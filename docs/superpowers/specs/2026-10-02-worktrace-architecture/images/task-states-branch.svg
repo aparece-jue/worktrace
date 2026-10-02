@@ -1,0 +1,137 @@
+<svg viewBox="0 0 1000 620" role="img" aria-labelledby="task-branch-title task-branch-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="task-branch-title">Worktrace Task 状态机的旁支与终态</title>
+  <desc id="task-branch-desc">就绪状态引出三条旁支：排期（Scheduled，V0.2 才开放，虚线框）、阻塞、等待，三条旁支各自都能回到就绪。另有一条「放弃」路径从就绪通向已取消。已完成（属上一张图）与已取消两个终态都用醒目的强调箭头显式 reopen 回到就绪，其余路径一律不能从终态离开。左列分区标为旁支，右列分区标为终态。</desc>
+
+  <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
+    <marker id="tb-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="tb-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 分区（z 序最底） ===== -->
+  <rect x="404" y="80" width="270" height="356" rx="6" fill="rgba(111,175,168,0.05)" stroke="rgba(42,35,32,0.10)" stroke-width="1"/>
+  <text x="420" y="98" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">旁支 · 均可回到就绪</text>
+  <rect x="690" y="80" width="280" height="356" rx="6" fill="rgba(217,96,58,0.05)" stroke="rgba(217,96,58,0.28)" stroke-width="1"/>
+  <text x="706" y="98" fill="#D9603A" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">终态 · 仅显式 reopen</text>
+
+  <!-- ===== 连线（先画） ===== -->
+  <!-- 就绪 <-> 排期：出口走下方车道，回程走上方车道，两条水平线错开 24px 不相交 -->
+  <path d="M 150 232 V 156 Q 150 148 158 148 H 430" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#tb-arrow)"/>
+  <path d="M 430 172 H 182 Q 174 172 174 180 V 232" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#tb-arrow)"/>
+  <!-- 就绪 <-> 阻塞：同高，直接左右成对 -->
+  <path d="M 240 256 H 430" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#tb-arrow)"/>
+  <path d="M 430 280 H 240" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#tb-arrow)"/>
+  <!-- 就绪 <-> 等待 -->
+  <path d="M 150 304 V 380 Q 150 388 158 388 H 430" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#tb-arrow)"/>
+  <path d="M 430 412 H 182 Q 174 412 174 404 V 304" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#tb-arrow)"/>
+  <!-- 就绪 -> 已取消：从左侧绕到图底，避开两条旁支车道 -->
+  <path d="M 90 288 H 50 Q 42 288 42 296 V 444 Q 42 452 50 452 H 712 Q 720 452 720 444 V 380"
+        fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#tb-arrow)"/>
+  <!-- 已取消 -> 就绪（焦点：终态不是终点） -->
+  <path d="M 706 332 H 264 Q 256 332 256 324 V 306 Q 256 298 248 298 H 240"
+        fill="none" stroke="#D9603A" stroke-width="1.2" marker-end="url(#tb-arrow-accent)"/>
+  <!-- 已完成 -> 就绪（同一规则，故同为焦点色） -->
+  <path d="M 706 212 H 214 Q 206 212 206 220 V 232"
+        fill="none" stroke="#D9603A" stroke-width="1.2" marker-end="url(#tb-arrow-accent)"/>
+
+  <!-- ===== 跃迁标签（遮罩在方框之前，且不压任何方框与其它连线） ===== -->
+  <g font-family="'Geist Mono',monospace" font-size="8.5" text-anchor="middle" fill="#6F6357">
+    <rect x="295" y="127" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="310" y="136">排期</text>
+    <rect x="297" y="181" width="46" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="320" y="190">取消排期</text>
+    <rect x="320" y="235" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="335" y="244">阻塞</text>
+    <rect x="320" y="289" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="335" y="298">解除</text>
+    <rect x="295" y="367" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="310" y="376">等待</text>
+    <rect x="304" y="421" width="32" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="320" y="430">条件满足</text>
+    <rect x="50" y="354" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="65" y="363">放弃</text>
+    <rect x="460" y="311" width="80" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="500" y="320" fill="#D9603A">显式 reopen</text>
+    <rect x="460" y="191" width="80" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="500" y="200" fill="#D9603A">显式 reopen</text>
+  </g>
+
+  <!-- ===== 枢纽 ===== -->
+  <rect x="90" y="232" width="150" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="90" y="232" width="150" height="72" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="165" y="263" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">就绪</text>
+  <text x="165" y="281" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">READY · 枢纽</text>
+
+  <!-- ===== 旁支三态 ===== -->
+  <rect x="430" y="112" width="210" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="430" y="112" width="210" height="72" rx="6" fill="#FBF9F6" stroke="#8A94A3" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="535" y="143" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">排期</text>
+  <text x="535" y="161" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">SCHEDULED · V0.2</text>
+
+  <rect x="430" y="232" width="210" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="430" y="232" width="210" height="72" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="535" y="263" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">阻塞</text>
+  <text x="535" y="281" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">BLOCKED · 暂停 session</text>
+
+  <rect x="430" y="352" width="210" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="430" y="352" width="210" height="72" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="535" y="383" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">等待</text>
+  <text x="535" y="401" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">WAITING · 暂停 session</text>
+
+  <!-- ===== 终态两个 ===== -->
+  <rect x="706" y="148" width="232" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="706" y="148" width="232" height="72" rx="6" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
+  <text x="822" y="179" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">已完成</text>
+  <text x="822" y="197" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">DONE · 见图 1</text>
+
+  <rect x="706" y="308" width="232" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="706" y="308" width="232" height="72" rx="6" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
+  <text x="822" y="339" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">已取消</text>
+  <text x="822" y="357" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">CANCELLED · 保留审计</text>
+
+  <!-- ===== 注记 ===== -->
+  <text x="40" y="486" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    三条旁支一律回到就绪，不直接跳到进行中；要重新开工必须先经过就绪。</text>
+  <text x="40" y="506" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    进入阻塞或等待会暂停正在运行的 session；取消与完成会结束它，但后台会话结束不自动完成任务。</text>
+  <text x="40" y="526" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    已完成与已取消都不是真终态：除显式 reopen 外没有别的出边，且 reopen 保留历史、清除当前质量。</text>
+  <text x="40" y="546" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    排期 V0.1 不开放；V0.1 不显示排期筛选器，Today 只是简单的今日选择列表。</text>
+
+  <!-- ===== 图例（底部横条） ===== -->
+  <line x1="30" y1="574" x2="970" y2="574" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="594" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <rect x="110" y="585" width="16" height="10" rx="2" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="132" y="594" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">枢纽</text>
+  <rect x="240" y="585" width="16" height="10" rx="2" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="262" y="594" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">旁支（可回就绪）</text>
+  <rect x="410" y="585" width="16" height="10" rx="2" fill="#FBF9F6" stroke="#8A94A3" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="432" y="594" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">V0.2 才开放</text>
+  <rect x="560" y="585" width="16" height="10" rx="2" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
+  <text x="582" y="594" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">终态</text>
+  <line x1="660" y1="590" x2="690" y2="590" stroke="#D9603A" stroke-width="1.2"/>
+  <text x="700" y="594" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">显式 reopen（唯一出边）</text>
+</svg>

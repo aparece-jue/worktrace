@@ -124,6 +124,8 @@ Closing a window does not terminate the core. Explicit quit atomically finishes 
 
 ![Task state machine (main chain)](images/task-states-main.svg)
 
+![Task state machine (branches and terminal states)](images/task-states-branch.svg)
+
 V0.1 has no Scheduled UI. Today's plan is a simple daily selection; scheduling is a V0.2 time_block. start from Inbox may clarify to Ready in the same command. Doing describes work in progress, not a running timer; pause need not change it. Blocked/Waiting pauses running sessions; completion/cancellation finishes them. A background session finishing never automatically completes its task.
 
 No hierarchy UI in V0.1. V0.2 times leaves by default; parents aggregate descendant intervals without duplicate counting. Children finishing do not automatically finish the parent. Parent/child and milestone assignments must share the project, reject cycles, and validate subtree moves transactionally.

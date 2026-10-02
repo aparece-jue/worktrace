@@ -127,6 +127,10 @@ paused 无 open interval，因此值冻结。倒计时 remaining_ms = max(0, tar
 
 > 图：主链六个状态的推进与回退。色深 = 推进程度，已完成是唯一强调终态；旁支、取消终态与显式 reopen 见下一张。
 
+![Task 状态机（旁支与终态）](images/task-states-branch.svg)
+
+> 图：就绪引出的三条旁支都能回到它；已完成与已取消除显式 reopen 外没有别的出边。
+
 V0.1 不开放 Scheduled；Today 的“今日计划”是简单今日选择列表，排期另由 V0.2 time_block 管理。从 Inbox 直接 start 可在同一业务命令内先理清为 Ready，不强迫经过每个状态。
 
 暂停不必改变 Doing：Doing 表示任务尚在处理，不等同 running session。设为 Blocked/Waiting 时暂停运行 session；取消/完成时结束；后台会话结束不自动完成任务。
