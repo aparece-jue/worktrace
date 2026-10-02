@@ -115,6 +115,8 @@ Recovering sessions neither run nor occupy the running foreground slot. Exclude 
 
 Closing a window does not terminate the core. Explicit quit atomically finishes running/paused sessions and saves revision/clean_exit_at. Recovering records remain unresolved. Startup scanning and transactions handle crashes before/after commit; delivered shutdown events are not a reliability prerequisite.
 
+![Crash recovery flow](images/crash-recovery-flow.svg)
+
 ## 5. Task states and hierarchy
 
 | From | Allowed targets |

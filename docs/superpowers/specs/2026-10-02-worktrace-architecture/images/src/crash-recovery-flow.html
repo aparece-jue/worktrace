@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Worktrace 崩溃恢复流程</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif+TC:wght@400&family=Noto+Sans+TC:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{--paper:#FBF9F6;--ink:#2A2320;--muted:#6F6357;--accent:#D9603A;--rule:rgba(42,35,32,0.14);}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font-family:'Geist','Noto Sans TC',system-ui,sans-serif;
+       display:flex;justify-content:center;padding:3rem 1.5rem}
+  figure{margin:0;max-width:1000px;width:100%}
+  .eyebrow{font-family:'Geist Mono',monospace;font-size:11px;letter-spacing:.16em;
+           text-transform:uppercase;color:var(--muted);margin:0 0 .5rem}
+  h1{font-family:'Instrument Serif','Noto Serif TC',serif;font-weight:400;
+     font-size:1.75rem;margin:0 0 .35rem}
+  .sub{color:var(--muted);font-size:.9rem;margin:0 0 1.75rem}
+  svg{display:block;width:100%;height:auto}
+</style>
+</head>
+<body>
+<figure>
+  <p class="eyebrow">数据模型 · 崩溃恢复 · §4</p>
+  <h1>崩溃恢复流程</h1>
+  <p class="sub">判定不看心跳阈值，只看「属于旧 run 且没有结束」——所以强杀后立刻重启也会被逮到。</p>
+
+<svg viewBox="0 0 1000 900" role="img" aria-labelledby="crash-rec-title crash-rec-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="crash-rec-title">Worktrace 进程启动时的崩溃恢复流程</title>
+  <desc id="crash-rec-desc">自上而下：通过单实例检查后进程启动，每次启动新建一条 application_run；判定旧 run 是否还有未结束的 session（含 paused），没有就正常进入记录，有就把整个 session 置为待确认 recovering 并打上 needs_review；待确认记录不自动运行、不占前台槽位、暂不计入已确认统计，由用户在三类处置中选择：确认截止时间或修改区间（关闭不确定区间、验证重叠并写修正日志）、保存为暂停（要显式 resume 才继续）、或丢弃（保留审计）。待确认那一步是唯一的强调项。</desc>
+
+  <defs>
+    <marker id="cr-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 连线（先画） ===== -->
+  <path d="M 500 116 V 156" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#cr-arrow)"/>
+  <path d="M 500 212 V 240" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#cr-arrow)"/>
+  <path d="M 650 300 H 700" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#cr-arrow)"/>
+  <path d="M 500 360 V 420" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#cr-arrow)"/>
+  <path d="M 500 492 V 516" fill="none" stroke="#D9603A" stroke-width="1.2" marker-end="url(#cr-arrow)"/>
+  <path d="M 350 570 H 198 Q 190 570 190 578 V 660" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#cr-arrow)"/>
+  <path d="M 500 624 V 660" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#cr-arrow)"/>
+  <path d="M 650 570 H 802 Q 810 570 810 578 V 660" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#cr-arrow)"/>
+
+  <!-- ===== 判定标签 ===== -->
+  <g font-family="'Geist Mono',monospace" font-size="8.5" text-anchor="middle" fill="#6F6357">
+    <rect x="660" y="279" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="675" y="288">没有</text>
+    <rect x="508" y="382" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="523" y="391">有</text>
+  </g>
+
+  <!-- ===== 处置标签 ===== -->
+  <g font-family="'Geist Mono',monospace" font-size="8.5" text-anchor="middle" fill="#6F6357">
+    <rect x="68" y="630" width="114" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="125" y="639">确认截止时间 / 修改区间</text>
+    <rect x="508" y="630" width="56" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="536" y="639">保存为暂停</text>
+    <rect x="772" y="630" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="787" y="639">丢弃</text>
+  </g>
+
+  <!-- ===== 起点与步骤 ===== -->
+  <path d="M 380 60 H 620 A 28 28 0 0 1 620 116 H 380 A 28 28 0 0 1 380 60 Z" fill="#FBF9F6"/>
+  <path d="M 380 60 H 620 A 28 28 0 0 1 620 116 H 380 A 28 28 0 0 1 380 60 Z"
+        fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="500" y="84" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">进程启动</text>
+  <text x="500" y="102" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">单实例检查成功后才走到这里</text>
+
+  <rect x="380" y="156" width="240" height="56" rx="6" fill="#FBF9F6"/>
+  <rect x="380" y="156" width="240" height="56" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="500" y="180" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">新建 application_run</text>
+  <text x="500" y="198" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">每次进程启动一行</text>
+
+  <!-- ===== 判定一：旧 run 是否还有未结束 session ===== -->
+  <path d="M 500 240 L 650 300 L 500 360 L 350 300 Z" fill="#FBF9F6"/>
+  <path d="M 500 240 L 650 300 L 500 360 L 350 300 Z" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="500" y="294" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">旧 run 是否还有</text>
+  <text x="500" y="312" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">未结束的 session？</text>
+
+  <path d="M 700 272 H 940 A 28 28 0 0 1 940 328 H 700 A 28 28 0 0 1 700 272 Z" fill="#FBF9F6"/>
+  <path d="M 700 272 H 940 A 28 28 0 0 1 940 328 H 700 A 28 28 0 0 1 700 272 Z"
+        fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="820" y="296" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">正常进入记录</text>
+  <text x="820" y="314" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">没有待确认记录</text>
+
+  <!-- ===== 待确认（焦点） ===== -->
+  <rect x="360" y="420" width="280" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="360" y="420" width="280" height="72" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="500" y="444" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">待确认（recovering · needs_review = 1）</text>
+  <text x="500" y="463" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">不自动运行 · 不占 running 前台槽位</text>
+  <text x="500" y="478" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">整个 session 暂不进入已确认统计</text>
+
+  <!-- ===== 判定二：用户怎么处置 ===== -->
+  <path d="M 500 516 L 650 570 L 500 624 L 350 570 Z" fill="#FBF9F6"/>
+  <path d="M 500 516 L 650 570 L 500 624 L 350 570 Z" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="500" y="575" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">用户如何处置？</text>
+
+  <!-- ===== 三类处置 ===== -->
+  <rect x="60" y="660" width="260" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="60" y="660" width="260" height="80" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="190" y="686" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">确认为已结束</text>
+  <text x="190" y="706" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">关闭不确定区间 · 验证重叠</text>
+  <text x="190" y="721" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">不出现半个审计记录</text>
+
+  <rect x="370" y="660" width="260" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="370" y="660" width="260" height="80" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="500" y="686" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">保存为暂停</text>
+  <text x="500" y="706" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">不自动继续计时</text>
+  <text x="500" y="721" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">要显式 resume 才切回 running</text>
+
+  <rect x="680" y="660" width="260" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="680" y="660" width="260" height="80" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="810" y="686" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">丢弃</text>
+  <text x="810" y="706" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">保留审计记录</text>
+  <text x="810" y="721" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">不计入统计</text>
+
+  <!-- ===== 注记 ===== -->
+  <text x="40" y="782" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    不以“心跳超过两分钟”作为门槛：心跳约每 30 秒持久化，只给出最后可信时间与不确定区间，并不证明那一段已经完成。</text>
+  <text x="40" y="802" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    待确认时间在界面上单列，不能静默显示为 0；确认时才关闭那个终点未定的区间并验证重叠，修正写入日志。</text>
+  <text x="40" y="822" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    关闭窗口只隐藏界面，不退出核心。显式退出在一个事务内结束 running / paused 的 session，并保存修订号与 clean_exit_at；有 recovering 记录则保留待确认。</text>
+  <text x="40" y="842" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    崩溃发生在提交之前还是之后，都由事务与下一次扫描处理，不依赖退出事件必定送达。</text>
+
+  <!-- ===== 图例（底部横条） ===== -->
+  <line x1="30" y1="862" x2="970" y2="862" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="882" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <ellipse cx="128" cy="878" rx="18" ry="9" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="156" y="882" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">起点 / 终点</text>
+  <rect x="270" y="873" width="36" height="10" rx="4" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="318" y="882" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">步骤</text>
+  <path d="M 410 878 L 428 870 L 446 878 L 428 886 Z" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="458" y="882" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">判定（每个出口都标注）</text>
+  <rect x="640" y="873" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="662" y="882" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">焦点：需要人做决定的一步</text>
+</svg>
+</figure>
+</body>
+</html>

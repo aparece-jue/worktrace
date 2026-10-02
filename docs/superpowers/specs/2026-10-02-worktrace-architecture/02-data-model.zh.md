@@ -122,6 +122,10 @@ paused 无 open interval，因此值冻结。倒计时 remaining_ms = max(0, tar
 
 关闭窗口仅隐藏/关闭界面，不退出核心。显式退出在一个事务内结束 running/paused session、保存修订号与 clean_exit_at；有 recovering 记录则保留待确认。崩溃发生在提交前后均由事务和下一次扫描处理，不依赖退出事件必定送达。
 
+![崩溃恢复流程](images/crash-recovery-flow.svg)
+
+> 图：判定只看「属于旧 run 且未结束」，不设心跳阈值；待确认是唯一需要人做决定的一步。
+
 ## 5. Task 状态与层级
 
 | 当前状态 | 允许的目标状态 |
