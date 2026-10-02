@@ -5,8 +5,9 @@
 <title>Worktrace 模块边界与依赖方向</title>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif+TC:wght@400&family=Noto+Sans+TC:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  :root{--paper:#f5f5f5;--paper-2:#ececec;--ink:#2d3142;--muted:#4f5d75;--soft:#bfc0c0;
-        --accent:#eb6c36;--accent-tint:rgba(235,108,54,0.08);--rule:rgba(45,49,66,0.12);}
+  :root{--paper:#FBF9F6;--paper-2:#f3ece1;--ink:#2a2320;--muted:#6f6357;
+        --accent:#d9480f;--accent-tint:rgba(217,72,15,0.10);--blue:#1d4ed8;
+        --rule:rgba(42,35,32,0.14);}
   *{box-sizing:border-box}
   body{margin:0;background:var(--paper);color:var(--ink);
        font-family:'Geist','Noto Sans TC',system-ui,sans-serif;
@@ -22,110 +23,106 @@
 </head>
 <body>
 <figure>
-  <p class="eyebrow">总体架构 · 模块边界</p>
+  <p class="eyebrow">总体架构 · 模块边界 </p>
   <h1>模块边界与依赖方向</h1>
-  <p class="sub">依赖恒为由上至下，不允许反向。 lib.rs 是组合根。</p>
+  <p class="sub">依赖恒为由上至下，不允许反向；右列为每层允许依赖的对象。</p>
 
-<svg viewBox="0 0 1000 620" role="img" aria-labelledby="arch-layers-title arch-layers-desc" xmlns="http://www.w3.org/2000/svg">
-  <title id="arch-layers-title">Worktrace 模块边界与依赖方向</title>
-  <desc id="arch-layers-desc">自顶向下的五个模块边界：commands 边界、services 服务、storage 持久化、domain 领域、platform 平台，依赖方向由上至下；底部一条虚线横切带表示 events 可被任何层发布与订阅；domain 被强调，因为它必须保持无 IO，不得依赖 storage 与 platform。</desc>
+<svg viewBox="0 0 1000 660" role="img" aria-labelledby="arch-layers-title arch-layers-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="arch-layers-title">Worktrace 模块边界、依赖方向与允许依赖</title>
+  <desc id="arch-layers-desc">自顶向下五个模块边界：commands 边界、services 服务、storage 持久化、domain 领域、platform 平台，依赖方向由上至下；右列列出每层允许依赖的对象，其中 domain 仅可依赖纯事件类型且禁止 IO；底部虚线带表示 events 为横切，可被任何层发布与订阅。</desc>
 
   <defs>
-    <marker id="al-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-      <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+    <marker id="c-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6f6357"/>
     </marker>
   </defs>
 
-  <rect width="100%" height="100%" fill="#f5f5f5"/>
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
 
-  <!-- 左侧依赖方向指示（在栈外） -->
-  <line x1="62" y1="60" x2="62" y2="460" stroke="#4f5d75" stroke-width="1" marker-end="url(#al-arrow)"/>
-  <rect x="18" y="238" width="88" height="14" rx="2" fill="#f5f5f5"/>
-  <text x="62" y="249" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
+  <!-- 左侧依赖方向（栈外） -->
+  <line x1="62" y1="60" x2="62" y2="440" stroke="#6f6357" stroke-width="1" marker-end="url(#c-arrow)"/>
+  <rect x="16" y="240" width="92" height="14" rx="2" fill="#FBF9F6"/>
+  <text x="62" y="251" fill="#6f6357" font-size="9" font-family="'Geist Mono',monospace"
         text-anchor="middle" letter-spacing="0.06em">依赖方向 ↓</text>
 
-  <!-- L4 边界 -->
-  <rect x="100" y="60" width="800" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-  <text x="124" y="97" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        letter-spacing="0.08em">边界</text>
-  <text x="170" y="92" fill="#2d3142" font-size="15" font-weight="600"
-        font-family="'Geist',sans-serif">边界 · commands/</text>
-  <text x="170" y="109" fill="#4f5d75" font-size="10"
-        font-family="'Geist',sans-serif">Tauri IPC：参数校验 · DTO 转换 · 编排调用</text>
-  <text x="876" y="97" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        text-anchor="end">commands/</text>
+  <!-- 列头 -->
+  <text x="170" y="48" fill="#6f6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.12em">模块 · 职责</text>
+  <text x="616" y="48" fill="#6f6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.12em">允许依赖</text>
 
-  <!-- L3 服务 -->
-  <rect x="100" y="132" width="800" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-  <text x="124" y="169" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        letter-spacing="0.08em">服务</text>
-  <text x="170" y="164" fill="#2d3142" font-size="15" font-weight="600"
-        font-family="'Geist',sans-serif">服务 · services/</text>
-  <text x="170" y="181" fill="#4f5d75" font-size="10"
-        font-family="'Geist',sans-serif">timer · session · statistics · report · knowledge · context · search · ai</text>
-  <text x="876" y="169" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        text-anchor="end">services/</text>
+  <!-- commands -->
+  <rect x="100" y="60" width="800" height="72" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <text x="124" y="102" fill="#3F6F9E" font-size="9" font-family="'Geist Mono',monospace" letter-spacing="0.08em">边界</text>
+  <text x="170" y="94" fill="#2a2320" font-size="15" font-weight="600" font-family="'Geist',sans-serif">commands/</text>
+  <text x="170" y="112" fill="#6f6357" font-size="10" font-family="'Geist',sans-serif">Tauri IPC：参数校验 · 错误/DTO · 调用服务</text>
+  <line x1="596" y1="72" x2="596" y2="120" stroke="rgba(42,35,32,0.14)" stroke-width="1"/>
+  <text x="616" y="98" fill="#2a2320" font-size="10" font-family="'Geist Mono',monospace">services · domain(类型)</text>
+  <text x="616" y="114" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">不直连 SQL</text>
 
-  <!-- L2 持久化 -->
-  <rect x="100" y="204" width="800" height="64" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-  <text x="124" y="241" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        letter-spacing="0.08em">持久化</text>
-  <text x="170" y="236" fill="#2d3142" font-size="15" font-weight="600"
-        font-family="'Geist',sans-serif">持久化 · storage/</text>
-  <text x="170" y="253" fill="#4f5d75" font-size="10"
-        font-family="'Geist',sans-serif">rusqlite · 迁移 · 事务 · 备份 · 仓储</text>
-  <text x="876" y="241" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        text-anchor="end">storage/</text>
+  <!-- services -->
+  <rect x="100" y="140" width="800" height="72" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="124" y="182" fill="#4E8C85" font-size="9" font-family="'Geist Mono',monospace" letter-spacing="0.08em">服务</text>
+  <text x="170" y="174" fill="#2a2320" font-size="15" font-weight="600" font-family="'Geist',sans-serif">services/</text>
+  <text x="170" y="192" fill="#6f6357" font-size="10" font-family="'Geist',sans-serif">意图编排 · 计时 · 统计 · 上下文 · AI</text>
+  <line x1="596" y1="152" x2="596" y2="200" stroke="rgba(42,35,32,0.14)" stroke-width="1"/>
+  <text x="616" y="178" fill="#2a2320" font-size="10" font-family="'Geist Mono',monospace">domain · storage</text>
+  <text x="616" y="194" fill="#2a2320" font-size="10" font-family="'Geist Mono',monospace">platform · events</text>
 
-  <!-- L1 领域（焦点层） -->
-  <rect x="100" y="276" width="800" height="64" rx="6" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
-  <text x="124" y="313" fill="#eb6c36" font-size="9" font-family="'Geist Mono',monospace"
-        letter-spacing="0.08em">领域</text>
-  <text x="170" y="308" fill="#2d3142" font-size="15" font-weight="600"
-        font-family="'Geist',sans-serif">领域 · domain/</text>
-  <text x="170" y="325" fill="#4f5d75" font-size="10"
-        font-family="'Geist',sans-serif">纯类型与规则，无 IO —— 不得 import storage/ 或 platform/</text>
-  <text x="876" y="313" fill="#eb6c36" font-size="9" font-family="'Geist Mono',monospace"
-        text-anchor="end">domain/</text>
+  <!-- storage -->
+  <rect x="100" y="220" width="800" height="72" rx="6" fill="#FBF1DC" stroke="#CBA758" stroke-width="1"/>
+  <text x="124" y="262" fill="#9A7B2E" font-size="9" font-family="'Geist Mono',monospace" letter-spacing="0.08em">持久化</text>
+  <text x="170" y="254" fill="#2a2320" font-size="15" font-weight="600" font-family="'Geist',sans-serif">storage/</text>
+  <text x="170" y="272" fill="#6f6357" font-size="10" font-family="'Geist',sans-serif">SQLite · 迁移 · 事务 · 备份 · 查询</text>
+  <line x1="596" y1="232" x2="596" y2="280" stroke="rgba(42,35,32,0.14)" stroke-width="1"/>
+  <text x="616" y="258" fill="#2a2320" font-size="10" font-family="'Geist Mono',monospace">domain · 纯事件类型</text>
+  <text x="616" y="274" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">不调用平台层</text>
 
-  <!-- L0 平台 -->
-  <rect x="100" y="348" width="800" height="64" rx="6" fill="#ececec" stroke="#4f5d75" stroke-width="1"/>
-  <text x="124" y="385" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        letter-spacing="0.08em">平台</text>
-  <text x="170" y="380" fill="#2d3142" font-size="15" font-weight="600"
-        font-family="'Geist',sans-serif">平台 · platform/</text>
-  <text x="170" y="397" fill="#4f5d75" font-size="10"
-        font-family="'Geist',sans-serif">Win32：窗口样式 · 托盘 · 热键 · 休眠检测 · 单实例（无依赖）</text>
-  <text x="876" y="385" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        text-anchor="end">platform/</text>
+  <!-- domain（焦点） -->
+  <rect x="100" y="300" width="800" height="72" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="124" y="342" fill="#d9480f" font-size="9" font-family="'Geist Mono',monospace" letter-spacing="0.08em">领域</text>
+  <text x="170" y="334" fill="#2a2320" font-size="15" font-weight="600" font-family="'Geist',sans-serif">domain/</text>
+  <text x="170" y="352" fill="#6f6357" font-size="10" font-family="'Geist',sans-serif">纯类型 · 状态跃迁 · 校验</text>
+  <line x1="596" y1="312" x2="596" y2="360" stroke="rgba(217,72,15,0.40)" stroke-width="1"/>
+  <text x="616" y="338" fill="#d9480f" font-size="10" font-family="'Geist Mono',monospace">仅纯事件类型</text>
+  <text x="616" y="354" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">禁止 IO —— 不得依赖 storage / platform</text>
 
-  <!-- 横切 events：虚线，表示不参与栈的层级 -->
-  <rect x="100" y="428" width="800" height="48" rx="6" fill="#f5f5f5" stroke="#4f5d75"
-        stroke-width="1" stroke-dasharray="4,3"/>
-  <text x="124" y="457" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        letter-spacing="0.08em">横切</text>
-  <text x="170" y="452" fill="#2d3142" font-size="14" font-weight="600"
-        font-family="'Geist',sans-serif">事件 · events/</text>
-  <text x="170" y="468" fill="#4f5d75" font-size="10"
-        font-family="'Geist',sans-serif">事件类型 + 总线 + revision；任何层可发布与订阅（无依赖）</text>
-  <text x="876" y="457" fill="#4f5d75" font-size="9" font-family="'Geist Mono',monospace"
-        text-anchor="end">events/</text>
+  <!-- platform -->
+  <rect x="100" y="380" width="800" height="72" rx="6" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
+  <text x="124" y="422" fill="#5C6675" font-size="9" font-family="'Geist Mono',monospace" letter-spacing="0.08em">平台</text>
+  <text x="170" y="414" fill="#2a2320" font-size="15" font-weight="600" font-family="'Geist',sans-serif">platform/</text>
+  <text x="170" y="432" fill="#6f6357" font-size="10" font-family="'Geist',sans-serif">OS 窗口 · 托盘 · 锁屏 · 热键 · 单实例</text>
+  <line x1="596" y1="392" x2="596" y2="440" stroke="rgba(42,35,32,0.14)" stroke-width="1"/>
+  <text x="616" y="418" fill="#2a2320" font-size="10" font-family="'Geist Mono',monospace">无领域依赖</text>
+  <text x="616" y="434" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">只做 Tauri/OS 适配，不做业务判断</text>
 
-  <!-- 组合根注记 -->
-  <rect x="100" y="492" width="800" height="26" rx="4" fill="#f5f5f5"/>
-  <text x="100" y="509" fill="#4f5d75" font-size="10" font-family="'Geist',sans-serif">
-    组合根：<tspan font-family="'Geist Mono',monospace" font-size="9">lib.rs</tspan> 是唯一装配全部层的地方 —— 分层的成败取决于此。</text>
+  <!-- events（横切，蓝） -->
+  <rect x="100" y="460" width="800" height="56" rx="6" fill="#EFE8F6" stroke="#8E74B5" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="124" y="494" fill="#8E74B5" font-size="9" font-family="'Geist Mono',monospace" letter-spacing="0.08em">横切</text>
+  <text x="170" y="486" fill="#2a2320" font-size="14" font-weight="600" font-family="'Geist',sans-serif">events/</text>
+  <text x="170" y="503" fill="#6f6357" font-size="10" font-family="'Geist',sans-serif">纯事件类型 · 独立运行时分发适配</text>
+  <line x1="596" y1="472" x2="596" y2="504" stroke="rgba(142,116,181,0.45)" stroke-width="1"/>
+  <text x="616" y="490" fill="#8E74B5" font-size="10" font-family="'Geist Mono',monospace">纯类型：无</text>
+  <text x="616" y="505" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">广播适配可依赖 Tauri；任何层可订阅</text>
 
-  <!-- 图例：底部横条 -->
-  <line x1="30" y1="552" x2="970" y2="552" stroke="rgba(45,49,66,0.12)" stroke-width="0.8"/>
-  <text x="30" y="570" fill="#4f5d75" font-size="8" font-family="'Geist Mono',monospace"
-        letter-spacing="0.14em">LEGEND</text>
-  <rect x="130" y="562" width="16" height="10" rx="2" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
-  <text x="152" y="570" fill="#4f5d75" font-size="9" font-family="'Geist',sans-serif">层（参与依赖栈）</text>
-  <rect x="290" y="562" width="16" height="10" rx="2" fill="#f5f5f5" stroke="#4f5d75" stroke-width="1" stroke-dasharray="3,2"/>
-  <text x="312" y="570" fill="#4f5d75" font-size="9" font-family="'Geist',sans-serif">横切（不参与依赖栈）</text>
-  <rect x="500" y="562" width="16" height="10" rx="2" fill="rgba(235,108,54,0.08)" stroke="#eb6c36" stroke-width="1"/>
-  <text x="522" y="570" fill="#4f5d75" font-size="9" font-family="'Geist',sans-serif">本次强调：必须保持无 IO 的边界</text>
+  <!-- 组合根 -->
+  <text x="100" y="536" fill="#6f6357" font-size="10" font-family="'Geist',sans-serif">
+    组合根：<tspan font-family="'Geist Mono',monospace" font-size="9">lib.rs</tspan> 是唯一装配全部层的地方；M00 的原生回调由 M11/组合根接到 services，不在平台层写数据库。</text>
+
+  <!-- 图例 -->
+  <line x1="30" y1="572" x2="970" y2="572" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="590" fill="#6f6357" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">LEGEND</text>
+  <text x="130" y="584" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">色相 = 功能</text>
+  <text x="130" y="597" fill="#6f6357" font-size="8" font-family="'Geist Mono',monospace">边界 / 服务 / 持久化 / 领域 / 平台 / 横切</text>
+  <text x="440" y="584" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">饱和度 = 作用程度（约束强度）</text>
+  <rect x="440" y="591" width="14" height="9" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="460" y="599" fill="#6f6357" font-size="8" font-family="'Geist Mono',monospace">强</text>
+  <rect x="486" y="591" width="14" height="9" rx="2" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <text x="506" y="599" fill="#6f6357" font-size="8" font-family="'Geist Mono',monospace">中</text>
+  <rect x="532" y="591" width="14" height="9" rx="2" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
+  <text x="552" y="599" fill="#6f6357" font-size="8" font-family="'Geist Mono',monospace">淡</text>
+  <text x="720" y="584" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">虚线 = 横切</text>
+  <text x="720" y="597" fill="#6f6357" font-size="8" font-family="'Geist Mono',monospace">不参与依赖栈</text>
 </svg>
 </figure>
 </body>

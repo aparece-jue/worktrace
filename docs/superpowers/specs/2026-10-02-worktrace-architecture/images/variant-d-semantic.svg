@@ -1,6 +1,6 @@
-<svg viewBox="0 0 1000 660" role="img" aria-labelledby="arch-layers-title arch-layers-desc" xmlns="http://www.w3.org/2000/svg">
-  <title id="arch-layers-title">Worktrace 模块边界、依赖方向与允许依赖</title>
-  <desc id="arch-layers-desc">自顶向下五个模块边界：commands 边界、services 服务、storage 持久化、domain 领域、platform 平台，依赖方向由上至下；右列列出每层允许依赖的对象，其中 domain 仅可依赖纯事件类型且禁止 IO；底部虚线带表示 events 为横切，可被任何层发布与订阅。</desc>
+<svg viewBox="0 0 1000 660" role="img" aria-labelledby="arch-d-title arch-d-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="arch-d-title">Worktrace 模块边界、依赖方向与允许依赖</title>
+  <desc id="arch-d-desc">自顶向下五个模块边界：commands 边界、services 服务、storage 持久化、domain 领域、platform 平台，依赖方向由上至下；右列列出每层允许依赖的对象，其中 domain 仅可依赖纯事件类型且禁止 IO；底部虚线带表示 events 为横切，可被任何层发布与订阅。</desc>
 
   <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
     <marker id="c-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
