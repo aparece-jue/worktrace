@@ -43,3 +43,5 @@ V0.3 delivers selected-input bundling/preview before M10; V0.4 imports structure
 Each vertical feature delivers command contracts, persistence, UI, meaningful tests and a demonstrable acceptance case. Avoid empty directories created only to look layered. Test transitions, rollback, recovery, concurrency and accounting boundaries rather than mechanically mirroring every function. Scope/dependencies follow 04/05; approved choices and new revisions follow 06.
 
 Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).
+
+See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).

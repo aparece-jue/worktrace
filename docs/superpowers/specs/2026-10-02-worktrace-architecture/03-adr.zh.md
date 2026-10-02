@@ -101,3 +101,5 @@ SQLite 支持部分唯一索引；包含 NULL 的普通唯一约束不能保障�
 - [Tauri process model](https://v2.tauri.app/concept/process-model/)
 
 当前产品边界（2026-10-03）：个人工作记录与任务管理，包含能力短板分析和 KPA 工作证据整理；文件读取、OCR、正文提取和正文搜索交给外部 Agent 与配套 skill。见 [范围与导入契约](07-scope-and-agent-import.zh.md)。
+
+实施细节补充见 [08：计时、阶段、AI 与报告快照](08-implementation-contracts.zh.md)。

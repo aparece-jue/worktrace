@@ -173,3 +173,7 @@
 当前产品边界（2026-10-03）：个人工作记录与任务管理，包含能力短板分析和 KPA 工作证据整理；文件读取、OCR、正文提取和正文搜索交给外部 Agent 与配套 skill。见 [范围与导入契约](07-scope-and-agent-import.zh.md)。
 
 资料引用 Reference：标题、路径/URL 与来源定位，不含正文。Agent Import：外部 skill 输出 JSON，校验和预览后逐项采纳。能力画像 Capability Profile：证据、自评与可选模型推断，连接改善措施。KPA Evidence：可回溯的工作时间、成果与证据材料。
+
+实施细节补充见 [08：计时、阶段、AI 与报告快照](08-implementation-contracts.zh.md)。
+
+duration_ms：可信区间时长校验值，与统计起止差一致；归属终点 Attribution Endpoint：开始墙钟＋可信单调增量；检查点 Checkpoint：成功持久化的可信时钟映射；phase：番茄钟 work/break 阶段；report_snapshot：用户确认后不可变的报告内容和事实快照。

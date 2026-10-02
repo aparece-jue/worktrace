@@ -8,11 +8,11 @@
 
 | 版本 | 存储对象 |
 | --- | --- |
-| V0.1 | app_meta、application_run、project、task、work_session、work_interval、time_edit、task_change、daily_plan、tag、task_tag |
+| V0.1 | app_meta、application_run、interval_checkpoint、project、task、work_session、work_interval、time_edit、task_change、daily_plan、tag、task_tag |
 | V0.2 | goal、milestone、task_dependency、time_block、task_knowledge（实际使用标记） |
 | V0.3 | ai_suggestion、ai_feedback；本次 AI 输入/目的地确认记录 |
-| V0.4 | context_fact、decision、document（仅引用）、task_document、agent_import_batch/item |
-| V0.5 | knowledge_stat（可重建派生缓存） |
+| V0.4 | context_fact、decision、document（仅引用）、task_document、outcome、outcome_source、agent_import_batch/item |
+| V0.5 | knowledge_stat（可重建派生缓存）、report_snapshot（确认报告） |
 
 ![ER（辅助表与迁移表）](images/er-more-tables.svg)
 
@@ -48,7 +48,12 @@ work_session(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id),
              needs_review INTEGER NOT NULL DEFAULT 0, row_version INTEGER NOT NULL)
 work_interval(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
               started_at INTEGER NOT NULL, ended_at INTEGER, voided_at INTEGER,
+              duration_ms INTEGER, sampled_end_wall_at INTEGER,
               needs_review INTEGER NOT NULL DEFAULT 0)
+interval_checkpoint(interval_id TEXT PRIMARY KEY REFERENCES work_interval(id),
+                    run_id TEXT NOT NULL REFERENCES application_run(id),
+                    wall_at INTEGER NOT NULL, attribution_at INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL)
+
 time_edit(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
           before_json TEXT NOT NULL, after_json TEXT NOT NULL, reason TEXT,
           created_at INTEGER NOT NULL)
@@ -108,7 +113,7 @@ CREATE INDEX idx_session_task ON work_session(task_id);
 
 暂停后恢复仍是同一 session；结束后再次开始是新 session。paused 也可直接 finish。完成/取消任务会结束其所有运行或暂停 session；若存在 recovering 记录，先返回 RECOVERY_REQUIRED，不悄悄确认历史。
 
-显示 active_ms = SUM(已结束有效 interval 的 ended_at - started_at) + 当前 open interval 的实时工作时长。
+显示 active_ms = SUM(可信闭合 interval.duration_ms) + 协调器当前单调增量；duration_ms 与归属终点差一致，异常和人工修正规则见 08。
 paused 无 open interval，因此值冻结。倒计时 remaining_ms = max(0, target_duration_ms - active_ms)，超时另显示 overtime_ms；到点只提示，不自动完成任务。恢复不会消耗暂停期间的预算。
 
 运行中用单调时钟测量时长，墙钟用于持久化时间归属。系统改时、休眠或时钟不连续不能靠 now-started_at 掩盖；在最后可信检查点停止可疑区间并进入 recovering，由用户校正。跨重启不复用单调时钟。
@@ -173,7 +178,7 @@ task_dependency 仅存一个规范方向（predecessor_id → successor_id）；
 
 ## 6. 统计与标签
 
-统计范围统一为半开区间 [from,to)。每段有效 interval 与范围交集：max(0,min(end,to)-max(start,from))，运行区间的 end 使用同一快照时刻 now。已确认闭合区间（含 recovering 会话中已可信部分）与实时暂计分列；needs_review=1、voided_at 非空或 discarded 的区间排除。待确认部分单列。
+统计范围统一为半开区间 [from,to)。每段有效 interval 与范围交集：max(0,min(end,to)-max(start,from))，运行区间的 end 使用同一协调器快照的单调归属终点，不另采墙钟。已确认闭合区间（含 recovering 会话中已可信部分）与实时暂计分列；needs_review=1、voided_at 非空或 discarded 的区间排除。待确认部分单列。
 
 人工仅 FOREGROUND，机器分别汇总 BACKGROUND/PASSIVE，WAITING 单列。禁止将并行机器时长加成人工；报表必须返回 measure、timezone、range、as_of、revision。
 
@@ -192,7 +197,7 @@ V0.1 priority_json/estimated_json 就使用稳定信封：value、source(user/ru
 
 ai_suggestion 保存 task_id、kind、输入任务版本、provider/model、prompt_version、建议值、生成时间、状态（pending/accepted/edited/rejected/stale）、原始估时和来源；ai_feedback 关联 suggestion_id。保留被拒建议及采纳后修改，才能统计接受率和估时误差。输入版本改变时旧建议变 stale；模型自报 confidence 与历史校准置信度分列，样本不足显示未知。
 
-V0.3 保存用户本次所选 AI 输入的实体版本与目的地，默认不发送，不新增四级 security_level。V0.4 context_fact 是用户确认的简要事实，一个 project/key 至多一个当前值；保留历史及取代事务。document 仅存用户提供的标题、路径/URL、来源定位，不存正文、OCR 或提取缓存；关联文件不代表验证内容或授权读取。Agent 导入批次和条目保存格式版本、内容摘要哈希、来源、采纳结果及映射，见 07；去重不依赖文件路径。任务成果和证据引用可在 V0.1 以描述/完成备注起步，V0.5 再做结构化成果、用户自评和知识练习记录迁移。
+V0.3 保存用户本次所选 AI 输入的实体版本与目的地，默认不发送，不新增四级 security_level。V0.4 context_fact 是用户确认的简要事实，一个 project/key 至多一个当前值；保留历史及取代事务。document 仅存用户提供的标题、路径/URL、来源定位，不存正文、OCR 或提取缓存；关联文件不代表验证内容或授权读取。Agent 导入批次和条目保存格式版本、内容摘要哈希、来源、采纳结果及映射，见 07；去重不依赖文件路径。任务成果和证据引用在 V0.1 以描述/完成备注起步，V0.4 增加最小 outcome/outcome_source 供导入，V0.5 扩展自评、练习及 report_snapshot。
 
 knowledge_stat 是可重建结果，保留 algorithm_version、sample_count、computed_at；V0.5 评分仅作为实验结果，不用累计时长直接推导能力。
 
@@ -229,3 +234,7 @@ ContextFact 取代保持 superseded_by 模型，可采用以下同事务顺序�
 所有工时查询增加 interval.needs_review=0 与 voided_at IS NULL 条件；作废整个会话不得影响其他会话。epoch/snapshot、状态版本/tick、暂停可信恢复、部分丢弃、事实取代顺序均需独立故障测试。
 
 当前产品边界（2026-10-03）：个人工作记录与任务管理，包含能力短板分析和 KPA 工作证据整理；文件读取、OCR、正文提取和正文搜索交给外部 Agent 与配套 skill。见 [范围与导入契约](07-scope-and-agent-import.zh.md)。
+
+实施细节补充见 [08：计时、阶段、AI 与报告快照](08-implementation-contracts.zh.md)。
+
+V0.1 增加 interval_checkpoint(interval_id、run_id、wall_at、attribution_at、elapsed_ms)，恢复只用最后成功持久化检查点。duration_ms 在可信闭合时非空并等于 ended_at-started_at；待确认区间可为空，补齐 CHECK 与 FK。V0.2 阶段字段和 V0.4/V0.5 成果/报告完整迁移按 08 实施。核心 ER 为摘要，省略新增采样/检查点字段，完整逻辑定义以本节及 08 为准。

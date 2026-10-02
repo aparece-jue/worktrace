@@ -25,7 +25,7 @@
   <h1>Agent 导入事务与失败边界</h1>
   <p class="sub">导入只有两种结局：整体拒绝，或整体落库。中间没有「进去一半」这个状态。</p>
 
-<svg viewBox="0 0 1000 1000" role="img" aria-labelledby="aif-title aif-desc" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 1000 1060" role="img" aria-labelledby="aif-title aif-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="aif-title">Worktrace 外部 Agent 导入的处理流程与失败边界</title>
   <desc id="aif-desc">自上而下：用户选择外部工具导出的 JSON 批次，应用先在本地验证结构与格式版本与大小，未知字段一律拒绝；验证不通过则整体拒绝并给出定位，不部分接受。通过后进入预览，展示内容、来源以及哪些条目是新增、哪些与既有记录冲突；用户选择目标项目并逐项采纳，同 ID 同内容返回既有映射而不重复创建，同 ID 不同内容显示冲突且不静默覆盖。最后在单个事务里创建或修改选中记录、来源、导入映射与审计，返回 epoch 与 revision；未采纳条目不进入业务实体。预览、采纳与写入三步共用同一个失败出口——所选条目任一失败整笔回滚，这是唯一的强调项，也是全图唯一真正写库的一步。</desc>
 
@@ -46,7 +46,7 @@
   <path d="M 350 300 H 270" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#aif-arrow)"/>
   <path d="M 500 352 V 400" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#aif-arrow)"/>
   <path d="M 500 480 V 536" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#aif-arrow)"/>
-  <path d="M 500 616 V 672" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#aif-arrow)"/>
+  <path d="M 500 628 V 672" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#aif-arrow)"/>
   <path d="M 500 752 V 808" fill="none" stroke="#D9603A" stroke-width="1.2" marker-end="url(#aif-arrow-accent)"/>
   <!-- 失败括号：罩住预览 / 采纳 / 写入三步 -->
   <path d="M 720 440 H 740 Q 748 440 748 448 V 704 Q 748 712 740 712 H 720"
@@ -89,12 +89,14 @@
         font-family="'Geist',sans-serif" text-anchor="middle">验证通过？</text>
 
   <rect x="40" y="260" width="230" height="80" rx="6" fill="#FBF9F6"/>
-  <rect x="40" y="260" width="230" height="80" rx="6" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
-  <text x="155" y="290" fill="#2A2320" font-size="12" font-weight="600"
+  <rect x="40" y="256" width="230" height="88" rx="6" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
+  <text x="155" y="286" fill="#2A2320" font-size="12" font-weight="600"
         font-family="'Geist',sans-serif" text-anchor="middle">整体拒绝</text>
-  <text x="155" y="310" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">未知版本 / 非法字段 / 超限</text>
-  <text x="155" y="326" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+  <text x="155" y="306" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">IMPORT_SCHEMA_UNSUPPORTED</text>
+  <text x="155" y="320" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">IMPORT_VALIDATION_FAILED</text>
+  <text x="155" y="336" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">给出定位，不部分接受</text>
 
   <rect x="280" y="400" width="440" height="80" rx="6" fill="#FBF9F6"/>
@@ -106,14 +108,16 @@
   <text x="500" y="466" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">相似条目提示人工核对，不承诺语义去重</text>
 
-  <rect x="280" y="536" width="440" height="80" rx="6" fill="#FBF9F6"/>
-  <rect x="280" y="536" width="440" height="80" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
-  <text x="500" y="566" fill="#2A2320" font-size="12" font-weight="600"
+  <rect x="280" y="536" width="440" height="92" rx="6" fill="#FBF9F6"/>
+  <rect x="280" y="536" width="440" height="92" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="500" y="564" fill="#2A2320" font-size="12" font-weight="600"
         font-family="'Geist',sans-serif" text-anchor="middle">选择目标项目 + 逐项采纳</text>
-  <text x="500" y="586" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">同 ID 同内容返回既有映射，不重复创建</text>
-  <text x="500" y="602" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">同 ID 不同内容显示冲突，不静默覆盖</text>
+  <text x="500" y="584" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">去重身份 = producer.tool + skill + batch_id + item_id</text>
+  <text x="500" y="600" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">同身份同内容 → 返回既有映射；不同内容 → IMPORT_CONTENT_CONFLICT</text>
+  <text x="500" y="616" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">目标已删除 / 修改 → IMPORT_TARGET_CHANGED；跨项目 → IMPORT_MAPPING_CONFLICT</text>
 
   <rect x="280" y="672" width="440" height="80" rx="6" fill="#FBF9F6"/>
   <rect x="280" y="672" width="440" height="80" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
@@ -144,26 +148,26 @@
 
   <!-- ===== 注记 ===== -->
   <text x="40" y="896" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    内容哈希由应用按规范 JSON 计算（键排序、UTF-8、协议版本内固定），不信任外部提供的哈希；去重不依赖文件路径。</text>
+    内容哈希由应用计算：SHA-256 覆盖 kind / content / sources，sources 保持数组顺序，对象键递归按 UTF-16 排序，无空白、UTF-8、不做 Unicode 正规化，不含生成时间与 producer 版本；不信任外部提供的哈希。</text>
   <text x="40" y="916" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    正文不可作为指令执行；导入审计与来源含敏感信息，随用户数据备份，不进入诊断日志。</text>
+    机器格式见 agent-import.schema.json、样例见 examples/；Schema 只定义结构，日期真实性、同批 item_id 唯一、大小、目标映射与事务仍由应用校验。</text>
   <text x="40" y="936" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    去重键是 producer / batch_id / item_id 加内容哈希；新批次的相似条目只提示人工核对，不承诺语义去重。</text>
+    每项最多 100 个来源；拒绝重复 JSON 键、空白必填字符串与非法日期；sources 可为空但界面标为「无来源、待确认」。正文不可作为指令执行；审计与来源随用户数据备份，不进诊断日志。</text>
 
   <!-- ===== 图例（底部横条） ===== -->
-  <line x1="30" y1="958" x2="970" y2="958" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
-  <text x="30" y="978" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+  <line x1="30" y1="1018" x2="970" y2="1018" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="1038" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
         letter-spacing="0.14em">LEGEND</text>
-  <ellipse cx="128" cy="974" rx="18" ry="9" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
-  <text x="156" y="978" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">事务的两端</text>
+  <ellipse cx="128" cy="1034" rx="18" ry="9" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="156" y="1038" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">事务的两端</text>
   <path d="M 270 974 L 288 966 L 306 974 L 288 982 Z" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
-  <text x="318" y="978" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">判定</text>
-  <rect x="400" y="969" width="36" height="10" rx="4" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
-  <text x="448" y="978" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">步骤</text>
-  <rect x="530" y="969" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
-  <text x="552" y="978" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">焦点：全图唯一真正写库的一步</text>
-  <line x1="810" y1="974" x2="840" y2="974" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4"/>
-  <text x="852" y="978" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">共用的失败出口</text>
+  <text x="318" y="1038" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">判定</text>
+  <rect x="400" y="1029" width="36" height="10" rx="4" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="448" y="1038" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">步骤</text>
+  <rect x="530" y="1029" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="552" y="1038" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">焦点：全图唯一真正写库的一步</text>
+  <line x1="810" y1="1034" x2="840" y2="1034" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4"/>
+  <text x="852" y="1038" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">共用的失败出口</text>
 </svg>
 </figure>
 </body>

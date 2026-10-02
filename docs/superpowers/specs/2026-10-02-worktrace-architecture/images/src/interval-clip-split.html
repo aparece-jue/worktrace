@@ -27,7 +27,7 @@
 
 <svg viewBox="0 0 1000 870" role="img" aria-labelledby="clip-split-title clip-split-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="clip-split-title">Worktrace 统计的区间裁剪与人工/机器分离</title>
-  <desc id="clip-split-desc">自上而下：查询输入带着半开范围与同一快照时刻，取出有效区间集合并排除待确认及作废区间、整次 discarded；对每一段区间按公式取与范围的交集，这就是全图唯一的计算规则，也是强调项；裁剪结果按 mode 分成四类并分别汇总——人工只算 FOREGROUND，机器分 BACKGROUND 与 PASSIVE 两项，WAITING 单列，人工与机器之间有一条明确禁止跨越的合并边界；四类测量各自进入报表 DTO，已确认已结束与实时暂计分开标注。</desc>
+  <desc id="clip-split-desc">自上而下：查询输入带着半开范围与协调器快照，取出有效区间集合并排除待确认及作废区间、整次 discarded；对每一段区间按公式取与范围的交集，这就是全图唯一的计算规则，也是强调项；裁剪结果按 mode 分成四类并分别汇总——人工只算 FOREGROUND，机器分 BACKGROUND 与 PASSIVE 两项，WAITING 单列，人工与机器之间有一条明确禁止跨越的合并边界；四类测量各自进入报表 DTO，已确认已结束与实时暂计分开标注。</desc>
 
   <defs>
     <marker id="cs-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -96,7 +96,7 @@
   <text x="500" y="308" fill="#D9603A" font-size="11" font-family="'Geist Mono',monospace"
         text-anchor="middle">max(0, min(end, to) − max(start, from))</text>
   <text x="500" y="328" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">运行区间的 end 用同一快照时刻 now</text>
+        text-anchor="middle">运行区间的 end 用协调器单调归属终点</text>
 
   <!-- ===== 四类测量 ===== -->
   <rect x="50" y="430" width="200" height="80" rx="6" fill="#FBF9F6"/>
@@ -147,7 +147,7 @@
 
   <!-- ===== 注记 ===== -->
   <text x="40" y="740" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    统计范围统一为半开区间 [from,to)；每段有效 interval 与范围取交集，运行区间的 end 使用同一快照时刻 now。</text>
+    统计范围统一为半开区间 [from,to)；每段有效 interval 与范围取交集，运行区间的 end 使用同一协调器快照的单调归属终点，不另采墙钟。</text>
   <text x="40" y="760" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     人工只算 FOREGROUND，机器分 BACKGROUND / PASSIVE 两项，WAITING 单列；禁止把并行的机器时长加成人工。</text>
   <text x="40" y="780" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">

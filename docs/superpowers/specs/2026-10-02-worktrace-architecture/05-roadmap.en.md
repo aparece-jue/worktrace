@@ -16,8 +16,8 @@ Apply dependency cleanup and decide production dockview after review; preserve c
 | V0.1 | Capture→time→correct/recover→Today→minimal export/review→backup | F-001…F-011, F-014…F-020 |
 | V0.1b | Desktop enhancement: HUD/modes/global capture hotkey | F-012/F-013 plus F-001 hotkey extension |
 | V0.2 | Concurrency/interruption/weights/scheduling/reports/existing-entity search | F-101…F-113 |
-| V0.3 | AI/history/feedback/selected-input confirmation | F-201…F-208 |
-| V0.4 | Brief facts/decisions, references, Agent imports and record search | F-301…F-305 plus F-110 extension |
+| V0.3 | AI/history/feedback/selected-input confirmation | F-201…F-210 |
+| V0.4 | Brief facts/decisions, minimal outcomes, references, Agent imports and record search | F-301…F-305 plus F-110 extension |
 | V0.5 | Extended review/KPA/knowledge facts/experimental capability model | F-401…F-405 |
 | V1.0 | Automated backup/hardened migration/recovery/long-run verification | F-501…F-510 |
 
@@ -65,3 +65,7 @@ Current scope (2026-10-03): personal work records and task management, including
 
 
 Capability loop: evidence → user-confirmed gap → learning/practice task → work samples/self-assessment → review; optional proficiency retained. KPA collects traceable outcomes/dates, never grades people.
+
+See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).
+
+V0.1 probes 08 clock mapping/checkpoints; V0.2 break never counts effort; V0.3 adds F-209/F-210; V0.4 minimal outcome storage precedes import; V0.5 confirmed report snapshots and capability action reviews.

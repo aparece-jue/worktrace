@@ -36,13 +36,13 @@ AI 默认关闭；每次选择记录、预览实际发送内容和提供商/端�
 }
 ```
 
-各 kind 最小 content：task.title（description/completion_criteria 可选）；project_note.title/body；fact.key/value；decision.title/rationale/decided_at；outcome.title/body/occurred_at。日期时间均带时区；允许不完整的建议注明 unknown，不允许生成虚构时间或工时。任务引用、项目归属、标签由导入预览映射；首版不导入 timer/session、工作区间、历史完成时间或直接批量覆盖状态。
+各 kind 最小 content：task.title（description/completion_criteria 可选）；project_note.title/body；fact.key/value；decision.title/rationale/decided_at；outcome.title/body/occurred_at。日期时间均带时区；只有 occurred_at/decided_at 可用 null 表示未知；不使用字符串 unknown，不允许生成虚构时间或工时。任务引用、项目归属、标签由导入预览映射；首版不导入 timer/session、工作区间、历史完成时间或直接批量覆盖状态。
 
 ## 4. 导入事务与失败边界
 
 选择文件 → 本地验证结构/版本/大小 → 预览内容、来源与新增/冲突 → 选择目标项目及逐项采纳 → 单事务创建/修改选中记录、来源、导入映射和审计 → 返回 epoch/revision。未采纳条目不进入业务实体。未知格式版本、非法 kind/字段/日期、超限整体拒绝并给出定位。推荐首版硬限制 5 MiB、1000 条，具体性能通过 M01 实验验证；未知字段拒绝，正文不可作为指令执行。
 
-相同 producer/batch_id/item_id 与同内容哈希重复采纳返回既有映射，不重复创建。哈希由应用按规范 JSON 计算（键排序、UTF-8，协议版本内固定），不信任外部提供的哈希；同 ID 不同内容显示冲突，不静默覆盖。新批次的相似条目提示人工核对，不承诺语义去重。取代已有事实/决策或编辑任务须显式映射并带 expected_data_epoch/row_version；所选条目任一失败整体回滚，可以减少选择后重试。导入审计与来源包含敏感信息，按用户数据备份，不进入诊断日志。
+相同去重身份（定义见 §6） 与同内容哈希重复采纳返回既有映射，不重复创建。应用按 §6 定义计算哈希，不信任外部提供的哈希；同 ID 不同内容显示冲突，不静默覆盖。新批次的相似条目提示人工核对，不承诺语义去重。取代已有事实/决策或编辑任务须显式映射并带 expected_data_epoch/row_version；所选条目任一失败整体回滚，可以减少选择后重试。导入审计与来源包含敏感信息，按用户数据备份，不进入诊断日志。
 
 ![Agent 导入事务与失败边界](images/agent-import-flow.svg)
 
@@ -50,4 +50,16 @@ AI 默认关闭；每次选择记录、预览实际发送内容和提供商/端�
 
 ## 5. 交付与验收
 
-V0.1 支持简单成果/问题备注及手动证据引用；V0.3 AI 输入确认与建议；V0.4 JSON 导入和配套 skill；V0.5 能力措施复盘及 KPA 证据材料。验收包含：无文件正文读取、未知版本/非法结构拒绝、重复采纳、ID 内容冲突、部分选择与失败回滚、旧版本编辑冲突、来源保留、危险引用拒绝、无自动网络请求及无自动 AI 发送。配套 skill 与应用共用协议样例，skill 更新不得隐式改变协议。
+V0.1 支持简单成果/问题备注及手动证据引用；V0.3 AI 输入确认与建议；V0.4 JSON 导入和配套 skill；V0.5 能力措施复盘及 KPA 证据材料。验收包含：不读取关联源文件正文（导入 JSON 与用户记录文本允许读取）、未知版本/非法结构拒绝、重复采纳、ID 内容冲突、部分选择与失败回滚、旧版本编辑冲突、来源保留、危险引用拒绝、无自动网络请求及无自动 AI 发送。配套 skill 与应用共用协议样例，skill 更新不得隐式改变协议。
+
+实施细节补充见 [08：计时、阶段、AI 与报告快照](08-implementation-contracts.zh.md)。
+
+## 6. 字段、去重与错误的精确定义
+
+机器格式见 [JSON Schema](agent-import.schema.json)，样例见 [有效样例](examples/agent-import.valid.json)。该 Schema 仅定义结构；应用还必须验证真实日期、同批 item_id 唯一、大小、目标映射及事务。schema_version=1：fact.value 仅非空字符串；未知成果/决策日期为 null，其他必填内容不得用 null 或 unknown 代替。
+
+去重身份为 producer.tool + producer.skill + batch_id + item_id；skill_version 为来源元数据，不改变身份。内容哈希 SHA-256 覆盖 kind/content/sources；sources 保持数组顺序，所有对象键递归按 UTF-16 排序，JSON.stringify 无空白，UTF-8、不做 Unicode 正规化，不含生成时间或 producer 版本。版本 1 内容仅字符串/null/对象/数组，无浮点数规范化问题。保存完整规范内容，以便排查哈希差异。
+
+同身份不同内容返回 IMPORT_CONTENT_CONFLICT；目标实体已删除/作废或修改后返回 IMPORT_TARGET_CHANGED，由用户显式选择恢复/新增，不静默重建或覆盖。不同目标项目不得复用既有映射；返回 IMPORT_MAPPING_CONFLICT。非法格式/日期/重复 item_id 返回 IMPORT_VALIDATION_FAILED，未知版本返回 IMPORT_SCHEMA_UNSUPPORTED；任一所选项冲突整体不落库。
+
+每项最多 100 个来源；拒绝重复 JSON 对象键、空白必填字符串及非法日期。可选 locator/observed_at 可省略或为 null；sources 可为空，但界面标为“无来源、待确认”。[无效输入样例](examples/agent-import.invalid-cases.json) 同时包含 Schema 与业务校验案例，具体错误归类以 §6 为准。

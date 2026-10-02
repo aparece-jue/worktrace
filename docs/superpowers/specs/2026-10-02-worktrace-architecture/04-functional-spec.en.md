@@ -74,7 +74,7 @@ SPEC §52 scope: Knowledge Tag, Weighted Tag, Reports, TimeBlock, Pomodoro, Inte
 | F-101 | Concurrency | At most one running FOREGROUND, multiple paused allowed; direct conflicting start/resume rejected; explicit switch atomically pauses old and starts new | M01 M05 | §12 |
 | F-102 | Execution mode | Each session is FOREGROUND / BACKGROUND / PASSIVE / WAITING | M05 | §12 |
 | F-103 | Human-effort accounting | **1 h of foreground design plus 1 h of background AI generation must report 1 h of human effort, not 2 h** | M06 | §12 |
-| F-104 | Pomodoro | 25/5, 50/10, 90/20, and custom; work and break spans are distinguishable | M04 | §14 |
+| F-104 | Pomodoro | 25/5, 50/10, 90/20, and custom; persist phases under 08; break has no work intervals and freezes/restarts without backfill; explicit next-cycle start checks occupancy | M04 | §14 |
 | F-105 | Time blocks | Multiple blocks per task; unscheduling preserves effort; Scheduled introduced here; timezone and half-open ranges explicit | M01 M02 M12 | §14 §37 |
 | F-106 | Interruptions | Explicit interruption atomically pauses old and starts new; show count and inserted-task human duration, mark an unresumed original as open; duration is not automatically productivity loss | M05 M06 | §23 |
 | F-107 | Knowledge tags | Hierarchical knowledge tags (Electronics → Analog → ADC) | M01 M02 | §16.3 |
@@ -100,7 +100,9 @@ Unavailable AI leaves the core unchanged. An explicitly requested AI action repo
 | F-205 | AI priority | No background overwrite of any confirmed value, including adopted AI; explicit edits/re-adoption allowed; show suggestion separately | M10 M02 | §5.3 |
 | F-206 | Auditable AI metrics | Denominator includes valid accepted/edited/rejected outcomes; retain suggestion_id/model/prompt version; show acceptance and error separately, never claim equivalent saved time | M10 M01 M06 | §35 |
 | F-207 | AI feedback | Quick feedback per suggestion: too fine / too coarse / estimate too long / too short / wrong tag / wrong category / unreasonable priority | M10 | §34 |
-| F-208 | AI input confirmation | AI off by default; select records, preview actual input and confirm provider/endpoint; changed inputs require reconfirmation; never auto-send imports; mock verifies unselected content/bodies/secrets are excluded from outbound and logs | M09 M10 M01 | §31 |
+| F-208 | AI input confirmation | AI off by default; select records, preview actual input and confirm provider/endpoint; changed inputs require reconfirmation; never auto-send imports; mock verifies unselected content/linked-source bodies/secrets are excluded from outbound and logs | M09 M10 M01 | §31 |
+| F-209 | AI summary | Explicit period/timezone/measure/input versions; code computes numbers, citations whitelisted, pending/inferences separate; stale input cannot overwrite confirmed reports | M09 M10 M06 M07 | §32 §43 |
+| F-210 | AI schedule suggestions | Selected tasks/dependencies/confirmed estimates/available windows only; prompt for missing inputs; adoption revalidates conflicts/state/versions and commits chosen blocks atomically, never starts timers | M09 M10 M01 M02 | §3.3 §32 |
 
 ---
 
@@ -174,3 +176,7 @@ Performance thresholds name hardware/data size/scope/baseline; capture latency e
 Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).
 
 Scope exclusions: in-app OCR/source-body parsing/indexing, directory scanning, engineering correctness checks and automatic performance grading. Keep record search, optional capability models and KPA evidence. F-017 allows explicit manual history correction; Agent imports never directly change effort or completion timestamps.
+
+See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).
+
+F-007 also tests wall/monotonic divergence, checkpoint failure and day boundaries. F-304 tests V0.4 outcomes/null dates/deleted mapping targets. F-402 tests immutable confirmed snapshots reproducing old values/citations after source edits, regenerated as new versions.

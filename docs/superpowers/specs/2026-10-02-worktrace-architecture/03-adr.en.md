@@ -101,3 +101,5 @@ SQLite supports partial unique indexes; NULL-containing ordinary uniqueness does
 - [Tauri process model](https://v2.tauri.app/concept/process-model/)
 
 Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).
+
+See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).

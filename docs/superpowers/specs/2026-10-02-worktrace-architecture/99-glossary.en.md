@@ -176,3 +176,7 @@ Current scope (2026-10-03): personal work records and task management, including
 
 
 Reference: title/path/URL/source locator, no body. Agent Import: validated/reviewed per-item adoption of external skill JSON. Capability Profile: evidence, self-report and optional inference connected to actions. KPA Evidence: traceable work dates/outcomes/evidence.
+
+See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).
+
+duration_ms: trusted interval duration validated against accounting endpoints; Attribution Endpoint: start wall plus trusted monotonic elapsed; Checkpoint: successfully persisted trusted clock mapping; phase: Pomodoro work/break; report_snapshot: immutable confirmed report content/facts.

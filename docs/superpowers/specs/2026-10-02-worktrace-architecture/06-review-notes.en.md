@@ -74,3 +74,11 @@ Current scope (2026-10-03): personal work records and task management, including
 ## 7. 2026-10-03 scope revision
 
 Update PROJECT_SPEC and bilingual 00–05/99 scope/modules/entities/acceptance; add 07 import contract. Keep AI task assistance, capability gaps/actions and KPA evidence. External Agents/skills process source files. Delete the former classification diagram; prior extraction/classification history is superseded by this section. No business code or companion skill implemented.
+
+See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).
+
+## 8. Contract refinements awaiting review
+
+Add 08 clock attribution/checkpoints, Pomodoro phases, V0.4 outcomes, F-209/F-210 and immutable KPA snapshots. 07 adds schema/fixtures/null dates/deduplication errors. Clarify linked-source-body exclusion. Documents/protocol examples only; no implemented platform behavior.
+
+Static checks: links/fences across 21 Markdown files, 63 acceptance IDs and bilingual SQL parity; five-kind valid import and six invalid structure/date/duplicate-ID fixtures passed a local protocol checker; six SQLite example constraints passed. These do not constitute implemented or accepted import/timing/Pomodoro/AI/report features.

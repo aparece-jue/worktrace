@@ -8,11 +8,11 @@ This replaces pause-total storage. The schema is logical, not an executable migr
 
 | Version | Objects |
 | --- | --- |
-| V0.1 | app_meta, application_run, project, task, work_session, work_interval, time_edit, task_change, daily_plan, tag, task_tag |
+| V0.1 | app_meta, application_run, interval_checkpoint, project, task, work_session, work_interval, time_edit, task_change, daily_plan, tag, task_tag |
 | V0.2 | goal, milestone, task_dependency, time_block, task_knowledge (actual-use metadata) |
 | V0.3 | ai_suggestion, ai_feedback; per-action input/destination confirmation |
-| V0.4 | context_fact, decision, document (references only), task_document, agent_import_batch/item |
-| V0.5 | knowledge_stat, a rebuildable derived cache |
+| V0.4 | context_fact, decision, document (references only), task_document, outcome, outcome_source, agent_import_batch/item |
+| V0.5 | knowledge_stat (rebuildable cache), report_snapshot (confirmed reports) |
 
 ![ER (auxiliary and migration tables)](images/er-more-tables.svg)
 
@@ -46,7 +46,12 @@ work_session(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id),
              needs_review INTEGER NOT NULL DEFAULT 0, row_version INTEGER NOT NULL)
 work_interval(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
               started_at INTEGER NOT NULL, ended_at INTEGER, voided_at INTEGER,
+              duration_ms INTEGER, sampled_end_wall_at INTEGER,
               needs_review INTEGER NOT NULL DEFAULT 0)
+interval_checkpoint(interval_id TEXT PRIMARY KEY REFERENCES work_interval(id),
+                    run_id TEXT NOT NULL REFERENCES application_run(id),
+                    wall_at INTEGER NOT NULL, attribution_at INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL)
+
 time_edit(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
           before_json TEXT NOT NULL, after_json TEXT NOT NULL, reason TEXT,
           created_at INTEGER NOT NULL)
@@ -102,7 +107,7 @@ M01 supplies executable DDL, CHECKs, NOT NULLs, deletion policies and migrations
 
 Pause/resume keeps the session; starting again after finish creates a new one. A paused session may finish directly. Completing/cancelling a task finishes its running/paused sessions. Unresolved recovering records return RECOVERY_REQUIRED rather than silently confirming history.
 
-active_ms is the sum of closed effective intervals plus the running interval's current duration. Paused values freeze because there is no open interval. Countdown remaining_ms=max(0,target_duration_ms-active_ms); overtime is shown separately. Expiry alerts but does not complete the task. Pauses consume no countdown budget.
+active_ms sums trusted closed interval.duration_ms plus coordinator monotonic live elapsed; duration equals accounting endpoint difference; anomalies and manual correction follow 08. Paused values freeze because there is no open interval. Countdown remaining_ms=max(0,target_duration_ms-active_ms); overtime is shown separately. Expiry alerts but does not complete the task. Pauses consume no countdown budget.
 
 Use a monotonic clock for live durations and wall time for persisted attribution. Wall-clock changes, suspend and discontinuities cannot be hidden with now-started_at: stop the uncertain interval at the last trusted checkpoint and require reconciliation. Monotonic clock state is not reused across restarts.
 
@@ -158,7 +163,7 @@ task_dependency stores one predecessor→successor direction; blocks/depends_on 
 
 ## 6. Statistics and tags
 
-Use half-open [from,to) ranges. Clip every effective interval: max(0,min(end,to)-max(start,from)). Use one snapshot now for open running intervals. Separate confirmed closed intervals (including trusted parts of recovering sessions) from provisional live time. Exclude pending/voided intervals and discarded sessions; pending time is separate. DTOs carry measure, timezone, range, as_of and revision.
+Use half-open [from,to) ranges. Clip every effective interval: max(0,min(end,to)-max(start,from)). Use the same coordinator snapshot monotonic attribution endpoint for open running intervals; never sample wall time independently. Separate confirmed closed intervals (including trusted parts of recovering sessions) from provisional live time. Exclude pending/voided intervals and discarded sessions; pending time is separate. DTOs carry measure, timezone, range, as_of and revision.
 
 Human effort includes FOREGROUND only. Sum BACKGROUND/PASSIVE as separate machine measures; WAITING is separate. Never add concurrent machine durations to human totals.
 
@@ -174,7 +179,7 @@ Use stable priority_json/estimated_json envelopes from V0.1: value, source(user/
 
 ai_suggestion retains task/kind/input version, provider/model/prompt version, suggested value, original estimate, timestamps and pending/accepted/edited/rejected/stale outcomes. ai_feedback links suggestion_id. Keep rejected suggestions and post-adoption edits for valid acceptance/error statistics. Stale inputs invalidate suggestions. Self-reported model confidence differs from empirically calibrated confidence; insufficient evidence is Unknown.
 
-V0.3 persists selected input entity versions and destination; no default sends or four-level security_level. V0.4 context_fact holds user-confirmed brief facts, one current value per project/key with replacement history. document stores only supplied title/path/URL/source locator, never bodies/OCR/extraction caches; association neither verifies content nor authorizes reading. Agent batches/items retain schema version, payload hash, provenance, adoption results and mappings; see 07. Deduplication is not path-based. V0.1 captures outcomes/evidence in completion notes; V0.5 migrates structured outcomes, self-assessments and practice records.
+V0.3 persists selected input entity versions and destination; no default sends or four-level security_level. V0.4 context_fact holds user-confirmed brief facts, one current value per project/key with replacement history. document stores only supplied title/path/URL/source locator, never bodies/OCR/extraction caches; association neither verifies content nor authorizes reading. Agent batches/items retain schema version, payload hash, provenance, adoption results and mappings; see 07. Deduplication is not path-based. V0.1 captures outcomes/evidence in completion notes; V0.4 adds minimal outcome/outcome_source for imports; V0.5 extends self-assessments/practice and report_snapshot.
 
 knowledge_stat is rebuildable and carries algorithm_version/sample_count/computed_at. V0.5 ability scores are experimental, never inferred from total hours alone.
 
@@ -209,3 +214,7 @@ Keep the superseded_by model for ContextFact with this atomic order: insert new 
 Time queries require interval.needs_review=0 and voided_at IS NULL. Whole-session void never affects other sessions. Test epochs/snapshots, state-version/ticks, trusted paused recovery, partial discard and fact replacement with fault injection.
 
 Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).
+
+See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).
+
+V0.1 adds interval_checkpoint(interval_id/run_id/wall_at/attribution_at/elapsed_ms); recovery uses only the last persisted checkpoint. Trusted closed duration_ms is nonnull and equals ended_at-started_at; uncertain rows may be null. Add CHECK/FKs. V0.2 phases and V0.4/V0.5 outcomes/report migrations follow 08. Core ER is a summary omitting sampling/checkpoint fields; text and 08 are normative.

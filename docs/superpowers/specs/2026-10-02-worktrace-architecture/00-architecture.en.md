@@ -95,3 +95,5 @@ No four-level file classification, file-permission inheritance or extraction cac
 ![AI input and external Agent boundary](images/ai-agent-boundary.svg)
 
 [Module breakdown](01-module-breakdown.en.md) · [Data model](02-data-model.en.md) · [ADR](03-adr.en.md) · [Functional spec](04-functional-spec.en.md) · [Roadmap](05-roadmap.en.md) · [Review notes](06-review-notes.en.md) · [Scope and import contract](07-scope-and-agent-import.en.md) · [Glossary](99-glossary.en.md)
+
+See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).

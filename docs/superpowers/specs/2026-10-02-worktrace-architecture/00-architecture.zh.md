@@ -97,3 +97,5 @@ AI Gateway 只接收 M09 按本次用户选择构造的 Context Bundle。AI 默�
 ![AI 输入与外部 Agent 边界](images/ai-agent-boundary.svg)
 
 > 图：文件正文不进来，只进来结构化结果；AI 不自己开，每次都要人点一下。
+
+实施细节补充见 [08：计时、阶段、AI 与报告快照](08-implementation-contracts.zh.md)。

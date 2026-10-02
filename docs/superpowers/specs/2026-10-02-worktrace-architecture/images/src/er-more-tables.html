@@ -27,7 +27,7 @@
 
 <svg viewBox="0 0 1000 790" role="img" aria-labelledby="er-more-title er-more-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="er-more-title">Worktrace 辅助表与后续迁移表的实体关系</title>
-  <desc id="er-more-desc">八张表按引入版本由深到浅着色：V0.1 的 tag、task_tag、daily_plan 最深，V0.2 的 goal、milestone、task_dependency、time_block 居中，V0.3 的 ai_suggestion 最浅。tag 自引用出父子层级，并一对多 task_tag。其余各表的外键都指向本图之外、属于上一张图的 project 与 task，因此统一收束到底部一个虚线引用块，箭头一律向下指向它。task_tag 用强调色标出，因为标签权重规则（每个 kind 总和不超过 1、不自动归一化）落在它身上。右下角列出尚未画入的表，含 V0.4 新增的 Agent 导入批次与条目。</desc>
+  <desc id="er-more-desc">八张表按引入版本由深到浅着色：V0.1 的 tag、task_tag、daily_plan 最深，V0.2 的 goal、milestone、task_dependency、time_block 居中，V0.3 的 ai_suggestion 最浅。tag 自引用出父子层级，并一对多 task_tag。其余各表的外键都指向本图之外、属于上一张图的 project 与 task，因此统一收束到底部一个虚线引用块，箭头一律向下指向它。task_tag 用强调色标出，因为标签权重规则（每个 kind 总和不超过 1、不自动归一化）落在它身上。右下角列出尚未画入的表，含 V0.4 新增的成果实体与 Agent 导入批次、V0.5 的确认报告快照。</desc>
 
   <defs>
     <marker id="em-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -183,8 +183,10 @@
     <text x="700" y="452">V0.2　task_knowledge（未画）</text>
     <text x="700" y="468">V0.4　context_fact · decision</text>
     <text x="700" y="484">　　　document（仅引用）· task_document</text>
-    <text x="700" y="500">　　　agent_import_batch / item</text>
-    <text x="700" y="516">V0.5　knowledge_stat（可重建）</text>
+    <text x="700" y="500">　　　outcome · outcome_source</text>
+    <text x="700" y="516">　　　agent_import_batch / item</text>
+    <text x="700" y="532">V0.5　knowledge_stat（可重建）</text>
+    <text x="700" y="548">　　　report_snapshot（确认报告）</text>
   </g>
 
   <!-- ===== 图外已有表的引用块 ===== -->

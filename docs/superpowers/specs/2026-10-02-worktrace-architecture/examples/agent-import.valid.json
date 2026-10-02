@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "batch_id": "review-001",
+  "generated_at": "2026-10-03T09:00:00+08:00",
+  "producer": {
+    "tool": "external-agent",
+    "skill": "worktrace-export",
+    "skill_version": "1"
+  },
+  "items": [
+    {
+      "item_id": "item-1",
+      "kind": "task",
+      "content": {
+        "title": "复核测试结果",
+        "completion_criteria": "记录复核结论"
+      },
+      "sources": [
+        {
+          "title": "用户提供的资料",
+          "reference": "report.pdf",
+          "locator": "第 3 页",
+          "observed_at": null
+        }
+      ]
+    },
+    {
+      "item_id": "item-2",
+      "kind": "project_note",
+      "content": {
+        "title": "背景",
+        "body": "用户选择的简要背景"
+      },
+      "sources": [
+        {
+          "title": "用户提供的资料",
+          "reference": "report.pdf",
+          "locator": "第 3 页",
+          "observed_at": null
+        }
+      ]
+    },
+    {
+      "item_id": "item-3",
+      "kind": "fact",
+      "content": {
+        "key": "review_stage",
+        "value": "待复核"
+      },
+      "sources": [
+        {
+          "title": "用户提供的资料",
+          "reference": "report.pdf",
+          "locator": "第 3 页",
+          "observed_at": null
+        }
+      ]
+    },
+    {
+      "item_id": "item-4",
+      "kind": "decision",
+      "content": {
+        "title": "先复核再排期",
+        "rationale": "范围尚待确认",
+        "decided_at": null
+      },
+      "sources": [
+        {
+          "title": "用户提供的资料",
+          "reference": "report.pdf",
+          "locator": "第 3 页",
+          "observed_at": null
+        }
+      ]
+    },
+    {
+      "item_id": "item-5",
+      "kind": "outcome",
+      "content": {
+        "title": "完成资料整理",
+        "body": "待用户确认的成果说明",
+        "occurred_at": null
+      },
+      "sources": [
+        {
+          "title": "用户提供的资料",
+          "reference": "report.pdf",
+          "locator": "第 3 页",
+          "observed_at": null
+        }
+      ]
+    }
+  ]
+}
