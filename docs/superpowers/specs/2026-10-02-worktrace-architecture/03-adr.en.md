@@ -91,6 +91,8 @@ On R-04: keeping the demo component in `src/components/` as a reference is fine,
 
 Separate origin/confirmation authority; retain suggestions/feedback/input versions; default strictly local. Summaries/caches/drafts inherit strictest source level; logs redact bodies and credentials use OS storage. Model confidence is not empirical calibration.
 
+![Confidentiality levels and the AI egress boundary](images/security-ai-egress.svg)
+
 
 ## Verification references
 
