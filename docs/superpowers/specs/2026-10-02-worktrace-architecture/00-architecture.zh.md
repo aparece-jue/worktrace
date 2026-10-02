@@ -64,6 +64,10 @@ app_meta.revision 随成功业务写事务加 1 并持久化；同事务多项�
 4. 窗口再次显示/恢复、IPC 重连时检查 get_revision；可见窗口最多每 30 秒轻量校验，补救丢失最后一条事件。后台窗口重显前校验。版本检查不拉全库。
 5. 跳号/乱序且缓存无法证明一致时重新取快照；允许短暂延迟，不依赖通知永不丢失。
 
+![revision 同步协议](images/revision-sync.svg)
+
+> 图：①–⑤ 即上面五步。虚线是异步通知与独立通道；`timer.tick` 不进业务 revision。
+
 timer.tick 独立携带 run_id、tick_seq、as_of、session_id、active_ms、remaining_ms。每个 run 内递增；旧 run/旧序号丢弃，不触发业务 revision 写入。重开窗口立即查询计时快照，不等下一秒 tick。
 
 ## 6. 前端状态与外发边界

@@ -64,6 +64,8 @@ Envelope: event/revision/at (Unix milliseconds)/payload. Broadcast committed tra
 4. Check get_revision on focus/reopen/resume/reconnection and at most every 30 seconds while visible. Hidden windows validate before display. This catches a lost final event without polling the full database.
 5. Refetch a snapshot on gaps/reordering when consistency cannot be established. Temporary display latency is allowed.
 
+![Revision synchronisation protocol](images/revision-sync.svg)
+
 timer.tick uses separate run_id/tick_seq/as_of/session_id/active_ms/remaining_ms. Discard old runs/sequences; it never persists a business revision. Reopened windows query timing immediately rather than waiting for another tick.
 
 ## 6. Frontend and outbound data
