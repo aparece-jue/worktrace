@@ -198,7 +198,7 @@ Restore: stop timers/pause writes/close connections, consistently back up curren
 
 ## 11. Restore epochs and fact replacement order (revision)
 
-Enter maintenance on DB restore/replacement; cancel old queued work/queries/AI requests. Validate a temporary candidate, generate a new data_epoch, switch recoverably and reopen. Failure returns to the original DB/epoch and forces a handshake. Create a current run and scan using §4; never reuse backed-up runtime memory. Reject old-epoch mutations. Restored revision may be lower and is comparable only inside its new epoch.
+Enter maintenance on DB restore/replacement; cancel old queued work/queries/AI requests. Validate a temporary candidate, generate a new data_epoch, switch recoverably and reopen. Failure returns to the original DB/epoch and forces a handshake. Create a current run and scan using §4; never reuse backed-up runtime memory. Every old-epoch mutation returns DATA_EPOCH_MISMATCH. Restored revision may be lower and is comparable only inside its new epoch.
 
 Keep the superseded_by model for ContextFact with this atomic order: insert new fact temporarily superseded_by=old ID (not current); set old.superseded_by=new ID; clear new.superseded_by to NULL. On commit the chain is acyclic and exactly one current row exists; failure rolls back everything. Intermediate states are not visible to other readers. Reject cross-project/key links, self-references and arbitrary historical pointer edits. Do not insert a second current row first or assume UNIQUE checks wait until commit.
 
