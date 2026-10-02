@@ -89,7 +89,7 @@ On R-04: keeping the demo component in `src/components/` as a reference is fine,
 
 ## ADR-013 Suggestion provenance, confirmation and external Agents
 
-Retain suggestion/feedback/input versions and adoption. Confirm input and destination per action. Remove file classification and extraction caches; external tools parse files, reviewed imports retain provenance and never auto-send. Keep capability-gap analysis and evidence-focused KPA. The former classification diagram is superseded; see 07 for current boundaries.
+Retain suggestion/feedback/input versions and adoption. Confirm input and destination per action. Remove file classification and extraction caches; external tools parse files, reviewed imports retain provenance and never auto-send. Keep capability-gap analysis and evidence-focused KPA. The former classification scheme and its diagram were deleted; see 07 for current boundaries.
 
 ## Verification references
 

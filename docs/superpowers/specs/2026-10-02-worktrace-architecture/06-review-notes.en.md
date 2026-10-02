@@ -73,4 +73,4 @@ Current scope (2026-10-03): personal work records and task management, including
 
 ## 7. 2026-10-03 scope revision
 
-Update PROJECT_SPEC and bilingual 00–05/99 scope/modules/entities/acceptance; add 07 import contract. Keep AI task assistance, capability gaps/actions and KPA evidence. External Agents/skills process source files. Archive the former classification diagram; prior extraction/classification history is superseded by this section. No business code or companion skill implemented.
+Update PROJECT_SPEC and bilingual 00–05/99 scope/modules/entities/acceptance; add 07 import contract. Keep AI task assistance, capability gaps/actions and KPA evidence. External Agents/skills process source files. Delete the former classification diagram; prior extraction/classification history is superseded by this section. No business code or companion skill implemented.
