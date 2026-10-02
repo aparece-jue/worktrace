@@ -1,0 +1,157 @@
+# Worktrace 术语表
+
+| 项 | 值 |
+| --- | --- |
+| 文档状态 | 设计草案（待评审） |
+| 日期 | 2026-10-02 |
+| 地位 | **本表是全部中英文档的术语唯一真相源**。任何文档与本表冲突时以本表为准 |
+| 英文版 | [`99-glossary.en.md`](99-glossary.en.md) |
+
+> 「禁止混用」一列是本文的主要价值 —— 它记录的是**这个项目里最容易混淆的术语对**。
+
+---
+
+## 1. 时间与工时（最易混淆的一组）
+
+| 中文 | English | 定义 | 禁止混用 |
+| --- | --- | --- | --- |
+| 流逝时长 | Elapsed Time | 墙钟上经过的时间。09:00 到 10:00 就是 1 小时，无论中间在做什么 | **不得单独说「工时」**。说「工时」必须指明是哪一种 |
+| **人工工时** | **Human Effort** | 用户本人实际投入的时间。只有 FOREGROUND 模式的 session 计入 | 与「实际时长」「流逝时长」**都不是**同义词 |
+| 机器时长 | Machine / AI Process Time | 后台 AI 生成、仿真运行等非人工过程占用的时间。BACKGROUND / PASSIVE 计入此列 | 不得计入人工工时 |
+| 关联时长 | Associated Duration | 统计口径一：任务带某标签，该标签就计入任务全部工时 | 与「加权工时」是**两种口径**，不可互相替代 |
+| 加权工时 | Weighted Duration | 统计口径二：按标签权重分配工时（ADC 50% × 2h = 1h） | 同上 |
+| 估时 | Estimated Duration | 任务开始前对耗时的估计。可以是 AI 给的（`source = ai`）或用户填的 | 与「计划时长」不是一回事 |
+| 计划时长 | Planned Duration | 用户实际排进日程的时长 | 与「估时」不是一回事 |
+| 实际时长 | Actual Duration | 事后统计出的真实耗时（由 session 聚合） | **不等于人工工时**（若含后台任务） |
+
+> SPEC §12 的硬要求：`1h 设计（前台）+ 1h AI 生成（后台）` **必须**统计成 1h 人工工时，不是 2h。
+
+---
+
+## 2. 核心对象
+
+| 中文 | English | 定义 | 禁止混用 |
+| --- | --- | --- | --- |
+| 目标 | Goal | 长期目标，如"完成工业 IO 控制板开发" | |
+| 项目 | Project | 长期上下文容器（目标 + 约束 + 决策 + 任务 + 文档 + 知识） | 不只是"任务分组" |
+| 里程碑 | Milestone | 项目阶段结果，如"原理图设计冻结" | |
+| 任务 | Task | 主要管理对象。WBS 树上从 Task 到叶子的所有节点都是 Task | |
+| 行动 | Action | **就是叶子 Task**，不单独建表（见 02-data-model §7） | 不是独立实体类型 |
+| 会话 | WorkSession | 一次连续计时区间 | 与「分段」不是同一层 |
+| 分段 | SessionSegment | WorkSession 内部的子区间（V1 起） | |
+| 依赖 | Dependency | 任务间关系：`blocks` / `depends_on` / `related` / `parallel` | |
+
+---
+
+## 3. 任务状态
+
+| 中文 | English | 定义 | 禁止混用 |
+| --- | --- | --- | --- |
+| 收件箱 | Inbox | 已捕获未理清 | |
+| 理清中 | Clarifying | 正在明确"下一步动作" | |
+| 就绪 | Ready | 可执行未排期 | |
+| 已排期 | Scheduled | 已进时间块 | |
+| 进行中 | Doing | 正在做 | |
+| **受阻** | **Blocked** | **我做不了**（缺技能、缺决策、前置未完） | **与 Waiting 是不同状态，不得合并** |
+| **等待** | **Waiting** | **等外部**（同事回复、器件、测试、审批） | 同上 |
+| 待检查 | Review | 做完待验 | |
+| 完成 | Done | 终态 | |
+| 已取消 | Cancelled | 终态 | |
+
+---
+
+## 4. 执行模式
+
+| 中文 | English | 计入人工工时 | 定义 |
+| --- | --- | --- | --- |
+| 前台 | FOREGROUND | ✅ | 用户当前正在做的事。**同时至多一个** |
+| 后台 | BACKGROUND | ❌ | 并行进行、不由用户推进（如 AI 生成文档） |
+| 被动 | PASSIVE | ❌ | 机器过程（如 LTspice 仿真跑着） |
+| 等待 | WAITING | ❌ | 等外部条件 |
+
+---
+
+## 5. 标签体系（五类）
+
+| 中文 | English | 定义 |
+| --- | --- | --- |
+| 领域 | Domain | 任务属于什么领域：Hardware / Firmware / Software / Documentation / Management |
+| 活动 | Activity | 实际在做什么：Design / Research / Calculation / Coding / Debug / Review / Testing |
+| 知识 | Knowledge | 需要什么知识。**唯一有层级的类别**（Electronics → Analog → ADC） |
+| 上下文 | Context | 需要什么条件：PC / Internet / OrCAD / Lab / High Focus |
+| 汇报 | Report | 专用于周报与 KPA：产品研发 / 技术预研 / 问题分析 / 验证测试 |
+
+> 「上下文」一词有两义：**标签类别**（本表）与 **Context Engine 的上下文**（下节）。写作时须限定，如「Context 类标签」vs「上下文包」。
+
+---
+
+## 6. 能力模型与质量
+
+| 中文 | English | 定义 | 禁止混用 |
+| --- | --- | --- | --- |
+| 熟练度 | Skill Level | 对能力的估计值（0–1） | **必须与置信度并存**，单独给出会得出错误结论 |
+| 置信度 | Confidence | 该估计有多少样本支撑 | 同上 |
+| 返工 | Rework | 完成后被推翻重做 | |
+| 完成质量 | Completion Quality | `normal` / `reworked` / `review_failed` / `partially_done` / `abandoned` | |
+| 打断 | Interruption | 计时中插入另一任务，原会话被暂停 | |
+
+> SPEC §20 的硬要求：`Vulkan: Skill 0.72 / Confidence 0.21` 意味着"表现不错但样本不足"。只给 Skill 会误导。
+
+---
+
+## 7. 上下文引擎
+
+| 中文 | English | 定义 |
+| --- | --- | --- |
+| 上下文包 | Context Bundle | 任务上下文 + 项目上下文 + 相关文档 + 知识 + 历史 + 决策的集合 |
+| 上下文事实 | ContextFact | 项目级的事实条目（如 `Pt1000 current = 0.2mA`） |
+| 已取代 | Superseded | 事实被新值替代后的状态。**旧值保留，不覆盖**（版本化） |
+| 决策日志 | Decision Log | 记录决策、理由、日期，供日后追问"当时为什么这么选" |
+| 上下文完整度 | Context Completeness | 对任务背景充分程度的百分比评估 |
+| 保密等级 | Security Level | `PUBLIC` / `INTERNAL` / `CONFIDENTIAL` / `STRICT_LOCAL` |
+| 严格本地 | STRICT_LOCAL | **不允许发送到云 AI、不允许自动外发**，只允许本地处理 |
+
+---
+
+## 8. 界面部件
+
+| 中文 | English | 定义 | 禁止混用 |
+| --- | --- | --- | --- |
+| 主窗 | Main Window | 常规主界面 | |
+| 抬头显示 | HUD / OSD | 置顶、透明、鼠标穿透、不抢焦点、无任务栏图标的实时状态窗 | |
+| 迷你控制器 | Mini Controller | **可交互**小窗：暂停 / 完成 / 切换 / 快速捕获 | **与 HUD 是两回事**：HUD 穿透不可点，Mini 可点 |
+| 托盘 | System Tray | 原生托盘菜单，不依赖任何窗口存活 | |
+| 锁定模式 | Locked | HUD 状态：鼠标穿透、不可选、不可拖 | |
+| 编辑模式 | Edit | HUD 状态：可移动、可调整大小、可配置 | |
+
+---
+
+## 9. 架构与实现
+
+| 中文 | English | 定义 |
+| --- | --- | --- |
+| 唯一真相源 | Single Source of Truth | 领域状态只在 Rust 侧存在一份（ADR-006） |
+| 命令 | Command | 前端 → Rust 的请求/响应通道 |
+| 事件 | Event | Rust → 前端的广播通道 |
+| 信封 | Envelope | 事件的统一外层结构 `{event, revision, at, payload}` |
+| 修订号 | revision | Rust 侧单调递增的全局版本号，用于检测漏事件（ADR-010） |
+| 快照 | Snapshot | `get_snapshot()` 返回的当前状态全量，供窗口挂载时对齐 |
+| 状态镜像 | State Mirror | 前端缓存层 `src/services/domainState.ts`，唯一订阅入口 |
+| 失效信号 | Invalidation Signal | 领域事件在前端的角色 —— 触发重拉，而非打补丁 |
+| 待确认 | needs_review | 崩溃恢复后会话的标记。**系统不自动补写工时**，须用户确认 |
+| 平台层 | Platform Layer | `src-tauri/src/platform/`，Win32 调用的唯一边界（ADR-005） |
+| 组合根 | Composition Root | `lib.rs`，唯一装配全部层的地方 |
+| 领域层 | Domain Layer | `domain/`，纯类型与规则，无 IO |
+
+---
+
+## 10. 方法论
+
+| 中文 | English | 定义 |
+| --- | --- | --- |
+| 捕获 | Capture | 把要做的事记下来 |
+| 理清 | Clarify | 明确"这是什么、下一步做什么" |
+| 计划 | Plan | 拆解、估时、排优先级 |
+| 记录 | Track | 记录真实工时、切换、打断 |
+| 回顾 | Review | 分析结果、生成报表、提高预测准确度 |
+| WBS | Work Breakdown Structure | Goal → Project → Milestone → Task → Action |
