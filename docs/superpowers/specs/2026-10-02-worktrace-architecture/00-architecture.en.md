@@ -1,6 +1,6 @@
 # Worktrace — Overall Architecture
 
-Status: revised draft for user review. Date: 2026-10-02. [Chinese](00-architecture.zh.md).
+Status: revised draft for user review. Date: 2026-10-03. [Chinese](00-architecture.zh.md).
 See [product vision](../../../PROJECT_SPEC.md) and [review notes](06-review-notes.en.md). This is target design, not implemented behaviour; the repository still has the initial frontend and greet command.
 
 ## 1. Scope and document authority
@@ -80,7 +80,7 @@ A single serial timer coordinator handles starts/pauses/resumes/finishes/system 
 
 One domainState subscription entry per JS context with cleanup and hooks for pages. Business events invalidate queries; ticks replace display values. Begin with a simple store such as useSyncExternalStore, but permit a cache/state library when justified; library avoidance is not what establishes Rust authority.
 
-AI receives only an M09-whitelisted Context Bundle. V0.3 includes minimal task/project security; full document extraction is V0.4. Default STRICT_LOCAL. Explicit provider-specific authorization is required for outbound items. STRICT_LOCAL is cloud-blocked; CONFIDENTIAL is blocked by default, INTERNAL needs explicit authorization, PUBLIC may transmit after cloud AI is enabled. Derived content inherits the strictest source level. Logs record IDs/classification/counts, not sensitive text. Credentials use OS credential storage, never SQLite/localStorage. Adopting a suggestion is not outbound authorization.
+AI receives M09 bundles of selected records only. AI is off by default; preview actual inputs and confirm provider/endpoint per action. Keep task suggestions and summaries, no linked-file body access or extraction caches. Imported Agent results require review and never automatically send. Credentials stay in OS storage; logs exclude bodies/secrets.
 
 ## 7. Open verification and index
 
@@ -88,8 +88,10 @@ Probe Windows HUD click-through/no-focus/DPI, multi-entry dev/package paths, dat
 
 [Modules](01-module-breakdown.en.md) · [Data](02-data-model.en.md) · [ADRs](03-adr.en.md) · [Acceptance](04-functional-spec.en.md) · [Roadmap](05-roadmap.en.md) · [Glossary](99-glossary.en.md)
 
-## 8. Classification and outbound authorization (revision)
+## 8. AI input and external Agent boundary
 
-Check classification independently from destination authorization. STRICT_LOCAL never transmits solely because a destination is authorized; explicit reclassification and impact review are required. CONFIDENTIAL is blocked by default and needs separate scoped data approval; INTERNAL needs authorization; PUBLIC may send with cloud AI enabled. Renaming/moving derived content never clears inherited classification.
+No four-level file classification, file-permission inheritance or extraction cache. Keep AI-off mode, per-action selection/preview/confirmation and destination/input-version checks. Changes require renewed confirmation; cancellation blocks unsent requests, not recall. Users manage external Agent permissions in that tool. Import never grants permission to send. See [07](07-scope-and-agent-import.en.md).
 
-Bind grants to project_id/provider_id/normalized endpoint URL/allowed levels and scope. Project approval does not authorize every provider. Changed endpoints require new grants. Check classification/grant versions both during Bundle assembly and immediately before send; revocation cancels unsent requests, not promises recall of sent data. Audit reclassification/destination changes/revocation without bodies or credentials.
+![AI input and external Agent boundary](images/ai-agent-boundary.svg)
+
+[Module breakdown](01-module-breakdown.en.md) · [Data model](02-data-model.en.md) · [ADR](03-adr.en.md) · [Functional spec](04-functional-spec.en.md) · [Roadmap](05-roadmap.en.md) · [Review notes](06-review-notes.en.md) · [Scope and import contract](07-scope-and-agent-import.en.md) · [Glossary](99-glossary.en.md)

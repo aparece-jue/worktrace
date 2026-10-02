@@ -1,6 +1,6 @@
 # Worktrace — Revision Summary and Review Choices
 
-Status: R-01–R-08 approved; this revision awaits review; implementation and platform probes remain open. Date: 2026-10-02. [Chinese](06-review-notes.zh.md).
+Status: R-01–R-08 approved; this revision awaits review; implementation and platform probes remain open. Date: 2026-10-03. [Chinese](06-review-notes.zh.md).
 
 ## 1. Changes
 
@@ -30,12 +30,12 @@ work_interval is one proposed implementation. A pause-interval model is also pos
 | R-02 | Foreground sleep/lock | Auto-pause, explicit resume | Wall time includes absence; asking on every wake adds interaction |
 | R-03 | Historical classification | Recompute using current classification, label reports, freeze exports | Session snapshots retain original categories with greater editing/migration cost; useful for formal audit |
 | R-04 | Layout | Fixed first, preserve DockviewDemo | Add dockview/persistence after real multi-panel demand |
-| R-05 | AI outbound defaults | STRICT_LOCAL, explicit project/provider authorization | Automatic sending is easier but conflicts with sensitive engineering data; inherited classification still enforced |
-| R-06 | Ability scores | Usage/sample facts first, optional experimental scores | Immediate 0–1 values require algorithm/calibration/sample thresholds, risk false precision |
+| R-05 | AI boundary (updated this revision) | Off by default; select/preview/confirm inputs and destination per action | Remove file classification; external Agent permissions stay with that tool |
+| R-06 | Capability profiles and gap actions | Retain self-report/evidence/optional scores connected to practice and review | Validate samples/calibration; effort alone never measures ability |
 | R-07 | Mini window | Schedule after real-use evidence | Prioritize Mini before click-through HUD if interactive controls matter more |
 | R-08 | Weights | Per-kind total ≤1, Unallocated remainder, no auto-normalization | Normalization must visibly explain changed accounting |
 
-R-01–R-08 were approved on 2026-10-02; this revision does not reopen those choices.
+Original R-01–R-08 approved 2026-10-02. User-confirmed scope now updates R-05 to input confirmation and retains capability profiles/optional scores under R-06.
 
 ## 4. Implementation probes
 
@@ -67,3 +67,10 @@ Read [roadmap](05-roadmap.en.md), R-01…R-08, [data](02-data-model.en.md), [acc
 This revision changes documents and existing diagrams only. Example constraint checks do not constitute runtime acceptance.
 
 Checks passed: links/fences and bilingual IDs/SQL across 17 Markdown files; strict XML/accessibility structure and HTML-source export for 13 SVGs; six representative SQLite constraint cases and ContextFact replacement/injected rollback/unique-current/FK checks. Application acceptance and per-diagram visual review have not been performed.
+
+Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).
+
+
+## 7. 2026-10-03 scope revision
+
+Update PROJECT_SPEC and bilingual 00–05/99 scope/modules/entities/acceptance; add 07 import contract. Keep AI task assistance, capability gaps/actions and KPA evidence. External Agents/skills process source files. Archive the former classification diagram; prior extraction/classification history is superseded by this section. No business code or companion skill implemented.

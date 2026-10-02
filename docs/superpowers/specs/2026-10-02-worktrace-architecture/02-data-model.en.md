@@ -1,6 +1,6 @@
 # Worktrace — Data Model
 
-Status: revised draft for user review. Date: 2026-10-02.
+Status: revised draft for user review. Date: 2026-10-03.
 Upstream: [architecture](00-architecture.en.md); [Chinese](02-data-model.zh.md).
 This replaces pause-total storage. The schema is logical, not an executable migration.
 
@@ -10,8 +10,8 @@ This replaces pause-total storage. The schema is logical, not an executable migr
 | --- | --- |
 | V0.1 | app_meta, application_run, project, task, work_session, work_interval, time_edit, task_change, daily_plan, tag, task_tag |
 | V0.2 | goal, milestone, task_dependency, time_block, task_knowledge (actual-use metadata) |
-| V0.3 | ai_suggestion, ai_feedback; task/project security_level |
-| V0.4 | context_fact, decision, document, task_document |
+| V0.3 | ai_suggestion, ai_feedback; per-action input/destination confirmation |
+| V0.4 | context_fact, decision, document (references only), task_document, agent_import_batch/item |
 | V0.5 | knowledge_stat, a rebuildable derived cache |
 
 ![ER (auxiliary and migration tables)](images/er-more-tables.svg)
@@ -174,7 +174,7 @@ Use stable priority_json/estimated_json envelopes from V0.1: value, source(user/
 
 ai_suggestion retains task/kind/input version, provider/model/prompt version, suggested value, original estimate, timestamps and pending/accepted/edited/rejected/stale outcomes. ai_feedback links suggestion_id. Keep rejected suggestions and post-adoption edits for valid acceptance/error statistics. Stale inputs invalidate suggestions. Self-reported model confidence differs from empirically calibrated confidence; insufficient evidence is Unknown.
 
-V0.3 task/project security_level defaults to STRICT_LOCAL; M09/M10 whitelist outbound payloads. In V0.4, context_fact allows only one current value per project/key through a partial unique index WHERE superseded_by IS NULL; replacement inserts and links atomically. Documents retain content hash/modified time, and extraction caches inherit classification. task_document has real FKs. Reclassification never strips origin security metadata.
+V0.3 persists selected input entity versions and destination; no default sends or four-level security_level. V0.4 context_fact holds user-confirmed brief facts, one current value per project/key with replacement history. document stores only supplied title/path/URL/source locator, never bodies/OCR/extraction caches; association neither verifies content nor authorizes reading. Agent batches/items retain schema version, payload hash, provenance, adoption results and mappings; see 07. Deduplication is not path-based. V0.1 captures outcomes/evidence in completion notes; V0.5 migrates structured outcomes, self-assessments and practice records.
 
 knowledge_stat is rebuildable and carries algorithm_version/sample_count/computed_at. V0.5 ability scores are experimental, never inferred from total hours alone.
 
@@ -207,3 +207,5 @@ Keep the superseded_by model for ContextFact with this atomic order: insert new 
 ![ContextFact three-step supersede](images/contextfact-supersede.svg)
 
 Time queries require interval.needs_review=0 and voided_at IS NULL. Whole-session void never affects other sessions. Test epochs/snapshots, state-version/ticks, trusted paused recovery, partial discard and fact replacement with fault injection.
+
+Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).

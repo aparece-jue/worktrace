@@ -1,6 +1,6 @@
 # Worktrace — Architecture Decision Records
 
-Status: revised review draft; date: 2026-10-02. Corrects categorical reasoning, retains IDs and adds 011–013. Retained means continuity, not empirical verification. Product choices R-01…R-08 were approved on 2026-10-02; see [review notes](06-review-notes.en.md) §3.
+Status: revised review draft; date: 2026-10-03. Corrects categorical reasoning, retains IDs and adds 011–013. Retained means continuity, not empirical verification. Product choices R-01…R-08 were approved on 2026-10-02; see [review notes](06-review-notes.en.md) §3.
 [Architecture](00-architecture.en.md) · [Other language](03-adr.zh.md)
 
 | ADR | Decision | Status |
@@ -17,7 +17,7 @@ Status: revised review draft; date: 2026-10-02. Corrects categorical reasoning, 
 | ADR-010 | Transactional revision/convergence | Revised |
 | ADR-011 | Effective intervals/recovery | Revised proposal |
 | ADR-012 | Milestones/product trade-offs | **Decided** |
-| ADR-013 | Suggestion history/classification inheritance | Revised proposal |
+| ADR-013 | Suggestion provenance, input confirmation and external Agents | Revised proposal |
 
 ## ADR-001 Ant Design only
 
@@ -79,7 +79,7 @@ These eight product trade-offs are approved (see [review notes](06-review-notes.
 | R-02 | Foreground auto-pauses on lock/sleep; the user resumes explicitly afterwards |
 | R-03 | Historical statistics recompute from **current** tags, projects, and weights; reports state the basis; exports freeze the result |
 | R-04 | Fixed layout first; keep the dockview dependency, but `DockviewDemo` **must not ship in V0.1** |
-| R-05 | AI egress defaults to `STRICT_LOCAL`; authorize project/provider/normalized endpoint together; never override STRICT_LOCAL |
+| R-05 | AI off by default; preview selected records and confirm destination; no linked-file reading |
 | R-06 | Ship knowledge usage and sample facts first; capability scoring is an **experiment that can be switched off** |
 | R-07 | The Mini window is scheduled later, driven by real usage |
 | R-08 | Per-kind tag weights sum to ≤1; the remainder stays unallocated and is **never auto-normalised** |
@@ -87,12 +87,9 @@ These eight product trade-offs are approved (see [review notes](06-review-notes.
 On R-04: keeping the demo component in `src/components/` as a reference is fine, but it must be excluded from the packaged artifact.
 
 
-## ADR-013 Suggestion history/classification inheritance
+## ADR-013 Suggestion provenance, confirmation and external Agents
 
-Separate origin/confirmation authority; retain suggestions/feedback/input versions; default strictly local. Summaries/caches/drafts inherit strictest source level; logs redact bodies and credentials use OS storage. Model confidence is not empirical calibration.
-
-![Confidentiality levels and the AI egress boundary](images/security-ai-egress.svg)
-
+Retain suggestion/feedback/input versions and adoption. Confirm input and destination per action. Remove file classification and extraction caches; external tools parse files, reviewed imports retain provenance and never auto-send. Keep capability-gap analysis and evidence-focused KPA. The former classification diagram is superseded; see 07 for current boundaries.
 
 ## Verification references
 
@@ -102,3 +99,5 @@ SQLite supports partial unique indexes; NULL-containing ordinary uniqueness does
 - [SQLite NULL handling](https://www.sqlite.org/nulls.html)
 - [Rust Instant](https://doc.rust-lang.org/std/time/struct.Instant.html)
 - [Tauri process model](https://v2.tauri.app/concept/process-model/)
+
+Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).

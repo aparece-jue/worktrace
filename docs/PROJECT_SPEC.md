@@ -1,3 +1,5 @@
+> 2026-10-03 当前范围：个人任务与工作记录、能力短板分析、可追溯 KPA；文件处理由外部 Agent＋配套 skill 承担。具体边界与导入协议见 [07](superpowers/specs/2026-10-02-worktrace-architecture/07-scope-and-agent-import.zh.md)。以下历史示例以当前验收与路线图为准。
+
 # AI 辅助时间与工作管理工具
 
 > 2026-10-02 评审修订：本文保留原始愿景和版本草案。当前可评估的实现设计见 [修订摘要与待评估清单](superpowers/specs/2026-10-02-worktrace-architecture/06-review-notes.zh.md)、[路线图](superpowers/specs/2026-10-02-worktrace-architecture/05-roadmap.zh.md) 和 [数据模型](superpowers/specs/2026-10-02-worktrace-architecture/02-data-model.zh.md)。修订方案包含 V0.1b、有效工作区间、早期备份/修正/周回顾；R-01～R-08 已获批准，本轮协议与恢复调整待审核；不表示功能已实现。
@@ -321,7 +323,7 @@ Review / 文档 → 中等精力
                                             │
                                   ┌─────────┴─────────┐
                                   │                   │
-                              AI Gateway          Files / Context
+                              AI Gateway          References / Notes
                                   │
                            Local / Cloud AI
 ```
@@ -1300,148 +1302,19 @@ Abandoned
 
 ## 25. Context Engine
 
-Context Engine 用于解决：
-
-> 用户只说一句任务描述时，AI缺乏足够背景。
-
-例如：
-
-```text
-“完成 AIAO 原理图”
-```
-
-AI不能只看到这一句话。
-
-它应该获取：
-
-```text
-Task Context
-+
-Project Context
-+
-Related Documents
-+
-Knowledge
-+
-History
-+
-Decisions
-```
-
-形成 Context Bundle。
-
----
+上下文用于任务理清、估时与回顾，只包含用户本次选择的任务、历史、简要项目事实和决策。应用不从关联文件读取正文。外部 Agent 配套 skill 导出结构化结果，由用户预览后导入。
 
 ## 26. Project Context
 
-Project 应保存：
-
-```text
-目标
-设计约束
-关键参数
-架构
-决策
-文档
-历史任务
-未解决问题
-术语
-知识
-```
-
-例如：
-
-```text
-Project:
-AIAO
-
-Decision:
-ADC = ADS1118
-
-Decision:
-DAC = AD5422
-
-Constraint:
-24V supply
-
-Constraint:
-2 AI + 2 AO
-```
-
----
+保存用户填写或确认导入的目标、约束、简要事实、决策和资料引用。它是工作背景记录，不承担工程设计正确性验证或完整参数管理。
 
 ## 27. Context Completeness
 
-AI 可以对任务上下文完整程度进行判断。
-
-例如：
-
-```text
-Goal           ✓
-Project        ✓
-Input          ✓
-Output         ✓
-Constraints    ✓
-Dependency     ✓
-Acceptance     ?
-Deadline       ✓
-```
-
-得到：
-
-```text
-Context Completeness: 88%
-```
-
-只有真正缺失重要信息时才询问用户。
-
-避免每个任务都弹出大量表单。
-
----
+按具体动作列出缺少的目标、完成条件等信息，允许补充或跳过，不计算项目整体技术完整度百分比。
 
 ## 28. ContextFact
 
-建议增加：
-
-```text
-ContextFact
-```
-
-结构：
-
-```text
-id
-project_id
-
-key
-value
-
-source_type
-source_id
-
-confidence
-security_level
-
-created_at
-superseded_by
-```
-
-例如：
-
-```text
-Pt1000 current = 0.2mA
-```
-
-后续修改：
-
-```text
-0.2mA → superseded
-0.3mA → current
-```
-
-这样 AI 不会一直使用过期数据。
-
----
+保留简要事实的来源、确认和取代历史；同项目/key 至多一个当前值。事实来自用户或已确认的 Agent 导入，不自动提取。
 
 ## 29. Decision Log
 
@@ -1472,55 +1345,11 @@ Date:
 
 ## 30. 文件与资料
 
-支持关联：
-
-```text
-PDF
-Word
-Excel
-Markdown
-Images
-CSV
-JSON
-Netlist
-Code
-Log
-```
-
-核心目标是：
-
-> 获取上下文。
-
-不是：
-
-> 自己实现一个 Office 或 CAD。
-
----
+仅保存资料标题、路径/URL 和证据定位，用户主动打开。OCR、文件正文分析、自动提取及正文搜索交给外部 Agent 和配套 skill；应用不扫描目录或读取关联文件正文。导入契约见当前架构 07。
 
 ## 31. 保密数据
 
-文件和 Context 建议支持：
-
-```text
-PUBLIC
-INTERNAL
-CONFIDENTIAL
-STRICT_LOCAL
-```
-
-例如：
-
-```text
-STRICT_LOCAL
-```
-
-意味着：
-
-- 不允许发送到云 AI
-- 不允许自动外发
-- 只允许本地处理
-
----
+AI 默认关闭，本次选择记录、预览发送内容和提供商/端点后确认。取消四级文件密级、文件权限继承与缓存体系。外部工具文件权限由用户在对应工具管理，skill 不替代授权；导入内容不自动外发。
 
 ## 32. AI Gateway
 
@@ -1799,51 +1628,7 @@ Milestone
 
 ## 44. KPA / 工作汇报
 
-不能只输出：
-
-```text
-本季度 510h
-```
-
-而应该组合：
-
-```text
-时间投入
-+
-完成任务
-+
-里程碑
-+
-项目成果
-+
-问题
-+
-改进
-```
-
-例如：
-
-```text
-工业IO项目
-
-投入:
-126h
-
-完成:
-- DIDO输入模块
-- PWM输出模块
-- AIAO前端
-- RS232隔离模块
-
-里程碑:
-4 / 5
-```
-
-AI 可以基于这些真实数据生成：
-
-> 周报、月报和 KPA 草稿。
-
----
+KPA 用于整理已有工作的证明材料：任务开始/完成时间、确认投入、里程碑、成果、问题处理和证据引用。按周期/项目生成可追溯草稿，用户审核；不自动评价绩效，不虚构贡献、收益或历史时间。
 
 ## 45. 数据导入导出
 
@@ -1885,35 +1670,7 @@ Crash Recovery
 
 ## 47. Search
 
-统一搜索：
-
-```text
-Task
-Project
-Document
-Decision
-Knowledge
-Context
-Session
-```
-
-例如：
-
-```text
-“所有和 RS485 隔离有关的内容”
-```
-
-返回：
-
-```text
-任务
-文档
-设计决策
-历史记录
-知识
-```
-
----
+搜索本版本已存在的任务、项目、标签、工作记录，以及后续简要事实、决策和资料引用标题。不读取或索引源文件正文。
 
 ## 48. External Agent
 
@@ -2051,17 +1808,7 @@ AI Priority Suggestion
 
 ## 54. V0.4
 
-加入：
-
-```text
-Context Engine
-Project Context
-Decision Log
-ContextFact
-Document Association
-```
-
----
+V0.4：轻量项目背景、事实/决策历史、资料引用、JSON Agent 结果预览与导入，以及配套 skill。没有应用内 OCR、正文提取或文件分析。
 
 ## 55. V0.5
 
@@ -2109,7 +1856,7 @@ AI Feedback
 
 用户应该尽量少填写信息。
 
-AI 自动提取和建议。
+AI 基于已选记录给建议；文件提取由外部 Agent 承担。
 
 ---
 

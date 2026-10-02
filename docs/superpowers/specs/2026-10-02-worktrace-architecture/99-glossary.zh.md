@@ -3,7 +3,7 @@
 | 项 | 值 |
 | --- | --- |
 | 文档状态 | 设计草案（待评审） |
-| 日期 | 2026-10-02 |
+| 日期 | 2026-10-03 |
 | 地位 | 本表统一术语；业务规则以修订后的 00/02/04 为准，术语冲突需同步修订 |
 | 英文版 | [`99-glossary.en.md`](99-glossary.en.md) |
 
@@ -103,13 +103,11 @@
 
 | 中文 | English | 定义 |
 | --- | --- | --- |
-| 上下文包 | Context Bundle | 任务上下文 + 项目上下文 + 相关文档 + 知识 + 历史 + 决策的集合 |
+| 上下文包 | Context Bundle | 本次用户选择的任务/简要背景/知识/历史/决策，不含文件正文 |
 | 上下文事实 | ContextFact | 项目级的事实条目（如 `Pt1000 current = 0.2mA`） |
 | 已取代 | Superseded | 事实被新值替代后的状态。**旧值保留，不覆盖**（版本化） |
 | 决策日志 | Decision Log | 记录决策、理由、日期，供日后追问"当时为什么这么选" |
-| 上下文完整度 | Context Completeness | 关键信息具备/缺失清单；百分比须有可解释算法，否则不显示 |
-| 保密等级 | Security Level | `PUBLIC` / `INTERNAL` / `CONFIDENTIAL` / `STRICT_LOCAL` |
-| 严格本地 | STRICT_LOCAL | **不允许发送到云 AI、不允许自动外发**，只允许本地处理 |
+| 上下文完整度 | Context Completeness | 具体动作的必要输入缺项提示，不计算整体百分比 |
 
 ---
 
@@ -171,3 +169,7 @@
 来源/确认、休眠与历史分类默认值详见 02/06，R-01～R-08 已批准；本轮协议与恢复修订待审核，平台验证与实现尚未完成。
 
 数据代次 `data_epoch`：数据库身份 UUID，创建/恢复时更新；revision 仅在同一代次内比较。`session_version`：计时会话状态版本，过滤暂停前晚到的 tick。`needs_review`：区间级不确定标记，session 汇总反映它；可信闭合区间不因此被排除。
+
+当前产品边界（2026-10-03）：个人工作记录与任务管理，包含能力短板分析和 KPA 工作证据整理；文件读取、OCR、正文提取和正文搜索交给外部 Agent 与配套 skill。见 [范围与导入契约](07-scope-and-agent-import.zh.md)。
+
+资料引用 Reference：标题、路径/URL 与来源定位，不含正文。Agent Import：外部 skill 输出 JSON，校验和预览后逐项采纳。能力画像 Capability Profile：证据、自评与可选模型推断，连接改善措施。KPA Evidence：可回溯的工作时间、成果与证据材料。

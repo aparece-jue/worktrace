@@ -1,11 +1,11 @@
 # Worktrace 总体架构
 
-状态：评审修订草案，待用户评估。日期：2026-10-02。对应：[英文版](00-architecture.en.md)。
+状态：评审修订草案，待用户评估。日期：2026-10-03。对应：[英文版](00-architecture.en.md)。
 产品愿景见 [PROJECT_SPEC](../../../PROJECT_SPEC.md)；修订和待评估项见 [评审摘要](06-review-notes.zh.md)。本套文件描述目标设计，不表示功能已实现；当前仓库仍是前端页面与 greet 命令脚手架。
 
 ## 1. 定位与文档权责
 
-面向个人工程工作的本地任务、工时与回顾工具。Local First、AI Optional、User > Rule > AI 保留；AI 不可用不影响核心功能。暂不做通用 Agent、插件市场、Office/CAD 替代或通用工作流。
+面向个人工作的任务、时间、成果与回顾工具，支持能力短板分析及可追溯 KPA 材料。Local First、AI Optional、User > Rule > AI 保留；AI 不可用不影响核心功能。暂不做通用 Agent、插件市场、Office/CAD 替代或通用工作流。
 
 PROJECT_SPEC 是愿景与原始版本草案；04 决定验收范围、05 决定依赖及实施顺序、02 决定数据口径、03 记录技术理由、99 统一术语。R-01～R-08 已确认；技术验证仍未完成，本轮协议与恢复行为修订待审核。新增产品取舍单列在 06，不能用实现状态代替批准状态。中文为工作主稿，英文随同次修订同步；冲突先修订，不能让多个文件分别宣称最高优先级。
 
@@ -76,22 +76,24 @@ timer.tick 和计时查询均携带 data_epoch、run_id、session_id、session_v
 
 ![数据代次切换与恢复隔离](images/epoch-switch-restore.svg)
 
-> 图：恢复换的不是数据，是数据库身份。代次一变，旧响应、旧通知、未应用建议同时作废。
+> 图：恢复替换数据，并生成新的数据库身份。代次一变，旧响应、旧通知、未应用建议同时作废。
 
 ## 6. 前端状态与外发边界
 
 每个 JS 上下文只有一个 domainState 订阅入口；页面通过 hooks 读取，清理监听。事件只作缓存失效，计时 tick 更新展示值；业务规则留在 Rust。先用 useSyncExternalStore 等简单方案，前端缓存复杂后允许评估状态库，不能把“不使用库”当领域权威的必要条件。
 
-AI Gateway 只接收 M09 构造的白名单 Context Bundle。V0.3 即引入最小任务/项目保密策略，完整文档提取到 V0.4。默认 STRICT_LOCAL；用户按项目、提供商与规范化端点授权允许外发的条目。STRICT_LOCAL 禁止云端，CONFIDENTIAL 默认禁止，INTERNAL 需明确授权，PUBLIC 可在启用云 AI 后发送。派生摘要/提取缓存继承最严格来源等级，日志仅记录 ID、等级与计数，不记录机密正文。凭据使用系统凭据存储，不放 SQLite 或前端 localStorage；模型建议的采纳不等于外发授权。
+AI Gateway 只接收 M09 按本次用户选择构造的 Context Bundle。AI 默认关闭；用户预览实际输入、确认目的地后才发送。任务理清、拆分、估时、标签、优先级/排期和总结保留，程序计算事实统计，AI 组织建议与表达。应用不读取关联文件正文；外部 Agent 结果先导入确认，不自动转发。凭据使用系统凭据存储，日志不记录正文或密钥。
 
 ## 7. 待验证与索引
 
 在实现阶段验证：Windows HUD 穿透/无焦点与 DPI、多入口开发/打包路径、数据库执行线程与关闭/备份竞争、断网/锁屏/休眠/改时计时行为。尚无实测结论，不能写“已验证”。HUD 可行性实验不阻塞核心记录闭环。
 
-[模块拆分](01-module-breakdown.zh.md) · [数据模型](02-data-model.zh.md) · [ADR](03-adr.zh.md) · [功能验收](04-functional-spec.zh.md) · [路线图](05-roadmap.zh.md) · [术语](99-glossary.zh.md)
+[模块拆分](01-module-breakdown.zh.md) · [数据模型](02-data-model.zh.md) · [ADR](03-adr.zh.md) · [功能验收](04-functional-spec.zh.md) · [路线图](05-roadmap.zh.md) · [评审摘要](06-review-notes.zh.md) · [范围与导入契约](07-scope-and-agent-import.zh.md) · [术语](99-glossary.zh.md)
 
-## 8. 外发授权与分类优先级（本轮修订）
+## 8. AI 输入与外部 Agent 边界
 
-分类和目的地授权分别校验：STRICT_LOCAL 永不因授权自动外发；若用户决定外发，必须先显式重新分类并查看影响范围。CONFIDENTIAL 默认禁止，需单独数据范围批准；INTERNAL 需授权；PUBLIC 在云 AI 启用后可发。派生内容不得仅重命名/更换项目解除最严格来源等级。
+应用内不建设四级文件密级、文件权限继承或提取缓存。保留关闭 AI、本次选择/预览/确认、目的地与输入版本校验；输入或提供商/端点改变须重新确认，撤销阻止尚未发出的请求，不承诺撤回已发内容。外部 Agent 的文件授权由用户在对应工具管理；导入不等于允许发送。完整导入契约见 [07](07-scope-and-agent-import.zh.md)。
 
-授权绑定 project_id、provider_id、endpoint（规范化 URL）及允许等级/范围。项目允许外发不等于任意提供商均可接收；更换 endpoint 必须重新授权。发送前与构造 Bundle 时均检查当前分类/授权版本；撤销后取消未发请求，已发请求不能承诺撤回。密级调整、目的地变更和授权撤销记录审计，日志不含正文/凭据。
+![AI 输入与外部 Agent 边界](images/ai-agent-boundary.svg)
+
+> 图：文件正文不进来，只进来结构化结果；AI 不自己开，每次都要人点一下。

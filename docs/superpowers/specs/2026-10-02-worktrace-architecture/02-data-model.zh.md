@@ -1,6 +1,6 @@
 # Worktrace 数据模型
 
-状态：评审修订草案，待用户评估。日期：2026-10-02。
+状态：评审修订草案，待用户评估。日期：2026-10-03。
 上游：[总体架构](00-architecture.zh.md)；对应：[英文版](02-data-model.en.md)。
 本次替换旧模型中的暂停累计方案；以下是逻辑结构，不是可直接执行的迁移脚本。
 
@@ -10,8 +10,8 @@
 | --- | --- |
 | V0.1 | app_meta、application_run、project、task、work_session、work_interval、time_edit、task_change、daily_plan、tag、task_tag |
 | V0.2 | goal、milestone、task_dependency、time_block、task_knowledge（实际使用标记） |
-| V0.3 | ai_suggestion、ai_feedback；task/project 增加 security_level |
-| V0.4 | context_fact、decision、document、task_document |
+| V0.3 | ai_suggestion、ai_feedback；本次 AI 输入/目的地确认记录 |
+| V0.4 | context_fact、decision、document（仅引用）、task_document、agent_import_batch/item |
 | V0.5 | knowledge_stat（可重建派生缓存） |
 
 ![ER（辅助表与迁移表）](images/er-more-tables.svg)
@@ -192,7 +192,7 @@ V0.1 priority_json/estimated_json 就使用稳定信封：value、source(user/ru
 
 ai_suggestion 保存 task_id、kind、输入任务版本、provider/model、prompt_version、建议值、生成时间、状态（pending/accepted/edited/rejected/stale）、原始估时和来源；ai_feedback 关联 suggestion_id。保留被拒建议及采纳后修改，才能统计接受率和估时误差。输入版本改变时旧建议变 stale；模型自报 confidence 与历史校准置信度分列，样本不足显示未知。
 
-V0.3 task/project security_level 默认 STRICT_LOCAL，外发前按 M09/M10 白名单策略检查。V0.4 context_fact 只允许同项目同 key 的当前值一条（部分唯一索引 WHERE superseded_by IS NULL）；取代必须同事务插入新值并链接旧值。document 引用路径外还存内容哈希/修改时间，提取缓存继承文件保密等级；task_document 补齐外键。不能因重新分类而清除来源保密标记。
+V0.3 保存用户本次所选 AI 输入的实体版本与目的地，默认不发送，不新增四级 security_level。V0.4 context_fact 是用户确认的简要事实，一个 project/key 至多一个当前值；保留历史及取代事务。document 仅存用户提供的标题、路径/URL、来源定位，不存正文、OCR 或提取缓存；关联文件不代表验证内容或授权读取。Agent 导入批次和条目保存格式版本、内容摘要哈希、来源、采纳结果及映射，见 07；去重不依赖文件路径。任务成果和证据引用可在 V0.1 以描述/完成备注起步，V0.5 再做结构化成果、用户自评和知识练习记录迁移。
 
 knowledge_stat 是可重建结果，保留 algorithm_version、sample_count、computed_at；V0.5 评分仅作为实验结果，不用累计时长直接推导能力。
 
@@ -227,3 +227,5 @@ ContextFact 取代保持 superseded_by 模型，可采用以下同事务顺序�
 > 图：换个顺序就会撞上部分唯一索引——这三步的顺序是为满足「当前值只有一条」而定的。
 
 所有工时查询增加 interval.needs_review=0 与 voided_at IS NULL 条件；作废整个会话不得影响其他会话。epoch/snapshot、状态版本/tick、暂停可信恢复、部分丢弃、事实取代顺序均需独立故障测试。
+
+当前产品边界（2026-10-03）：个人工作记录与任务管理，包含能力短板分析和 KPA 工作证据整理；文件读取、OCR、正文提取和正文搜索交给外部 Agent 与配套 skill。见 [范围与导入契约](07-scope-and-agent-import.zh.md)。

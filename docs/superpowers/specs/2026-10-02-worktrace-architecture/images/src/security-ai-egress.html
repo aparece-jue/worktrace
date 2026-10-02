@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>Worktrace 保密等级与 AI 外发边界</title>
+<title>Worktrace 历史方案：四级保密边界（已停用）</title>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif+TC:wght@400&family=Noto+Sans+TC:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root{--paper:#FBF9F6;--ink:#2A2320;--muted:#6F6357;--accent:#D9603A;--rule:rgba(42,35,32,0.14);}
@@ -22,12 +22,12 @@
 <body>
 <figure>
   <p class="eyebrow">安全边界 · 保密等级 · §6 / ADR-013</p>
-  <h1>保密等级与 AI 外发边界</h1>
-  <p class="sub">默认 STRICT_LOCAL；四档是同一色相的有序阶梯，色深即约束强度。跨过外发边界只有一条路：M09 → 闸门 → M10。</p>
+  <h1>历史方案：四级保密边界（已停用）</h1>
+  <p class="sub">归档参考，不代表现行设计。2026-10-03 改为本次选择、预览与确认；当前规则见 07。</p>
 
 <svg viewBox="0 0 1000 660" role="img" aria-labelledby="sec-egress-title sec-egress-desc" xmlns="http://www.w3.org/2000/svg">
-  <title id="sec-egress-title">Worktrace 保密等级与 AI 外发边界</title>
-  <desc id="sec-egress-desc">本机（可信）与云 AI（外部）之间是一条外发边界，跨过它只有一条通路：M09 上下文按条目保密等级做白名单与保密过滤，构造出的白名单 Context Bundle 经 AI Gateway 闸门校验，交给闸门之后的 M10 AI，再由 M10 调用云端提供商。左侧四档保密等级自上而下是 STRICT_LOCAL、CONFIDENTIAL、INTERNAL、PUBLIC，是同一色相的有序阶梯，颜色越深约束越强，默认 STRICT_LOCAL；STRICT_LOCAL 绝对禁止，CONFIDENTIAL 默认禁止，图示默认阻断分支，其虚线通路在外发边界之前以停止符号终止，INTERNAL 需绑定项目、提供商与端点授权、PUBLIC 在启用云 AI 后可发送，两者经 M09 进入外发链路。本机域内另列四条约束：派生摘要与提取缓存继承最严格来源等级；日志只记录 ID、等级与计数，不记录机密正文；凭据使用系统凭据存储，不放 SQLite 或前端 localStorage；模型建议的采纳不等于外发授权。</desc>
+  <title id="sec-egress-title">Worktrace 历史方案：四级保密边界（已停用）</title>
+  <desc id="sec-egress-desc">历史方案，2026-10-03 已停用；以下等级和授权仅保留为历史参考。本机（可信）与云 AI（外部）之间是一条外发边界，跨过它只有一条通路：M09 上下文按条目保密等级做白名单与保密过滤，构造出的白名单 Context Bundle 经 AI Gateway 闸门校验，交给闸门之后的 M10 AI，再由 M10 调用云端提供商。左侧四档保密等级自上而下是 STRICT_LOCAL、CONFIDENTIAL、INTERNAL、PUBLIC，是同一色相的有序阶梯，颜色越深约束越强，默认 STRICT_LOCAL；STRICT_LOCAL 绝对禁止，CONFIDENTIAL 默认禁止，图示默认阻断分支，其虚线通路在外发边界之前以停止符号终止，INTERNAL 需绑定项目、提供商与端点授权、PUBLIC 在启用云 AI 后可发送，两者经 M09 进入外发链路。本机域内另列四条约束：派生摘要与提取缓存继承最严格来源等级；日志只记录 ID、等级与计数，不记录机密正文；凭据使用系统凭据存储，不放 SQLite 或前端 localStorage；模型建议的采纳不等于外发授权。</desc>
 
   <defs>
     <marker id="se-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">

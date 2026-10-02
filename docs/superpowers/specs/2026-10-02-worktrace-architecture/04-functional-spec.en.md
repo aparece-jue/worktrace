@@ -3,7 +3,7 @@
 | Item | Value |
 | --- | --- |
 | Status | Revised draft for user review |
-| Date | 2026-10-02 |
+| Date | 2026-10-03 |
 | Upstream | [`../../../PROJECT_SPEC.md`](../../../PROJECT_SPEC.md), [`01-module-breakdown.en.md`](01-module-breakdown.en.md) |
 | Version split | Revised proposal in 05; approved R-01–R-08 in 06; this revision awaits review |
 | Chinese version | [`04-functional-spec.zh.md`](04-functional-spec.zh.md) |
@@ -80,7 +80,7 @@ SPEC §52 scope: Knowledge Tag, Weighted Tag, Reports, TimeBlock, Pomodoro, Inte
 | F-107 | Knowledge tags | Hierarchical knowledge tags (Electronics → Analog → ADC) | M01 M02 | §16.3 |
 | F-108 | Tag weights | Per kind finite weights in 0..1; sum above 1 rejected, below 1 leaves Unallocated; Knowledge weights only in task_tag | M01 M02 M12 | §17 |
 | F-109 | Two measures | Same weighted tag supports both: a 50% tag on 2h yields associated 2h and weighted 1h; associated sums non-additive, allocation never crosses kinds; history policy explicit | M06 | §18 |
-| F-110 | Staged search | V0.2 Task/Project/Goal/Milestone/Tag/Session; V0.4 adds Document/Decision/ContextFact; test short Chinese terms, RS485/model IDs/paths; no categories for absent entities | M13 | §47 |
+| F-110 | Phased search | V0.2 existing records; V0.4 brief facts/decisions/reference titles; never read or index source-file bodies | M13 | §47 |
 | F-111 | Reports | Daily / Weekly / Monthly / Quarterly / Custom, filterable by Project / Goal / Domain / Activity / Knowledge / Report Tag / Task / Milestone | M07 | §43 |
 | F-112 | Export | JSON / CSV / Markdown; exported content matches what the UI shows | M07 | §45 |
 | F-113 | Estimate error | Retain pre-start baseline and measure; zero estimates excluded from percentages; incomplete/pending/anomalous data separate; show samples/median error, never mix human/machine | M06 M08 | §22 |
@@ -100,21 +100,21 @@ Unavailable AI leaves the core unchanged. An explicitly requested AI action repo
 | F-205 | AI priority | No background overwrite of any confirmed value, including adopted AI; explicit edits/re-adoption allowed; show suggestion separately | M10 M02 | §5.3 |
 | F-206 | Auditable AI metrics | Denominator includes valid accepted/edited/rejected outcomes; retain suggestion_id/model/prompt version; show acceptance and error separately, never claim equivalent saved time | M10 M01 M06 | §35 |
 | F-207 | AI feedback | Quick feedback per suggestion: too fine / too coarse / estimate too long / too short / wrong tag / wrong category / unreasonable priority | M10 | §34 |
-| F-208 | Minimal classification | V0.3 task/project default STRICT_LOCAL; minimal M09 filters before outbound; mixed levels/derived summaries/logs/provider switches cannot bypass; verify mock outbound payloads without logging sensitive text | M09 M10 M01 | §31 |
+| F-208 | AI input confirmation | AI off by default; select records, preview actual input and confirm provider/endpoint; changed inputs require reconfirmation; never auto-send imports; mock verifies unselected content/bodies/secrets are excluded from outbound and logs | M09 M10 M01 | §31 |
 
 ---
 
-## 4. V0.4 — Context engine
+## 4. V0.4 — Light background and Agent imports
 
 SPEC §54.
 
 | ID | Feature | Acceptance criterion | Depends on | SPEC |
 | --- | --- | --- | --- | --- |
-| F-301 | Project Context | A project stores goals, constraints, key parameters, architecture, decisions, documents, terminology | M09 | §26 |
+| F-301 | Light project background | User-written or confirmed imported goals, constraints, brief facts, decisions and references; no automatic engineering parameter database | M09 | §26 |
 | F-302 | Decision Log | Record decision, rationale, date; later review answers "why was this chosen then" | M09 | §29 |
 | F-303 | Fact versioning | One current project/key fact; replacement atomic; new requests use current values and old-input suggestions become stale | M09 M01 | §28 |
-| F-304 | Document association | Associate PDF / Word / Excel / Markdown / images / CSV / JSON / netlist / code / logs and extract context from them | M09 | §30 |
-| F-305 | Explainable context check | Show present/missing critical information and sources; prompt only for missing requirements; percentages need public denominator/weights/unknown rules, otherwise no precise score | M09 | §27 |
+| F-304 | References and Agent import | Path/URL references only; validate/preview/adopt/deduplicate 07 JSON, retain provenance; reject unknown versions, resolve conflicts, rollback on failure; never read source bodies | M09 M01 | §30 |
+| F-305 | Required input check | Action-specific missing goal/completion inputs, supplement or skip; no technical project completeness judgment or global percentage | M09 | §27 |
 
 ---
 
@@ -125,8 +125,8 @@ SPEC §55.
 | ID | Feature | Acceptance criterion | Depends on | SPEC |
 | --- | --- | --- | --- | --- |
 | F-401 | Extended weekly review | Simple weekly review already exists in V0.1; extend with blockers/delays/error/interruptions/AI effects; insufficient evidence Unknown, no fabricated ability/benefit claims | M07 M06 | §3.6 |
-| F-402 | KPA report | Produces composite material (time invested + tasks completed + milestones + outcomes + issues + improvements), not a bare total | M07 | §44 |
-| F-403 | Experimental capability model | Default to usage facts/sample counts; enabled scores require algorithm version/confidence or Unknown/limitations; low evidence never yields definitive grades; enablement pending review | M08 | §19 §20 |
+| F-402 | KPA evidence materials | Organize task start/completion dates, confirmed effort, milestones, outcomes and evidence by period/project; trace drafts to records, never fabricate contributions/benefits or performance scores | M07 M06 | §44 |
+| F-403 | Capability profile and gaps | Usage, estimate errors, rework/blocker reasons and self-assessment; evidenced gaps/actions; optional proficiency/scores distinguish self-report/inference with algorithm/sample/Unknown; never infer solely from effort | M08 | §19 §20 |
 | F-404 | Rework detection | "Fast but reworked" is distinguished from "fast and clean" in the capability model, using `quality` | M08 | §24 |
 | F-405 | Knowledge analytics | Knowledge usage frequency and recent movement are visible | M08 | §19 |
 
@@ -170,3 +170,7 @@ No acceptance criteria are written for these, because SPEC §50 excludes them: p
 ## 9. Acceptance environment and boundaries
 
 Performance thresholds name hardware/data size/scope/baseline; capture latency excludes typing time. Classify backups/exports too. Integration cases cover migration failure, disk-full, duplicate submission, stale edits, pauses across midnight and corrections. Precise ability/completeness scores need explainable algorithms; otherwise Unknown. This revision awaits user review and product acceptance has not been executed.
+
+Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).
+
+Scope exclusions: in-app OCR/source-body parsing/indexing, directory scanning, engineering correctness checks and automatic performance grading. Keep record search, optional capability models and KPA evidence. F-017 allows explicit manual history correction; Agent imports never directly change effort or completion timestamps.

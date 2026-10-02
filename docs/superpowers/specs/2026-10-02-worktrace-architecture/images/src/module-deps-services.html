@@ -27,7 +27,7 @@
 
 <svg viewBox="0 0 1000 750" role="img" aria-labelledby="dep-svc-title dep-svc-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="dep-svc-title">Worktrace 模块依赖：服务层与扩展链</title>
-  <desc id="dep-svc-desc">核心基础模块（M00–M05 与 M12）压缩为底部一个方块。它上方是服务层与扩展链：虚线分组框内六个模块（M06 统计、M07 报告、M08 知识/估时、M09 上下文、M10 AI、M13 搜索）各自都直接依赖核心的 M01 存储与 M02 领域，图中把六条平行依赖汇总成一条加粗箭头，指向整个分组而不是某个模块。M06 是分组内的汇点，向上支撑 M07 报告与 M08 知识/估时；M09 向上支撑 M10 AI，且 V0.3 必须先完成 M09 最小外发策略再接 M10。M13 只依赖 M01/M02：不依赖 M06，也不要求尚未存在的表。M11 窗口画在分组之外，它压在 M00 平台与 M03 事件上，并经服务接口接入。配色：色相表示模块所在的层（青色服务层、石板色平台侧、暖灰为压缩块），青色的深浅表示它在链条中的作用程度，最深的是 M06。</desc>
+  <desc id="dep-svc-desc">核心基础模块（M00–M05 与 M12）压缩为底部一个方块。它上方是服务层与扩展链：虚线分组框内六个模块（M06 统计、M07 报告、M08 知识/估时、M09 上下文、M10 AI、M13 搜索）各自都直接依赖核心的 M01 存储与 M02 领域，图中把六条平行依赖汇总成一条加粗箭头，指向整个分组而不是某个模块。M06 是分组内的汇点，向上支撑 M07 报告与 M08 知识/估时；M09 向上支撑 M10 AI，且 V0.3 必须先完成 M09 输入选择与确认再接 M10。M13 只依赖 M01/M02：不依赖 M06，也不要求尚未存在的表。M11 窗口画在分组之外，它压在 M00 平台与 M03 事件上，并经服务接口接入。配色：色相表示模块所在的层（青色服务层、石板色平台侧、暖灰为压缩块），青色的深浅表示它在链条中的作用程度，最深的是 M06。</desc>
 
   <defs>
     <marker id="ds-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -131,7 +131,7 @@
   <text x="400" y="295" fill="#2A2320" font-size="12" font-weight="600"
         font-family="'Geist',sans-serif" text-anchor="middle">M09 上下文</text>
   <text x="400" y="313" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">白名单与保密过滤</text>
+        text-anchor="middle">所选记录组包与预览</text>
 
   <!-- M13 搜索：只压在 M01/M02 上 -->
   <rect x="548" y="264" width="176" height="60" rx="6" fill="#FBF9F6"/>
@@ -175,7 +175,7 @@
   <text x="40" y="636" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     M11 不在该汇总内——它压在 M00 平台与 M03 事件上，并经服务接口接入；托盘 V0.1、HUD V0.1b、Mini 待评估。</text>
   <text x="40" y="656" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    V0.3 必须先完成 M09 最小外发策略，再接 M10；V0.4 才扩展文档提取。M13 不依赖 M06，也不要求尚未存在的表。</text>
+    V0.3 必须先完成 M09 输入选择与确认，再接 M10；V0.4 接入 Agent 结果导入。M13 不依赖 M06，也不要求尚未存在的表。</text>
   <text x="40" y="676" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     V0.x 芯片 = 该能力首次落地的版本（取 01 职责表的版本列）；依赖以模块职责表为准。</text>
 

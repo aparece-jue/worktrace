@@ -1,6 +1,6 @@
 # Worktrace — Roadmap and Milestones
 
-Status: revised proposal for user review. Date: 2026-10-02. [Chinese](05-roadmap.zh.md).
+Status: revised proposal for user review. Date: 2026-10-03. [Chinese](05-roadmap.zh.md).
 Upstream: [acceptance](04-functional-spec.en.md), [modules](01-module-breakdown.en.md). [Pending choices](06-review-notes.en.md).
 
 ## 0. Review and incremental delivery
@@ -16,8 +16,8 @@ Apply dependency cleanup and decide production dockview after review; preserve c
 | V0.1 | Capture→time→correct/recover→Today→minimal export/review→backup | F-001…F-011, F-014…F-020 |
 | V0.1b | Desktop enhancement: HUD/modes/global capture hotkey | F-012/F-013 plus F-001 hotkey extension |
 | V0.2 | Concurrency/interruption/weights/scheduling/reports/existing-entity search | F-101…F-113 |
-| V0.3 | AI/history/feedback/minimal context/outbound security | F-201…F-208 |
-| V0.4 | Project facts/decisions/document extraction/extended search | F-301…F-305 plus F-110 extension |
+| V0.3 | AI/history/feedback/selected-input confirmation | F-201…F-208 |
+| V0.4 | Brief facts/decisions, references, Agent imports and record search | F-301…F-305 plus F-110 extension |
 | V0.5 | Extended review/KPA/knowledge facts/experimental capability model | F-401…F-405 |
 | V1.0 | Automated backup/hardened migration/recovery/long-run verification | F-501…F-510 |
 
@@ -38,8 +38,8 @@ Each step delivers commands/persistence/UI/tests/demo. Specify only the next sli
 
 - V0.1b: HUD properties/DPI/displays/modes/hotkey conflicts; Mini scope awaits review. A failed HUD probe may defer delivery, never count degraded behaviour as a pass.
 - V0.2: expand M06/M07, concurrency/interruption/time_block/Goal/Milestone/dependencies/WBS. M08 covers estimate errors and knowledge facts only. M13 searches existing objects and tests Chinese/model identifiers before choosing LIKE/FTS5.
-- V0.3: minimal M09 whitelist/classification before M10 history/feedback. Use existing entities; advanced analyze_context/review_week interfaces follow later capabilities, not all eight at once.
-- V0.4: add ContextFact/Decision/Document migrations; deliver format extraction incrementally with a support matrix. Association does not imply parsing support. Extend M13 here.
+- V0.3: M09 selected-input/preview/confirmation before M10 history/feedback. Use existing entities; advanced analyze_context/review_week interfaces follow later capabilities, not all eight at once.
+- V0.4: brief ContextFact/Decision, references and reviewed Agent import under 07; M13 searches records/reference titles, never source-file bodies.
 - V0.5: usage facts/sample counts before optional experimental ability scores; KPA/review use confirmed facts, acceptance rate does not establish saved time.
 - V1.0: automate/harden existing protection and conduct fault/long-run tests; data protection is not first implemented here.
 
@@ -60,3 +60,8 @@ Core chain: M02→M01→M04/M05→minimal M06→minimal M07. M12 shell can mock 
 Each spec lists scope/F-IDs, commands/DTOs, transactions/invariants, errors/retries, tests, manual acceptance and deviations. Track implementation separately as not-started/in-progress/accepted. Meaningful invariant tests replace mechanical one-test-per-function rules.
 
 Implementation checks for this revision: M01 validates epoch switching and ContextFact replacement; M04/M05 validate commit/baseline serialization and stale ticks; M06 retains trusted closed effort within recovering. R-01–R-08 are approved; this protocol/recovery revision awaits review.
+
+Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).
+
+
+Capability loop: evidence → user-confirmed gap → learning/practice task → work samples/self-assessment → review; optional proficiency retained. KPA collects traceable outcomes/dates, never grades people.

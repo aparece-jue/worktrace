@@ -3,7 +3,7 @@
 | Item | Value |
 | --- | --- |
 | Status | Design draft (under review) |
-| Date | 2026-10-02 |
+| Date | 2026-10-03 |
 | Standing | Terminology reference; revised 00/02/04 own business rules. Resolve terminology conflicts together |
 | Chinese version | [`99-glossary.zh.md`](99-glossary.zh.md) |
 
@@ -107,9 +107,7 @@
 | ContextFact | 上下文事实 | A project-level fact (e.g. `Pt1000 current = 0.2mA`) |
 | Superseded | 已取代 | The state of a fact replaced by a newer value. **The old value is kept, never overwritten** (versioning) |
 | Decision Log | 决策日志 | Records decision, rationale, and date so "why was this chosen then" stays answerable |
-| Context Completeness | 上下文完整度 | Present/missing critical-information checklist; percentages require an explainable algorithm |
-| Security Level | 保密等级 | `PUBLIC` / `INTERNAL` / `CONFIDENTIAL` / `STRICT_LOCAL` |
-| STRICT_LOCAL | 严格本地 | **Must never be sent to cloud AI or transmitted automatically**; local processing only |
+| Context Completeness | 上下文完整度 | Action-specific required-input gaps, no global percentage |
 
 ---
 
@@ -173,3 +171,8 @@ See 02/06 for origin/confirmation, sleep and historical classification defaults.
 `data_epoch`: database UUID renewed on create/restore; revisions compare only within an epoch. `session_version`: timer state version rejecting late pre-pause ticks. `needs_review`: interval uncertainty mirrored by session summary; trusted closed intervals still count.
 
 R-01–R-08 are approved; this protocol/recovery revision awaits review.
+
+Current scope (2026-10-03): personal work records and task management, including capability gaps and KPA evidence. External Agents and companion skills handle file reading, OCR, extraction and full-text search. See [scope and import contract](07-scope-and-agent-import.en.md).
+
+
+Reference: title/path/URL/source locator, no body. Agent Import: validated/reviewed per-item adoption of external skill JSON. Capability Profile: evidence, self-report and optional inference connected to actions. KPA Evidence: traceable work dates/outcomes/evidence.
