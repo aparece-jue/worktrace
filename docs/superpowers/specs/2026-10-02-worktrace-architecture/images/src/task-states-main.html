@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Worktrace Task 状态机（主链）</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif+TC:wght@400&family=Noto+Sans+TC:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{--paper:#FBF9F6;--ink:#2A2320;--muted:#6F6357;--accent:#D9603A;--rule:rgba(42,35,32,0.14);}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font-family:'Geist','Noto Sans TC',system-ui,sans-serif;
+       display:flex;justify-content:center;padding:3rem 1.5rem}
+  figure{margin:0;max-width:1000px;width:100%}
+  .eyebrow{font-family:'Geist Mono',monospace;font-size:11px;letter-spacing:.16em;
+           text-transform:uppercase;color:var(--muted);margin:0 0 .5rem}
+  h1{font-family:'Instrument Serif','Noto Serif TC',serif;font-weight:400;
+     font-size:1.75rem;margin:0 0 .35rem}
+  .sub{color:var(--muted);font-size:.9rem;margin:0 0 1.75rem}
+  svg{display:block;width:100%;height:auto}
+</style>
+</head>
+<body>
+<figure>
+  <p class="eyebrow">数据模型 · 状态跃迁 · §5</p>
+  <h1>Task 状态机（主链）</h1>
+  <p class="sub">从左到右是任务的推进程度，色深即进度；旁支、取消终态与显式 reopen 见「旁支与终态」。</p>
+
+<svg viewBox="0 0 1000 580" role="img" aria-labelledby="task-main-title task-main-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="task-main-title">Worktrace Task 状态机主链：从收件箱到已完成</title>
+  <desc id="task-main-desc">状态推进从左到右依次为：收件箱、澄清中、就绪、进行中、评审中，最后在下方终态带汇入已完成。收件箱到澄清中为「理清」，澄清中到就绪为「就绪」，就绪到进行中为「开始」，进行中到评审中为「送审」，评审中到已完成为「通过」。评审中检查失败回退到就绪，不回退到进行中；另有虚线捷径表示 start 可在同一业务命令内把收件箱直接理清为就绪。方框颜色由浅到深表示推进程度，已完成是唯一的强调终态。</desc>
+
+  <defs>
+    <marker id="tm-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="tm-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 分区（z 序最底） ===== -->
+  <rect x="40" y="120" width="920" height="108" rx="6" fill="rgba(111,175,168,0.05)" stroke="rgba(42,35,32,0.10)" stroke-width="1"/>
+  <text x="56" y="138" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">主链推进</text>
+  <rect x="420" y="280" width="160" height="128" rx="6" fill="rgba(217,96,58,0.05)" stroke="rgba(217,96,58,0.28)" stroke-width="1"/>
+  <text x="436" y="298" fill="#D9603A" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">完成终态</text>
+
+  <!-- ===== 连线（先画） ===== -->
+  <path d="M 222 180 H 262" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#tm-arrow)"/>
+  <path d="M 394 180 H 434" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#tm-arrow)"/>
+  <path d="M 566 180 H 606" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#tm-arrow)"/>
+  <path d="M 738 180 H 778" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#tm-arrow)"/>
+  <!-- 评审中 -> 已完成（焦点：主链的收束）。出口与上方回退边错开 32px，
+       否则上下两条线同 x，看起来像一条线穿过了方框。 -->
+  <path d="M 876 216 V 336 Q 876 344 868 344 H 566" fill="none"
+        stroke="#D9603A" stroke-width="1.2" marker-end="url(#tm-arrow-accent)"/>
+  <!-- 评审中 -> 就绪：检查失败回退，走上方 -->
+  <path d="M 844 144 V 84 Q 844 76 836 76 H 508 Q 500 76 500 84 V 144"
+        fill="none" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#tm-arrow)"/>
+  <!-- 收件箱 -> 就绪：start 同命令内自动理清，走下方 -->
+  <path d="M 156 216 V 246 Q 156 254 164 254 H 492 Q 500 254 500 246 V 216"
+        fill="none" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#tm-arrow)"/>
+
+  <!-- ===== 跃迁标签（遮罩在方框之前，且不压任何方框） ===== -->
+  <g font-family="'Geist Mono',monospace" font-size="8.5" text-anchor="middle" fill="#6F6357">
+    <rect x="227" y="159" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="242" y="168">理清</text>
+    <rect x="399" y="159" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="414" y="168">就绪</text>
+    <rect x="571" y="159" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="586" y="168">开始</text>
+    <rect x="743" y="159" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="758" y="168">送审</text>
+    <rect x="640" y="55" width="64" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="672" y="64">检查失败</text>
+    <rect x="884" y="254" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="899" y="263" fill="#D9603A">通过</text>
+    <rect x="270" y="233" width="116" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="328" y="242">start · 同命令内自动理清</text>
+  </g>
+
+  <!-- ===== 主链五态：色深 = 推进程度 ===== -->
+  <rect x="90" y="144" width="132" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="90" y="144" width="132" height="72" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="156" y="175" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">收件箱</text>
+  <text x="156" y="193" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">INBOX · 尚未整理</text>
+
+  <rect x="262" y="144" width="132" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="262" y="144" width="132" height="72" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="328" y="175" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">澄清中</text>
+  <text x="328" y="193" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">CLARIFYING · 补齐描述</text>
+
+  <rect x="434" y="144" width="132" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="434" y="144" width="132" height="72" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="500" y="175" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">就绪</text>
+  <text x="500" y="193" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">READY · 可执行</text>
+
+  <rect x="606" y="144" width="132" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="606" y="144" width="132" height="72" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="672" y="175" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">进行中</text>
+  <text x="672" y="193" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">DOING · 正在处理</text>
+
+  <rect x="778" y="144" width="132" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="778" y="144" width="132" height="72" rx="6" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
+  <text x="844" y="175" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">评审中</text>
+  <text x="844" y="193" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">REVIEW · 检查结果</text>
+
+  <!-- ===== 完成终态（焦点） ===== -->
+  <rect x="434" y="308" width="132" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="434" y="308" width="132" height="72" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="500" y="339" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">已完成</text>
+  <text x="500" y="357" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">DONE · 保留历史</text>
+
+  <!-- ===== 注记 ===== -->
+  <text x="40" y="440" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    主链只有收件箱 → 澄清中 → 就绪 → 进行中 → 评审中 → 已完成六个状态；旁支、取消终态与显式 reopen 见另一张图。</text>
+  <text x="40" y="460" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    start 可在同一业务命令内把收件箱直接理清为就绪（图中虚线捷径），不强迫每个任务走完每个状态。</text>
+  <text x="40" y="480" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    进行中表示任务尚在处理，不等同于有正在运行的 session；暂停运行中的 session 不改变任务状态。</text>
+  <text x="40" y="500" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    评审中检查失败回退到就绪，不回退到进行中；回退不是重开，历史不丢。</text>
+
+  <!-- ===== 图例（底部横条） ===== -->
+  <line x1="30" y1="534" x2="970" y2="534" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="554" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <rect x="110" y="545" width="16" height="10" rx="2" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="132" y="554" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">早期（未就绪）</text>
+  <rect x="290" y="545" width="16" height="10" rx="2" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="312" y="554" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">可执行 / 进行中</text>
+  <rect x="470" y="545" width="16" height="10" rx="2" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
+  <text x="492" y="554" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">临近完成</text>
+  <rect x="640" y="545" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="662" y="554" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">完成终态</text>
+  <line x1="800" y1="550" x2="830" y2="550" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4"/>
+  <text x="842" y="554" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">非默认路径</text>
+</svg>
+</figure>
+</body>
+</html>
