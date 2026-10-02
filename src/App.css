@@ -1,0 +1,6 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #f5f7fa; color: #172235; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+.app-shell { max-width: 960px; margin: 0 auto; padding: 64px 32px; }
+header { margin-bottom: 32px; }
+.connection-form { width: 100%; max-width: 480px; }
+.status { margin-top: 20px; }
