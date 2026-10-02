@@ -146,6 +146,8 @@ Use half-open [from,to) ranges. Clip every effective interval: max(0,min(end,to)
 
 Human effort includes FOREGROUND only. Sum BACKGROUND/PASSIVE as separate machine measures; WAITING is separate. Never add concurrent machine durations to human totals.
 
+![Interval clipping and the human/machine split](images/interval-clip-split.svg)
+
 Associated duration always counts each associated tag in full, regardless of weight; sums across tags may exceed total effort and must be labelled non-additive. Weighted effort allocates within each kind: finite weight in 0..1, NULL means unallocated. Totals below 1 leave an Unallocated remainder; totals above 1 are rejected. No silent normalization. Knowledge ancestor reports deduplicate intervals rather than summing parent/child associations.
 
 Proposed default: recompute history using current tags/project assignments/weights and label reports accordingly. Exports retain the generated result and its accounting policy. Historical classification snapshots remain a user-review option. Knowledge weights live only in task_tag; task_knowledge stores required_level/used/learning_gain rather than duplicating weights.

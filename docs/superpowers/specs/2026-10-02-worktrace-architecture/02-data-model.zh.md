@@ -161,6 +161,10 @@ task_dependency 仅存一个规范方向（predecessor_id → successor_id）；
 
 人工仅 FOREGROUND，机器分别汇总 BACKGROUND/PASSIVE，WAITING 单列。禁止将并行机器时长加成人工；报表必须返回 measure、timezone、range、as_of、revision。
 
+![区间裁剪与人工 / 机器分离](images/interval-clip-split.svg)
+
+> 图：一次范围查询的全部口径。焦点是全图唯一的计算规则；人工与机器之间是禁止跨越的合并边界，不是箭头。
+
 关联时长：所有关联标签都计全部人工时长，与 weight 是否存在无关；多个标签之和可大于人工总量，UI 明示不可相加。
 加权工时：只在同一 kind 内分配；weight 为 NULL 表示未分配，非 NULL 要求有限且 0..1。权重总和小于 1，差额归“未分配”；超过 1 拒绝保存；不偷偷归一化。Knowledge 层级汇总对子孙任务/区间去重，不能直接相加父子关联时长。
 
