@@ -40,6 +40,10 @@ SQLite 的同步访问放入受控阻塞执行边界；连接不跨 await 持锁
 
 > 图：依赖恒为由上至下；`events/` 为横切，不参与依赖栈。
 
+![运行时与进程拓扑](images/runtime-topology.svg)
+
+> 图：核心进程持有全部状态；三个 WebView 各自独立，只是订阅者。
+
 ## 4. IPC 与错误
 
 Command 按意图命名，一次完成业务事务；Today 等聚合视图一次返回，列表避免 N+1。DTO 类型从 Rust 生成，选型在实现阶段验证。更新命令带 expected_row_version，冲突返回 VERSION_CONFLICT；长耗时 AI 请求另带输入版本，结果不覆盖已变更任务。

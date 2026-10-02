@@ -40,6 +40,10 @@ Run synchronous DB work inside a controlled blocking boundary; never hold connec
 
 > The dependency direction is always downward; `events/` is cross-cutting and outside the stack.
 
+![Runtime and process topology](images/runtime-topology.svg)
+
+> The core process holds all state; the three webviews are independent subscribers.
+
 ## 4. IPC and errors
 
 Commands follow intent and return aggregate views without N+1. Generate TS DTO types from Rust after validating tooling. Mutations carry expected_row_version; conflicts return VERSION_CONFLICT. AI requests retain input versions and do not apply to changed tasks.

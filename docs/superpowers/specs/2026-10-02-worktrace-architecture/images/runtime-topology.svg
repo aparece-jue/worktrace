@@ -1,0 +1,129 @@
+<svg viewBox="0 0 1000 640" role="img" aria-labelledby="rt-topo-title rt-topo-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="rt-topo-title">Worktrace 运行时与进程拓扑</title>
+  <desc id="rt-topo-desc">左侧区域是 Rust 核心进程，内含领域服务与事件总线、单文件 SQLite、原生托盘，它是唯一真相源；右侧区域是三个相互独立的 WebView 进程：主窗、HUD、Mini，它们不共享内存。窗口经 COMMAND 通道向核心发出请求，核心经 EVENT 通道向所有窗口广播；托盘直连核心，不依赖任何窗口存活。</desc>
+
+  <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
+    <marker id="rt-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="rt-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 区域（先画，z 序最底） ===== -->
+  <rect x="50" y="56" width="420" height="404" rx="8" fill="rgba(42,35,32,0.02)"
+        stroke="rgba(42,35,32,0.20)" stroke-width="1" stroke-dasharray="4,4"/>
+  <rect x="70" y="48" width="150" height="14" rx="2" fill="#FBF9F6"/>
+  <text x="76" y="59" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.12em">RUST 核心进程</text>
+
+  <rect x="530" y="56" width="420" height="404" rx="8" fill="rgba(42,35,32,0.02)"
+        stroke="rgba(42,35,32,0.20)" stroke-width="1" stroke-dasharray="4,4"/>
+  <rect x="550" y="48" width="230" height="14" rx="2" fill="#FBF9F6"/>
+  <text x="556" y="59" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.12em">WEBVIEW 进程 × 3（不共享内存）</text>
+
+  <!-- ===== 连线（在方框之前） ===== -->
+  <!-- COMMAND：右 -> 左 -->
+  <path d="M 530 200 H 470" stroke="#6F6357" stroke-width="1" marker-end="url(#rt-arrow)"/>
+  <rect x="452" y="182" width="96" height="12" rx="2" fill="#FBF9F6"/>
+  <text x="500" y="191" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.06em">COMMAND</text>
+
+  <!-- EVENT：左 -> 右（焦点，accent） -->
+  <path d="M 470 250 H 530" stroke="#D9603A" stroke-width="1" marker-end="url(#rt-arrow-accent)"/>
+  <rect x="452" y="232" width="96" height="12" rx="2" fill="#FBF9F6"/>
+  <text x="500" y="241" fill="#D9603A" font-size="8" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.06em">EVENT + rev</text>
+
+  <!-- 核心内部：服务 <-> SQLite / 托盘 -->
+  <path d="M 260 236 V 268" stroke="#6F6357" stroke-width="1"/>
+  <path d="M 330 268 V 236" stroke="#6F6357" stroke-width="1"/>
+
+  <!-- ===== 核心进程内的节点 ===== -->
+  <!-- 领域服务 + 事件总线（焦点，accent） -->
+  <rect x="80" y="140" width="360" height="96" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <rect x="92" y="150" width="34" height="12" rx="2" fill="transparent" stroke="rgba(217,96,58,0.40)" stroke-width="0.8"/>
+  <text x="109" y="159" fill="#D9603A" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">CORE</text>
+  <text x="260" y="176" fill="#2A2320" font-size="13" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">领域服务 + 事件总线</text>
+  <text x="260" y="194" fill="#6F6357" font-size="9" font-family="'Geist Mono',monospace"
+        text-anchor="middle">timer · session · statistics · revision</text>
+  <text x="260" y="212" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif"
+        text-anchor="middle">唯一真相源：主窗 / HUD / Mini 读的是同一份状态</text>
+
+  <!-- SQLite -->
+  <rect x="80" y="268" width="170" height="72" rx="6" fill="rgba(42,35,32,0.05)" stroke="#6F6357" stroke-width="1"/>
+  <text x="165" y="298" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">SQLite</text>
+  <text x="165" y="316" fill="#6F6357" font-size="9" font-family="'Geist Mono',monospace"
+        text-anchor="middle">单文件 · WAL</text>
+
+  <!-- 托盘（platform 色相：石板） -->
+  <rect x="270" y="268" width="170" height="72" rx="6" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
+  <text x="355" y="298" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">系统托盘</text>
+  <text x="355" y="316" fill="#6F6357" font-size="9" font-family="'Geist Mono',monospace"
+        text-anchor="middle">原生 · 不依赖窗口</text>
+
+  <!-- 核心进程注记 -->
+  <text x="80" y="372" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    关掉全部窗口后，托盘仍可暂停 / 完成 / 快速捕获，计时继续。</text>
+  <text x="80" y="390" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    单实例：第二次启动唤起已有主窗，不产生第二个写库进程。</text>
+  <text x="80" y="408" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    崩溃恢复按 application_run 判定，不依赖退出事件送达。</text>
+
+  <!-- ===== WebView 进程内的节点（boundary 色相：蓝） ===== -->
+  <rect x="550" y="132" width="380" height="72" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <rect x="562" y="142" width="40" height="12" rx="2" fill="transparent" stroke="rgba(107,155,199,0.45)" stroke-width="0.8"/>
+  <text x="582" y="151" fill="#3F6F9E" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">MAIN</text>
+  <text x="740" y="168" fill="#2A2320" font-size="13" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">主窗</text>
+  <text x="740" y="186" fill="#6F6357" font-size="9" font-family="'Geist Mono',monospace"
+        text-anchor="middle">1100×760 · Today / Inbox / Reports</text>
+
+  <rect x="550" y="220" width="380" height="72" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <rect x="562" y="230" width="40" height="12" rx="2" fill="transparent" stroke="rgba(107,155,199,0.45)" stroke-width="0.8"/>
+  <text x="582" y="239" fill="#3F6F9E" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">HUD</text>
+  <text x="740" y="256" fill="#2A2320" font-size="13" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">HUD / OSD</text>
+  <text x="740" y="274" fill="#6F6357" font-size="9" font-family="'Geist Mono',monospace"
+        text-anchor="middle">置顶 · 透明 · 穿透 · 无焦点 · V0.1b</text>
+
+  <rect x="550" y="308" width="380" height="72" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <rect x="562" y="318" width="44" height="12" rx="2" fill="transparent" stroke="rgba(107,155,199,0.45)" stroke-width="0.8"/>
+  <text x="584" y="327" fill="#3F6F9E" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">MINI</text>
+  <text x="740" y="344" fill="#2A2320" font-size="13" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">Mini 小窗</text>
+  <text x="740" y="362" fill="#6F6357" font-size="9" font-family="'Geist Mono',monospace"
+        text-anchor="middle">暂停 · 完成 · 切换 · 快速捕获</text>
+
+  <text x="550" y="408" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    每个窗口是独立 JS 上下文，互不可见。</text>
+  <text x="550" y="426" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    领域事件只作缓存失效信号 → 重新拉取；</text>
+  <text x="550" y="444" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    高频 timer.tick 直接替换展示值。</text>
+
+  <!-- 图例 -->
+  <line x1="30" y1="500" x2="970" y2="500" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="518" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <rect x="130" y="510" width="16" height="10" rx="2" fill="#FBF9F6" stroke="rgba(42,35,32,0.25)"
+        stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="152" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">进程边界</text>
+  <rect x="260" y="510" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="282" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">焦点：唯一真相源与广播</text>
+  <rect x="470" y="510" width="16" height="10" rx="2" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <text x="492" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">WebView 视图（无状态）</text>
+  <rect x="680" y="510" width="16" height="10" rx="2" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
+  <text x="702" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">平台层部件</text>
+</svg>
