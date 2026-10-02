@@ -88,22 +88,23 @@
   <!-- ===== 消息标签：先垫纸色遮罩，距所标线 9px ===== -->
   <g font-family="'Geist Mono',monospace" font-size="8.5" fill="#6F6357" text-anchor="middle">
     <!-- ① subscribe -->
-    <rect x="145" y="179" width="160" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="225" y="188">① subscribe：注册监听并暂存通知</text>
+    <rect x="170" y="167" width="110" height="24" rx="2" fill="#FBF9F6"/>
+    <text x="225" y="177">① subscribe：注册监听</text>
+    <text x="225" y="188">并暂存通知，不立即应用</text>
 
     <!-- ② get_snapshot -->
-    <rect x="161" y="211" width="129" height="24" rx="2" fill="#FBF9F6"/>
+    <rect x="155" y="211" width="140" height="24" rx="2" fill="#FBF9F6"/>
     <text x="225" y="221">get_snapshot：拉取快照</text>
     <text x="225" y="232">带 revision；数据同一读事务</text>
 
     <!-- 同一读事务内取 revision -->
-    <rect x="549" y="255" width="112" height="24" rx="2" fill="#FBF9F6"/>
+    <rect x="543" y="255" width="124" height="24" rx="2" fill="#FBF9F6"/>
     <text x="605" y="265">同一读事务内取</text>
     <text x="605" y="276">revision（随快照返回）</text>
 
     <!-- 关键返回（珊瑚色） -->
-    <rect x="338" y="311" width="155" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="415" y="320" fill="#D9603A">快照 + revision（数据与版本同源）</text>
+    <rect x="348" y="311" width="134" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="415" y="320" fill="#D9603A">快照 + revision（数据同源）</text>
 
     <!-- 应用快照 -->
     <rect x="163" y="343" width="125" height="24" rx="2" fill="#FBF9F6"/>
@@ -111,37 +112,37 @@
     <text x="225" y="364">&lt;= 快照值 的暂存通知</text>
 
     <!-- 写事务 +1 -->
-    <rect x="542" y="409" width="127" height="24" rx="2" fill="#FBF9F6"/>
+    <rect x="535" y="409" width="140" height="24" rx="2" fill="#FBF9F6"/>
     <text x="605" y="419">成功业务写事务 revision +1</text>
     <text x="605" y="430">并持久化；无业务变化不加</text>
 
     <!-- domain.changed 广播 -->
-    <rect x="718" y="453" width="155" height="24" rx="2" fill="#FBF9F6"/>
-    <text x="795" y="463">domain.changed：事务提交后</text>
-    <text x="795" y="474">多项变化合并为一条；附实体 ID/类别</text>
+    <rect x="720" y="453" width="150" height="24" rx="2" fill="#FBF9F6"/>
+    <text x="795" y="463">domain.changed（事务提交后）</text>
+    <text x="795" y="474">合并为一条；附变化实体 ID/类别</text>
 
     <!-- domain.changed 送达 -->
-    <rect x="539" y="497" width="132" height="24" rx="2" fill="#FBF9F6"/>
+    <rect x="535" y="497" width="140" height="24" rx="2" fill="#FBF9F6"/>
     <text x="605" y="507">domain.changed</text>
     <text x="605" y="518">（延迟 / 重复 / 乱序都可能）</text>
 
     <!-- 查询重拉 -->
-    <rect x="338" y="541" width="155" height="24" rx="2" fill="#FBF9F6"/>
+    <rect x="335" y="541" width="160" height="24" rx="2" fill="#FBF9F6"/>
     <text x="415" y="551">③ 受影响查询失效后重新拉取</text>
     <text x="415" y="562">响应带 revision；新请求合并去重</text>
 
     <!-- timer.tick -->
-    <rect x="167" y="585" width="116" height="24" rx="2" fill="#FBF9F6"/>
+    <rect x="163" y="585" width="124" height="24" rx="2" fill="#FBF9F6"/>
     <text x="225" y="595">timer.tick（独立通道）</text>
     <text x="225" y="606">不触发业务 revision 写入</text>
 
     <!-- get_revision 校验 -->
-    <rect x="342" y="651" width="146" height="24" rx="2" fill="#FBF9F6"/>
+    <rect x="339" y="651" width="152" height="24" rx="2" fill="#FBF9F6"/>
     <text x="415" y="661">④ get_revision 轻量校验</text>
     <text x="415" y="672">重显 / IPC 重连时；最多每 30 秒</text>
 
     <!-- opt：重新取快照 -->
-    <rect x="343" y="731" width="144" height="24" rx="2" fill="#FBF9F6"/>
+    <rect x="341" y="731" width="148" height="24" rx="2" fill="#FBF9F6"/>
     <text x="415" y="741">⑤ 重新取快照</text>
     <text x="415" y="752">允许短暂延迟，不依赖通知永不丢失</text>
   </g>
@@ -192,11 +193,11 @@
 
   <!-- ===== 注记 ===== -->
   <text x="40" y="810" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    app_meta.revision 随成功业务写事务加 1 并持久化；无业务变化不加，心跳和 timer.tick 不加；同事务多项变化合并为一条 domain.changed，附变化实体 ID/类别。</text>
+    app_meta.revision 随成功业务写事务加 1 并持久化；无业务变化不加，心跳和 timer.tick 不加；同事务多项变化合并为一条 domain.changed（附变化实体 ID/类别），按 revision 顺序广播。</text>
   <text x="40" y="828" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     timer.tick 走独立通道，自带 run_id、tick_seq、as_of、session_id、active_ms、remaining_ms；每个 run 内递增；旧 run / 旧序号丢弃，不触发业务 revision 写入。</text>
   <text x="40" y="846" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    查询响应带 revision；比该视图已应用 / 所需版本旧的响应不得覆盖，新请求合并去重；窗口重显 / IPC 重连时检查 get_revision，版本检查不拉全库。</text>
+    查询响应带 revision；比该视图已应用 / 所需版本旧的响应不得覆盖，新请求合并去重。窗口重显 / IPC 重连时、后台窗口重显前检查 get_revision 以补救丢失的最后一条事件；版本检查不拉全库。</text>
   <text x="40" y="864" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     跳号 / 乱序且缓存无法证明一致时重新取快照；允许短暂延迟，不依赖通知永不丢失。方框色相 = 功能归属，深浅 = 作用程度。</text>
 

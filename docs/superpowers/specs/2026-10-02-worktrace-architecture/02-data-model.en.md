@@ -14,6 +14,8 @@ This replaces pause-total storage. The schema is logical, not an executable migr
 | V0.4 | context_fact, decision, document, task_document |
 | V0.5 | knowledge_stat, a rebuildable derived cache |
 
+![ER (auxiliary and migration tables)](images/er-more-tables.svg)
+
 Add Goal/Milestone foreign-key columns in V0.2, together with their tables. V0.1 exposes no unsupported filters. IDs are UUID strings, with explicit NOT NULL primary keys in full DDL. Timestamps are Unix milliseconds; durations are milliseconds, converted to minutes only for display.
 
 Project owns tasks; tasks form a tree whose leaves are Actions. Each task has sessions; each session has effective work_interval rows. These minimal timing intervals are needed in V0.1 for pauses and range clipping; they are not the later activity-classification SessionSegment feature.

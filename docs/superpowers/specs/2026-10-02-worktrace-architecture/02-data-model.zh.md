@@ -14,6 +14,10 @@
 | V0.4 | context_fact、decision、document、task_document |
 | V0.5 | knowledge_stat（可重建派生缓存） |
 
+![ER（辅助表与迁移表）](images/er-more-tables.svg)
+
+> 图：辅助表与后续迁移表。色深 = 引入越早；七条外键都指向图外的 project / task，统一收束到底部的引用块。
+
 Goal/Milestone 外键在 V0.2 迁移时加入；不能在 V0.1 建引用不存在表的列并启用相关写入。V0.1 不显示这些对象的筛选器。实体 ID 使用 UUID 字符串；所有主键显式 NOT NULL（完整 DDL）；所有时间戳和时长单位分别为 Unix 毫秒、毫秒。UI 可显示分钟。
 
 Project 可包含多个 Task；Task 自引用，叶子 Task 称 Action。Task 下有多个 WorkSession，每个 session 有一到多个有效工作区间 work_interval。它不是 V1 的活动细分 SessionSegment：这里只记录实际工作的起止，用于暂停与跨日报表。

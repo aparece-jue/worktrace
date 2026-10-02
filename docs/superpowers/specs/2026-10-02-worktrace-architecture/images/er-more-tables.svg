@@ -1,0 +1,192 @@
+<svg viewBox="0 0 1000 790" role="img" aria-labelledby="er-more-title er-more-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="er-more-title">Worktrace 辅助表与后续迁移表的实体关系</title>
+  <desc id="er-more-desc">八张表按引入版本由深到浅着色：V0.1 的 tag、task_tag、daily_plan 最深，V0.2 的 goal、milestone、task_dependency、time_block 居中，V0.3 的 ai_suggestion 最浅。tag 自引用出父子层级，并一对多 task_tag。其余各表的外键都指向本图之外、属于上一张图的 project 与 task，因此统一收束到底部一个虚线引用块，箭头一律向下指向它。task_tag 用强调色标出，因为标签权重规则（每个 kind 总和不超过 1、不自动归一化）落在它身上。右下角列出 V0.4 与 V0.5 尚未画入的表。</desc>
+
+  <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
+    <marker id="em-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="em-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 关系线（先画，箭头指向外键所在的一端） ===== -->
+  <path d="M 60 110 H 40 Q 32 110 32 118 V 140 Q 32 148 40 148 H 60"
+        fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#em-arrow)"/>
+  <path d="M 180 174 V 240" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#em-arrow)"/>
+  <!-- 以下七条都指向图外的 project / task，统一收束到底部引用块 -->
+  <path d="M 300 287 H 340 Q 348 287 348 295 V 560" fill="none"
+        stroke="#D9603A" stroke-width="1.2" marker-end="url(#em-arrow-accent)"/>
+  <path d="M 300 440 H 320 Q 328 440 328 448 V 560" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#em-arrow)"/>
+  <path d="M 620 120 H 656 Q 664 120 664 128 V 560" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#em-arrow)"/>
+  <path d="M 700 150 H 692 Q 684 150 684 158 V 560" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#em-arrow)"/>
+  <path d="M 620 280 H 640 Q 648 280 648 288 V 560" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#em-arrow)"/>
+  <path d="M 820 320 V 560" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#em-arrow)"/>
+  <path d="M 500 508 V 560" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#em-arrow)"/>
+
+  <!-- ===== 基数（贴在端点旁，不压在线上） ===== -->
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="52" y="104" text-anchor="end">1</text>
+    <text x="52" y="166" text-anchor="end">N</text>
+    <text x="172" y="196" text-anchor="end">1</text>
+    <text x="172" y="232" text-anchor="end">N</text>
+    <text x="292" y="279" text-anchor="end">1</text>
+    <text x="292" y="432" text-anchor="end">1</text>
+    <text x="628" y="112">1</text>
+    <text x="708" y="142">1</text>
+    <text x="628" y="272">1</text>
+    <text x="828" y="312">1</text>
+    <text x="508" y="500">1</text>
+  </g>
+
+  <!-- ===== V0.1：tag / task_tag / daily_plan ===== -->
+  <rect x="60" y="80" width="240" height="94" rx="6" fill="#FBF9F6"/>
+  <rect x="60" y="80" width="240" height="94" rx="6" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
+  <rect x="68" y="86" width="44" height="12" rx="2" fill="transparent" stroke="rgba(78,140,133,0.45)" stroke-width="0.8"/>
+  <text x="90" y="95" fill="#3F6F6A" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">V0.1</text>
+  <text x="122" y="96" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">tag</text>
+  <line x1="60" y1="106" x2="300" y2="106" stroke="rgba(78,140,133,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="70" y="122"># id TEXT</text>
+    <text x="70" y="136">kind TEXT</text>
+    <text x="70" y="150">name TEXT</text>
+    <text x="70" y="164">→ parent_id TEXT　仅 Knowledge</text>
+  </g>
+
+  <rect x="60" y="240" width="240" height="94" rx="6" fill="#FBF9F6"/>
+  <rect x="60" y="240" width="240" height="94" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <rect x="68" y="246" width="44" height="12" rx="2" fill="transparent" stroke="rgba(217,96,58,0.45)" stroke-width="0.8"/>
+  <text x="90" y="255" fill="#D9603A" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">V0.1</text>
+  <text x="122" y="256" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">task_tag</text>
+  <line x1="60" y1="266" x2="300" y2="266" stroke="rgba(217,96,58,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="70" y="282"># task_id TEXT</text>
+    <text x="70" y="296"># tag_id TEXT</text>
+    <text x="70" y="310">weight REAL　NULL = 未分配</text>
+    <text x="70" y="324">按 kind 汇总 ≤ 1，不自动归一化</text>
+  </g>
+
+  <rect x="60" y="400" width="240" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="60" y="400" width="240" height="80" rx="6" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
+  <rect x="68" y="406" width="44" height="12" rx="2" fill="transparent" stroke="rgba(78,140,133,0.45)" stroke-width="0.8"/>
+  <text x="90" y="415" fill="#3F6F6A" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">V0.1</text>
+  <text x="122" y="416" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">daily_plan</text>
+  <line x1="60" y1="426" x2="300" y2="426" stroke="rgba(78,140,133,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="70" y="442"># task_id TEXT</text>
+    <text x="70" y="456"># local_date TEXT</text>
+    <text x="70" y="470"># timezone TEXT</text>
+  </g>
+
+  <!-- ===== V0.2：goal / milestone / task_dependency / time_block ===== -->
+  <rect x="380" y="80" width="240" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="380" y="80" width="240" height="80" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <rect x="388" y="86" width="44" height="12" rx="2" fill="transparent" stroke="rgba(111,175,168,0.45)" stroke-width="0.8"/>
+  <text x="410" y="95" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">V0.2</text>
+  <text x="442" y="96" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">goal</text>
+  <line x1="380" y1="106" x2="620" y2="106" stroke="rgba(111,175,168,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="390" y="122"># id TEXT</text>
+    <text x="390" y="136">title TEXT</text>
+    <text x="390" y="150">status TEXT　active/done/dropped</text>
+  </g>
+
+  <rect x="700" y="80" width="240" height="94" rx="6" fill="#FBF9F6"/>
+  <rect x="700" y="80" width="240" height="94" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <rect x="708" y="86" width="44" height="12" rx="2" fill="transparent" stroke="rgba(111,175,168,0.45)" stroke-width="0.8"/>
+  <text x="730" y="95" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">V0.2</text>
+  <text x="762" y="96" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">milestone</text>
+  <line x1="700" y1="106" x2="940" y2="106" stroke="rgba(111,175,168,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="710" y="122"># id TEXT</text>
+    <text x="710" y="136">→ project_id TEXT</text>
+    <text x="710" y="150">status TEXT　open/done/cancelled</text>
+    <text x="710" y="164">due_at · done_at INTEGER</text>
+  </g>
+
+  <rect x="380" y="240" width="240" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="380" y="240" width="240" height="80" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <rect x="388" y="246" width="44" height="12" rx="2" fill="transparent" stroke="rgba(111,175,168,0.45)" stroke-width="0.8"/>
+  <text x="410" y="255" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">V0.2</text>
+  <text x="442" y="256" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">task_dependency</text>
+  <line x1="380" y1="266" x2="620" y2="266" stroke="rgba(111,175,168,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="390" y="282"># predecessor_id TEXT</text>
+    <text x="390" y="296"># successor_id TEXT</text>
+    <text x="390" y="310">仅规范方向；拒绝自依赖与环</text>
+  </g>
+
+  <rect x="700" y="240" width="240" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="700" y="240" width="240" height="80" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <rect x="708" y="246" width="44" height="12" rx="2" fill="transparent" stroke="rgba(111,175,168,0.45)" stroke-width="0.8"/>
+  <text x="730" y="255" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">V0.2</text>
+  <text x="762" y="256" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">time_block</text>
+  <line x1="700" y1="266" x2="940" y2="266" stroke="rgba(111,175,168,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="710" y="282">→ task_id TEXT</text>
+    <text x="710" y="296">start_at · end_at INTEGER</text>
+    <text x="710" y="310">timezone TEXT　保留多次排期</text>
+  </g>
+
+  <!-- ===== V0.3：ai_suggestion ===== -->
+  <rect x="380" y="400" width="240" height="108" rx="6" fill="#FBF9F6"/>
+  <rect x="380" y="400" width="240" height="108" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <rect x="388" y="406" width="44" height="12" rx="2" fill="transparent" stroke="rgba(168,204,200,0.55)" stroke-width="0.8"/>
+  <text x="410" y="415" fill="#5E8F8A" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">V0.3</text>
+  <text x="442" y="416" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">ai_suggestion</text>
+  <line x1="380" y1="426" x2="620" y2="426" stroke="rgba(168,204,200,0.45)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="390" y="442"># id TEXT</text>
+    <text x="390" y="456">→ task_id TEXT</text>
+    <text x="390" y="470">kind · provider/model</text>
+    <text x="390" y="484">input_row_version INTEGER</text>
+    <text x="390" y="498">status TEXT　pending/accepted/…</text>
+  </g>
+
+  <!-- ===== 未画入的后续表（填右下空位） ===== -->
+  <text x="700" y="432" fill="#6F6357" font-size="9" font-weight="600" font-family="'Geist',sans-serif">未画入本图的后续表</text>
+  <g font-family="'Geist Mono',monospace" font-size="8.5" fill="#6F6357">
+    <text x="700" y="452">V0.4　context_fact · decision</text>
+    <text x="700" y="468">　　　document · task_document</text>
+    <text x="700" y="484">V0.5　knowledge_stat（可重建）</text>
+  </g>
+
+  <!-- ===== 图外已有表的引用块 ===== -->
+  <rect x="60" y="560" width="880" height="64" rx="6" fill="#FBF9F6"/>
+  <rect x="60" y="560" width="880" height="64" rx="6" fill="rgba(42,35,32,0.03)" stroke="#8A94A3" stroke-width="1" stroke-dasharray="5,4"/>
+  <text x="80" y="588" fill="#2A2320" font-size="12" font-weight="600" font-family="'Geist',sans-serif">已有表（见图 7）：</text>
+  <text x="222" y="588" fill="#2A2320" font-size="11.5" font-family="'Geist Mono',monospace">project · task</text>
+  <text x="80" y="608" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">本图七条外键全部落在它们身上；箭头方向即外键方向。引用块本身不定义字段。</text>
+
+  <!-- ===== 注记 ===== -->
+  <text x="40" y="662" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    Goal / Milestone 外键在 V0.2 迁移时加入：不能在 V0.1 建引用不存在表的列并启用相关写入，V0.1 也不显示这些对象的筛选器。</text>
+  <text x="40" y="682" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    只有 Knowledge 允许 parent_id，父子 kind 一致且无环；标签名先去首尾空白、空串拒绝，根级与子级分别唯一。</text>
+  <text x="40" y="702" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    标签权重只在同一 kind 内分配：weight 为 NULL 表示未分配，总和小于 1 的差额归“未分配”，超过 1 拒绝保存，不偷偷归一化。</text>
+  <text x="40" y="722" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    task_dependency 只存一个规范方向（predecessor → successor）；blocks / depends_on 是同一关系的两种视角。time_block 保留多次排期。</text>
+
+  <!-- ===== 图例（底部横条） ===== -->
+  <line x1="30" y1="746" x2="970" y2="746" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="766" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <rect x="110" y="757" width="16" height="10" rx="2" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
+  <text x="132" y="766" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">V0.1 引入</text>
+  <rect x="260" y="757" width="16" height="10" rx="2" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="282" y="766" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">V0.2 迁移</text>
+  <rect x="410" y="757" width="16" height="10" rx="2" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="432" y="766" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">V0.3 迁移</text>
+  <rect x="560" y="757" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="582" y="766" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">焦点：权重规则落点</text>
+  <rect x="750" y="757" width="16" height="10" rx="2" fill="rgba(42,35,32,0.03)" stroke="#8A94A3" stroke-width="1" stroke-dasharray="5,4"/>
+  <text x="772" y="766" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">图外已有表</text>
+</svg>
