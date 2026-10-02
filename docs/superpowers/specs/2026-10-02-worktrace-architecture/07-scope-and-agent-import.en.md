@@ -29,6 +29,8 @@ Choose file → locally validate schema/version/limits → preview content/prove
 
 Same producer/batch_id/item_id and identical canonical content hash returns existing mapping. App computes sorted-key UTF-8 JSON hashes under a fixed protocol version; never trust supplied hashes. Same ID with changed content is an explicit conflict. Similar new-batch items require human review; no promised semantic deduplication. Replacements/edits require explicit mapping plus expected_data_epoch/row_version. Any selected-item failure rolls back the entire adoption transaction; reduce selection and retry. Provenance/audit is user data included in backup, never diagnostic logs.
 
+![Agent import transaction and failure boundary](images/agent-import-flow.svg)
+
 ## 5. Delivery and acceptance
 
 V0.1 short outcome/problem notes and manual evidence references; V0.3 confirmed AI inputs/suggestions; V0.4 JSON imports and companion skill; V0.5 capability action reviews and KPA. Test no source-body reads, unknown/invalid versions, repeated adoption, changed-ID conflicts, selection/rollback, stale-edit conflicts, provenance, unsafe-reference rejection and absence of automatic network/AI calls. Skill/app share protocol fixtures; skill updates never silently change protocol.
