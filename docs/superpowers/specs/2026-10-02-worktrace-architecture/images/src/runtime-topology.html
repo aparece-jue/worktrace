@@ -29,7 +29,7 @@
 
 <svg viewBox="0 0 1000 640" role="img" aria-labelledby="rt-topo-title rt-topo-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="rt-topo-title">Worktrace 运行时与进程拓扑</title>
-  <desc id="rt-topo-desc">左侧区域是 Rust 核心进程，内含领域服务与事件总线、单文件 SQLite、原生托盘，它是唯一真相源；右侧区域是三个相互独立的 WebView 进程：主窗、HUD、Mini，它们不共享内存。窗口经 COMMAND 通道向核心发出请求，核心经 EVENT 通道向所有窗口广播；托盘直连核心，不依赖任何窗口存活。</desc>
+  <desc id="rt-topo-desc">左侧区域是 Rust 核心进程，内含领域服务与事件总线、单文件 SQLite、原生托盘，它是唯一真相源；右侧区域是三个独立的 WebView JS 上下文（不推定操作系统进程数）：主窗、HUD、Mini，它们不共享内存。窗口经 COMMAND 通道向核心发出请求，核心经 EVENT 通道向所有窗口广播；托盘直连核心，不依赖任何窗口存活。</desc>
 
   <defs>
     <marker id="rt-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -53,7 +53,7 @@
         stroke="rgba(42,35,32,0.20)" stroke-width="1" stroke-dasharray="4,4"/>
   <rect x="550" y="48" width="230" height="14" rx="2" fill="#FBF9F6"/>
   <text x="556" y="59" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
-        letter-spacing="0.12em">WEBVIEW 进程 × 3（不共享内存）</text>
+        letter-spacing="0.12em">WEBVIEW 上下文 × 3（独立 JS）</text>
 
   <!-- ===== 连线（在方框之前） ===== -->
   <!-- COMMAND：右 -> 左 -->
@@ -148,11 +148,11 @@
         letter-spacing="0.14em">LEGEND</text>
   <rect x="130" y="510" width="16" height="10" rx="2" fill="#FBF9F6" stroke="rgba(42,35,32,0.25)"
         stroke-width="1" stroke-dasharray="3,2"/>
-  <text x="152" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">进程边界</text>
+  <text x="152" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">运行时边界</text>
   <rect x="260" y="510" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
   <text x="282" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">焦点：唯一真相源与广播</text>
   <rect x="470" y="510" width="16" height="10" rx="2" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
-  <text x="492" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">WebView 视图（无状态）</text>
+  <text x="492" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">WebView 视图（无业务权威状态）</text>
   <rect x="680" y="510" width="16" height="10" rx="2" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
   <text x="702" y="518" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">平台层部件</text>
 </svg>

@@ -14,7 +14,7 @@ Status: revised draft for review; date: 2026-10-02.
 | M04 | Timer | Monotonic clock, countdown budget, ticks, lock/suspend reconciliation | M02, M03, M00 | V0.1; Pomodoro V0.2 |
 | M05 | Sessions | Intervals, pause/resume/finish, recovery confirmation, manual correction | M01, M02, M04 | V0.1; concurrency/interruption V0.2 |
 | M06 | Statistics | Range clipping, human/machine separation, weights, reconcilable DTOs | M01, M02 | Minimal V0.1; extended V0.2 |
-| M07 | Reports | Export/simple weekly review; extended ranges and KPA | M06, M01 | Minimal V0.1; reports V0.2; KPA V0.5 |
+| M07 | Reports | Export/simple weekly review; extended ranges and KPA | M06, M01, M02 (pure types) | Minimal V0.1; reports V0.2; KPA V0.5 |
 | M08 | Knowledge/estimates | Error and knowledge usage; experimental capability model | M01, M02, M06 | Error V0.2; scores V0.5 |
 | M09 | Context | Outbound whitelist/classification first; facts/documents/decisions later | M01, M02 | Minimal V0.3; full V0.4 |
 | M10 | AI | Provider calls, suggestion history/input versions/adoption/feedback; optional | M09, M01, M02 | V0.3 |
@@ -30,12 +30,14 @@ Core implementation chain: M02 → M01 → M04/M05 → minimal M06 → minimal M
 
 V0.3 implements minimal M09 outbound policy before M10; V0.4 expands document extraction. M13 is independent of M06 and never requires future tables.
 
-![Module dependencies (V0.1 core loop)](images/module-deps-core.svg)
+![Core module implementation order](images/module-deps-core.svg)
 
-> Dependency depth and project-wide fan-in for the V0.1 core loop. M02 domain is depended on by 9 modules and is the structural hub.
+> Core foundation implementation order, not direct code dependencies; V0.1 also includes minimal M06/M07.
 
 ![Module dependencies (service layer and expansion chain)](images/module-deps-services.svg)
 
+> Code dependency direction (dependees below); figure 3's arrows mean implementation order instead — the two read differently.
+
 ## 3. Implementation deliverables
 
-Each vertical feature delivers command contracts, persistence, UI, meaningful tests and a demonstrable acceptance case. Avoid empty directories created only to look layered. Test transitions, rollback, recovery, concurrency and accounting boundaries rather than mechanically mirroring every function. Scope/dependencies follow 04/05; pending product choices follow 06.
+Each vertical feature delivers command contracts, persistence, UI, meaningful tests and a demonstrable acceptance case. Avoid empty directories created only to look layered. Test transitions, rollback, recovery, concurrency and accounting boundaries rather than mechanically mirroring every function. Scope/dependencies follow 04/05; approved choices and new revisions follow 06.

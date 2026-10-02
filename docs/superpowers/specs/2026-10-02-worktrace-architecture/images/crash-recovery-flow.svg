@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1000 900" role="img" aria-labelledby="crash-rec-title crash-rec-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="crash-rec-title">Worktrace 进程启动时的崩溃恢复流程</title>
-  <desc id="crash-rec-desc">自上而下：通过单实例检查后进程启动，每次启动新建一条 application_run；判定旧 run 是否还有未结束的 session（含 paused），没有就正常进入记录，有就把整个 session 置为待确认 recovering 并打上 needs_review；待确认记录不自动运行、不占前台槽位、暂不计入已确认统计，由用户在三类处置中选择：确认截止时间或修改区间（关闭不确定区间、验证重叠并写修正日志）、保存为暂停（要显式 resume 才继续）、或丢弃（保留审计）。待确认那一步是唯一的强调项。</desc>
+  <desc id="crash-rec-desc">启动新 run，扫描不确定区间；可信暂停保持 paused。不确定区间进入 recovering，不自动计时、不占前台槽位；此前可信闭合区间仍计入统计。确认截止时间、保存为暂停或丢弃不确定区间均写审计；作废整次记录是另一个显式动作。</desc>
 
   <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
     <marker id="cr-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -37,7 +37,7 @@
     <rect x="508" y="630" width="56" height="12" rx="2" fill="#FBF9F6"/>
     <text x="536" y="639">保存为暂停</text>
     <rect x="772" y="630" width="30" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="787" y="639">丢弃</text>
+    <text x="787" y="639">丢弃不确定区间</text>
   </g>
 
   <!-- ===== 起点与步骤 ===== -->
@@ -62,7 +62,7 @@
   <text x="500" y="294" fill="#2A2320" font-size="11.5" font-weight="600"
         font-family="'Geist',sans-serif" text-anchor="middle">旧 run 是否还有</text>
   <text x="500" y="312" fill="#2A2320" font-size="11.5" font-weight="600"
-        font-family="'Geist',sans-serif" text-anchor="middle">未结束的 session？</text>
+        font-family="'Geist',sans-serif" text-anchor="middle">不确定的区间？</text>
 
   <path d="M 700 272 H 940 A 28 28 0 0 1 940 328 H 700 A 28 28 0 0 1 700 272 Z" fill="#FBF9F6"/>
   <path d="M 700 272 H 940 A 28 28 0 0 1 940 328 H 700 A 28 28 0 0 1 700 272 Z"
@@ -70,7 +70,7 @@
   <text x="820" y="296" fill="#2A2320" font-size="12" font-weight="600"
         font-family="'Geist',sans-serif" text-anchor="middle">正常进入记录</text>
   <text x="820" y="314" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">没有待确认记录</text>
+        text-anchor="middle">可信暂停保持 paused</text>
 
   <!-- ===== 待确认（焦点） ===== -->
   <rect x="360" y="420" width="280" height="72" rx="6" fill="#FBF9F6"/>
@@ -80,7 +80,7 @@
   <text x="500" y="463" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">不自动运行 · 不占 running 前台槽位</text>
   <text x="500" y="478" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">整个 session 暂不进入已确认统计</text>
+        text-anchor="middle">仅不确定区间待确认，闭合工时保留</text>
 
   <!-- ===== 判定二：用户怎么处置 ===== -->
   <path d="M 500 516 L 650 570 L 500 624 L 350 570 Z" fill="#FBF9F6"/>
@@ -110,11 +110,11 @@
   <rect x="680" y="660" width="260" height="80" rx="6" fill="#FBF9F6"/>
   <rect x="680" y="660" width="260" height="80" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
   <text x="810" y="686" fill="#2A2320" font-size="11.5" font-weight="600"
-        font-family="'Geist',sans-serif" text-anchor="middle">丢弃</text>
+        font-family="'Geist',sans-serif" text-anchor="middle">丢弃不确定区间</text>
   <text x="810" y="706" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">保留审计记录</text>
   <text x="810" y="721" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">不计入统计</text>
+        text-anchor="middle">此前闭合区间仍计入</text>
 
   <!-- ===== 注记 ===== -->
   <text x="40" y="782" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">

@@ -77,7 +77,7 @@
 
     <!-- 关键返回（珊瑚色） -->
     <rect x="348" y="311" width="134" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="415" y="320" fill="#D9603A">快照 + revision（数据同源）</text>
+    <text x="415" y="320" fill="#D9603A">快照 + epoch/revision（数据同源）</text>
 
     <!-- 应用快照 -->
     <rect x="163" y="343" width="125" height="24" rx="2" fill="#FBF9F6"/>
@@ -102,7 +102,7 @@
     <!-- 查询重拉 -->
     <rect x="335" y="541" width="160" height="24" rx="2" fill="#FBF9F6"/>
     <text x="415" y="551">③ 受影响查询失效后重新拉取</text>
-    <text x="415" y="562">响应带 revision；新请求合并去重</text>
+    <text x="415" y="562">响应带 epoch/revision；过滤旧回复</text>
 
     <!-- timer.tick -->
     <rect x="163" y="585" width="124" height="24" rx="2" fill="#FBF9F6"/>
@@ -152,7 +152,7 @@
   <rect x="620" y="96" width="160" height="54" rx="6" fill="#FBF9F6"/>
   <rect x="620" y="96" width="160" height="54" rx="6" fill="#FBF1DC" stroke="#CBA758" stroke-width="1"/>
   <text x="700" y="120" fill="#2A2320" font-size="12" font-weight="600" font-family="'Geist',sans-serif"
-        text-anchor="middle">app_meta.revision</text>
+        text-anchor="middle">epoch / revision</text>
   <text x="700" y="137" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
         text-anchor="middle">STORAGE · 业务写事务 +1</text>
 
@@ -168,9 +168,9 @@
   <text x="40" y="810" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     app_meta.revision 随成功业务写事务加 1 并持久化；无业务变化不加，心跳和 timer.tick 不加；同事务多项变化合并为一条 domain.changed（附变化实体 ID/类别），按 revision 顺序广播。</text>
   <text x="40" y="828" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    timer.tick 走独立通道，自带 run_id、tick_seq、as_of、session_id、active_ms、remaining_ms；每个 run 内递增；旧 run / 旧序号丢弃，不触发业务 revision 写入。</text>
+    tick 带 epoch、run_id、session_id、session_version、tick_seq、as_of 与计时值；旧代次、旧状态版本或旧序号丢弃。</text>
   <text x="40" y="846" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    查询响应带 revision；比该视图已应用 / 所需版本旧的响应不得覆盖，新请求合并去重。窗口重显 / IPC 重连时、后台窗口重显前检查 get_revision 以补救丢失的最后一条事件；版本检查不拉全库。</text>
+    响应带 epoch/revision；跨 epoch 先握手并清缓存，同代次过滤旧 revision；可见窗口每 ≤30 秒校验。</text>
   <text x="40" y="864" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     跳号 / 乱序且缓存无法证明一致时重新取快照；允许短暂延迟，不依赖通知永不丢失。方框色相 = 功能归属，深浅 = 作用程度。</text>
 
@@ -185,7 +185,7 @@
   <line x1="400" y1="902" x2="424" y2="902" stroke="#8E74B5" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#rev-open-purple)"/>
   <text x="432" y="906" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">异步通知（空心箭头）</text>
   <line x1="560" y1="902" x2="584" y2="902" stroke="#D9603A" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#rev-arrow-coral)"/>
-  <text x="592" y="906" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">关键返回：快照 + revision</text>
+  <text x="592" y="906" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">关键返回：快照 + epoch/revision</text>
   <rect x="750" y="895" width="8" height="14" fill="rgba(107,155,199,0.16)" stroke="#6B9BC7" stroke-width="0.8"/>
   <text x="766" y="906" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">激活期</text>
   <rect x="815" y="895" width="24" height="14" rx="2" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.22)" stroke-width="1"/>

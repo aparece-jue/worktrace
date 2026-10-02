@@ -24,7 +24,7 @@ Project owns tasks; tasks form a tree whose leaves are Actions. Each task has se
 
 ```sql
 -- Logical schema: full executable DDL and migrations belong to M01.
-app_meta(singleton INTEGER PRIMARY KEY, revision INTEGER NOT NULL)
+app_meta(singleton INTEGER PRIMARY KEY, data_epoch TEXT NOT NULL, revision INTEGER NOT NULL)
 application_run(id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, clean_exit_at INTEGER)
 goal(id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, status TEXT NOT NULL,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
@@ -45,7 +45,8 @@ work_session(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id),
              interruption_of TEXT REFERENCES work_session(id), quality TEXT,
              needs_review INTEGER NOT NULL DEFAULT 0, row_version INTEGER NOT NULL)
 work_interval(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
-              started_at INTEGER NOT NULL, ended_at INTEGER, voided_at INTEGER)
+              started_at INTEGER NOT NULL, ended_at INTEGER, voided_at INTEGER,
+              needs_review INTEGER NOT NULL DEFAULT 0)
 time_edit(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
           before_json TEXT NOT NULL, after_json TEXT NOT NULL, reason TEXT,
           created_at INTEGER NOT NULL)
@@ -105,17 +106,30 @@ active_ms is the sum of closed effective intervals plus the running interval's c
 
 Use a monotonic clock for live durations and wall time for persisted attribution. Wall-clock changes, suspend and discontinuities cannot be hidden with now-started_at: stop the uncertain interval at the last trusted checkpoint and require reconciliation. Monotonic clock state is not reused across restarts.
 
-Proposed default: pause foreground work on lock/suspend; resume only by explicit action. Machine/background suspension is reconciled separately. This remains a product-review item in [review notes](06-review-notes.en.md). Accuracy tests must name the chosen sleep policy and include clock changes in both directions.
+Confirmed R-02: pause foreground work on lock/suspend, resume explicitly. Specify machine/background suspend behaviour in their implementation spec; the foreground choice is approved in [review notes](06-review-notes.en.md). Accuracy tests must name the chosen sleep policy and include clock changes in both directions.
 
-## 4. Recovery and exit
+## 4. Recovery and exit (behaviour revision awaiting review)
 
-Acquire single-instance ownership before initializing a run. Each startup creates application_run and moves all unfinished sessions from previous runs, including paused sessions, to recovering with needs_review=1. No two-minute heartbeat threshold: immediate restart after a kill is covered. Persist a heartbeat about every 30 seconds; it supplies a last trusted time, not a fabricated endpoint.
+After single-instance ownership, create application_run and scan unfinished previous-run sessions without heartbeat-age thresholds. Recover based on interval facts:
 
-Recovering sessions neither run nor occupy the running foreground slot. Exclude the whole unconfirmed session from confirmed totals; show pending time separately. The user can confirm an endpoint, edit intervals, save as paused then explicitly resume, or discard. Close uncertain intervals, validate overlaps and audit the decision atomically.
+| Previous record | Startup action | Accounting |
+| --- | --- | --- |
+| paused with no open/pending intervals | Keep paused, update run_id, never auto-resume | Confirmed closed intervals still count |
+| running with an open interval | Set recovering, flag only that interval needs_review=1 | Closed confirmed intervals count, open interval pending |
+| recovering | Retain pending status, never add known effort | Same |
+| Broken state/interval invariant | Isolate and diagnose; no invented repairs | Suspect intervals excluded and visible |
 
-Closing a window does not terminate the core. Explicit quit atomically finishes running/paused sessions and saves revision/clean_exit_at. Recovering records remain unresolved. Startup scanning and transactions handle crashes before/after commit; delivered shutdown events are not a reliability prerequisite.
+Keep session.needs_review and interval flags consistent in transactions; never independently modify them. Running has no pending interval; recovering has a pending interval or explicit invariant-fault marker. About every 30 seconds persist a trusted checkpoint with interval_id/trusted wall time/live baseline. It is a candidate cutoff, never automatic effort backfill. M04/M05 specify checkpoint persistence; last_heartbeat_at alone is not a complete clock mapping.
+
+Recovering does not occupy running foreground. Show confirmed effort and pending interval separately; unknown endpoints are unknown ranges, not precise fabricated duration. Confirm/edit the uncertain interval and finish, or close it, save paused and explicitly resume.
+
+Discard uncertain interval only sets its voided_at and clears pending status, preserving earlier valid intervals; session becomes finished or paused. Voiding the whole session is a separate explicit intent, voids every interval and sets discarded. Audit/version/revision updates are atomic; do not share an ambiguous Discard button. Confirmation cannot overlap subsequently recorded human work.
+
+Window closure does not exit. Explicit quit finishes running/paused and saves revision/clean_exit_at atomically; recovering remains pending. After resolution or preserved pause, update run_id to current run with original attribution audited. Repeated restarts cannot double-void or alter confirmed effort.
 
 ![Crash recovery flow](images/crash-recovery-flow.svg)
+
+> The diagram covers uncertain-interval confirmation; fully trusted paused sessions directly remain paused.
 
 ## 5. Task states and hierarchy
 
@@ -142,7 +156,7 @@ task_dependency stores one predecessor→successor direction; blocks/depends_on 
 
 ## 6. Statistics and tags
 
-Use half-open [from,to) ranges. Clip every effective interval: max(0,min(end,to)-max(start,from)). Use one snapshot now for open running intervals. Distinguish confirmed closed time from provisional live time. Exclude recovering/discarded sessions. DTOs carry measure, timezone, range, as_of and revision.
+Use half-open [from,to) ranges. Clip every effective interval: max(0,min(end,to)-max(start,from)). Use one snapshot now for open running intervals. Separate confirmed closed intervals (including trusted parts of recovering sessions) from provisional live time. Exclude pending/voided intervals and discarded sessions; pending time is separate. DTOs carry measure, timezone, range, as_of and revision.
 
 Human effort includes FOREGROUND only. Sum BACKGROUND/PASSIVE as separate machine measures; WAITING is separate. Never add concurrent machine durations to human totals.
 
@@ -150,7 +164,7 @@ Human effort includes FOREGROUND only. Sum BACKGROUND/PASSIVE as separate machin
 
 Associated duration always counts each associated tag in full, regardless of weight; sums across tags may exceed total effort and must be labelled non-additive. Weighted effort allocates within each kind: finite weight in 0..1, NULL means unallocated. Totals below 1 leave an Unallocated remainder; totals above 1 are rejected. No silent normalization. Knowledge ancestor reports deduplicate intervals rather than summing parent/child associations.
 
-Proposed default: recompute history using current tags/project assignments/weights and label reports accordingly. Exports retain the generated result and its accounting policy. Historical classification snapshots remain a user-review option. Knowledge weights live only in task_tag; task_knowledge stores required_level/used/learning_gain rather than duplicating weights.
+Confirmed R-03: recompute history using current tags/project assignments/weights and label reports accordingly. Exports retain the generated result and its accounting policy. Historical classification snapshots are a future change, not an open R-03 decision. Knowledge weights live only in task_tag; task_knowledge stores required_level/used/learning_gain rather than duplicating weights.
 
 ## 7. AI and context migrations
 
@@ -181,3 +195,11 @@ Restore: stop timers/pause writes/close connections, consistently back up curren
 - Project states active/archived/done; archived projects cannot start new sessions but history remains editable. Goal active/done/dropped; Milestone open/done/cancelled. Full DDL defines importance/urgency/energy/difficulty ranges; V0.1 need not expose energy/difficulty inputs.
 - Task completion writes task_change; reports select completions by its timestamp, not updated_at/session end. Reopened work is labelled reopened, not falsely presented as still completed.
 - Pausable countdown budgets are execution timing; fixed time_block calendar endpoints do not move on pause. Never conflate them.
+
+## 11. Restore epochs and fact replacement order (revision)
+
+Enter maintenance on DB restore/replacement; cancel old queued work/queries/AI requests. Validate a temporary candidate, generate a new data_epoch, switch recoverably and reopen. Failure returns to the original DB/epoch and forces a handshake. Create a current run and scan using §4; never reuse backed-up runtime memory. Reject old-epoch mutations. Restored revision may be lower and is comparable only inside its new epoch.
+
+Keep the superseded_by model for ContextFact with this atomic order: insert new fact temporarily superseded_by=old ID (not current); set old.superseded_by=new ID; clear new.superseded_by to NULL. On commit the chain is acyclic and exactly one current row exists; failure rolls back everything. Intermediate states are not visible to other readers. Reject cross-project/key links, self-references and arbitrary historical pointer edits. Do not insert a second current row first or assume UNIQUE checks wait until commit.
+
+Time queries require interval.needs_review=0 and voided_at IS NULL. Whole-session void never affects other sessions. Test epochs/snapshots, state-version/ticks, trusted paused recovery, partial discard and fact replacement with fault injection.

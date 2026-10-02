@@ -26,7 +26,7 @@ Project 可包含多个 Task；Task 自引用，叶子 Task 称 Action。Task �
 
 ```sql
 -- Logical schema: full executable DDL and migrations belong to M01.
-app_meta(singleton INTEGER PRIMARY KEY, revision INTEGER NOT NULL)
+app_meta(singleton INTEGER PRIMARY KEY, data_epoch TEXT NOT NULL, revision INTEGER NOT NULL)
 application_run(id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, clean_exit_at INTEGER)
 goal(id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, status TEXT NOT NULL,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
@@ -47,7 +47,8 @@ work_session(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id),
              interruption_of TEXT REFERENCES work_session(id), quality TEXT,
              needs_review INTEGER NOT NULL DEFAULT 0, row_version INTEGER NOT NULL)
 work_interval(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
-              started_at INTEGER NOT NULL, ended_at INTEGER, voided_at INTEGER)
+              started_at INTEGER NOT NULL, ended_at INTEGER, voided_at INTEGER,
+              needs_review INTEGER NOT NULL DEFAULT 0)
 time_edit(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
           before_json TEXT NOT NULL, after_json TEXT NOT NULL, reason TEXT,
           created_at INTEGER NOT NULL)
@@ -112,19 +113,30 @@ paused 无 open interval，因此值冻结。倒计时 remaining_ms = max(0, tar
 
 运行中用单调时钟测量时长，墙钟用于持久化时间归属。系统改时、休眠或时钟不连续不能靠 now-started_at 掩盖；在最后可信检查点停止可疑区间并进入 recovering，由用户校正。跨重启不复用单调时钟。
 
-建议默认：前台在锁屏/休眠时暂停，恢复后由用户继续；后台/机器任务的休眠时间单独确认。这是产品待评估项，见 [评审摘要](06-review-notes.zh.md)。M04 的精度验收必须针对选定策略，并测试向前/向后改时。
+已确认 R-02：前台在锁屏/休眠时暂停，恢复后由用户显式继续；后台/机器任务的休眠行为在其实现规格中明确。前台策略已批准，见 [评审摘要](06-review-notes.zh.md)。M04 的精度验收必须针对选定策略，并测试向前/向后改时。
 
-## 4. 崩溃恢复与退出
+## 4. 崩溃恢复与退出（行为修订，待本轮审核）
 
-单实例检查成功后才能初始化运行记录。每次进程启动新建 application_run；所有属于旧 run 的未结束 session（包括 paused）进入 recovering，置 needs_review=1。不以“心跳超过两分钟”作为门槛，因此强杀后立即重启也会恢复。心跳约每 30 秒持久化，给出最后可信时间及不确定区间，不证明该段已经完成。
+单实例检查后新建 application_run，扫描旧 run 未结束会话，不用两分钟心跳门槛。恢复按区间事实区分：
 
-恢复记录不自动运行，不占 running 前台槽位，整个待确认 session 暂不进入已确认统计。用户可选择确认截止时间、修改区间、保存为暂停并显式恢复、或丢弃。确认时关闭不确定 interval，验证重叠并记录修正日志；丢弃保留审计。UI 单列待确认时间，不能静默显示为 0。
+| 旧记录 | 启动后的处理 | 统计 |
+| --- | --- | --- |
+| paused 且无开放/待确认区间 | 保持 paused，更新 run_id；不自动继续 | 已确认闭合区间保持计入 |
+| running 且有开放区间 | session 设 recovering；只将该区间 needs_review=1 | 既有闭合区间计入；开放区间待确认 |
+| recovering | 保持待确认，不增加已知工时 | 同上 |
+| 状态/区间不变量损坏 | 隔离故障记录、诊断，禁止自动修复事实 | 可疑区间暂不计，UI 明示 |
 
-关闭窗口仅隐藏/关闭界面，不退出核心。显式退出在一个事务内结束 running/paused session、保存修订号与 clean_exit_at；有 recovering 记录则保留待确认。崩溃发生在提交前后均由事务和下一次扫描处理，不依赖退出事件必定送达。
+session.needs_review 在事务内与区间标记保持一致，不能单独修改；running 必须无待确认区间，recovering 必须有待确认区间或显式不变量故障标记。心跳约每 30 秒记录最后可信检查点（对应 interval_id、可信墙钟/运行态基线），仅提供默认候选截止时间，不能自动补工时。检查点的完整持久化形态由 M04/M05 规格确定，不把单一 last_heartbeat_at 当成充分的时钟映射。
+
+恢复会话不占运行前台槽位；UI 显示已确认工时与待确认区间，后者没有确定终点时显示未知范围，不伪造精确时长。用户可确认/修改不确定区间并 finish，或关闭该区间后保存 paused 并显式 resume。
+
+“丢弃不确定区间”仅将目标 interval 置 voided_at 并清 needs_review，保留此前有效闭合区间，session 随之 finished 或 paused；如用户要删除全部会话工时，须使用单独明确的“作废整次记录”意图，将全部区间作废并置 discarded。两种操作都写 time_edit、校验版本、更新 revision，不能含糊共用一个“丢弃”按钮。恢复确认不允许与后来已记录人工时间重叠。
+
+关闭窗口不退出核心。显式退出同事务结束 running/paused、保存 revision 与 clean_exit_at；recovering 记录保留。恢复完成/保留暂停后将 run_id 切到当前 run，审计保存原 run；多次重启不得重复作废或让已确认工时变化。
 
 ![崩溃恢复流程](images/crash-recovery-flow.svg)
 
-> 图：判定只看「属于旧 run 且未结束」，不设心跳阈值；待确认是唯一需要人做决定的一步。
+> 图只展示有不确定区间时的确认分支；已暂停且全部区间可信的会话直接恢复为暂停。
 
 ## 5. Task 状态与层级
 
@@ -157,7 +169,7 @@ task_dependency 仅存一个规范方向（predecessor_id → successor_id）；
 
 ## 6. 统计与标签
 
-统计范围统一为半开区间 [from,to)。每段有效 interval 与范围交集：max(0,min(end,to)-max(start,from))，运行区间的 end 使用同一快照时刻 now。已确认已结束时间和实时暂计值分开标注；recovering/discarded 排除。
+统计范围统一为半开区间 [from,to)。每段有效 interval 与范围交集：max(0,min(end,to)-max(start,from))，运行区间的 end 使用同一快照时刻 now。已确认闭合区间（含 recovering 会话中已可信部分）与实时暂计分列；needs_review=1、voided_at 非空或 discarded 的区间排除。待确认部分单列。
 
 人工仅 FOREGROUND，机器分别汇总 BACKGROUND/PASSIVE，WAITING 单列。禁止将并行机器时长加成人工；报表必须返回 measure、timezone、range、as_of、revision。
 
@@ -168,7 +180,7 @@ task_dependency 仅存一个规范方向（predecessor_id → successor_id）；
 关联时长：所有关联标签都计全部人工时长，与 weight 是否存在无关；多个标签之和可大于人工总量，UI 明示不可相加。
 加权工时：只在同一 kind 内分配；weight 为 NULL 表示未分配，非 NULL 要求有限且 0..1。权重总和小于 1，差额归“未分配”；超过 1 拒绝保存；不偷偷归一化。Knowledge 层级汇总对子孙任务/区间去重，不能直接相加父子关联时长。
 
-建议默认按当前标签、项目归属与权重重算历史，UI 明示“按当前分类”；导出保存当时结果与筛选口径。若用户要求历史分类冻结，再增加 session 分类快照，见待评估项。task_tag 与 task_knowledge 不重复存同一权重，知识权重唯一来自 task_tag；task_knowledge 只记录 required_level、used、learning_gain 等任务特定信息。
+已确认 R-03：按当前标签、项目归属与权重重算历史，UI 明示“按当前分类”；导出保存当时结果与筛选口径。若用户要求历史分类冻结，再增加 session 分类快照，作为未来变更另行评估。task_tag 与 task_knowledge 不重复存同一权重，知识权重唯一来自 task_tag；task_knowledge 只记录 required_level、used、learning_gain 等任务特定信息。
 
 ## 7. AI 与上下文（后续迁移）
 
@@ -199,3 +211,11 @@ V0.1 task_change 记录任务状态/质量/归属变更，与实体更新同事�
 - Project 状态 active/archived/done；归档项目不能新启动 session，但其历史仍可修正。Goal 为 active/done/dropped；Milestone 为 open/done/cancelled。重要/紧急度和精力/难度的值域在完整 DDL 明确，V0.1 可不展示精力/难度输入。
 - 完成任务写 task_change；报告按该记录的时刻选完成项，不以 updated_at 或 session 结束时间代替。完成后重开显示“重新打开”，避免周报宣称仍已完成。
 - 倒计时暂停和工作区间预算为执行计时；time_block 的固定日程截止时刻不会因暂停后移，二者不能混用。
+
+## 11. 数据库恢复与事实取代的具体顺序（本轮修订）
+
+恢复/替换库进入维护态，取消旧队列/查询/AI 请求；临时候选库验证并生成全新 data_epoch，再可回滚切换、重开。失败返回原库原 epoch，强制重新握手。完成后创建当前运行记录并依 §4 扫描，不沿用备份里的运行内存。所有旧 epoch 修改请求返回 DATA_EPOCH_MISMATCH。恢复后的 revision 可低于原库，仅在新 epoch 内比较。
+
+ContextFact 取代保持 superseded_by 模型，可采用以下同事务顺序：① 新事实先令 superseded_by=旧事实 ID，因此尚非 current；② 旧事实 superseded_by=新 ID；③ 新事实 superseded_by=NULL，成为唯一 current。事务成功后链无环；失败全部回滚。中间态不对其他读取者可见，下一代取代同样操作。拒绝跨项目/key、自引用、任意编辑历史指针。M09 不依赖插入第二条 current 后再修复，也不假设 UNIQUE 延迟到提交才检查。
+
+所有工时查询增加 interval.needs_review=0 与 voided_at IS NULL 条件；作废整个会话不得影响其他会话。epoch/snapshot、状态版本/tick、暂停可信恢复、部分丢弃、事实取代顺序均需独立故障测试。

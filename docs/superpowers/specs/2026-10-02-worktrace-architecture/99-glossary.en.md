@@ -133,12 +133,12 @@
 | Single Source of Truth | 唯一真相源 | Domain state exists in exactly one place, on the Rust side (ADR-006) |
 | Command | 命令 | The frontend → Rust request/response channel |
 | Event | 事件 | The Rust → frontend broadcast channel |
-| Envelope | 信封 | The common outer structure of an event: `{event, revision, at, payload} (business events; at is Unix milliseconds)` |
+| Envelope | 信封 | The common outer structure of an event: `{event, data_epoch, revision, at, payload} (business events; at is Unix milliseconds)` |
 | revision | 修订号 | Durable business-transaction revision; ticks/heartbeats do not increment it (ADR-010) |
 | Snapshot | 快照 | The full current state returned by `get_snapshot()`, used by a window to align on mount |
 | State Mirror | 状态镜像 | The frontend cache layer `src/services/domainState.ts`, the only subscription entry point |
 | Invalidation Signal | 失效信号 | The frontend role of a domain event — triggers a refetch rather than patching state |
-| needs_review | 待确认 | Flag on unfinished previous-run sessions; recovering does not occupy the running slot and counts only after confirmation |
+| needs_review | 待确认 | Uncertain-interval flag mirrored by session; no running occupancy; only that interval awaits confirmation |
 | Platform Layer | 平台层 | `src-tauri/src/platform/`, the only boundary for Win32 calls (ADR-005) |
 | Composition Root | 组合根 | `lib.rs`, the only place that assembles all layers |
 | Domain Layer | 领域层 | `domain/`, pure types and rules with no IO |
@@ -163,9 +163,13 @@
 | work_interval | Effective start/end facts; pause closes, resume opens; clipped to report ranges |
 | source | user/rule/ai origin; adopting AI keeps its origin |
 | confirmed_at | User-confirmed authority; no background overwrite of confirmed values |
-| recovering | Unfinished previous-run record for confirmation/edit/discard, never advances |
+| recovering | Recovery record with uncertain intervals; trusted closed effort retained; never advances |
 | tick_seq | Per-run display sequence, not durable business revision |
 | Provisional | Running interval as of snapshot time, separate from confirmed closed time |
 | Unallocated | Remaining human effort when per-kind weights sum below 1 |
 
 See 02/06 for origin/confirmation, sleep and historical classification defaults. All documents remain review drafts.
+
+`data_epoch`: database UUID renewed on create/restore; revisions compare only within an epoch. `session_version`: timer state version rejecting late pre-pause ticks. `needs_review`: interval uncertainty mirrored by session summary; trusted closed intervals still count.
+
+R-01–R-08 are approved; this protocol/recovery revision awaits review.

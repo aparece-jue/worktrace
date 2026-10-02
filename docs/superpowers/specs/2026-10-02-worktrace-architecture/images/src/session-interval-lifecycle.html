@@ -27,7 +27,7 @@
 
 <svg viewBox="0 0 1000 760" role="img" aria-labelledby="session-life-title session-life-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="session-life-title">Worktrace 会话与工作区间的生命周期</title>
-  <desc id="session-life-desc">会话状态分三段：运行中与已暂停构成可循环的计时段（running 恰好有一个未结束的有效区间，paused 没有开放区间、计时值冻结），recovering 是待确认段（不自动运行、不占前台槽位，可保留一个终点未定的区间），finished 与 discarded 是终态。start 建立 running，pause 与 resume 在两者之间往返，finish 从两者都能到达 finished，crash 或强杀后下次启动扫描把未结束的会话（含 paused）送入 recovering，recovering 再经「确认截止时间」到 finished、「保存为暂停」回到 paused、「丢弃」到 discarded。</desc>
+  <desc id="session-life-desc">会话状态分三段：运行中与已暂停构成可循环的计时段（running 恰好有一个未结束的有效区间，paused 没有开放区间、计时值冻结），recovering 是待确认段（不自动运行、不占前台槽位，可保留一个终点未定的区间），finished 与 discarded 是终态。start 建立 running，pause 与 resume 在两者之间往返，finish 从两者都能到达 finished，crash 后扫描把含不确定区间的会话送入 recovering；可信 paused 保持暂停，recovering 再经「确认截止时间」到 finished、「保存为暂停」回到 paused、「作废整次记录」到 discarded；丢弃单个区间可到 finished。</desc>
 
   <defs>
     <marker id="sl-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -56,7 +56,7 @@
   <path d="M 150 286 V 522 Q 150 530 158 530 H 350" fill="none"
         stroke="#6F6357" stroke-width="1" marker-end="url(#sl-arrow)"/>
   <path d="M 470 286 V 494" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#sl-arrow)"/>
-  <!-- 崩溃路径：running 与 paused 都进 recovering -->
+  <!-- 异常路径：running 因崩溃/强杀进 recovering；paused 仅在区间不确定时进 -->
   <path d="M 200 214 V 158 Q 200 150 208 150 H 752 Q 760 150 760 158 V 214"
         fill="none" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#sl-arrow)"/>
   <path d="M 435 214 V 126 Q 435 118 443 118 H 792 Q 800 118 800 126 V 214"
@@ -82,13 +82,13 @@
     <rect x="468" y="129" width="64" height="12" rx="2" fill="#FBF9F6"/>
     <text x="500" y="138">崩溃 / 强杀</text>
     <rect x="568" y="97" width="64" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="600" y="106">崩溃 / 强杀</text>
+    <text x="600" y="106">区间异常</text>
     <rect x="594" y="509" width="72" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="630" y="518" fill="#D9603A">确认截止时间</text>
+    <text x="630" y="518" fill="#D9603A">确认 / 丢弃区间</text>
     <rect x="574" y="229" width="72" height="12" rx="2" fill="#FBF9F6"/>
     <text x="610" y="238" fill="#D9603A">保存为暂停</text>
-    <rect x="808" y="394" width="30" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="823" y="403">丢弃</text>
+    <rect x="806" y="394" width="44" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="823" y="403">整次作废</text>
   </g>
 
   <circle cx="56" cy="250" r="6" fill="#2A2320"/>
@@ -137,7 +137,7 @@
   <text x="40" y="658" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     暂停后 resume 仍是同一个 session；结束后再次 start 是新 session。paused 也可以直接 finish。</text>
   <text x="40" y="678" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    待确认不自动运行、不占 running 前台槽位，整个会话暂不进入已确认统计；确认时才关闭那个终点未定的区间。</text>
+    待确认不自动运行、不占 running 前台槽位，仅不确定区间不计入确认统计；可信闭合工时保留。</text>
   <text x="40" y="698" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     修正（correct）只对 finished / recovering 进行；运行或暂停中的记录必须先结束或确认再编辑。完成或取消任务会结束它所有 running / paused 的 session。</text>
 
@@ -154,7 +154,7 @@
   <rect x="610" y="737" width="16" height="10" rx="2" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
   <text x="632" y="746" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">终态</text>
   <line x1="720" y1="742" x2="750" y2="742" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4"/>
-  <text x="762" y="746" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">崩溃路径与非正常终态</text>
+  <text x="762" y="746" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">异常路径与非正常终态</text>
 </svg>
 </figure>
 </body>

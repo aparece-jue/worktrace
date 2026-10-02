@@ -5,7 +5,7 @@
 | Status | Revised draft for user review |
 | Date | 2026-10-02 |
 | Upstream | [`../../../PROJECT_SPEC.md`](../../../PROJECT_SPEC.md), [`01-module-breakdown.en.md`](01-module-breakdown.en.md) |
-| Version split | Revised proposal in 05; product choices pending in 06 |
+| Version split | Revised proposal in 05; approved R-01–R-08 in 06; this revision awaits review |
 | Chinese version | [`04-functional-spec.zh.md`](04-functional-spec.zh.md) |
 
 > Each item must have an observable acceptance criterion. If a criterion cannot be written, the requirement is not yet understood.
@@ -31,7 +31,7 @@ Revised proposal: recording/correction/recovery/Today/tray/minimal export and re
 | ID | Feature | Acceptance criterion | Depends on | SPEC |
 | --- | --- | --- | --- | --- |
 | F-006 | Stopwatch/countdown | Pause freezes values; resume preserves budget; finish while paused works; expiry alerts only; persist effective work intervals | M04 M05 | §14 |
-| F-007 | Clock/system events | Test the reviewed sleep/lock policy. Proposed foreground pause excludes 30 minutes of suspension and never auto-resumes; clock changes in either direction require explainable reconciliation, never negative effort; normal-clock test error ≤1 second | M04 M05 M00 | §15 |
+| F-007 | Clock/system events | Apply approved R-02 sleep/lock policy. Approved foreground pause excludes 30 minutes of suspension and never auto-resumes; clock changes in either direction require explainable reconciliation, never negative effort; normal-clock test error ≤1 second | M04 M05 M00 | §15 |
 | F-008 | Sessions and intervals | Pause/resume retains a session, restart after finish creates another; intervals are the accounting source; pauses count in no daily total | M01 M05 | §11 |
 | F-009 | Window-independent timing | Closing/hiding windows keeps the core alive; reopening queries immediately; explicit quit follows the data model | M04 M05 M11 M12 | §42 |
 
@@ -40,7 +40,7 @@ Revised proposal: recording/correction/recovery/Today/tray/minimal export and re
 | ID | Feature | Acceptance criterion | Depends on | SPEC |
 | --- | --- | --- | --- | --- |
 | F-010 | Today/minimal statistics | Daily selection, current task, confirmed human effort, provisional live effort and pending time shown separately; no time-block dependency; unpaused 23:50–00:10 splits into ten minutes each day | M06 M12 | §37 |
-| F-011 | Tray | Offers current task, pause, complete, quick capture, show HUD, quit. **With every window closed, the tray stays usable and timing continues** | M11 | §42 |
+| F-011 | Tray | Offers current task, pause, complete, quick capture, quit; show HUD added in V0.1b. **With every window closed, the tray stays usable and timing continues** | M11 | §42 |
 | F-012 | Basic HUD (V0.1b) | Topmost/transparent/click-through/no focus/no taskbar; verify DPI/multiple displays/reopen; failed properties require a reviewed alternative, not a false pass | M11 M00 M12 | §38 §40 |
 | F-013 | HUD modes (V0.1b) | Locked/Edit switches immediately; edit supports move/resize, Locked does not steal input; capture-hotkey conflicts offer configurable settings | M11 M00 M12 | §40 |
 
@@ -49,7 +49,7 @@ Revised proposal: recording/correction/recovery/Today/tray/minimal export and re
 | ID | Feature | Acceptance criterion | Depends on | SPEC |
 | --- | --- | --- | --- | --- |
 | F-014 | Local-first | All data lives in local SQLite. **With the network cable unplugged, every V0.1 feature works** with no error and no degraded-mode notice | M01 | §5.1 |
-| F-015 | Immediate-restart recovery | Kill/restart within ten seconds and kill while paused produce recovering records; no automatic timing/backfill; no running-foreground occupancy; confirmation/edit/discard are usable and audited | M01 M05 M12 | §46 §57 |
+| F-015 | Immediate-restart recovery | Restart within ten seconds: uncertain open intervals enter recovering; trusted paused sessions stay paused. Retain confirmed closed effort; distinguish discarding the uncertain interval from voiding the entire session; audit both | M01 M05 M12 | §46 §57 |
 | F-016 | One core | Temporary second-launch process forwards activation and exits; no duplicate DB/timer initialization; raises existing window | M00 M11 | §42 |
 
 ---
@@ -60,8 +60,8 @@ Revised proposal: recording/correction/recovery/Today/tray/minimal export and re
 | --- | --- | --- | --- | --- |
 | F-017 | Manual correction | Add missed work, edit endpoints and void mistakes with audit; reject negative/overlapping human intervals; Today/export reconcile afterwards | M01 M05 M06 M12 | §11 §57 |
 | F-018 | Minimal export/review | JSON detail export carries schema_version/units/timezone/generated time; Markdown weekly summary includes human effort/completed tasks/pending records; auditable without AI | M07 M06 M12 | §43 §45 |
-| F-019 | Initial backup/restore | Manual consistent snapshot and pre-migration backup; before restore back up current DB and check schema/integrity; failed restore preserves original; rehearse before two weeks of real data | M01 M12 | §46 |
-| F-020 | Multi-window convergence | Subscribe/snapshot race, reordered replies, lost final notice and reopen converge; visible-window loss corrected after next ≤30s revision check; ticks never increment durable business revision | M03 M01 M12 | §5.4 |
+| F-019 | Initial backup/restore | WAL-consistent backup; maintenance mode validates candidate, creates fresh data_epoch/run_id, cancels old requests and clears caches; lower-revision restore rejects old responses; failure retains original usable DB and re-handshakes | M01 M12 | §46 |
+| F-020 | Multi-window convergence | Resolve snapshot/listener races, reordering and last-event loss; visible windows check epoch/revision within 30 seconds; reject old epochs and pre-pause session_version ticks; ticks never increment revision | M03 M01 M12 | §5.4 |
 
 ---
 

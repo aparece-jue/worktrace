@@ -27,7 +27,7 @@
 
 <svg viewBox="0 0 1000 660" role="img" aria-labelledby="sec-egress-title sec-egress-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="sec-egress-title">Worktrace 保密等级与 AI 外发边界</title>
-  <desc id="sec-egress-desc">本机（可信）与云 AI（外部）之间是一条外发边界，跨过它只有一条通路：M09 上下文按条目保密等级做白名单与保密过滤，构造出的白名单 Context Bundle 经 AI Gateway 闸门校验，交给闸门之后的 M10 AI，再由 M10 调用云端提供商。左侧四档保密等级自上而下是 STRICT_LOCAL、CONFIDENTIAL、INTERNAL、PUBLIC，是同一色相的有序阶梯，颜色越深约束越强，默认 STRICT_LOCAL；STRICT_LOCAL 与 CONFIDENTIAL 归入禁止外发一组，其虚线通路在外发边界之前以停止符号终止，INTERNAL 需按提供商显式授权、PUBLIC 在启用云 AI 后可发送，两者经 M09 进入外发链路。本机域内另列四条约束：派生摘要与提取缓存继承最严格来源等级；日志只记录 ID、等级与计数，不记录机密正文；凭据使用系统凭据存储，不放 SQLite 或前端 localStorage；模型建议的采纳不等于外发授权。</desc>
+  <desc id="sec-egress-desc">本机（可信）与云 AI（外部）之间是一条外发边界，跨过它只有一条通路：M09 上下文按条目保密等级做白名单与保密过滤，构造出的白名单 Context Bundle 经 AI Gateway 闸门校验，交给闸门之后的 M10 AI，再由 M10 调用云端提供商。左侧四档保密等级自上而下是 STRICT_LOCAL、CONFIDENTIAL、INTERNAL、PUBLIC，是同一色相的有序阶梯，颜色越深约束越强，默认 STRICT_LOCAL；STRICT_LOCAL 绝对禁止，CONFIDENTIAL 默认禁止，图示默认阻断分支，其虚线通路在外发边界之前以停止符号终止，INTERNAL 需绑定项目、提供商与端点授权、PUBLIC 在启用云 AI 后可发送，两者经 M09 进入外发链路。本机域内另列四条约束：派生摘要与提取缓存继承最严格来源等级；日志只记录 ID、等级与计数，不记录机密正文；凭据使用系统凭据存储，不放 SQLite 或前端 localStorage；模型建议的采纳不等于外发授权。</desc>
 
   <defs>
     <marker id="se-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -68,7 +68,7 @@
   <path d="M 212 140 H 222 V 300 H 212" fill="none" stroke="#6F6357" stroke-width="1"/>
   <path d="M 212 316 H 222 V 476 H 212" fill="none" stroke="#6F6357" stroke-width="1"/>
 
-  <!-- STRICT_LOCAL / CONFIDENTIAL：默认禁止云端，通路在边界前终止 -->
+  <!-- STRICT_LOCAL 绝对禁止、CONFIDENTIAL 默认禁止：默认分支在边界前终止 -->
   <path d="M 222 220 H 264 Q 272 220 272 212 V 204 Q 272 196 280 196 H 716"
         fill="none" stroke="#D9603A" stroke-width="1.2" stroke-dasharray="5,4"/>
   <path d="M 716 182 V 210" fill="none" stroke="#D9603A" stroke-width="1.8"/>
@@ -85,7 +85,7 @@
   <!-- ===== 连线标签（遮罩在方框之前，且不压任何方框） ===== -->
   <g font-size="8.5" font-family="'Geist',sans-serif" text-anchor="middle" fill="#6F6357">
     <rect x="490" y="176" width="60" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="520" y="185" fill="#D9603A">默认禁止云端</text>
+    <text x="520" y="185" fill="#D9603A">严格本地不可授权绕过</text>
     <rect x="264" y="376" width="52" height="12" rx="2" fill="#FBF9F6"/>
     <text x="290" y="385">按等级过滤</text>
     <rect x="419" y="288" width="34" height="12" rx="2" fill="#FBF9F6"/>
@@ -101,7 +101,7 @@
   <rect x="48" y="140" width="164" height="72" rx="6" fill="#E7CE97" stroke="#87661A" stroke-width="1"/>
   <text x="64" y="168" fill="#2A2320" font-size="12" font-weight="600"
         font-family="'Geist Mono',monospace">STRICT_LOCAL</text>
-  <text x="64" y="190" fill="#4A3F33" font-size="8.5" font-family="'Geist',sans-serif">默认等级 · 禁止云端</text>
+  <text x="64" y="190" fill="#4A3F33" font-size="8.5" font-family="'Geist',sans-serif">不可授权绕过 · 须先重分类</text>
 
   <rect x="48" y="228" width="164" height="72" rx="6" fill="#FBF9F6"/>
   <rect x="48" y="228" width="164" height="72" rx="6" fill="#F1E0B9" stroke="#AB8834" stroke-width="1"/>
@@ -113,7 +113,7 @@
   <rect x="48" y="316" width="164" height="72" rx="6" fill="#F8EFD9" stroke="#C4A96A" stroke-width="1"/>
   <text x="64" y="344" fill="#2A2320" font-size="12" font-weight="600"
         font-family="'Geist Mono',monospace">INTERNAL</text>
-  <text x="64" y="366" fill="#4A3F33" font-size="8.5" font-family="'Geist',sans-serif">需按提供商显式授权</text>
+  <text x="64" y="366" fill="#4A3F33" font-size="8.5" font-family="'Geist',sans-serif">绑定项目 · 提供商 · 端点</text>
 
   <rect x="48" y="404" width="164" height="72" rx="6" fill="#FBF9F6"/>
   <rect x="48" y="404" width="164" height="72" rx="6" fill="#FCF7EB" stroke="#D8C79E" stroke-width="1"/>
@@ -157,7 +157,7 @@
   <text x="32" y="570" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     AI Gateway 只接收 M09 构造的白名单 Context Bundle；M09 负责白名单与保密过滤，M10 AI 模块在闸门之后。</text>
   <text x="32" y="588" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    默认 STRICT_LOCAL，用户按提供商显式授权允许外发的条目；STRICT_LOCAL 与 CONFIDENTIAL 默认禁止云端，INTERNAL 需明确授权，PUBLIC 可在启用云 AI 后发送。</text>
+    分类与授权分别校验；STRICT_LOCAL 不可绕过，目标授权绑定项目、提供商与规范化端点，发送前再次检查。</text>
 
   <!-- ===== 图例（底部横条） ===== -->
   <path d="M 32 618 H 968" fill="none" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>

@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1000 620" role="img" aria-labelledby="task-branch-title task-branch-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="task-branch-title">Worktrace Task 状态机的旁支与终态</title>
-  <desc id="task-branch-desc">就绪状态引出三条旁支：排期（Scheduled，V0.2 才开放，虚线框）、阻塞、等待，三条旁支各自都能回到就绪。另有一条「放弃」路径从就绪通向已取消。已完成（属上一张图）与已取消两个终态都用醒目的强调箭头显式 reopen 回到就绪，其余路径一律不能从终态离开。左列分区标为旁支，右列分区标为终态。</desc>
+  <desc id="task-branch-desc">本图仅示常见路径，完整合法跃迁见数据模型 §5；就绪状态引出三条旁支：排期（Scheduled，V0.2 才开放，虚线框）、阻塞、等待，三条旁支各自都能回到就绪。另有一条「放弃」路径从就绪通向已取消。已完成（属上一张图）与已取消两个终态都用醒目的强调箭头显式 reopen 回到就绪，其余路径一律不能从终态离开。左列分区标为旁支，右列分区标为终态。</desc>
 
   <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
     <marker id="tb-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">

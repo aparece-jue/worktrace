@@ -7,11 +7,11 @@
 
 面向个人工程工作的本地任务、工时与回顾工具。Local First、AI Optional、User > Rule > AI 保留；AI 不可用不影响核心功能。暂不做通用 Agent、插件市场、Office/CAD 替代或通用工作流。
 
-PROJECT_SPEC 是愿景与原始版本草案；04 决定验收范围、05 决定依赖及实施顺序、02 决定数据口径、03 记录技术理由、99 统一术语。任何新增产品取舍在 06 标为待评估，不能仅凭技术 ADR 宣称用户已批准。中文为工作主稿，英文随同次修订同步；冲突先修订，不能让多个文件分别宣称最高优先级。
+PROJECT_SPEC 是愿景与原始版本草案；04 决定验收范围、05 决定依赖及实施顺序、02 决定数据口径、03 记录技术理由、99 统一术语。R-01～R-08 已确认；技术验证仍未完成，本轮协议与恢复行为修订待审核。新增产品取舍单列在 06，不能用实现状态代替批准状态。中文为工作主稿，英文随同次修订同步；冲突先修订，不能让多个文件分别宣称最高优先级。
 
 ## 2. 技术与运行拓扑
 
-Tauri 2、React 19、TypeScript 6、Vite 8、pnpm；推荐统一 Ant Design，MUI/emotion 待设计评估后清理。保留复制来的组件，不把 DockviewDemo 自动接入产品；dockview 是否用于正式工作区待评估。
+Tauri 2、React 19、TypeScript 6、Vite 8、pnpm；推荐统一 Ant Design，MUI/emotion 待设计评估后清理。保留复制来的组件，不把 DockviewDemo 自动接入产品；R-04 已定固定布局优先，保留 dockview 依赖和演示，不接入 V0.1 发布入口。
 
 Rust 为单一应用核心进程，WebView/系统渲染可产生其他进程；不要承诺整个应用只有一个 OS 进程。Rust 服务是业务状态唯一权威，SQLite 是持久化依据，React 维护可重建视图缓存及 UI 临时状态。多个窗口可短暂不同步，以下协议提供收敛，不能宣称永不出现展示差异。
 
@@ -52,32 +52,42 @@ Command 按意图命名，一次完成业务事务；Today 等聚合视图一次
 
 已提交后广播失败只记诊断，不返回“事务失败”让用户重复操作。非幂等命令须避免重复提交；需要自动重试时加 request_id 并在同事务保存可重放结果，否则客户端不得盲目重试。
 
-## 5. 业务 revision 与同步协议
+## 5. 数据代次、业务 revision 与计时协议
 
-app_meta.revision 随成功业务写事务加 1 并持久化；同事务多项变化合并为一条 domain.changed 失效通知，附变化实体 ID/类别。无业务变化不加；心跳和 timer.tick 不加。快照 revision 与数据在同一读事务取得。
+app_meta 保存 data_epoch（UUID）与 revision。新数据库生成 epoch；成功恢复/替换数据库生成全新 epoch，不能沿用备份内的 epoch。同一 epoch 内业务写事务 revision +1，同事务多项变化合成一条 domain.changed。无业务变化、心跳、timer.tick 不加业务 revision。快照的数据、epoch、revision 在同一读事务取得。
 
-事件信封：event、revision、at（Unix 毫秒）、payload。多个事务提交后按 revision 顺序广播；前端仍必须处理延迟、重复及乱序。
+所有业务响应/快照/通知携带 data_epoch、revision；修改命令带 expected_data_epoch 和 expected_row_version。epoch 不匹配返回 DATA_EPOCH_MISMATCH，不写入；非幂等 request_id 的重放也只在同一 epoch 内。revision 仅同一 epoch 内可比较，不能用恢复后的低版本号推断旧数据。
 
-1. 窗口先注册监听并暂存通知，然后拉取带 revision 的一致快照。
-2. 应用快照，丢弃 revision <= 快照值的通知；后续通知让受影响查询失效。
-3. 查询响应带 revision；比该视图已应用/所需版本旧的响应不得覆盖，新请求合并去重。
-4. 窗口再次显示/恢复、IPC 重连时检查 get_revision；可见窗口最多每 30 秒轻量校验，补救丢失最后一条事件。后台窗口重显前校验。版本检查不拉全库。
-5. 跳号/乱序且缓存无法证明一致时重新取快照；允许短暂延迟，不依赖通知永不丢失。
+1. 窗口先监听并暂存通知，再拉一致快照。
+2. 新 epoch 的权威快照使全部业务/计时缓存失效；丢弃旧 epoch 响应、通知和未应用建议。普通未知 epoch 通知只触发重新握手，不直接接纳，防止迟到通知把缓存切回旧库。
+3. 应用快照后丢弃同 epoch 且 revision <= 快照版本的通知。受影响视图合并刷新，查询响应比已应用/所需版本旧时不得覆盖。
+4. 重显、恢复、IPC 重连以及可见窗口至多每 30 秒检查 get_revision，返回 epoch+revision；隐藏窗口显示前校验。最后事件丢失仍可收敛。
+5. 跳号/乱序无法证明一致时取新快照。恢复期间暂停服务受理新写入，返回 DATA_RESTORE_IN_PROGRESS；取消旧队列/查询/AI 请求，完成后恢复握手。
 
-![revision 同步协议](images/revision-sync.svg)
+事件信封：data_epoch、event、revision、at（Unix 毫秒）、payload。广播按提交顺序；失败只诊断，不回滚已提交业务。
 
-> 图：①–⑤ 即上面五步。虚线是异步通知与独立通道；`timer.tick` 不进业务 revision。
+timer.tick 和计时查询均携带 data_epoch、run_id、session_id、session_version（work_session.row_version）、tick_seq、as_of、active_ms、remaining_ms、state。tick_seq 每个 run 内递增，查询/命令结果也返回同一展示序列基线。前端先检查 epoch、run、会话/状态版本，再比较 tick_seq；旧状态生成的 tick 即使序号较新也不能覆盖暂停/切换后的展示。较新 session_version 的未知 tick 先触发计时快照，不能自行推导状态跃迁。
 
-timer.tick 独立携带 run_id、tick_seq、as_of、session_id、active_ms、remaining_ms。每个 run 内递增；旧 run/旧序号丢弃，不触发业务 revision 写入。重开窗口立即查询计时快照，不等下一秒 tick。
+计时状态变更由一个串行协调器按 start/pause/resume/finish/系统事件顺序处理：同一时钟采样生成事务所需区间事实 → 提交 DB 并增加 session_version → 应用内存计时基线 → 返回结果/发送状态快照。tick 和计时查询经同一协调器采样，不在提交与基线应用之间生成不一致 DTO。提交失败不应用内存变更；提交成功后内存应用失败进入故障恢复，不返回普通可重试的失败。持久化事实是恢复依据，内存基线是可重建运行态。
+
+![版本与快照同步](images/revision-sync.svg)
+
+> 图展示常规同步；data_epoch 切换、计时状态版本与恢复队列隔离的完整规则以本节为准。
 
 ## 6. 前端状态与外发边界
 
 每个 JS 上下文只有一个 domainState 订阅入口；页面通过 hooks 读取，清理监听。事件只作缓存失效，计时 tick 更新展示值；业务规则留在 Rust。先用 useSyncExternalStore 等简单方案，前端缓存复杂后允许评估状态库，不能把“不使用库”当领域权威的必要条件。
 
-AI Gateway 只接收 M09 构造的白名单 Context Bundle。V0.3 即引入最小任务/项目保密策略，完整文档提取到 V0.4。默认 STRICT_LOCAL；用户按提供商显式授权允许外发的条目。STRICT_LOCAL 与 CONFIDENTIAL 默认禁止云端，INTERNAL 需明确授权，PUBLIC 可在启用云 AI 后发送。派生摘要/提取缓存继承最严格来源等级，日志仅记录 ID、等级与计数，不记录机密正文。凭据使用系统凭据存储，不放 SQLite 或前端 localStorage；模型建议的采纳不等于外发授权。
+AI Gateway 只接收 M09 构造的白名单 Context Bundle。V0.3 即引入最小任务/项目保密策略，完整文档提取到 V0.4。默认 STRICT_LOCAL；用户按项目、提供商与规范化端点授权允许外发的条目。STRICT_LOCAL 禁止云端，CONFIDENTIAL 默认禁止，INTERNAL 需明确授权，PUBLIC 可在启用云 AI 后发送。派生摘要/提取缓存继承最严格来源等级，日志仅记录 ID、等级与计数，不记录机密正文。凭据使用系统凭据存储，不放 SQLite 或前端 localStorage；模型建议的采纳不等于外发授权。
 
 ## 7. 待验证与索引
 
 在实现阶段验证：Windows HUD 穿透/无焦点与 DPI、多入口开发/打包路径、数据库执行线程与关闭/备份竞争、断网/锁屏/休眠/改时计时行为。尚无实测结论，不能写“已验证”。HUD 可行性实验不阻塞核心记录闭环。
 
 [模块拆分](01-module-breakdown.zh.md) · [数据模型](02-data-model.zh.md) · [ADR](03-adr.zh.md) · [功能验收](04-functional-spec.zh.md) · [路线图](05-roadmap.zh.md) · [术语](99-glossary.zh.md)
+
+## 8. 外发授权与分类优先级（本轮修订）
+
+分类和目的地授权分别校验：STRICT_LOCAL 永不因授权自动外发；若用户决定外发，必须先显式重新分类并查看影响范围。CONFIDENTIAL 默认禁止，需单独数据范围批准；INTERNAL 需授权；PUBLIC 在云 AI 启用后可发。派生内容不得仅重命名/更换项目解除最严格来源等级。
+
+授权绑定 project_id、provider_id、endpoint（规范化 URL）及允许等级/范围。项目允许外发不等于任意提供商均可接收；更换 endpoint 必须重新授权。发送前与构造 Bundle 时均检查当前分类/授权版本；撤销后取消未发请求，已发请求不能承诺撤回。密级调整、目的地变更和授权撤销记录审计，日志不含正文/凭据。

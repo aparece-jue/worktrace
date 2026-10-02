@@ -133,12 +133,12 @@
 | 唯一真相源 | Single Source of Truth | 领域状态只在 Rust 侧存在一份（ADR-006） |
 | 命令 | Command | 前端 → Rust 的请求/响应通道 |
 | 事件 | Event | Rust → 前端的广播通道 |
-| 信封 | Envelope | 事件的统一外层结构 `{event, revision, at, payload}（业务事件；at 为 Unix 毫秒）` |
+| 信封 | Envelope | 事件的统一外层结构 `{event, data_epoch, revision, at, payload}（业务事件；at 为 Unix 毫秒）` |
 | 修订号 | revision | 随业务事务提交的持久版本号；tick/心跳不增加（ADR-010） |
 | 快照 | Snapshot | `get_snapshot()` 返回的当前状态全量，供窗口挂载时对齐 |
 | 状态镜像 | State Mirror | 前端缓存层 `src/services/domainState.ts`，唯一订阅入口 |
 | 失效信号 | Invalidation Signal | 领域事件在前端的角色 —— 触发重拉，而非打补丁 |
-| 待确认 | needs_review | 旧 run 未结束会话的标记，进入 recovering，不占运行槽位，确认后才计入已确认统计 |
+| 待确认 | needs_review | 不确定区间标记，session 镜像汇总；不占运行槽位，仅该区间确认后计入 |
 | 平台层 | Platform Layer | `src-tauri/src/platform/`，Win32 调用的唯一边界（ADR-005） |
 | 组合根 | Composition Root | `lib.rs`，唯一装配全部层的地方 |
 | 领域层 | Domain Layer | `domain/`，纯类型与规则，无 IO |
@@ -163,9 +163,11 @@
 | work_interval 有效工作区间 | 开始/结束事实；暂停关闭区间，恢复新建区间，跨报表范围裁剪 |
 | source 来源 | user/rule/ai，记录值从哪里来；采纳 AI 不改变来源 |
 | confirmed_at 确认 | 用户确认权，任何已确认值不被后台覆盖 |
-| recovering 恢复待确认 | 旧 run 未结束记录，用户确认/修正/丢弃；不继续计时 |
+| recovering 恢复待确认 | 含不确定区间的恢复记录；可信闭合工时保留，不继续计时 |
 | tick_seq | 单次应用 run 的计时展示序号，不是持久业务版本 |
 | 暂计 | 正在运行区间截至快照时间的值，与已确认结束时间分列 |
 | 未分配 | 同一 kind 权重总和不足 1 的剩余人工工时 |
 
-来源/确认、休眠与历史分类默认值详见 02/06，本轮所有文档仍为待评估草案。
+来源/确认、休眠与历史分类默认值详见 02/06，R-01～R-08 已批准；本轮协议与恢复修订待审核，平台验证与实现尚未完成。
+
+数据代次 `data_epoch`：数据库身份 UUID，创建/恢复时更新；revision 仅在同一代次内比较。`session_version`：计时会话状态版本，过滤暂停前晚到的 tick。`needs_review`：区间级不确定标记，session 汇总反映它；可信闭合区间不因此被排除。

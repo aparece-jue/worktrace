@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1000 900" role="img" aria-labelledby="er-core-title er-core-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="er-core-title">Worktrace V0.1 核心表的实体关系</title>
-  <desc id="er-core-desc">八张 V0.1 表及其基数关系：project 一对多 task，task 自引用出父子层级、一对多 task_change 与 work_session，work_session 一对多 work_interval 与 time_edit，application_run 一对多 work_session；app_meta 是只存 revision 的单行表，与任何表都没有外键。work_interval 用强调色标出，因为实际工时一律由有效区间聚合，两张审计表不是第二份统计真相源。</desc>
+  <desc id="er-core-desc">八张 V0.1 表及其基数关系：project 一对多 task，task 自引用出父子层级、一对多 task_change 与 work_session，work_session 一对多 work_interval 与 time_edit，application_run 一对多 work_session；app_meta 是存 data_epoch 与 revision 的单行表，与任何表都没有外键。work_interval 用强调色标出，因为实际工时一律由有效区间聚合，两张审计表不是第二份统计真相源。</desc>
 
   <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
     <marker id="er-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -66,7 +66,7 @@
   <line x1="700" y1="106" x2="920" y2="106" stroke="rgba(138,148,163,0.35)" stroke-width="1"/>
   <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
     <text x="710" y="122"># singleton INTEGER　单行</text>
-    <text x="710" y="136">revision INTEGER</text>
+    <text x="710" y="136">data_epoch · revision</text>
   </g>
 
   <!-- ===== task ===== -->
@@ -154,7 +154,7 @@
     <text x="110" y="686">→ session_id TEXT</text>
     <text x="110" y="700">started_at INTEGER</text>
     <text x="110" y="714">ended_at INTEGER</text>
-    <text x="110" y="728">voided_at INTEGER</text>
+    <text x="110" y="728">voided_at · needs_review</text>
   </g>
 
   <!-- ===== 注记 ===== -->

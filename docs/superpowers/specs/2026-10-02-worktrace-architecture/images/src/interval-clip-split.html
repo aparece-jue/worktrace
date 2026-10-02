@@ -27,7 +27,7 @@
 
 <svg viewBox="0 0 1000 870" role="img" aria-labelledby="clip-split-title clip-split-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="clip-split-title">Worktrace 统计的区间裁剪与人工/机器分离</title>
-  <desc id="clip-split-desc">自上而下：查询输入带着半开范围与同一快照时刻，取出有效区间集合并排除 recovering 与 discarded；对每一段区间按公式取与范围的交集，这就是全图唯一的计算规则，也是强调项；裁剪结果按 mode 分成四类并分别汇总——人工只算 FOREGROUND，机器分 BACKGROUND 与 PASSIVE 两项，WAITING 单列，人工与机器之间有一条明确禁止跨越的合并边界；四类测量各自进入报表 DTO，已确认已结束与实时暂计分开标注。</desc>
+  <desc id="clip-split-desc">自上而下：查询输入带着半开范围与同一快照时刻，取出有效区间集合并排除待确认及作废区间、整次 discarded；对每一段区间按公式取与范围的交集，这就是全图唯一的计算规则，也是强调项；裁剪结果按 mode 分成四类并分别汇总——人工只算 FOREGROUND，机器分 BACKGROUND 与 PASSIVE 两项，WAITING 单列，人工与机器之间有一条明确禁止跨越的合并边界；四类测量各自进入报表 DTO，已确认已结束与实时暂计分开标注。</desc>
 
   <defs>
     <marker id="cs-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -84,7 +84,7 @@
   <text x="560" y="114" fill="#2A2320" font-size="12" font-weight="600"
         font-family="'Geist',sans-serif" text-anchor="middle">有效区间集合</text>
   <text x="560" y="134" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">排除 recovering / discarded</text>
+        text-anchor="middle">排除待确认 / 作废区间</text>
   <text x="560" y="150" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">已确认已结束 与 实时暂计 分开标注</text>
 
@@ -141,7 +141,7 @@
   <text x="500" y="652" fill="#2A2320" font-size="12" font-weight="600"
         font-family="'Geist',sans-serif" text-anchor="middle">报表 DTO</text>
   <text x="500" y="674" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">measure · timezone · range · as_of · revision</text>
+        text-anchor="middle">measure · timezone · range · as_of · epoch / revision</text>
   <text x="500" y="692" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">四类测量并列返回，绝不并成一个数</text>
 

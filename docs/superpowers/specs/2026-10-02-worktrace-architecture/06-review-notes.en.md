@@ -1,6 +1,6 @@
 # Worktrace — Revision Summary and Review Choices
 
-Status: for user review, not approved or implemented. Date: 2026-10-02. [Chinese](06-review-notes.zh.md).
+Status: R-01–R-08 approved; this revision awaits review; implementation and platform probes remain open. Date: 2026-10-02. [Chinese](06-review-notes.zh.md).
 
 ## 1. Changes
 
@@ -24,7 +24,7 @@ work_interval is one proposed implementation. A pause-interval model is also pos
 
 ## 3. Approved product choices (R-01…R-08)
 
-| ID | Choice | Proposed default | Alternative/impact |
+| ID | Choice | Approved choice | Alternative/impact |
 | --- | --- | --- | --- |
 | R-01 | First release scope | Core V0.1, HUD/hotkeys V0.1b | Merge if HUD is essential day one; core still implemented first |
 | R-02 | Foreground sleep/lock | Auto-pause, explicit resume | Wall time includes absence; asking on every wake adds interaction |
@@ -35,7 +35,7 @@ work_interval is one proposed implementation. A pause-interval model is also pos
 | R-07 | Mini window | Schedule after real-use evidence | Prioritize Mini before click-through HUD if interactive controls matter more |
 | R-08 | Weights | Per-kind total ≤1, Unallocated remainder, no auto-normalization | Normalization must visibly explain changed accounting |
 
-Defaults are proposals, not confirmed preferences. Respond by R-ID in the next review if useful.
+R-01–R-08 were approved on 2026-10-02; this revision does not reopen those choices.
 
 ## 4. Implementation probes
 
@@ -55,3 +55,15 @@ This revision checks document structure, links, acceptance IDs and representativ
 Observe capture/start effort, missed-entry repair, forgotten-stop correction, recovery friction and practical weekly-summary value. Record steps/examples before inventing percentage targets. Then choose whether splits/HUD/scoring/AI complexity earn their cost.
 
 Read [roadmap](05-roadmap.en.md), R-01…R-08, [data](02-data-model.en.md), [acceptance](04-functional-spec.en.md), then [architecture](00-architecture.en.md).
+
+## 6. New revisions awaiting review
+
+- Fresh data_epoch on restore prevents revision rollback and stale responses; session_version filters late ticks and the coordinator serializes DB commit and timer baseline application.
+- Trusted paused sessions remain paused. Only uncertain intervals need review; confirmed earlier effort remains counted. Discarding one interval differs from voiding an entire session. This behavioral change needs review.
+- ContextFact replacement specifies an atomic three-step sequence compatible with the partial unique index.
+- STRICT_LOCAL cannot be overridden by destination grants. Grants bind project/provider/normalized endpoint and are rechecked at send time; revocation blocks unsent requests only.
+- Diagrams distinguish views from OS processes, implementation order from dependencies, and common state paths from the normative table. Tray HUD is V0.1b.
+
+This revision changes documents and existing diagrams only. Example constraint checks do not constitute runtime acceptance.
+
+Checks passed: links/fences and bilingual IDs/SQL across 17 Markdown files; strict XML/accessibility structure and HTML-source export for 13 SVGs; six representative SQLite constraint cases and ContextFact replacement/injected rollback/unique-current/FK checks. Application acceptance and per-diagram visual review have not been performed.

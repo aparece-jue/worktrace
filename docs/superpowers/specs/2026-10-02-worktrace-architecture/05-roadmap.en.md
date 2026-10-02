@@ -58,3 +58,5 @@ Core chain: M02→M01→M04/M05→minimal M06→minimal M07. M12 shell can mock 
 ## 5. Slice specification
 
 Each spec lists scope/F-IDs, commands/DTOs, transactions/invariants, errors/retries, tests, manual acceptance and deviations. Track implementation separately as not-started/in-progress/accepted. Meaningful invariant tests replace mechanical one-test-per-function rules.
+
+Implementation checks for this revision: M01 validates epoch switching and ContextFact replacement; M04/M05 validate commit/baseline serialization and stale ticks; M06 retains trusted closed effort within recovering. R-01–R-08 are approved; this protocol/recovery revision awaits review.

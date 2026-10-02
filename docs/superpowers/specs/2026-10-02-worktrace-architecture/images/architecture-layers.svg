@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1000 660" role="img" aria-labelledby="arch-layers-title arch-layers-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="arch-layers-title">Worktrace 模块边界、依赖方向与允许依赖</title>
-  <desc id="arch-layers-desc">自顶向下五个模块边界：commands 边界、services 服务、storage 持久化、domain 领域、platform 平台，依赖方向由上至下；右列列出每层允许依赖的对象，其中 domain 仅可依赖纯事件类型且禁止 IO；底部虚线带表示 events 为横切，可被任何层发布与订阅。</desc>
+  <desc id="arch-layers-desc">自顶向下五个模块边界：commands 边界、services 服务、storage 持久化、domain 领域、platform 平台，依赖方向由上至下；右列列出每层允许依赖的对象，其中 domain 仅可依赖纯事件类型且禁止 IO；底部虚线带表示 events 为横切，纯类型供领域引用，运行时订阅限适配层。</desc>
 
   <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
     <marker id="c-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -74,7 +74,7 @@
   <text x="170" y="503" fill="#6f6357" font-size="10" font-family="'Geist',sans-serif">纯事件类型 · 独立运行时分发适配</text>
   <line x1="596" y1="472" x2="596" y2="504" stroke="rgba(142,116,181,0.45)" stroke-width="1"/>
   <text x="616" y="490" fill="#8E74B5" font-size="10" font-family="'Geist Mono',monospace">纯类型：无</text>
-  <text x="616" y="505" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">广播适配可依赖 Tauri；任何层可订阅</text>
+  <text x="616" y="505" fill="#6f6357" font-size="9" font-family="'Geist',sans-serif">广播适配可依赖 Tauri；运行时层订阅</text>
 
   <!-- 组合根 -->
   <text x="100" y="536" fill="#6f6357" font-size="10" font-family="'Geist',sans-serif">

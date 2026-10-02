@@ -23,11 +23,11 @@
 <figure>
   <p class="eyebrow">数据模型 · 状态跃迁 · §5</p>
   <h1>Task 状态机（旁支与终态）</h1>
-  <p class="sub">就绪是枢纽：三条旁支都能回到它，两个终态都只能靠显式 reopen 回去。</p>
+  <p class="sub">常见路径示意；完整规则以状态表为准。就绪是枢纽：三条旁支都能回到它，两个终态都只能靠显式 reopen 回去。</p>
 
 <svg viewBox="0 0 1000 620" role="img" aria-labelledby="task-branch-title task-branch-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="task-branch-title">Worktrace Task 状态机的旁支与终态</title>
-  <desc id="task-branch-desc">就绪状态引出三条旁支：排期（Scheduled，V0.2 才开放，虚线框）、阻塞、等待，三条旁支各自都能回到就绪。另有一条「放弃」路径从就绪通向已取消。已完成（属上一张图）与已取消两个终态都用醒目的强调箭头显式 reopen 回到就绪，其余路径一律不能从终态离开。左列分区标为旁支，右列分区标为终态。</desc>
+  <desc id="task-branch-desc">本图仅示常见路径，完整合法跃迁见数据模型 §5；就绪状态引出三条旁支：排期（Scheduled，V0.2 才开放，虚线框）、阻塞、等待，三条旁支各自都能回到就绪。另有一条「放弃」路径从就绪通向已取消。已完成（属上一张图）与已取消两个终态都用醒目的强调箭头显式 reopen 回到就绪，其余路径一律不能从终态离开。左列分区标为旁支，右列分区标为终态。</desc>
 
   <defs>
     <marker id="tb-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">

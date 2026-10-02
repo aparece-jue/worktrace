@@ -63,7 +63,7 @@ Commit business writes/revision together and coalesce one invalidation per trans
 
 ## ADR-011 Effective intervals/recovery
 
-V0.1 work_interval is independent of V1 activity segments. Partial unique index protects running foreground occupancy. Recover unfinished previous runs without heartbeat-age threshold; corrections are versioned/audited.
+V0.1 work_interval is independent of V1 activity segments. Partial unique index protects running foreground occupancy. Recover uncertain intervals without a heartbeat-age threshold; trusted paused sessions stay paused and confirmed closed effort remains counted; corrections are versioned/audited.
 
 ## ADR-012 — Versions and product trade-offs
 
@@ -79,7 +79,7 @@ These eight product trade-offs are approved (see [review notes](06-review-notes.
 | R-02 | Foreground auto-pauses on lock/sleep; the user resumes explicitly afterwards |
 | R-03 | Historical statistics recompute from **current** tags, projects, and weights; reports state the basis; exports freeze the result |
 | R-04 | Fixed layout first; keep the dockview dependency, but `DockviewDemo` **must not ship in V0.1** |
-| R-05 | AI egress defaults to `STRICT_LOCAL`; opt in explicitly per project or provider |
+| R-05 | AI egress defaults to `STRICT_LOCAL`; authorize project/provider/normalized endpoint together; never override STRICT_LOCAL |
 | R-06 | Ship knowledge usage and sample facts first; capability scoring is an **experiment that can be switched off** |
 | R-07 | The Mini window is scheduled later, driven by real usage |
 | R-08 | Per-kind tag weights sum to ≤1; the remainder stays unallocated and is **never auto-normalised** |
