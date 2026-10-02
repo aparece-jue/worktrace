@@ -57,20 +57,20 @@
 
   <!-- ===== 连线（在方框之前） ===== -->
   <!-- COMMAND：右 -> 左 -->
-  <path d="M 530 200 H 470" stroke="#6F6357" stroke-width="1" marker-end="url(#rt-arrow)"/>
+  <path d="M 530 200 H 470" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#rt-arrow)"/>
   <rect x="452" y="182" width="96" height="12" rx="2" fill="#FBF9F6"/>
   <text x="500" y="191" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
         text-anchor="middle" letter-spacing="0.06em">COMMAND</text>
 
   <!-- EVENT：左 -> 右（焦点，accent） -->
-  <path d="M 470 250 H 530" stroke="#D9603A" stroke-width="1" marker-end="url(#rt-arrow-accent)"/>
+  <path d="M 470 250 H 530" fill="none" stroke="#D9603A" stroke-width="1" marker-end="url(#rt-arrow-accent)"/>
   <rect x="452" y="232" width="96" height="12" rx="2" fill="#FBF9F6"/>
   <text x="500" y="241" fill="#D9603A" font-size="8" font-family="'Geist Mono',monospace"
         text-anchor="middle" letter-spacing="0.06em">EVENT + rev</text>
 
   <!-- 核心内部：服务 <-> SQLite / 托盘 -->
-  <path d="M 260 236 V 268" stroke="#6F6357" stroke-width="1"/>
-  <path d="M 330 268 V 236" stroke="#6F6357" stroke-width="1"/>
+  <path d="M 260 236 V 268" fill="none" stroke="#6F6357" stroke-width="1"/>
+  <path d="M 330 268 V 236" fill="none" stroke="#6F6357" stroke-width="1"/>
 
   <!-- ===== 核心进程内的节点 ===== -->
   <!-- 领域服务 + 事件总线（焦点，accent） -->

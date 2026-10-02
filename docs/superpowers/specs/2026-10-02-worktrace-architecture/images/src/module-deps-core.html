@@ -44,18 +44,19 @@
   <path d="M 500 170 V 126" stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
   <path d="M 500 270 V 226" stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
   <path d="M 500 370 V 326" stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
-  <!-- M02 -> M01（焦点：枢纽的主出口） -->
+  <!-- M02 -> M01（焦点：枢纽的主出口）。fill="none" 必须写：SVG 的 fill 初值是黑色，
+       开放路径会被隐式闭合，多拐点连线不写就渲染成实心黑块。 -->
   <path d="M 265 470 V 448 Q 265 440 273 440 H 492 Q 500 440 500 432 V 426"
-        stroke="#D9603A" stroke-width="1" marker-end="url(#dp-arrow-accent)"/>
-  <!-- M00 -> M04，绕右侧进入 -->
-  <path d="M 585 498 H 700 Q 708 498 708 490 V 306 Q 708 298 700 298 H 585"
-        stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
+        fill="none" stroke="#D9603A" stroke-width="1" marker-end="url(#dp-arrow-accent)"/>
+  <!-- M00 -> M04，走 M00 与 M03 之间的空档上行，不穿过 M03 方框 -->
+  <path d="M 585 498 H 609 Q 617 498 617 490 V 306 Q 617 298 609 298 H 585"
+        fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
   <!-- M03 -> M04，更外侧 -->
   <path d="M 820 490 H 852 Q 860 490 860 482 V 290 Q 860 282 852 282 H 585"
-        stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
+        fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
   <!-- M03 -> M02，从下方绕过 M00 -->
   <path d="M 650 526 V 560 Q 650 568 642 568 H 273 Q 265 568 265 560 V 526"
-        stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
+        fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
 
   <!-- ===== Rank 0 ===== -->
   <rect x="415" y="70" width="170" height="56" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
@@ -85,9 +86,9 @@
   <rect x="500" y="376" width="34" height="12" rx="2" fill="transparent" stroke="rgba(203,167,88,0.45)" stroke-width="0.8"/>
   <text x="517" y="385" fill="#9A7B2E" font-size="7" font-family="'Geist Mono',monospace"
         text-anchor="middle" letter-spacing="0.08em">CORE</text>
-  <text x="500" y="418" fill="#2A2320" font-size="12" font-weight="600"
+  <text x="500" y="404" fill="#2A2320" font-size="12" font-weight="600"
         font-family="'Geist',sans-serif" text-anchor="middle">M01 存储</text>
-  <text x="500" y="436" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+  <text x="500" y="420" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">迁移 · 事务 · 区间查询</text>
 
   <!-- ===== Rank 4 ===== -->
