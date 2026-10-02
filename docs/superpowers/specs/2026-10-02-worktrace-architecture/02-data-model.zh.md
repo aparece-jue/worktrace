@@ -222,4 +222,8 @@ V0.1 task_change 记录任务状态/质量/归属变更，与实体更新同事�
 
 ContextFact 取代保持 superseded_by 模型，可采用以下同事务顺序：① 新事实先令 superseded_by=旧事实 ID，因此尚非 current；② 旧事实 superseded_by=新 ID；③ 新事实 superseded_by=NULL，成为唯一 current。事务成功后链无环；失败全部回滚。中间态不对其他读取者可见，下一代取代同样操作。拒绝跨项目/key、自引用、任意编辑历史指针。M09 不依赖插入第二条 current 后再修复，也不假设 UNIQUE 延迟到提交才检查。
 
+![ContextFact 三步取代](images/contextfact-supersede.svg)
+
+> 图：换个顺序就会撞上部分唯一索引——这三步的顺序是为满足「当前值只有一条」而定的。
+
 所有工时查询增加 interval.needs_review=0 与 voided_at IS NULL 条件；作废整个会话不得影响其他会话。epoch/snapshot、状态版本/tick、暂停可信恢复、部分丢弃、事实取代顺序均需独立故障测试。

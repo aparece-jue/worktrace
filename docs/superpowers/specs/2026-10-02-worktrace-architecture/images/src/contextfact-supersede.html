@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Worktrace ContextFact 三步取代</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif+TC:wght@400&family=Noto+Sans+TC:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{--paper:#FBF9F6;--ink:#2A2320;--muted:#6F6357;--accent:#D9603A;--rule:rgba(42,35,32,0.14);}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font-family:'Geist','Noto Sans TC',system-ui,sans-serif;
+       display:flex;justify-content:center;padding:3rem 1.5rem}
+  figure{margin:0;max-width:1000px;width:100%}
+  .eyebrow{font-family:'Geist Mono',monospace;font-size:11px;letter-spacing:.16em;
+           text-transform:uppercase;color:var(--muted);margin:0 0 .5rem}
+  h1{font-family:'Instrument Serif','Noto Serif TC',serif;font-weight:400;
+     font-size:1.75rem;margin:0 0 .35rem}
+  .sub{color:var(--muted);font-size:.9rem;margin:0 0 1.75rem}
+  svg{display:block;width:100%;height:auto}
+</style>
+</head>
+<body>
+<figure>
+  <p class="eyebrow">数据模型 · 事实取代 · §11</p>
+  <h1>ContextFact 三步取代</h1>
+  <p class="sub">「当前值只有一条」是部分唯一索引逼出来的。这三步的顺序不是风格问题——换个顺序就会撞上索引。</p>
+
+<svg viewBox="0 0 1000 700" role="img" aria-labelledby="cf-title cf-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="cf-title">Worktrace ContextFact 在同一事务内的三步取代顺序</title>
+  <desc id="cf-desc">同项目同 key 已有一条当前事实 A。取代在同一事务内分三步：第一步让新事实 B 的 superseded_by 指向 A，此时 B 还不是 current；第二步让 A 的 superseded_by 指向 B，A 退出 current；第三步把 B 的 superseded_by 清为 NULL，B 成为唯一 current。提交后链无环且恰好一行 current，任一步失败则整笔回滚、不产生半个取代。中间态不对其他读取者可见，下一代取代重复同样三步。整笔事务可回滚是强调项。</desc>
+
+  <defs>
+    <marker id="cf-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="cf-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 连线（先画） ===== -->
+  <path d="M 450 100 V 148" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#cf-arrow)"/>
+  <path d="M 450 224 V 264" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#cf-arrow)"/>
+  <path d="M 450 340 V 380" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#cf-arrow)"/>
+  <path d="M 450 456 V 496" fill="none" stroke="#D9603A" stroke-width="1.2" marker-end="url(#cf-arrow-accent)"/>
+  <!-- 失败括号：罩住三步，虚线，任一步失败都从这里出去 -->
+  <path d="M 668 186 H 700 Q 708 186 708 194 V 410 Q 708 418 700 418 H 668"
+        fill="none" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4"/>
+  <path d="M 708 306 H 750" fill="none" stroke="#6F6357" stroke-width="1"
+        stroke-dasharray="5,4" marker-end="url(#cf-arrow)"/>
+
+  <!-- ===== 标签（遮罩在方框之前，且不压任何方框） ===== -->
+  <g font-family="'Geist Mono',monospace" font-size="8.5" text-anchor="middle" fill="#6F6357">
+    <rect x="716" y="196" width="64" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="748" y="205">任一步失败</text>
+  </g>
+
+  <!-- ===== 起点 ===== -->
+  <path d="M 280 44 H 620 A 28 28 0 0 1 620 100 H 280 A 28 28 0 0 1 280 44 Z" fill="#FBF9F6"/>
+  <path d="M 280 44 H 620 A 28 28 0 0 1 620 100 H 280 A 28 28 0 0 1 280 44 Z"
+        fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="450" y="70" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">同项目同 key 已有当前事实 A</text>
+  <text x="450" y="88" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">部分唯一索引 WHERE superseded_by IS NULL</text>
+
+  <!-- ===== 三步 ===== -->
+  <rect x="240" y="148" width="420" height="76" rx="6" fill="#FBF9F6"/>
+  <rect x="240" y="148" width="420" height="76" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="450" y="180" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">① 新事实 B.superseded_by = A</text>
+  <text x="450" y="200" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">B 因此尚不是 current</text>
+
+  <rect x="240" y="264" width="420" height="76" rx="6" fill="#FBF9F6"/>
+  <rect x="240" y="264" width="420" height="76" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="450" y="296" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">② 旧事实 A.superseded_by = B</text>
+  <text x="450" y="316" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">A 退出 current，仍是历史链的一环</text>
+
+  <rect x="240" y="380" width="420" height="76" rx="6" fill="#FBF9F6"/>
+  <rect x="240" y="380" width="420" height="76" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="450" y="412" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">③ 新事实 B.superseded_by = NULL</text>
+  <text x="450" y="432" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">B 成为唯一 current</text>
+
+  <!-- ===== 提交 ===== -->
+  <path d="M 280 496 H 620 A 28 28 0 0 1 620 552 H 280 A 28 28 0 0 1 280 496 Z" fill="#FBF9F6"/>
+  <path d="M 280 496 H 620 A 28 28 0 0 1 620 552 H 280 A 28 28 0 0 1 280 496 Z"
+        fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="450" y="522" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">提交</text>
+  <text x="450" y="540" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">链无环，恰好一行 current</text>
+
+  <!-- ===== 回滚 ===== -->
+  <rect x="750" y="268" width="230" height="76" rx="6" fill="#FBF9F6"/>
+  <rect x="750" y="268" width="230" height="76" rx="6" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
+  <text x="865" y="300" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">整笔回滚</text>
+  <text x="865" y="320" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">不产生半个取代</text>
+
+  <!-- ===== 注记 ===== -->
+  <text x="40" y="584" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    中间态不对其他读取者可见；下一代取代重复同样的三步，不另起一套顺序。</text>
+  <text x="40" y="604" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    拒绝跨项目 / key 的取代、自引用，以及任意编辑历史指针。</text>
+  <text x="40" y="624" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    M09 不依赖「先插入第二条 current 再修复」，也不假设 UNIQUE 延迟到提交才检查——三步顺序本身就是为满足部分唯一索引而设计的。</text>
+
+  <!-- ===== 图例（底部横条） ===== -->
+  <line x1="30" y1="646" x2="970" y2="646" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="666" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <ellipse cx="128" cy="662" rx="18" ry="9" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="156" y="666" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">事务的两端</text>
+  <rect x="270" y="657" width="36" height="10" rx="4" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="318" y="666" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">事务内的一步</text>
+  <rect x="440" y="657" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="462" y="666" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">焦点：这一步之后才唯一</text>
+  <line x1="650" y1="662" x2="680" y2="662" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4"/>
+  <text x="692" y="666" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">三步共用同一个失败出口</text>
+</svg>
+</figure>
+</body>
+</html>

@@ -204,4 +204,6 @@ Enter maintenance on DB restore/replacement; cancel old queued work/queries/AI r
 
 Keep the superseded_by model for ContextFact with this atomic order: insert new fact temporarily superseded_by=old ID (not current); set old.superseded_by=new ID; clear new.superseded_by to NULL. On commit the chain is acyclic and exactly one current row exists; failure rolls back everything. Intermediate states are not visible to other readers. Reject cross-project/key links, self-references and arbitrary historical pointer edits. Do not insert a second current row first or assume UNIQUE checks wait until commit.
 
+![ContextFact three-step supersede](images/contextfact-supersede.svg)
+
 Time queries require interval.needs_review=0 and voided_at IS NULL. Whole-session void never affects other sessions. Test epochs/snapshots, state-version/ticks, trusted paused recovery, partial discard and fact replacement with fault injection.
