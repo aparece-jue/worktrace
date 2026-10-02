@@ -93,6 +93,8 @@ M01 supplies executable DDL, CHECKs, NOT NULLs, deletion policies and migrations
 | switch/interrupt (V0.2) | Pause old session; start new session with interruption_of; roll back both on failure |
 | correct | Check row_version, ranges and overlaps; edit intervals; append time_edit; increase version |
 
+![Session and interval lifecycle](images/session-interval-lifecycle.svg)
+
 Pause/resume keeps the session; starting again after finish creates a new one. A paused session may finish directly. Completing/cancelling a task finishes its running/paused sessions. Unresolved recovering records return RECOVERY_REQUIRED rather than silently confirming history.
 
 active_ms is the sum of closed effective intervals plus the running interval's current duration. Paused values freeze because there is no open interval. Countdown remaining_ms=max(0,target_duration_ms-active_ms); overtime is shown separately. Expiry alerts but does not complete the task. Pauses consume no countdown budget.

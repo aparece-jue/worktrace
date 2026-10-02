@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Worktrace Session / interval 生命周期</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif+TC:wght@400&family=Noto+Sans+TC:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{--paper:#FBF9F6;--ink:#2A2320;--muted:#6F6357;--accent:#D9603A;--rule:rgba(42,35,32,0.14);}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font-family:'Geist','Noto Sans TC',system-ui,sans-serif;
+       display:flex;justify-content:center;padding:3rem 1.5rem}
+  figure{margin:0;max-width:1000px;width:100%}
+  .eyebrow{font-family:'Geist Mono',monospace;font-size:11px;letter-spacing:.16em;
+           text-transform:uppercase;color:var(--muted);margin:0 0 .5rem}
+  h1{font-family:'Instrument Serif','Noto Serif TC',serif;font-weight:400;
+     font-size:1.75rem;margin:0 0 .35rem}
+  .sub{color:var(--muted);font-size:.9rem;margin:0 0 1.75rem}
+  svg{display:block;width:100%;height:auto}
+</style>
+</head>
+<body>
+<figure>
+  <p class="eyebrow">数据模型 · 会话与计时 · §3</p>
+  <h1>Session / interval 生命周期</h1>
+  <p class="sub">每个方框的副标题就是它此刻允许有几个未结束区间——这是本图真正的主体，状态只是它的外壳。</p>
+
+<svg viewBox="0 0 1000 760" role="img" aria-labelledby="session-life-title session-life-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="session-life-title">Worktrace 会话与工作区间的生命周期</title>
+  <desc id="session-life-desc">会话状态分三段：运行中与已暂停构成可循环的计时段（running 恰好有一个未结束的有效区间，paused 没有开放区间、计时值冻结），recovering 是待确认段（不自动运行、不占前台槽位，可保留一个终点未定的区间），finished 与 discarded 是终态。start 建立 running，pause 与 resume 在两者之间往返，finish 从两者都能到达 finished，crash 或强杀后下次启动扫描把未结束的会话（含 paused）送入 recovering，recovering 再经「确认截止时间」到 finished、「保存为暂停」回到 paused、「丢弃」到 discarded。</desc>
+
+  <defs>
+    <marker id="sl-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="sl-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 分区（z 序最底） ===== -->
+  <rect x="40" y="170" width="560" height="180" rx="6" fill="rgba(111,175,168,0.05)" stroke="rgba(42,35,32,0.10)" stroke-width="1"/>
+  <text x="56" y="188" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">计时段 · 可循环</text>
+  <rect x="640" y="170" width="320" height="180" rx="6" fill="rgba(217,96,58,0.05)" stroke="rgba(217,96,58,0.28)" stroke-width="1"/>
+  <text x="656" y="188" fill="#D9603A" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">待确认 · 需人的动作</text>
+  <rect x="310" y="450" width="660" height="160" rx="6" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.12)" stroke-width="1"/>
+  <text x="326" y="468" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace" letter-spacing="0.14em">终态</text>
+
+  <!-- ===== 连线（先画） ===== -->
+  <path d="M 62 250 H 90" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#sl-arrow)"/>
+  <path d="M 260 250 H 350" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#sl-arrow)"/>
+  <path d="M 435 286 V 320 Q 435 328 427 328 H 208 Q 200 328 200 320 V 286"
+        fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#sl-arrow)"/>
+  <path d="M 150 286 V 522 Q 150 530 158 530 H 350" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#sl-arrow)"/>
+  <path d="M 470 286 V 494" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#sl-arrow)"/>
+  <!-- 崩溃路径：running 与 paused 都进 recovering -->
+  <path d="M 200 214 V 158 Q 200 150 208 150 H 752 Q 760 150 760 158 V 214"
+        fill="none" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#sl-arrow)"/>
+  <path d="M 435 214 V 126 Q 435 118 443 118 H 792 Q 800 118 800 126 V 214"
+        fill="none" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4" marker-end="url(#sl-arrow)"/>
+  <!-- 待确认的三个出口（焦点色） -->
+  <path d="M 750 286 V 522 Q 750 530 742 530 H 520" fill="none"
+        stroke="#D9603A" stroke-width="1.2" marker-end="url(#sl-arrow-accent)"/>
+  <path d="M 700 250 H 520" fill="none"
+        stroke="#D9603A" stroke-width="1.2" marker-end="url(#sl-arrow-accent)"/>
+  <path d="M 800 286 V 494" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#sl-arrow)"/>
+
+  <!-- ===== 跃迁标签（遮罩在方框之前，且不压任何方框） ===== -->
+  <g font-family="'Geist Mono',monospace" font-size="8.5" text-anchor="middle" fill="#6F6357">
+    <rect x="285" y="229" width="40" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="305" y="238">pause</text>
+    <rect x="285" y="307" width="40" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="305" y="316">resume</text>
+    <rect x="102" y="454" width="40" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="122" y="463">finish</text>
+    <rect x="478" y="424" width="40" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="498" y="433">finish</text>
+    <rect x="468" y="129" width="64" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="500" y="138">崩溃 / 强杀</text>
+    <rect x="568" y="97" width="64" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="600" y="106">崩溃 / 强杀</text>
+    <rect x="594" y="509" width="72" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="630" y="518" fill="#D9603A">确认截止时间</text>
+    <rect x="574" y="229" width="72" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="610" y="238" fill="#D9603A">保存为暂停</text>
+    <rect x="808" y="394" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="823" y="403">丢弃</text>
+  </g>
+
+  <circle cx="56" cy="250" r="6" fill="#2A2320"/>
+
+  <!-- ===== 计时段：色深 = 计时活跃度 ===== -->
+  <rect x="90" y="214" width="170" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="90" y="214" width="170" height="72" rx="6" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
+  <text x="175" y="245" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">运行中</text>
+  <text x="175" y="263" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">RUNNING · 恰好 1 个未结束区间</text>
+
+  <rect x="350" y="214" width="170" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="350" y="214" width="170" height="72" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="435" y="245" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">已暂停</text>
+  <text x="435" y="263" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">PAUSED · 无开放区间，值冻结</text>
+
+  <!-- ===== 待确认（焦点） ===== -->
+  <rect x="700" y="214" width="200" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="700" y="214" width="200" height="72" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="800" y="245" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">待确认</text>
+  <text x="800" y="263" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">RECOVERING · 可留 1 个不定终点区间</text>
+
+  <!-- ===== 终态 ===== -->
+  <rect x="350" y="494" width="170" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="350" y="494" width="170" height="72" rx="6" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
+  <text x="435" y="525" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">已结束</text>
+  <text x="435" y="543" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">FINISHED · 记录 ended_at</text>
+
+  <rect x="780" y="494" width="170" height="72" rx="6" fill="#FBF9F6"/>
+  <rect x="780" y="494" width="170" height="72" rx="6" fill="rgba(42,35,32,0.02)" stroke="#6F6357" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="865" y="525" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">已丢弃</text>
+  <text x="865" y="543" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">DISCARDED · 保留审计</text>
+
+  <!-- ===== 注记 ===== -->
+  <text x="40" y="638" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    每个运行中的 session 恰好有一个未结束的有效区间；数据库用部分唯一索引兜底：前台至多一条 running、每个 session 至多一个开放区间。</text>
+  <text x="40" y="658" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    暂停后 resume 仍是同一个 session；结束后再次 start 是新 session。paused 也可以直接 finish。</text>
+  <text x="40" y="678" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    待确认不自动运行、不占 running 前台槽位，整个会话暂不进入已确认统计；确认时才关闭那个终点未定的区间。</text>
+  <text x="40" y="698" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    修正（correct）只对 finished / recovering 进行；运行或暂停中的记录必须先结束或确认再编辑。完成或取消任务会结束它所有 running / paused 的 session。</text>
+
+  <!-- ===== 图例（底部横条） ===== -->
+  <line x1="30" y1="726" x2="970" y2="726" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="746" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <rect x="110" y="737" width="16" height="10" rx="2" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
+  <text x="132" y="746" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">计时中</text>
+  <rect x="240" y="737" width="16" height="10" rx="2" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="262" y="746" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">冻结（暂停）</text>
+  <rect x="400" y="737" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="422" y="746" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">待确认（需人的动作）</text>
+  <rect x="610" y="737" width="16" height="10" rx="2" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
+  <text x="632" y="746" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">终态</text>
+  <line x1="720" y1="742" x2="750" y2="742" stroke="#6F6357" stroke-width="1" stroke-dasharray="5,4"/>
+  <text x="762" y="746" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">崩溃路径与非正常终态</text>
+</svg>
+</figure>
+</body>
+</html>

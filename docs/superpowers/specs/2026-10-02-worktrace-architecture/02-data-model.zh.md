@@ -93,6 +93,10 @@ CREATE INDEX idx_session_task ON work_session(task_id);
 | switch/interrupt（V0.2） | 暂停旧 session → 启动新 session，记录 interruption_of；任一步失败全部回滚 |
 | correct | 检查 row_version、范围与重叠 → 编辑有效区间、写 time_edit、增加版本 |
 
+![Session / interval 生命周期](images/session-interval-lifecycle.svg)
+
+> 图：会话状态，以及它此刻允许有几个未结束区间。待确认是唯一要人先做决定才能离开的状态。
+
 暂停后恢复仍是同一 session；结束后再次开始是新 session。paused 也可直接 finish。完成/取消任务会结束其所有运行或暂停 session；若存在 recovering 记录，先返回 RECOVERY_REQUIRED，不悄悄确认历史。
 
 显示 active_ms = SUM(已结束有效 interval 的 ended_at - started_at) + 当前 open interval 的实时工作时长。
