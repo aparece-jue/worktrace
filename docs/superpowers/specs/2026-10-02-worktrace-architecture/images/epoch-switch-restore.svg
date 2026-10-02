@@ -1,0 +1,129 @@
+<svg viewBox="0 0 1000 930" role="img" aria-labelledby="epoch-title epoch-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="epoch-title">Worktrace 数据库恢复与 data_epoch 切换流程</title>
+  <desc id="epoch-desc">自上而下：恢复或替换数据库后先进入维护态，取消旧队列、查询与 AI 请求，新写入返回 DATA_RESTORE_IN_PROGRESS；随后验证临时候选库的完整性、外键与 schema。候选库不可用则还原原库与原 epoch 并强制重新握手；可用则生成全新 data_epoch，绝不沿用备份内的 epoch，此时恢复后的 revision 可以更低、只在新代次内比较。再经可回滚切换并重开，新 epoch 的权威快照使全部业务与计时缓存失效，旧 epoch 的响应、通知与未应用建议一律丢弃，最后依恢复章节扫描并创建当前运行记录，不沿用备份里的运行内存。代次切换是唯一的强调项。</desc>
+
+  <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
+    <marker id="ep-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="ep-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 连线（先画） ===== -->
+  <path d="M 500 100 V 140" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#ep-arrow)"/>
+  <path d="M 500 220 V 260" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#ep-arrow)"/>
+  <path d="M 500 340 V 364" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#ep-arrow)"/>
+  <path d="M 650 420 H 730" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#ep-arrow)"/>
+  <path d="M 500 476 V 516" fill="none" stroke="#D9603A" stroke-width="1.2" marker-end="url(#ep-arrow-accent)"/>
+  <path d="M 500 596 V 640" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#ep-arrow)"/>
+  <path d="M 500 720 V 764" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#ep-arrow)"/>
+
+  <!-- ===== 判定标签（遮罩在方框之前，且不压任何方框） ===== -->
+  <g font-family="'Geist Mono',monospace" font-size="8.5" text-anchor="middle" fill="#6F6357">
+    <rect x="672" y="399" width="36" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="690" y="408">不通过</text>
+    <rect x="508" y="490" width="30" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="523" y="499">通过</text>
+  </g>
+
+  <!-- ===== 起点 ===== -->
+  <path d="M 340 44 H 660 A 28 28 0 0 1 660 100 H 340 A 28 28 0 0 1 340 44 Z" fill="#FBF9F6"/>
+  <path d="M 340 44 H 660 A 28 28 0 0 1 660 100 H 340 A 28 28 0 0 1 340 44 Z"
+        fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="500" y="70" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">恢复 / 替换数据库</text>
+  <text x="500" y="88" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">从一致备份恢复，或整库替换</text>
+
+  <!-- ===== 维护态 ===== -->
+  <rect x="290" y="140" width="420" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="290" y="140" width="420" height="80" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="500" y="170" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">进入维护态</text>
+  <text x="500" y="190" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">取消旧队列 / 查询 / AI 请求</text>
+  <text x="500" y="206" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">新写入返回 DATA_RESTORE_IN_PROGRESS</text>
+
+  <!-- ===== 验证候选库 ===== -->
+  <rect x="290" y="260" width="420" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="290" y="260" width="420" height="80" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="500" y="290" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">验证临时候选库</text>
+  <text x="500" y="310" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">完整性 · 外键 · schema</text>
+  <text x="500" y="326" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">未来版本拒绝；旧版本先备份再迁移</text>
+
+  <!-- ===== 判定 ===== -->
+  <path d="M 500 364 L 650 420 L 500 476 L 350 420 Z" fill="#FBF9F6"/>
+  <path d="M 500 364 L 650 420 L 500 476 L 350 420 Z" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="500" y="425" fill="#2A2320" font-size="11.5" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">候选库可用？</text>
+
+  <!-- ===== 失败分支 ===== -->
+  <rect x="730" y="380" width="240" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="730" y="380" width="240" height="80" rx="6" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
+  <text x="850" y="410" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">还原原库与原 epoch</text>
+  <text x="850" y="430" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">强制重新握手</text>
+  <text x="850" y="446" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">原有数据不受影响</text>
+
+  <!-- ===== 焦点：代次切换 ===== -->
+  <rect x="290" y="516" width="420" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="290" y="516" width="420" height="80" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="500" y="546" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">生成全新 data_epoch</text>
+  <text x="500" y="566" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">绝不沿用备份内的 epoch</text>
+  <text x="500" y="582" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">恢复后的 revision 可更低，仅在新代次内比较</text>
+
+  <!-- ===== 切换与重开 ===== -->
+  <rect x="290" y="640" width="420" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="290" y="640" width="420" height="80" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="500" y="670" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">可回滚切换并重开</text>
+  <text x="500" y="690" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">新 epoch 权威快照使全部业务 / 计时缓存失效</text>
+  <text x="500" y="706" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">旧 epoch 响应、通知、未应用建议一律丢弃</text>
+
+  <!-- ===== 终点 ===== -->
+  <path d="M 340 764 H 660 A 28 28 0 0 1 660 820 H 340 A 28 28 0 0 1 340 764 Z" fill="#FBF9F6"/>
+  <path d="M 340 764 H 660 A 28 28 0 0 1 660 820 H 340 A 28 28 0 0 1 340 764 Z"
+        fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="500" y="790" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">依恢复章节扫描</text>
+  <text x="500" y="808" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">创建当前运行记录，不沿用备份里的运行内存</text>
+
+  <!-- ===== 注记 ===== -->
+  <text x="40" y="858" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    旧代次的修改请求一律返回 DATA_EPOCH_MISMATCH 且不写入；非幂等 request_id 的重放也只在同一代次内有效。</text>
+  <text x="40" y="878" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    新数据库生成 epoch；成功恢复或替换必须生成全新 epoch。代次之外只有 revision 可比较，不能拿恢复后的低版本号推断旧数据。</text>
+  <text x="40" y="898" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    未知代次的通知只触发重新握手，不能把缓存切回旧库——这是防迟到通知污染的唯一一道闸。</text>
+
+  <!-- ===== 图例（底部横条） ===== -->
+  <line x1="30" y1="920" x2="970" y2="920" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="940" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <ellipse cx="128" cy="936" rx="18" ry="9" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="156" y="940" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">起点 / 终点</text>
+  <rect x="270" y="931" width="36" height="10" rx="4" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="318" y="940" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">步骤</text>
+  <path d="M 410 936 L 428 928 L 446 936 L 428 944 Z" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="458" y="940" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">判定</text>
+  <rect x="540" y="931" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="562" y="940" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">焦点：代次在这里换掉</text>
+  <rect x="740" y="931" width="16" height="10" rx="2" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
+  <text x="762" y="940" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">失败出口</text>
+</svg>

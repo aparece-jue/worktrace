@@ -72,7 +72,11 @@ timer.tick 和计时查询均携带 data_epoch、run_id、session_id、session_v
 
 ![版本与快照同步](images/revision-sync.svg)
 
-> 图展示常规同步；data_epoch 切换、计时状态版本与恢复队列隔离的完整规则以本节为准。
+> 图展示常规同步；`data_epoch` 切换、计时状态版本与恢复队列隔离见下一张。
+
+![数据代次切换与恢复隔离](images/epoch-switch-restore.svg)
+
+> 图：恢复换的不是数据，是数据库身份。代次一变，旧响应、旧通知、未应用建议同时作废。
 
 ## 6. 前端状态与外发边界
 

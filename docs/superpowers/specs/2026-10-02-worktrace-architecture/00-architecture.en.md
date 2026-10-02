@@ -72,7 +72,9 @@ A single serial timer coordinator handles starts/pauses/resumes/finishes/system 
 
 ![Revision and snapshot synchronization](images/revision-sync.svg)
 
-> The diagram shows normal synchronization; epoch switches, timer state versions and restore queue isolation follow this section.
+> The diagram shows normal synchronization; epoch switches, timer state versions and restore queue isolation are in the next figure.
+
+![Epoch switch and restore isolation](images/epoch-switch-restore.svg)
 
 ## 6. Frontend and outbound data
 

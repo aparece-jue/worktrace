@@ -100,7 +100,8 @@
   <line x1="30" y1="676" x2="970" y2="676" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
   <text x="30" y="694" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
         letter-spacing="0.14em">LEGEND</text>
-  <rect x="130" y="686" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
-  <text x="152" y="694" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">纯领域基础</text>
+  <text x="110" y="694" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace">色相 = 层级（边界 / 服务 / 持久化 / 领域 / 平台 / 横切）</text>
+  <rect x="470" y="686" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="492" y="694" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">纯领域基础（焦点）</text>
 
 </svg>

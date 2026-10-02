@@ -76,7 +76,7 @@
     <text x="605" y="276">revision（随快照返回）</text>
 
     <!-- 关键返回（珊瑚色） -->
-    <rect x="348" y="311" width="134" height="12" rx="2" fill="#FBF9F6"/>
+    <rect x="339" y="311" width="152" height="12" rx="2" fill="#FBF9F6"/>
     <text x="415" y="320" fill="#D9603A">快照 + epoch/revision（数据同源）</text>
 
     <!-- 应用快照 -->

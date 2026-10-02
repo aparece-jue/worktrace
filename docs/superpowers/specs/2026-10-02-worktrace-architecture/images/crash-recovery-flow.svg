@@ -36,8 +36,8 @@
     <text x="125" y="639">确认截止时间 / 修改区间</text>
     <rect x="508" y="630" width="56" height="12" rx="2" fill="#FBF9F6"/>
     <text x="536" y="639">保存为暂停</text>
-    <rect x="772" y="630" width="30" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="787" y="639">丢弃不确定区间</text>
+    <rect x="738" y="630" width="64" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="770" y="639">丢弃不确定区间</text>
   </g>
 
   <!-- ===== 起点与步骤 ===== -->

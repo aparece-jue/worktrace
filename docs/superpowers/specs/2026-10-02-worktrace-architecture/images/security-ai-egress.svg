@@ -57,8 +57,8 @@
 
   <!-- ===== 连线标签（遮罩在方框之前，且不压任何方框） ===== -->
   <g font-size="8.5" font-family="'Geist',sans-serif" text-anchor="middle" fill="#6F6357">
-    <rect x="490" y="176" width="60" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="520" y="185" fill="#D9603A">严格本地不可授权绕过</text>
+    <rect x="476" y="176" width="88" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="520" y="185" fill="#D9603A">目标授权不足以放行</text>
     <rect x="264" y="376" width="52" height="12" rx="2" fill="#FBF9F6"/>
     <text x="290" y="385">按等级过滤</text>
     <rect x="419" y="288" width="34" height="12" rx="2" fill="#FBF9F6"/>
