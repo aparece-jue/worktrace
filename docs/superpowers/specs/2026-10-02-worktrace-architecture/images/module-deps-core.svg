@@ -1,0 +1,110 @@
+<svg viewBox="0 0 1000 720" role="img" aria-labelledby="dep-core-title dep-core-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="dep-core-title">Worktrace V0.1 模块依赖与扇入分布</title>
+  <desc id="dep-core-desc">按依赖深度分五个层级，自顶向下：M12 前端骨架依赖 M05 会话，M05 依赖 M04 计时与 M01 存储，M04 依赖 M01、M00 平台与 M03 事件，M01 依赖 M02 领域，M02 依赖 M03。右上角徽章显示全项目扇入计数：M02 领域被 9 个模块依赖，是整张图的结构枢纽，M01 存储为 7，M03 事件为 5，M00 平台为 2。</desc>
+
+  <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
+    <marker id="dp-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="dp-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 连线（先画） ===== -->
+  <path d="M 500 170 V 126" stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
+  <path d="M 500 270 V 226" stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
+  <path d="M 500 370 V 326" stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
+  <!-- M02 -> M01（焦点：枢纽的主出口） -->
+  <path d="M 265 470 V 448 Q 265 440 273 440 H 492 Q 500 440 500 432 V 426"
+        stroke="#D9603A" stroke-width="1" marker-end="url(#dp-arrow-accent)"/>
+  <!-- M00 -> M04，绕右侧进入 -->
+  <path d="M 585 498 H 700 Q 708 498 708 490 V 306 Q 708 298 700 298 H 585"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
+  <!-- M03 -> M04，更外侧 -->
+  <path d="M 820 490 H 852 Q 860 490 860 482 V 290 Q 860 282 852 282 H 585"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
+  <!-- M03 -> M02，从下方绕过 M00 -->
+  <path d="M 650 526 V 560 Q 650 568 642 568 H 273 Q 265 568 265 560 V 526"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#dp-arrow)"/>
+
+  <!-- ===== Rank 0 ===== -->
+  <rect x="415" y="70" width="170" height="56" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <text x="500" y="94" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M12 前端骨架</text>
+  <text x="500" y="112" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">经 IPC 调用服务</text>
+
+  <!-- ===== Rank 1 ===== -->
+  <rect x="415" y="170" width="170" height="56" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="500" y="194" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M05 会话</text>
+  <text x="500" y="212" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">区间 · 暂停恢复 · 修正</text>
+
+  <!-- ===== Rank 2 ===== -->
+  <rect x="415" y="270" width="170" height="56" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="500" y="294" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M04 计时</text>
+  <text x="500" y="312" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">单调时钟 · 预算倒计时</text>
+
+  <!-- ===== Rank 3 ===== -->
+  <rect x="415" y="370" width="170" height="56" rx="6" fill="#FBF1DC" stroke="#CBA758" stroke-width="1"/>
+  <text x="590" y="384" fill="#9A7B2E" font-size="8" font-family="'Geist Mono',monospace"
+        text-anchor="end" letter-spacing="0.06em">7 in</text>
+  <rect x="500" y="376" width="34" height="12" rx="2" fill="transparent" stroke="rgba(203,167,88,0.45)" stroke-width="0.8"/>
+  <text x="517" y="385" fill="#9A7B2E" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">CORE</text>
+  <text x="500" y="418" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M01 存储</text>
+  <text x="500" y="436" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">迁移 · 事务 · 区间查询</text>
+
+  <!-- ===== Rank 4 ===== -->
+  <!-- M02 领域：扇入枢纽，焦点 -->
+  <rect x="180" y="470" width="170" height="56" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="338" y="484" fill="#D9603A" font-size="8" font-family="'Geist Mono',monospace"
+        text-anchor="end" letter-spacing="0.06em">9 in</text>
+  <text x="265" y="500" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M02 领域</text>
+  <text x="265" y="518" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">纯类型 · 跃迁 · 校验（无 IO）</text>
+
+  <rect x="415" y="470" width="170" height="56" rx="6" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
+  <text x="573" y="484" fill="#5C6675" font-size="8" font-family="'Geist Mono',monospace"
+        text-anchor="end" letter-spacing="0.06em">2 in</text>
+  <text x="500" y="500" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M00 平台</text>
+  <text x="500" y="518" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">单实例 · 托盘 · 锁屏</text>
+
+  <rect x="650" y="470" width="170" height="56" rx="6" fill="#EFE8F6" stroke="#8E74B5" stroke-width="1"/>
+  <text x="808" y="484" fill="#8E74B5" font-size="8" font-family="'Geist Mono',monospace"
+        text-anchor="end" letter-spacing="0.06em">5 in</text>
+  <text x="735" y="500" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M03 事件</text>
+  <text x="735" y="518" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">纯事件类型 · revision</text>
+
+  <!-- 注记 -->
+  <text x="60" y="600" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    本图只画 V0.1 核心闭环；徽章给的是**全项目**扇入，不是本子图内的箭头数。</text>
+  <text x="60" y="618" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    M05 对 M01 与 M02、M04 对 M03 的依赖已在图中；同层内与跨层的其余直接依赖见 01 的职责表。</text>
+  <text x="60" y="636" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    关键路径 M02 → M01 → M04 → M05 任一环滑期，下游全部顺延。</text>
+  <text x="60" y="654" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    秩层为 5 层，略超依赖图 4 层预算：核心链路本身就有 5 级深度，压缩会丢信息。</text>
+
+  <!-- 图例 -->
+  <line x1="30" y1="676" x2="970" y2="676" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="694" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <rect x="130" y="686" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="152" y="694" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">扇入最大者（结构枢纽）</text>
+  <text x="360" y="694" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">
+    <tspan font-family="'Geist Mono',monospace" font-size="8">N in</tspan> = 全项目有多少模块依赖它</text>
+</svg>
