@@ -36,6 +36,10 @@ lib.rs 是组合根。commands 不直连 SQL，domain 无 IO，storage 不调用
 
 SQLite 的同步访问放入受控阻塞执行边界；连接不跨 await 持锁。采用串行数据库工作线程还是受控 spawn_blocking，在 M01 小实验后确定。写事务内校验全局不变量，数据库约束兜底。备份/恢复暂停写入；明确 busy_timeout、WAL、外键、迁移前备份及磁盘不足处理。备份实现优先 SQLite 一致快照 API 或经验证的 VACUUM INTO，不直接复制活跃 WAL 主文件。
 
+![模块边界与依赖方向](images/architecture-layers.svg)
+
+> 图：依赖恒为由上至下；`events/` 为横切，不参与依赖栈。
+
 ## 4. IPC 与错误
 
 Command 按意图命名，一次完成业务事务；Today 等聚合视图一次返回，列表避免 N+1。DTO 类型从 Rust 生成，选型在实现阶段验证。更新命令带 expected_row_version，冲突返回 VERSION_CONFLICT；长耗时 AI 请求另带输入版本，结果不覆盖已变更任务。

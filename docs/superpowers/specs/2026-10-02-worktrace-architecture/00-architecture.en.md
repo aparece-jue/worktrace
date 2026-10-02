@@ -36,6 +36,10 @@ Complete consistency-critical operations directly in one service transaction: fi
 
 Run synchronous DB work inside a controlled blocking boundary; never hold connection locks across await. Choose a serialized DB worker or controlled spawn_blocking after an M01 probe. Validate invariants in write transactions with database constraints as backup. Pause writes for backup/restore; specify busy_timeout, WAL, FKs, pre-migration backup and disk-full handling. Use a consistent SQLite backup API or verified VACUUM INTO, not a raw copy of a live WAL main file.
 
+![Module boundaries and dependency direction](images/architecture-layers.svg)
+
+> The dependency direction is always downward; `events/` is cross-cutting and outside the stack.
+
 ## 4. IPC and errors
 
 Commands follow intent and return aggregate views without N+1. Generate TS DTO types from Rust after validating tooling. Mutations carry expected_row_version; conflicts return VERSION_CONFLICT. AI requests retain input versions and do not apply to changed tasks.
