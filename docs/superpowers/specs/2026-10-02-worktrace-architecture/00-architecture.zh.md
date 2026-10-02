@@ -88,7 +88,7 @@ AI Gateway 只接收 M09 按本次用户选择构造的 Context Bundle。AI 默�
 
 在实现阶段验证：Windows HUD 穿透/无焦点与 DPI、多入口开发/打包路径、数据库执行线程与关闭/备份竞争、断网/锁屏/休眠/改时计时行为。尚无实测结论，不能写“已验证”。HUD 可行性实验不阻塞核心记录闭环。
 
-[模块拆分](01-module-breakdown.zh.md) · [数据模型](02-data-model.zh.md) · [ADR](03-adr.zh.md) · [功能验收](04-functional-spec.zh.md) · [路线图](05-roadmap.zh.md) · [评审摘要](06-review-notes.zh.md) · [范围与导入契约](07-scope-and-agent-import.zh.md) · [术语](99-glossary.zh.md)
+[模块拆分](01-module-breakdown.zh.md) · [数据模型](02-data-model.zh.md) · [ADR](03-adr.zh.md) · [功能验收](04-functional-spec.zh.md) · [路线图](05-roadmap.zh.md) · [评审摘要](06-review-notes.zh.md) · [范围与导入契约](07-scope-and-agent-import.zh.md) · [实施契约](08-implementation-contracts.zh.md) · [术语](99-glossary.zh.md)
 
 ## 8. AI 输入与外部 Agent 边界
 

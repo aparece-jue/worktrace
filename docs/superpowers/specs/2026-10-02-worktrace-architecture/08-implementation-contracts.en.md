@@ -1,6 +1,7 @@
 # Worktrace implementation contract supplements
 
 Status: 2026-10-03 proposal awaiting review; unimplemented. [中文](08-implementation-contracts.zh.md). Refines 02/04/07 without replacing platform probes.
+[Architecture](00-architecture.en.md) · [Module breakdown](01-module-breakdown.en.md) · [Data model](02-data-model.en.md) · [ADR](03-adr.en.md) · [Functional spec](04-functional-spec.en.md) · [Roadmap](05-roadmap.en.md) · [Review notes](06-review-notes.en.md) · [Scope and import contract](07-scope-and-agent-import.en.md) · [Glossary](99-glossary.en.md) · [Other language](08-implementation-contracts.zh.md)
 
 ## 1. Interval duration and attribution (V0.1)
 
