@@ -119,6 +119,8 @@ After single-instance ownership, create application_run and scan unfinished prev
 | recovering | Retain pending status, never add known effort | Same |
 | Broken state/interval invariant | Isolate and diagnose; no invented repairs | Suspect intervals excluded and visible |
 
+![The four recovery classifications](images/recovery-classification.svg)
+
 Keep session.needs_review and interval flags consistent in transactions; never independently modify them. Running has no pending interval; recovering has a pending interval or explicit invariant-fault marker. About every 30 seconds persist a trusted checkpoint with interval_id/trusted wall time/live baseline. It is a candidate cutoff, never automatic effort backfill. M04/M05 specify checkpoint persistence; last_heartbeat_at alone is not a complete clock mapping.
 
 Recovering does not occupy running foreground. Show confirmed effort and pending interval separately; unknown endpoints are unknown ranges, not precise fabricated duration. Confirm/edit the uncertain interval and finish, or close it, save paused and explicitly resume.
@@ -129,7 +131,7 @@ Window closure does not exit. Explicit quit finishes running/paused and saves re
 
 ![Crash recovery flow](images/crash-recovery-flow.svg)
 
-> The diagram covers uncertain-interval confirmation; fully trusted paused sessions directly remain paused.
+> This diagram expands only the uncertain-interval branch; the full four-way classification is in the previous figure.
 
 ## 5. Task states and hierarchy
 
