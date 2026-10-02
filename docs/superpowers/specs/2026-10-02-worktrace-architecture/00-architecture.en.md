@@ -1,201 +1,71 @@
 # Worktrace — Overall Architecture
 
-| Item | Value |
-| --- | --- |
-| Status | Design draft (under review) |
-| Date | 2026-10-02 |
-| Upstream | [`../../../PROJECT_SPEC.md`](../../../PROJECT_SPEC.md) (product design draft) |
-| Applies to | V0.1 onward |
-| Chinese version | [`00-architecture.zh.md`](00-architecture.zh.md) |
+Status: revised draft for user review. Date: 2026-10-02. [Chinese](00-architecture.zh.md).
+See [product vision](../../../PROJECT_SPEC.md) and [review notes](06-review-notes.en.md). This is target design, not implemented behaviour; the repository still has the initial frontend and greet command.
 
-> This document describes **how**. **What and why** live in `PROJECT_SPEC.md`. Where they conflict, this document wins and the reason is recorded as an ADR.
+## 1. Scope and document authority
 
----
+A local task, effort-recording and review tool for individual engineering work. Keep Local First, AI Optional and User > Rule > AI. No generic agent, plugin marketplace, Office/CAD replacement or workflow engine.
 
-## 1. Positioning and non-goals
+PROJECT_SPEC preserves vision/original milestones; 04 owns acceptance scope, 05 dependencies/order, 02 accounting/data, 03 technical rationale and 99 terminology. New product trade-offs are pending in 06, not user-approved merely because an ADR exists. Chinese is the working master, English updated together. Resolve conflicts rather than giving every document overriding authority.
 
-Worktrace is a **desktop tool for AI-assisted personal work management, time tracking, and work analytics**, built for long-term single-user use.
+## 2. Stack and topology
 
-Two constraints run through everything (SPEC §5.1, §5.2):
+Tauri 2, React 19, TypeScript 6, Vite 8, pnpm. Ant Design is the proposed sole component library; dependency cleanup follows design review. Preserve copied components. DockviewDemo is not automatically product UI; production dockview use remains open.
 
-- **Local First** — core data lives only in a local SQLite file. The tool is fully usable offline.
-- **AI Optional** — AI is an enhancement layer. Task, Project, Timer, WorkSession, Tag, Report, Review, Search, and Export must all work with no AI and no network.
+There is one authoritative Rust application core; WebView/system rendering can use additional OS processes. Rust owns business authority, SQLite persistence, React rebuildable query caches/UI state. Windows may briefly disagree; synchronization converges rather than guaranteeing identical displays at every instant.
 
-**Explicitly out of scope** (SPEC §50): plugin marketplace, generic workflow engine, general agent platform, IDE replacement, Office replacement, CAD automation. Architecturally this reduces to one rule: **no plugin system** (see ADR-002).
+Each main/HUD/Mini window has its own JS context. Window closure does not stop the core. Tray actions call the same services. Acquire single-instance ownership before database/timer initialization; a second launch may create a temporary process which forwards activation and exits, never another core.
 
----
+Separate lightweight HUD/Mini entries are proposed; one entry with lazy loading is a valid fallback. Validate multi-entry configuration against installed Vite 8 rather than assuming old option names. Grant least-needed window capabilities; HUD is read-only by default. Rust controls files, outbound requests and mutations.
 
-## 2. Locked stack
+## 3. Boundaries and transactions
 
-| Layer | Choice | Note |
+| Directory | Responsibility | Dependencies |
 | --- | --- | --- |
-| Shell | Tauri 2 | Single process, multiple webview windows |
-| Frontend | React 19 + TypeScript 6 + Vite 8 | |
-| Components | **Ant Design 6 (sole library)** | MUI / emotion removed — ADR-001 |
-| Panels | dockview 8 | **Under evaluation** — ADR-004 |
-| Packages | pnpm | |
-| Backend | Rust, edition 2021 | |
-| Database | SQLite via `rusqlite` + `bundled` | ADR-003 |
-| Platform | Windows-first | All platform calls confined to `platform/` — ADR-005 |
+| domain/ | Pure types, transitions, validation | Pure event types, no runtime bus or IO |
+| storage/ | SQLite, migrations, transactions, backups, queries | domain, pure event types |
+| platform/ | OS windows/tray/lock/hotkeys/single instance | Tauri/OS adapters, no business decisions |
+| services/ | Intent orchestration, timer/statistics/context/AI | domain, storage, platform, events |
+| commands/ | Inputs, errors/DTOs, service calls | services, domain types |
+| events/ | Pure types plus separate runtime dispatch adapter | Pure types dependency-free; dispatch may use Tauri |
 
----
+lib.rs assembles the application. Commands never directly issue SQL; domain has no IO; storage does not call platform. M11/composition root connects native callbacks to services.
 
-## 3. Layers and dependency rules
+Complete consistency-critical operations directly in one service transaction: finish sessions, update task result and increment revision. Never depend on asynchronous event subscribers to finish required writes. Statistics aggregate on demand.
 
-### 3.1 Six layers
+Run synchronous DB work inside a controlled blocking boundary; never hold connection locks across await. Choose a serialized DB worker or controlled spawn_blocking after an M01 probe. Validate invariants in write transactions with database constraints as backup. Pause writes for backup/restore; specify busy_timeout, WAL, FKs, pre-migration backup and disk-full handling. Use a consistent SQLite backup API or verified VACUUM INTO, not a raw copy of a live WAL main file.
 
-| Layer | Directory | Responsibility | May depend on |
-| --- | --- | --- | --- |
-| L4 Boundary | `commands/` | Tauri IPC: argument validation, DTO mapping, orchestration | `services`, `domain`, `events` |
-| L3 Services | `services/` | timer / session / statistics / report / knowledge / context / search / ai | `domain`, `storage`, `platform`, `events` |
-| L2 Persistence | `storage/` | Connections, transactions, schema, migrations, backup, repositories | `domain`, `events` |
-| L1 Domain | `domain/` | Pure types and rules, **no IO** | `events` |
-| L0 Platform | `platform/` | Win32: window styles, tray, hotkeys, sleep detection, single instance | none |
-| Cross-cutting | `events/` | Event types and bus | none |
+## 4. IPC and errors
 
-Dependencies always point L4 → L3 → L2 → L1. `platform/` and `events/` are leaves.
+Commands follow intent and return aggregate views without N+1. Generate TS DTO types from Rust after validating tooling. Mutations carry expected_row_version; conflicts return VERSION_CONFLICT. AI requests retain input versions and do not apply to changed tasks.
 
-### 3.2 Three hard rules
+Expected failures use Result<T,AppError> with code/message/redacted detail. Panic is a defect; current release panic=abort terminates the process and cannot be promised convertible to AppError. Diagnostics/recovery remain necessary; avoid unwrap on normal user/IO failures.
 
-1. **`domain/` must not import `storage/` or `platform/`.**
-   Domain rules must be testable without a database or an operating system. Break this once and `domain/` degrades into "structs attached to the database", taking the SPEC §8–13 object model with it.
-2. **`storage/` must not import `platform/`.**
-   The database path is injected by the composition root; the storage layer should not know Windows exists.
-3. **`commands/` must not import `storage/` directly.**
-   All data access goes through `services/`. Otherwise business rules leak out of the service layer into the IPC boundary as ad-hoc logic inside command handlers.
+Post-commit broadcast failure is diagnostic, not transaction failure. Prevent duplicate submissions. Automatic retries of non-idempotent commands require request_id plus a replay result stored in the same transaction; otherwise do not retry blindly.
 
-### 3.3 Composition root
+## 5. Revision and synchronization
 
-`src-tauri/src/lib.rs` is the **only assembly point**: build storage → build services → register commands → create windows and tray.
+Persist app_meta.revision once per successful business write transaction. Coalesce multiple changes into one domain.changed invalidation carrying affected types/IDs. No-op operations, heartbeats and timer.tick do not increment it. Read snapshot data and revision in one read transaction.
 
-Whether the layering holds depends entirely on this being the only file that imports across all layers. Any second place that does so is a design smell.
+Envelope: event/revision/at (Unix milliseconds)/payload. Broadcast committed transactions in revision order; clients still handle delay, duplication and reordering.
 
----
+1. Subscribe and buffer before fetching a consistent snapshot.
+2. Apply snapshot; discard notifications at or below its revision, then invalidate affected queries.
+3. Query replies carry revision. Discard replies older than a view's applied/required revision; coalesce requests.
+4. Check get_revision on focus/reopen/resume/reconnection and at most every 30 seconds while visible. Hidden windows validate before display. This catches a lost final event without polling the full database.
+5. Refetch a snapshot on gaps/reordering when consistency cannot be established. Temporary display latency is allowed.
 
-## 4. Runtime topology
+timer.tick uses separate run_id/tick_seq/as_of/session_id/active_ms/remaining_ms. Discard old runs/sequences; it never persists a business revision. Reopened windows query timing immediately rather than waiting for another tick.
 
-```
-Rust main process (single source of truth)
-├── Event bus ─── internal domain events + broadcast to every window
-├── SQLite ────── single file, WAL
-├── Windows (each = separate webview = separate JS context, no shared memory)
-│     main   primary window, 1100×760 (min 800×600)
-│     hud    always-on-top / transparent / click-through / no focus / no taskbar entry
-│     mini   interactive: pause / complete / switch / quick capture
-└── Tray ──────── native menu, independent of any window's lifetime
-```
+## 6. Frontend and outbound data
 
-### 4.1 Windows are subscribers, not state holders
+One domainState subscription entry per JS context with cleanup and hooks for pages. Business events invalidate queries; ticks replace display values. Begin with a simple store such as useSyncExternalStore, but permit a cache/state library when justified; library avoidance is not what establishes Rust authority.
 
-State exists in exactly one place: Rust. Consequently:
+AI receives only an M09-whitelisted Context Bundle. V0.3 includes minimal task/project security; full document extraction is V0.4. Default STRICT_LOCAL. Explicit provider-specific authorization is required for outbound items. STRICT_LOCAL/CONFIDENTIAL are cloud-blocked by default, INTERNAL needs explicit authorization, PUBLIC may transmit after cloud AI is enabled. Derived content inherits the strictest source level. Logs record IDs/classification/counts, not sensitive text. Credentials use OS credential storage, never SQLite/localStorage. Adopting a suggestion is not outbound authorization.
 
-- Closing the HUD, closing the main window, or minimizing to tray does not stop the timer or statistics.
-- Main, HUD, and Mini read the same state — they cannot disagree ("HUD shows 01:17:34, main shows 01:17:29" is impossible).
-- Reopening a window requires no state reconstruction, only a fresh snapshot fetch.
+## 7. Open verification and index
 
-### 4.2 Multiple build entries
+Probe Windows HUD click-through/no-focus/DPI, multi-entry dev/package paths, database threads and shutdown/backup races, and timer behaviour on offline/lock/suspend/clock changes. No empirical outcome is claimed yet. HUD probes do not block the recording loop.
 
-HUD and Mini use **separate Vite HTML entries** (`hud.html` / `mini.html`), not a route parameter on the main entry.
-
-Rationale: the HUD must open instantly, stay resident, and render minimally. Going through the main entry means a transparent overlay loads the entire main-window page bundle — slower startup, higher memory, and more fragile transparent rendering. The cost is a `build.rollupOptions.input` entry in the Vite config.
-
-### 4.3 The tray is independent of windows
-
-Tray items (current task / pause / complete / quick capture / show HUD / quit) read and write Rust state directly and emit events. SPEC §42 requires "hide the taskbar icon, keep the tray, keep running in the background" — achievable only if the tray does not depend on a live window.
-
-### 4.4 Single instance
-
-A second launch must raise the existing instance's main window rather than start a second process (two processes would write the same SQLite file). This lives in `platform/single_instance.rs`.
-
-### 4.5 HUD Locked / Edit
-
-The HUD's two modes (SPEC §40) are **held in Rust**, because toggling them changes Win32 extended window styles; the frontend only sends a command.
-
----
-
-## 5. IPC contract
-
-| Channel | Direction | Purpose | Mechanism |
-| --- | --- | --- | --- |
-| **command** | Frontend → Rust | Every **intent** (start a task, complete a task, query a view) | `invoke()` |
-| **event** | Rust → Frontend | Every **state-change notification**, delivered to all windows | `emit()` |
-
-### 5.1 Command granularity
-
-| Principle | Good | Bad |
-| --- | --- | --- |
-| One call completes one business transaction | `complete_task(task_id, quality)` internally ends the session → writes effort → updates statistics → emits events | `end_session()` + `update_task_status()` + `refresh_stats()` as three IPC calls |
-| Fetch a view in one shot | `get_today_view()` returns everything the Today page needs | `list_tasks()` + `list_sessions()` + `get_stats()` |
-| Name by intent | `start_task` / `pause_session` / `quick_capture` | `insert_session` / `update_row` |
-| No N+1 | Lists carry the fields they need | One `get_task_detail` per row |
-
-**DTO strategy**: reuse domain types via `#[derive(Serialize)]`, but return **dedicated aggregate DTOs** for view commands (`TodayView`, `ReportView`). Do not build a mirrored DTO per domain type.
-
-### 5.2 Event envelope
-
-Names follow SPEC §5.4's `entity.action` dotted form: `task.completed`, `session.started`, `session.finished`, `task.updated`, `project.updated`, `report.generated`.
-
-```jsonc
-{
-  "event": "task.updated",
-  "revision": 1042,                          // monotonically increasing global version
-  "at": "2026-10-02T21:30:00+08:00",
-  "payload": { }
-}
-```
-
-`revision` is **new in this document** (SPEC does not mention it). Rationale: a window may reopen, reload, or miss an event. On mount it calls `get_snapshot()` to obtain the current revision; if a later event's revision skips a number, the window knows it missed something and refetches. Without it, a window that missed an event shows stale data forever.
-
-### 5.3 Error contract
-
-Every command returns `Result<T, AppError>`, serialized as:
-
-```jsonc
-{ "code": "TASK_NOT_FOUND", "message": "...", "detail": { } }
-```
-
-**Rust panics must never cross the IPC boundary**; they are converted to `AppError`.
-
----
-
-## 6. Frontend state mirror
-
-Whether Q3=A (Rust as single source of truth) actually holds depends on this layer.
-
-**Single entry point**: `src/services/domainState.ts` owns all subscription and caching. **No page may call `listen()` itself** — otherwise duplicate subscriptions, leaks, and inconsistent state appear together.
-
-| Event kind | Frontend behaviour | Rationale |
-| --- | --- | --- |
-| Domain events (`task.created` / `updated` / `completed`, `project.updated`, …) | **Cache-invalidation signal only** → refetch affected views | The frontend must never re-implement business rules. Patching state from events duplicates those rules, and two copies drift |
-| High-frequency timer (`timer.tick`, ~1 Hz) | Replace displayed values directly: `{ session_id, elapsed_ms, remaining_ms }` | Refetching everything once per second is wasteful; this is display-only data the frontend performs no business logic on |
-
-**Shape**: a very thin store (`useSyncExternalStore` + one `Map`). **No Redux / Zustand / Jotai** — the source of truth is Rust and the frontend is only a cache; those libraries solve "the frontend owns the truth", a problem Q3=A already removed.
-
-**Type sync**: Rust DTOs → TS types must not be hand-written. Candidates are `ts-rs` and `tauri-specta`; pick one after confirming maintenance status and Tauri v2 compatibility as the first implementation step (see §7).
-
----
-
-## 7. Assumptions still to be verified
-
-These three are **not yet verified** and must not be treated as settled during implementation:
-
-1. **Dynamic click-through on Windows** — the `WS_EX_LAYERED | WS_EX_TRANSPARENT` combination, and whether toggling it requires `SetWindowPos(..., SWP_FRAMECHANGED)` to take effect.
-2. **Tauri v2 multi-window × Vite multi-entry** — how `WebviewWindowBuilder`'s url maps onto multi-entry build output.
-3. **Synchronous `rusqlite` with Tauri commands** — which thread executes a synchronous command, and whether heavy queries should uniformly use `spawn_blocking`.
-
-Findings must be written back into this document and into ADR-003 / ADR-005.
-
----
-
-## 8. ADR index
-
-| ID | Decision | Status |
-| --- | --- | --- |
-| ADR-001 | Keep Ant Design as the only component library; remove MUI / emotion | Decided, not yet applied |
-| ADR-002 | Layered monolith with an internal event bus (rejects microkernel and multi-crate) | Decided |
-| ADR-003 | Access SQLite through `rusqlite` + `bundled` | Decided |
-| ADR-004 | Evaluate whether dockview is needed | **Open** |
-| ADR-005 | Windows-first with a single platform boundary at `platform/` | Decided |
-| ADR-006 | Rust is the single source of truth; React holds UI-local state only | Decided |
-
-See [`03-adr.en.md`](03-adr.en.md).
+[Modules](01-module-breakdown.en.md) · [Data](02-data-model.en.md) · [ADRs](03-adr.en.md) · [Acceptance](04-functional-spec.en.md) · [Roadmap](05-roadmap.en.md) · [Glossary](99-glossary.en.md)

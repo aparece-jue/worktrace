@@ -4,7 +4,7 @@
 | --- | --- |
 | Status | Design draft (under review) |
 | Date | 2026-10-02 |
-| Standing | **This table is the single source of truth for terminology across every bilingual document.** Where any document conflicts with it, this table wins |
+| Standing | Terminology reference; revised 00/02/04 own business rules. Resolve terminology conflicts together |
 | Chinese version | [`99-glossary.zh.md`](99-glossary.zh.md) |
 
 > The "Never confuse with" column is the main value here: it records the term pairs this project gets wrong most easily.
@@ -37,8 +37,8 @@
 | Milestone | 里程碑 | A project stage outcome, e.g. "schematic design frozen" | |
 | Task | 任务 | The primary managed object. Every node from Task down to the leaves of the WBS tree is a Task | |
 | Action | 行动 | **Simply a leaf Task**; no separate table (see 02-data-model §7) | Not a distinct entity type |
-| WorkSession | 会话 | One continuous timed interval | Not the same level as a segment |
-| SessionSegment | 分段 | A sub-interval inside a WorkSession (from V1) | |
+| WorkSession | 会话 | A start-to-finish work session which may contain pauses; effort aggregates effective intervals | Not the same level as a segment |
+| SessionSegment | 分段 | Future activity classification, distinct from V0.1 timing work_interval | |
 | Dependency | 依赖 | Task relations: `blocks` / `depends_on` / `related` / `parallel` | |
 
 ---
@@ -55,8 +55,8 @@
 | **Blocked** | **受阻** | **I cannot proceed** (missing skill or decision, unfinished prerequisite) | **A different state from Waiting; never merge them** |
 | **Waiting** | **等待** | **Waiting on something external** (a reply, a part, a test, an approval) | See above |
 | Review | 待检查 | Finished, pending check | |
-| Done | 完成 | Terminal | |
-| Cancelled | 已取消 | Terminal | |
+| Done | 完成 | Reopen explicitly to become Ready again | |
+| Cancelled | 已取消 | Reopen explicitly to become Ready again | |
 
 ---
 
@@ -64,7 +64,7 @@
 
 | English | 中文 | Counts as human effort | Definition |
 | --- | --- | --- | --- |
-| FOREGROUND | 前台 | ✅ | What the user is doing right now. **At most one at a time** |
+| FOREGROUND | 前台 | ✅ | Current human work; one running session, several paused allowed |
 | BACKGROUND | 后台 | ❌ | Runs in parallel, not driven by the user (e.g. AI writing a document) |
 | PASSIVE | 被动 | ❌ | A machine process (e.g. an LTspice simulation running) |
 | WAITING | 等待 | ❌ | Blocked on an external condition |
@@ -89,13 +89,13 @@
 
 | English | 中文 | Definition | Never confuse with |
 | --- | --- | --- | --- |
-| Skill Level | 熟练度 | The estimated ability value (0–1) | **Must coexist with confidence**; alone it produces wrong conclusions |
+| Skill Level | 熟练度 | Experimental ability estimate; Unknown if disabled/insufficient evidence; default to usage facts | **Must coexist with confidence**; alone it produces wrong conclusions |
 | Confidence | 置信度 | How much evidence backs that estimate | See above |
 | Rework | 返工 | Work redone after being considered finished | |
 | Completion Quality | 完成质量 | `normal` / `reworked` / `review_failed` / `partially_done` / `abandoned` | |
 | Interruption | 打断 | A second task starts while timing, pausing the original session | |
 
-> SPEC §20's hard rule: `Vulkan: Skill 0.72 / Confidence 0.21` means "performing well, but on thin evidence". Reporting skill alone misleads.
+> The original numeric example is not an acceptance threshold; show facts and samples first. Scoring enablement is R-06.
 
 ---
 
@@ -107,7 +107,7 @@
 | ContextFact | 上下文事实 | A project-level fact (e.g. `Pt1000 current = 0.2mA`) |
 | Superseded | 已取代 | The state of a fact replaced by a newer value. **The old value is kept, never overwritten** (versioning) |
 | Decision Log | 决策日志 | Records decision, rationale, and date so "why was this chosen then" stays answerable |
-| Context Completeness | 上下文完整度 | A percentage assessment of how well a task is contextualised |
+| Context Completeness | 上下文完整度 | Present/missing critical-information checklist; percentages require an explainable algorithm |
 | Security Level | 保密等级 | `PUBLIC` / `INTERNAL` / `CONFIDENTIAL` / `STRICT_LOCAL` |
 | STRICT_LOCAL | 严格本地 | **Must never be sent to cloud AI or transmitted automatically**; local processing only |
 
@@ -133,12 +133,12 @@
 | Single Source of Truth | 唯一真相源 | Domain state exists in exactly one place, on the Rust side (ADR-006) |
 | Command | 命令 | The frontend → Rust request/response channel |
 | Event | 事件 | The Rust → frontend broadcast channel |
-| Envelope | 信封 | The common outer structure of an event: `{event, revision, at, payload}` |
-| revision | 修订号 | A globally monotonic counter maintained in Rust, used to detect missed events (ADR-010) |
+| Envelope | 信封 | The common outer structure of an event: `{event, revision, at, payload} (business events; at is Unix milliseconds)` |
+| revision | 修订号 | Durable business-transaction revision; ticks/heartbeats do not increment it (ADR-010) |
 | Snapshot | 快照 | The full current state returned by `get_snapshot()`, used by a window to align on mount |
 | State Mirror | 状态镜像 | The frontend cache layer `src/services/domainState.ts`, the only subscription entry point |
 | Invalidation Signal | 失效信号 | The frontend role of a domain event — triggers a refetch rather than patching state |
-| needs_review | 待确认 | The flag on a session after crash recovery. **The system never backfills effort**; the user confirms |
+| needs_review | 待确认 | Flag on unfinished previous-run sessions; recovering does not occupy the running slot and counts only after confirmation |
 | Platform Layer | 平台层 | `src-tauri/src/platform/`, the only boundary for Win32 calls (ADR-005) |
 | Composition Root | 组合根 | `lib.rs`, the only place that assembles all layers |
 | Domain Layer | 领域层 | `domain/`, pure types and rules with no IO |
@@ -155,3 +155,17 @@
 | Track | 记录 | Record real effort, switches, and interruptions |
 | Review | 回顾 | Analyse results, produce reports, improve prediction accuracy |
 | WBS | 工作分解结构 | Goal → Project → Milestone → Task → Action |
+
+## 11. Revision additions
+
+| Term | Definition |
+| --- | --- |
+| work_interval | Effective start/end facts; pause closes, resume opens; clipped to report ranges |
+| source | user/rule/ai origin; adopting AI keeps its origin |
+| confirmed_at | User-confirmed authority; no background overwrite of confirmed values |
+| recovering | Unfinished previous-run record for confirmation/edit/discard, never advances |
+| tick_seq | Per-run display sequence, not durable business revision |
+| Provisional | Running interval as of snapshot time, separate from confirmed closed time |
+| Unallocated | Remaining human effort when per-kind weights sum below 1 |
+
+See 02/06 for origin/confirmation, sleep and historical classification defaults. All documents remain review drafts.

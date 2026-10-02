@@ -1,5 +1,7 @@
 # AI 辅助时间与工作管理工具
 
+> 2026-10-02 评审修订：本文保留原始愿景和版本草案。当前可评估的实现设计见 [修订摘要与待评估清单](superpowers/specs/2026-10-02-worktrace-architecture/06-review-notes.zh.md)、[路线图](superpowers/specs/2026-10-02-worktrace-architecture/05-roadmap.zh.md) 和 [数据模型](superpowers/specs/2026-10-02-worktrace-architecture/02-data-model.zh.md)。修订方案包含 V0.1b、有效工作区间、早期备份/修正/周回顾；尚未获用户批准，不表示功能已实现。
+
 > 文档状态：项目设计草案，整理自“评估AI时间管理工具可行性”对话。
 > 本文描述产品定位、建议架构与计划功能，不代表这些功能已经实现；技术选型、字段与版本安排仍需结合仓库现状确认。
 

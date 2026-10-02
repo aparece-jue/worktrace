@@ -1,201 +1,71 @@
 # Worktrace 总体架构
 
-| 项 | 值 |
-| --- | --- |
-| 文档状态 | 设计草案（待评审） |
-| 日期 | 2026-10-02 |
-| 上游文档 | [`../../../PROJECT_SPEC.md`](../../../PROJECT_SPEC.md) 产品设计草案 |
-| 适用版本 | V0.1 起 |
-| 英文版 | [`00-architecture.en.md`](00-architecture.en.md) |
+状态：评审修订草案，待用户评估。日期：2026-10-02。对应：[英文版](00-architecture.en.md)。
+产品愿景见 [PROJECT_SPEC](../../../PROJECT_SPEC.md)；修订和待评估项见 [评审摘要](06-review-notes.zh.md)。本套文件描述目标设计，不表示功能已实现；当前仓库仍是前端页面与 greet 命令脚手架。
 
-> 本文描述**怎么做**。**做什么、为什么**以 `PROJECT_SPEC.md` 为准；两者冲突时以本文为准并在 ADR 中记录理由。
+## 1. 定位与文档权责
 
----
+面向个人工程工作的本地任务、工时与回顾工具。Local First、AI Optional、User > Rule > AI 保留；AI 不可用不影响核心功能。暂不做通用 Agent、插件市场、Office/CAD 替代或通用工作流。
 
-## 1. 定位与非目标
+PROJECT_SPEC 是愿景与原始版本草案；04 决定验收范围、05 决定依赖及实施顺序、02 决定数据口径、03 记录技术理由、99 统一术语。任何新增产品取舍在 06 标为待评估，不能仅凭技术 ADR 宣称用户已批准。中文为工作主稿，英文随同次修订同步；冲突先修订，不能让多个文件分别宣称最高优先级。
 
-Worktrace 是一款面向个人长期使用的 **AI 辅助工作管理、时间管理与工作分析桌面工具**。
+## 2. 技术与运行拓扑
 
-两条贯穿全局的约束（来自 SPEC §5.1、§5.2）：
+Tauri 2、React 19、TypeScript 6、Vite 8、pnpm；推荐统一 Ant Design，MUI/emotion 待设计评估后清理。保留复制来的组件，不把 DockviewDemo 自动接入产品；dockview 是否用于正式工作区待评估。
 
-- **Local First** —— 核心数据只存本地 SQLite，无网络也能完整使用。
-- **AI Optional** —— AI 是增强层。Task / Project / Timer / WorkSession / Tag / Report / Review / Search / Export 在没有 AI、没有网络时必须全部可用。
+Rust 为单一应用核心进程，WebView/系统渲染可产生其他进程；不要承诺整个应用只有一个 OS 进程。Rust 服务是业务状态唯一权威，SQLite 是持久化依据，React 维护可重建视图缓存及 UI 临时状态。多个窗口可短暂不同步，以下协议提供收敛，不能宣称永不出现展示差异。
 
-**明确不做**（SPEC §50）：插件市场、通用工作流引擎、通用 Agent 平台、IDE 替代、Office 替代、CAD 自动化。这些边界在架构上体现为一件事：**不引入插件系统**（见方案对比结论，ADR-002）。
+主窗、HUD、Mini 各有独立 JS 上下文；关闭窗口不终止核心。托盘直接调用同一服务。单实例启动检查在数据库/计时初始化之前完成；第二次启动的临时进程通知原实例后退出，不产生第二个核心或计时引擎。
 
----
+HUD/Mini 建议独立轻量入口；单入口+懒加载也是有效备选。Vite 8 的多入口配置以当前安装版本和构建验证为准，不凭旧配置名推断。各窗口只有需要的 capabilities；HUD 默认只读，文件/网络/修改能力由 Rust 边界控制。
 
-## 2. 技术栈（锁定）
+## 3. 模块边界与事务
 
-| 层 | 选型 | 说明 |
+| 目录 | 职责 | 允许依赖 |
 | --- | --- | --- |
-| 应用壳 | Tauri 2 | 单进程，多 Webview 窗口 |
-| 前端 | React 19 + TypeScript 6 + Vite 8 | |
-| 组件库 | **Ant Design 6（唯一）** | MUI / emotion 移除，见 ADR-001 |
-| 面板分屏 | dockview 8 | **待评估**，见 ADR-004 |
-| 包管理 | pnpm | |
-| 后端 | Rust，edition 2021 | |
-| 数据库 | SQLite，`rusqlite` + `bundled` | 见 ADR-003 |
-| 平台 | Windows 优先 | 平台调用集中在 `platform/`，见 ADR-005 |
+| domain/ | 纯类型、状态跃迁、校验 | 纯事件类型，不依赖运行时总线/IO |
+| storage/ | SQLite、迁移、事务、备份、查询 | domain、纯事件类型 |
+| platform/ | OS 窗口、托盘、锁屏、热键、单实例 | Tauri/OS 适配；不做业务判断 |
+| services/ | 意图编排、计时、统计、上下文、AI | domain、storage、platform、events |
+| commands/ | 参数校验、错误/DTO、调用服务 | services、domain 类型 |
+| events/ | 纯事件类型与独立运行时分发适配 | 纯类型无依赖；广播适配可依赖 Tauri |
 
----
+lib.rs 是组合根。commands 不直连 SQL，domain 无 IO，storage 不调用平台。M00 的原生回调由 M11/组合根接到 services，不在平台层偷偷写数据库。
 
-## 3. 分层与依赖规则
+服务必须直接在一个事务内完成需一致的变更：如 complete_task 结束相关 session、写 Task 结果、增加 revision。关键步骤不能交给事件订阅者异步补齐。统计正常查询时聚合，无须每次强制维护第二份总工时。
 
-### 3.1 六个层
+SQLite 的同步访问放入受控阻塞执行边界；连接不跨 await 持锁。采用串行数据库工作线程还是受控 spawn_blocking，在 M01 小实验后确定。写事务内校验全局不变量，数据库约束兜底。备份/恢复暂停写入；明确 busy_timeout、WAL、外键、迁移前备份及磁盘不足处理。备份实现优先 SQLite 一致快照 API 或经验证的 VACUUM INTO，不直接复制活跃 WAL 主文件。
 
-| 层 | 目录 | 职责 | 允许依赖 |
-| --- | --- | --- | --- |
-| L4 边界 | `commands/` | Tauri IPC：参数校验、DTO 转换、编排调用 | `services`, `domain`, `events` |
-| L3 服务 | `services/` | timer / session / statistics / report / knowledge / context / search / ai | `domain`, `storage`, `platform`, `events` |
-| L2 持久化 | `storage/` | 连接、事务、schema、迁移、备份、仓储实现 | `domain`, `events` |
-| L1 领域 | `domain/` | 纯类型与规则，**无 IO** | `events` |
-| L0 平台 | `platform/` | Win32：窗口样式、托盘、热键、休眠检测、单实例 | 无 |
-| 横切 | `events/` | 事件类型 + 总线 | 无 |
+## 4. IPC 与错误
 
-依赖方向恒为 L4 → L3 → L2 → L1，`platform/` 与 `events/` 是叶子。
+Command 按意图命名，一次完成业务事务；Today 等聚合视图一次返回，列表避免 N+1。DTO 类型从 Rust 生成，选型在实现阶段验证。更新命令带 expected_row_version，冲突返回 VERSION_CONFLICT；长耗时 AI 请求另带输入版本，结果不覆盖已变更任务。
 
-### 3.2 三条硬规则
+预期失败使用 Result<T,AppError>：code、message、脱敏 detail。panic 是缺陷；当前 release panic=abort 会终止进程，不能承诺 catch 后转 AppError。必须依靠诊断和恢复，并避免 unwrap 用于可预期用户/IO 错误。
 
-1. **`domain/` 不得 import `storage/` 或 `platform/`。**
-   领域规则必须能脱离数据库与操作系统单独跑测试。此条一破，`domain/` 就退化为"数据库的附属结构体"，SPEC §8–13 的对象模型随之失守。
-2. **`storage/` 不得 import `platform/`。**
-   数据库文件路径由组合根注入；存储层不应知道 Windows 的存在。
-3. **`commands/` 不得直接 import `storage/`。**
-   一切数据访问必须经过 `services/`。否则业务规则会从服务层漏进 IPC 边界，散落成"顺手在命令里写死"的逻辑。
+已提交后广播失败只记诊断，不返回“事务失败”让用户重复操作。非幂等命令须避免重复提交；需要自动重试时加 request_id 并在同事务保存可重放结果，否则客户端不得盲目重试。
 
-### 3.3 组合根
+## 5. 业务 revision 与同步协议
 
-`src-tauri/src/lib.rs` 是**唯一装配处**：建 storage → 建 services → 注册 commands → 建窗口与托盘。
+app_meta.revision 随成功业务写事务加 1 并持久化；同事务多项变化合并为一条 domain.changed 失效通知，附变化实体 ID/类别。无业务变化不加；心跳和 timer.tick 不加。快照 revision 与数据在同一读事务取得。
 
-分层的成败取决于"是否只有这一个文件 import 所有层"。任何第二个 import 跨全部层的地方，都应先怀疑设计。
+事件信封：event、revision、at（Unix 毫秒）、payload。多个事务提交后按 revision 顺序广播；前端仍必须处理延迟、重复及乱序。
 
----
+1. 窗口先注册监听并暂存通知，然后拉取带 revision 的一致快照。
+2. 应用快照，丢弃 revision <= 快照值的通知；后续通知让受影响查询失效。
+3. 查询响应带 revision；比该视图已应用/所需版本旧的响应不得覆盖，新请求合并去重。
+4. 窗口再次显示/恢复、IPC 重连时检查 get_revision；可见窗口最多每 30 秒轻量校验，补救丢失最后一条事件。后台窗口重显前校验。版本检查不拉全库。
+5. 跳号/乱序且缓存无法证明一致时重新取快照；允许短暂延迟，不依赖通知永不丢失。
 
-## 4. 运行时拓扑
+timer.tick 独立携带 run_id、tick_seq、as_of、session_id、active_ms、remaining_ms。每个 run 内递增；旧 run/旧序号丢弃，不触发业务 revision 写入。重开窗口立即查询计时快照，不等下一秒 tick。
 
-```
-Rust 主进程（唯一真相源）
-├── 事件总线 ──── 内部领域事件 + 广播到所有窗口
-├── SQLite ────── 单文件，WAL
-├── 窗口（每个 = 独立 Webview = 独立 JS 上下文，不共享内存）
-│     main   主窗，1100×760（min 800×600）
-│     hud    置顶 / 透明 / 鼠标穿透 / 无焦点 / 无任务栏图标
-│     mini   可交互小窗：暂停 / 完成 / 切换 / 快速捕获
-└── 托盘 ──────── 原生菜单，不依赖任何窗口存活
-```
+## 6. 前端状态与外发边界
 
-### 4.1 窗口只是订阅者
+每个 JS 上下文只有一个 domainState 订阅入口；页面通过 hooks 读取，清理监听。事件只作缓存失效，计时 tick 更新展示值；业务规则留在 Rust。先用 useSyncExternalStore 等简单方案，前端缓存复杂后允许评估状态库，不能把“不使用库”当领域权威的必要条件。
 
-**状态只存在于 Rust 一处。** 因此：
+AI Gateway 只接收 M09 构造的白名单 Context Bundle。V0.3 即引入最小任务/项目保密策略，完整文档提取到 V0.4。默认 STRICT_LOCAL；用户按提供商显式授权允许外发的条目。STRICT_LOCAL 与 CONFIDENTIAL 默认禁止云端，INTERNAL 需明确授权，PUBLIC 可在启用云 AI 后发送。派生摘要/提取缓存继承最严格来源等级，日志仅记录 ID、等级与计数，不记录机密正文。凭据使用系统凭据存储，不放 SQLite 或前端 localStorage；模型建议的采纳不等于外发授权。
 
-- 关掉 HUD、关掉主窗、最小化到托盘 —— 计时与统计照跑。
-- 主窗 / HUD / Mini 读同一份状态，不可能出现"HUD 显示 01:17:34、主窗显示 01:17:29"。
-- 窗口重开时不需要重建状态，只需重新拉一次快照。
+## 7. 待验证与索引
 
-### 4.2 多入口构建
+在实现阶段验证：Windows HUD 穿透/无焦点与 DPI、多入口开发/打包路径、数据库执行线程与关闭/备份竞争、断网/锁屏/休眠/改时计时行为。尚无实测结论，不能写“已验证”。HUD 可行性实验不阻塞核心记录闭环。
 
-HUD 与 Mini 使用**独立的 Vite HTML 入口**（`hud.html` / `mini.html`），而不是主入口加路由参数。
-
-理由：HUD 要求秒开、常驻、极简。走主入口意味着透明小窗要加载主窗整套页面代码，启动慢、内存高、透明窗口渲染更易出问题。代价仅为 Vite 中配置 `build.rollupOptions.input` 多入口。
-
-### 4.3 托盘独立于窗口
-
-托盘项（当前任务 / 暂停 / 完成 / 快速捕获 / 显示 HUD / 退出）直接读写 Rust 状态并发事件。SPEC §42 要求"最小化后隐藏任务栏图标、保留 Tray、后台继续运行"——这只有托盘不依赖窗口存活才能成立。
-
-### 4.4 单实例
-
-第二次启动必须唤起已有实例的主窗，不得起第二个进程（否则两个进程写同一个 SQLite 文件）。实现归 `platform/single_instance.rs`。
-
-### 4.5 HUD 的 Locked / Edit
-
-HUD 的两种模式（SPEC §40）由 **Rust 侧持有状态**，因为切换需修改 Win32 窗口扩展样式；前端只发一条命令。
-
----
-
-## 5. IPC 契约
-
-| 通道 | 方向 | 用途 | 机制 |
-| --- | --- | --- | --- |
-| **command** | 前端 → Rust | 所有**意图**（开始任务、完成任务、查询视图） | `invoke()` |
-| **event** | Rust → 前端 | 所有**状态变化通知**，投递给全部窗口 | `emit()` |
-
-### 5.1 command 粒度原则
-
-| 原则 | 正例 | 反例 |
-| --- | --- | --- |
-| 一次调用完成一个完整业务事务 | `complete_task(task_id, quality)` 内部依次结束 session → 写工时 → 更新统计 → 发事件 | `end_session()` + `update_task_status()` + `refresh_stats()` 三次 IPC |
-| 视图聚合一次取回 | `get_today_view()` 返回 Today 页所需全部数据 | `list_tasks()` + `list_sessions()` + `get_stats()` |
-| 按意图命名 | `start_task` / `pause_session` / `quick_capture` | `insert_session` / `update_row` |
-| 禁止 N+1 | 列表自带所需字段 | 列表每行再调 `get_task_detail` |
-
-**DTO 策略**：领域类型直接 `#[derive(Serialize)]` 复用；**视图类 command 返回专门的聚合 DTO**（`TodayView`、`ReportView`）。不做"每个领域类型配一个镜像 DTO"的双层结构。
-
-### 5.2 event 信封
-
-命名沿用 SPEC §5.4 的 `实体.动作` 点分式：`task.completed`、`session.started`、`session.finished`、`task.updated`、`project.updated`、`report.generated`。
-
-```jsonc
-{
-  "event": "task.updated",
-  "revision": 1042,                          // 单调递增全局版本号
-  "at": "2026-10-02T21:30:00+08:00",
-  "payload": { }
-}
-```
-
-`revision` 是**本文新增的**（SPEC 未提），理由：窗口可能重开、刚 reload、或错过事件。窗口挂载时调 `get_snapshot()` 取得当前 revision，之后若收到的事件 revision 跳号，即知漏事件并重新拉全量。没有它，错过事件的窗口会永久显示过期数据。
-
-### 5.3 错误契约
-
-所有 command 返回 `Result<T, AppError>`，`AppError` 序列化为：
-
-```jsonc
-{ "code": "TASK_NOT_FOUND", "message": "...", "detail": { } }
-```
-
-**Rust panic 不允许穿透 IPC 边界**，一律转为 `AppError`。
-
----
-
-## 6. 前端状态镜像
-
-Q3=A（Rust 单一真相源）能否落地，取决于这一层。
-
-**统一入口**：`src/services/domainState.ts` 提供唯一的订阅与缓存。**禁止任何页面自行 `listen()`** —— 否则重复订阅、内存泄漏、状态不一致会同时出现。
-
-| 事件类型 | 前端行为 | 理由 |
-| --- | --- | --- |
-| 领域事件（`task.created` / `updated` / `completed`、`project.updated` …） | **只当缓存失效信号** → 重新拉取受影响视图 | 前端绝不复刻业务规则。若用事件"打补丁"，规则就有两份，必然漂移 |
-| 高频计时（`timer.tick`，约 1 Hz） | 直接替换展示值 `{ session_id, elapsed_ms, remaining_ms }` | 每秒拉全量太重；且这是纯展示数据，前端不对它做业务判断 |
-
-**技术形态**：极薄 store（`useSyncExternalStore` + 一个 `Map`）。**不引入 Redux / Zustand / Jotai** —— 真相源在 Rust，前端只是缓存；复杂状态管理库解决的是"前端持有真相源"的问题，而该问题已被 Q3=A 消除。
-
-**类型同步**：Rust DTO → TS 类型不得手写。候选 `ts-rs`、`tauri-specta`，二选一，在实现阶段第一步确认维护状态与 Tauri v2 兼容性（见 §8）。
-
----
-
-## 7. 待实测假设
-
-以下三条**尚未验证**，不得在实现中当作既成事实：
-
-1. **Windows 鼠标穿透的动态切换** —— `WS_EX_LAYERED | WS_EX_TRANSPARENT` 的组合，以及切换后是否需要 `SetWindowPos(..., SWP_FRAMECHANGED)` 才生效。
-2. **Tauri v2 多窗口 × Vite 多入口** —— `WebviewWindowBuilder` 的 url 与多入口产物的路径对应关系。
-3. **同步 `rusqlite` 与 Tauri command 的配合** —— 同步 command 的实际执行线程，以及重查询是否统一走 `spawn_blocking`。
-
-验证结论应回填本文与 ADR-003 / ADR-005。
-
----
-
-## 8. ADR 索引
-
-| 编号 | 决策 | 状态 |
-| --- | --- | --- |
-| ADR-001 | 组件库只保留 Ant Design，移除 MUI / emotion | 已定，待执行 |
-| ADR-002 | 分层单体 + 内部事件总线（否决微内核插件化与多 crate） | 已定 |
-| ADR-003 | SQLite 访问用 `rusqlite` + `bundled` | 已定 |
-| ADR-004 | dockview 的必要性评估 | **待评估** |
-| ADR-005 | Windows 优先 + 单一平台边界 `platform/` | 已定 |
-| ADR-006 | Rust 为唯一真相源，React 只持 UI 临时状态 | 已定 |
-
-详见 [`03-adr.md`](03-adr.zh.md)。
+[模块拆分](01-module-breakdown.zh.md) · [数据模型](02-data-model.zh.md) · [ADR](03-adr.zh.md) · [功能验收](04-functional-spec.zh.md) · [路线图](05-roadmap.zh.md) · [术语](99-glossary.zh.md)

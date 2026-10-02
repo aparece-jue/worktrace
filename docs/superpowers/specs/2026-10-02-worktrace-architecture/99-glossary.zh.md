@@ -4,7 +4,7 @@
 | --- | --- |
 | 文档状态 | 设计草案（待评审） |
 | 日期 | 2026-10-02 |
-| 地位 | **本表是全部中英文档的术语唯一真相源**。任何文档与本表冲突时以本表为准 |
+| 地位 | 本表统一术语；业务规则以修订后的 00/02/04 为准，术语冲突需同步修订 |
 | 英文版 | [`99-glossary.en.md`](99-glossary.en.md) |
 
 > 「禁止混用」一列是本文的主要价值 —— 它记录的是**这个项目里最容易混淆的术语对**。
@@ -37,8 +37,8 @@
 | 里程碑 | Milestone | 项目阶段结果，如"原理图设计冻结" | |
 | 任务 | Task | 主要管理对象。WBS 树上从 Task 到叶子的所有节点都是 Task | |
 | 行动 | Action | **就是叶子 Task**，不单独建表（见 02-data-model §7） | 不是独立实体类型 |
-| 会话 | WorkSession | 一次连续计时区间 | 与「分段」不是同一层 |
-| 分段 | SessionSegment | WorkSession 内部的子区间（V1 起） | |
+| 会话 | WorkSession | 一次开始到结束的工作会话，可含暂停；工时由有效区间聚合 | 与「分段」不是同一层 |
+| 分段 | SessionSegment | 未来的活动细分；与 V0.1 计时用 work_interval 有效区间不同 | |
 | 依赖 | Dependency | 任务间关系：`blocks` / `depends_on` / `related` / `parallel` | |
 
 ---
@@ -55,8 +55,8 @@
 | **受阻** | **Blocked** | **我做不了**（缺技能、缺决策、前置未完） | **与 Waiting 是不同状态，不得合并** |
 | **等待** | **Waiting** | **等外部**（同事回复、器件、测试、审批） | 同上 |
 | 待检查 | Review | 做完待验 | |
-| 完成 | Done | 终态 | |
-| 已取消 | Cancelled | 终态 | |
+| 完成 | Done | 需显式 reopen 才可重新就绪 | |
+| 已取消 | Cancelled | 需显式 reopen 才可重新就绪 | |
 
 ---
 
@@ -64,7 +64,7 @@
 
 | 中文 | English | 计入人工工时 | 定义 |
 | --- | --- | --- | --- |
-| 前台 | FOREGROUND | ✅ | 用户当前正在做的事。**同时至多一个** |
+| 前台 | FOREGROUND | ✅ | 用户当前工作；同时至多一个 running，允许多个 paused |
 | 后台 | BACKGROUND | ❌ | 并行进行、不由用户推进（如 AI 生成文档） |
 | 被动 | PASSIVE | ❌ | 机器过程（如 LTspice 仿真跑着） |
 | 等待 | WAITING | ❌ | 等外部条件 |
@@ -89,13 +89,13 @@
 
 | 中文 | English | 定义 | 禁止混用 |
 | --- | --- | --- | --- |
-| 熟练度 | Skill Level | 对能力的估计值（0–1） | **必须与置信度并存**，单独给出会得出错误结论 |
+| 熟练度 | Skill Level | 实验性能力估计；未启用/样本不足时显示未知，默认先显示使用事实 | **必须与置信度并存**，单独给出会得出错误结论 |
 | 置信度 | Confidence | 该估计有多少样本支撑 | 同上 |
 | 返工 | Rework | 完成后被推翻重做 | |
 | 完成质量 | Completion Quality | `normal` / `reworked` / `review_failed` / `partially_done` / `abandoned` | |
 | 打断 | Interruption | 计时中插入另一任务，原会话被暂停 | |
 
-> SPEC §20 的硬要求：`Vulkan: Skill 0.72 / Confidence 0.21` 意味着"表现不错但样本不足"。只给 Skill 会误导。
+> 原愿景的数值示例不作为本轮评分验收；先展示事实与样本，评分启用方式见 R-06。
 
 ---
 
@@ -107,7 +107,7 @@
 | 上下文事实 | ContextFact | 项目级的事实条目（如 `Pt1000 current = 0.2mA`） |
 | 已取代 | Superseded | 事实被新值替代后的状态。**旧值保留，不覆盖**（版本化） |
 | 决策日志 | Decision Log | 记录决策、理由、日期，供日后追问"当时为什么这么选" |
-| 上下文完整度 | Context Completeness | 对任务背景充分程度的百分比评估 |
+| 上下文完整度 | Context Completeness | 关键信息具备/缺失清单；百分比须有可解释算法，否则不显示 |
 | 保密等级 | Security Level | `PUBLIC` / `INTERNAL` / `CONFIDENTIAL` / `STRICT_LOCAL` |
 | 严格本地 | STRICT_LOCAL | **不允许发送到云 AI、不允许自动外发**，只允许本地处理 |
 
@@ -133,12 +133,12 @@
 | 唯一真相源 | Single Source of Truth | 领域状态只在 Rust 侧存在一份（ADR-006） |
 | 命令 | Command | 前端 → Rust 的请求/响应通道 |
 | 事件 | Event | Rust → 前端的广播通道 |
-| 信封 | Envelope | 事件的统一外层结构 `{event, revision, at, payload}` |
-| 修订号 | revision | Rust 侧单调递增的全局版本号，用于检测漏事件（ADR-010） |
+| 信封 | Envelope | 事件的统一外层结构 `{event, revision, at, payload}（业务事件；at 为 Unix 毫秒）` |
+| 修订号 | revision | 随业务事务提交的持久版本号；tick/心跳不增加（ADR-010） |
 | 快照 | Snapshot | `get_snapshot()` 返回的当前状态全量，供窗口挂载时对齐 |
 | 状态镜像 | State Mirror | 前端缓存层 `src/services/domainState.ts`，唯一订阅入口 |
 | 失效信号 | Invalidation Signal | 领域事件在前端的角色 —— 触发重拉，而非打补丁 |
-| 待确认 | needs_review | 崩溃恢复后会话的标记。**系统不自动补写工时**，须用户确认 |
+| 待确认 | needs_review | 旧 run 未结束会话的标记，进入 recovering，不占运行槽位，确认后才计入已确认统计 |
 | 平台层 | Platform Layer | `src-tauri/src/platform/`，Win32 调用的唯一边界（ADR-005） |
 | 组合根 | Composition Root | `lib.rs`，唯一装配全部层的地方 |
 | 领域层 | Domain Layer | `domain/`，纯类型与规则，无 IO |
@@ -155,3 +155,17 @@
 | 记录 | Track | 记录真实工时、切换、打断 |
 | 回顾 | Review | 分析结果、生成报表、提高预测准确度 |
 | WBS | Work Breakdown Structure | Goal → Project → Milestone → Task → Action |
+
+## 11. 本轮补充
+
+| 术语 | 定义 |
+| --- | --- |
+| work_interval 有效工作区间 | 开始/结束事实；暂停关闭区间，恢复新建区间，跨报表范围裁剪 |
+| source 来源 | user/rule/ai，记录值从哪里来；采纳 AI 不改变来源 |
+| confirmed_at 确认 | 用户确认权，任何已确认值不被后台覆盖 |
+| recovering 恢复待确认 | 旧 run 未结束记录，用户确认/修正/丢弃；不继续计时 |
+| tick_seq | 单次应用 run 的计时展示序号，不是持久业务版本 |
+| 暂计 | 正在运行区间截至快照时间的值，与已确认结束时间分列 |
+| 未分配 | 同一 kind 权重总和不足 1 的剩余人工工时 |
+
+来源/确认、休眠与历史分类默认值详见 02/06，本轮所有文档仍为待评估草案。

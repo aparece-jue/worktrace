@@ -1,342 +1,169 @@
 # Worktrace — Data Model
 
-| Item | Value |
+Status: revised draft for user review. Date: 2026-10-02.
+Upstream: [architecture](00-architecture.en.md); [Chinese](02-data-model.zh.md).
+This replaces pause-total storage. The schema is logical, not an executable migration.
+
+## 1. Versions and entities
+
+| Version | Objects |
 | --- | --- |
-| Status | Design draft (under review) |
-| Date | 2026-10-02 |
-| Upstream | [`00-architecture.en.md`](00-architecture.en.md), [`01-module-breakdown.en.md`](01-module-breakdown.en.md) |
-| Implemented by | M01 Storage, M02 Domain model |
-| Chinese version | [`02-data-model.zh.md`](02-data-model.zh.md) |
+| V0.1 | app_meta, application_run, project, task, work_session, work_interval, time_edit, task_change, daily_plan, tag, task_tag |
+| V0.2 | goal, milestone, task_dependency, time_block, task_knowledge (actual-use metadata) |
+| V0.3 | ai_suggestion, ai_feedback; task/project security_level |
+| V0.4 | context_fact, decision, document, task_document |
+| V0.5 | knowledge_stat, a rebuildable derived cache |
 
-> This document defines the entity relations, tables, and state machines. **Full DDL and migration scripts belong to M01's own spec.**
+Add Goal/Milestone foreign-key columns in V0.2, together with their tables. V0.1 exposes no unsupported filters. IDs are UUID strings, with explicit NOT NULL primary keys in full DDL. Timestamps are Unix milliseconds; durations are milliseconds, converted to minutes only for display.
 
----
+Project owns tasks; tasks form a tree whose leaves are Actions. Each task has sessions; each session has effective work_interval rows. These minimal timing intervals are needed in V0.1 for pauses and range clipping; they are not the later activity-classification SessionSegment feature.
 
-## 1. Entity relations
+## 2. Logical schema and database constraints
 
+```sql
+-- Logical schema: full executable DDL and migrations belong to M01.
+app_meta(singleton INTEGER PRIMARY KEY, revision INTEGER NOT NULL)
+application_run(id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, clean_exit_at INTEGER)
+goal(id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, status TEXT NOT NULL,
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
+project(id TEXT PRIMARY KEY, goal_id TEXT REFERENCES goal(id), name TEXT NOT NULL,
+        description TEXT, status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
+milestone(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id), title TEXT NOT NULL,
+          status TEXT NOT NULL, due_at INTEGER, done_at INTEGER)
+task(id TEXT PRIMARY KEY, project_id TEXT REFERENCES project(id), milestone_id TEXT REFERENCES milestone(id),
+     parent_task_id TEXT REFERENCES task(id), title TEXT NOT NULL, description TEXT,
+     status TEXT NOT NULL, priority_json TEXT, estimated_json TEXT,
+     planned_duration_ms INTEGER, deadline INTEGER, importance INTEGER, urgency INTEGER,
+     energy_required INTEGER, difficulty INTEGER, completion_criteria TEXT, quality TEXT,
+     baseline_estimate_json TEXT, row_version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
+work_session(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id),
+             run_id TEXT NOT NULL REFERENCES application_run(id), mode TEXT NOT NULL,
+             state TEXT NOT NULL, timer_kind TEXT NOT NULL, target_duration_ms INTEGER,
+             started_at INTEGER NOT NULL, ended_at INTEGER, last_heartbeat_at INTEGER,
+             interruption_of TEXT REFERENCES work_session(id), quality TEXT,
+             needs_review INTEGER NOT NULL DEFAULT 0, row_version INTEGER NOT NULL)
+work_interval(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
+              started_at INTEGER NOT NULL, ended_at INTEGER, voided_at INTEGER)
+time_edit(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES work_session(id),
+          before_json TEXT NOT NULL, after_json TEXT NOT NULL, reason TEXT,
+          created_at INTEGER NOT NULL)
+task_change(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id),
+            before_json TEXT NOT NULL, after_json TEXT NOT NULL, created_at INTEGER NOT NULL)
+daily_plan(task_id TEXT NOT NULL REFERENCES task(id), local_date TEXT NOT NULL,
+           timezone TEXT NOT NULL, PRIMARY KEY(task_id,local_date,timezone))
+tag(id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+    parent_id TEXT REFERENCES tag(id), created_at INTEGER NOT NULL)
+task_tag(task_id TEXT NOT NULL REFERENCES task(id), tag_id TEXT NOT NULL REFERENCES tag(id),
+         weight REAL, PRIMARY KEY(task_id,tag_id))
 ```
-Goal 1──n Project 1──n Milestone 1──n Task
-                                        │
-        Task ──self──→ Task              │  parent_task_id (WBS hierarchy)
-        Task n──n Task  (Dependency)     │  blocks / depends_on / related / parallel
-        Task 1──n WorkSession ───────────┘
-        WorkSession 1──n SessionSegment  (from V1)
-        Task n──n Tag   (carries weight)
-        Tag  ──self──→ Tag               (hierarchy only for kind = knowledge)
-        Project 1──n ContextFact
-        Project 1──n Decision
-        Project 1──n Document ──n Task   (many-to-many)
-        Tag(kind=knowledge) 1──1 KnowledgeStat
-        Task n──n KnowledgeStat          (through TaskKnowledge)
+
+```sql
+CREATE UNIQUE INDEX uq_running_foreground ON work_session(mode)
+  WHERE mode='FOREGROUND' AND state='running';
+CREATE UNIQUE INDEX uq_open_interval ON work_interval(session_id)
+  WHERE ended_at IS NULL AND voided_at IS NULL;
+CREATE UNIQUE INDEX uq_tag_root ON tag(kind,name) WHERE parent_id IS NULL;
+CREATE UNIQUE INDEX uq_tag_child ON tag(kind,parent_id,name) WHERE parent_id IS NOT NULL;
+CREATE INDEX idx_interval_session ON work_interval(session_id);
+CREATE INDEX idx_task_project ON task(project_id);
+CREATE INDEX idx_task_status ON task(status);
+CREATE INDEX idx_session_task ON work_session(task_id);
 ```
 
----
 
-## 2. Tables
+M01 supplies executable DDL, CHECKs, NOT NULLs, deletion policies and migrations. Enable foreign_keys on every connection.
 
-### 2.0 Which tables belong to which milestone
+- Session state: running / paused / recovering / finished / discarded. A running session has exactly one open effective interval; paused/finished/discarded have none. Recovering may retain one uncertain endpoint and never advances normally.
+- Timer kind: stopwatch / countdown, extended with pomodoro in V0.2. target_duration_ms is an input budget, NULL for stopwatch.
+- Modes: FOREGROUND / BACKGROUND / PASSIVE / WAITING; only FOREGROUND is exposed in V0.1. Several foreground sessions may be paused, but only one may run. Resume uses the same occupancy check.
+- An interval cannot end before its start; effective intervals within a session cannot overlap. Confirmed historical human intervals across sessions cannot overlap either; validate in a write transaction.
+- task.quality is allowed in Review, Done or Cancelled (abandoned may accompany Cancelled). Reopen clears current quality and preserves the change history. Add a CHECK for allowed state/quality combinations.
+- Trim tag names, reject empty strings and compare case-sensitively for now. Root and child uniqueness are separate. Only Knowledge has parents; parent and child kinds match, and cycles are rejected.
+- Default FK policy is RESTRICT. Archive/soft-delete tasks with timing history; archive projects without removing history. Reject deleting used tags until associations are removed.
+- Do not store task.actual_duration, elapsed, remaining or paused_total_ms. Effective intervals are the timing source; time_edit is audit history, not an alternative aggregate source.
 
-This design covers the whole product lifecycle, but **not every table is created in V0.1**:
+## 3. Sessions and timers
 
-| Tables | Introduced in |
+| Intent | Atomic changes |
 | --- | --- |
-| `goal` `project` `milestone` `task` `work_session` `tag` `task_tag` | V0.1 |
-| `knowledge_stat` `task_knowledge` | V0.2 |
-| `context_fact` `decision` `document` `task_document` | V0.4 |
+| start | Check executability/foreground occupancy; create running session and open interval |
+| pause | Close open interval; set paused |
+| resume | Check occupancy; create open interval; set running |
+| finish | Close interval if running; set finished and ended_at |
+| switch/interrupt (V0.2) | Pause old session; start new session with interruption_of; roll back both on failure |
+| correct | Check row_version, ranges and overlaps; edit intervals; append time_edit; increase version |
 
-**Migration strategy**: V0.1 creates only the V0.1 tables. Later milestones **add** tables through migrations rather than creating everything up front.
+Pause/resume keeps the session; starting again after finish creates a new one. A paused session may finish directly. Completing/cancelling a task finishes its running/paused sessions. Unresolved recovering records return RECOVERY_REQUIRED rather than silently confirming history.
 
-Creating unused tables freezes structure that has not been thought through yet, and unused tables attract change requests — precisely the speculative design SPEC §57 warns against. The same applies to columns: `priority_json` and `estimated_json` on `task`, which serve V0.3's AI metadata, may start as plain columns in V0.1 and migrate to the envelope shape in V0.3.
+active_ms is the sum of closed effective intervals plus the running interval's current duration. Paused values freeze because there is no open interval. Countdown remaining_ms=max(0,target_duration_ms-active_ms); overtime is shown separately. Expiry alerts but does not complete the task. Pauses consume no countdown budget.
 
-### 2.1 Goals and projects
+Use a monotonic clock for live durations and wall time for persisted attribution. Wall-clock changes, suspend and discontinuities cannot be hidden with now-started_at: stop the uncertain interval at the last trusted checkpoint and require reconciliation. Monotonic clock state is not reused across restarts.
 
-```sql
-goal(
-  id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT,
-  status TEXT NOT NULL,                    -- active / done / dropped
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-)
+Proposed default: pause foreground work on lock/suspend; resume only by explicit action. Machine/background suspension is reconciled separately. This remains a product-review item in [review notes](06-review-notes.en.md). Accuracy tests must name the chosen sleep policy and include clock changes in both directions.
 
-project(
-  id TEXT PRIMARY KEY,
-  goal_id TEXT REFERENCES goal(id),
-  name TEXT NOT NULL, description TEXT,
-  status TEXT NOT NULL,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-)
+## 4. Recovery and exit
 
-milestone(
-  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id),
-  title TEXT NOT NULL, status TEXT NOT NULL,
-  due_at INTEGER, done_at INTEGER,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-)
-```
+Acquire single-instance ownership before initializing a run. Each startup creates application_run and moves all unfinished sessions from previous runs, including paused sessions, to recovering with needs_review=1. No two-minute heartbeat threshold: immediate restart after a kill is covered. Persist a heartbeat about every 30 seconds; it supplies a last trusted time, not a fabricated endpoint.
 
-### 2.2 Task
+Recovering sessions neither run nor occupy the running foreground slot. Exclude the whole unconfirmed session from confirmed totals; show pending time separately. The user can confirm an endpoint, edit intervals, save as paused then explicitly resume, or discard. Close uncertain intervals, validate overlaps and audit the decision atomically.
 
-```sql
-task(
-  id TEXT PRIMARY KEY,
-  project_id TEXT REFERENCES project(id),
-  milestone_id TEXT REFERENCES milestone(id),
-  parent_task_id TEXT REFERENCES task(id),   -- WBS hierarchy; an Action is simply a leaf Task
-  title TEXT NOT NULL, description TEXT,
-  status TEXT NOT NULL,                      -- see §3
+Closing a window does not terminate the core. Explicit quit atomically finishes running/paused sessions and saves revision/clean_exit_at. Recovering records remain unresolved. Startup scanning and transactions handle crashes before/after commit; delivered shutdown events are not a reliability prerequisite.
 
-  priority_json TEXT,                        -- {"value":"P1","source":"user","confidence":null,"confirmed_at":...}
-  estimated_json TEXT,                       -- same envelope, carries SPEC §22 estimated_duration
+## 5. Task states and hierarchy
 
-  importance INTEGER, urgency INTEGER,       -- 0..3
-  deadline INTEGER,
-  scheduled_start INTEGER, scheduled_end INTEGER,
-  planned_duration INTEGER,                  -- minutes; the user's own plan
-
-  energy_required INTEGER, difficulty INTEGER,
-  completion_criteria TEXT,
-  quality TEXT,                              -- see §5
-  needs_review INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-)
-```
-
-**On `actual_duration`**: SPEC §8.4 lists it, and this design **deliberately omits it**. Actual effort is always aggregated from `work_session`:
-
-```sql
-SELECT SUM(ended_at - started_at - paused_total_ms) FROM work_session WHERE task_id = ?
-```
-
-A stored copy would be a second source of truth and would inevitably drift from the detail rows. `work_session(task_id)` is indexed, and at personal scale (a few hundred thousand rows over ten years) the aggregation cost is negligible. If reports ever become a bottleneck, add a **materialized summary table** maintained by M01 when a session ends — not a semantically vague column on `task`. The deviation is recorded in §7.
-
-### 2.3 WorkSession
-
-```sql
-work_session(
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES task(id),
-  mode TEXT NOT NULL,                        -- FOREGROUND / BACKGROUND / PASSIVE / WAITING
-  started_at INTEGER NOT NULL,
-  ended_at INTEGER,                          -- NULL = still running
-  paused_total_ms INTEGER NOT NULL DEFAULT 0,
-  target_end INTEGER,                        -- target instant for countdown/Pomodoro; NULL for stopwatch
-  interruption_of TEXT REFERENCES work_session(id),
-  quality TEXT,
-  needs_review INTEGER NOT NULL DEFAULT 0,   -- set after crash recovery, see §6
-  last_heartbeat_at INTEGER,                 -- refreshed every 30s while running
-  created_at INTEGER NOT NULL
-)
-```
-
-**This table has no `remaining` and no `elapsed`.** That is SPEC §15's rule expressed in the schema: store instants only, compute every displayed value on demand.
-
-```rust
-elapsed_ms   = now - started_at - paused_total_ms
-remaining_ms = target_end - now          // meaningless when target_end IS NULL
-```
-
-### 2.4 Tags
-
-```sql
-tag(
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,        -- domain / activity / knowledge / context / report
-  name TEXT NOT NULL,
-  parent_id TEXT REFERENCES tag(id),         -- used only by kind = knowledge
-  created_at INTEGER NOT NULL,
-  UNIQUE(kind, parent_id, name)
-)
-
-task_tag(
-  task_id TEXT NOT NULL REFERENCES task(id),
-  tag_id  TEXT NOT NULL REFERENCES tag(id),
-  weight  REAL,                              -- NULL = associated-duration semantics; value = weighted-duration semantics
-  PRIMARY KEY (task_id, tag_id)
-)
-```
-
-A single `weight` column carries both of SPEC §18's measures; **no second table**:
-
-| `weight` | Semantics | How it is counted |
-| --- | --- | --- |
-| `NULL` | Associated duration | The tag counts the task's full effort |
-| value (e.g. 0.6) | Weighted duration | Effort allocated proportionally |
-
-Weights are **not** forced to sum to 1. When they do not, M06 decides the normalization strategy; that decision belongs to M06's spec.
-
-### 2.5 Knowledge
-
-```sql
-knowledge_stat(
-  tag_id TEXT PRIMARY KEY REFERENCES tag(id),   -- kind must be knowledge
-  experience_hours REAL NOT NULL DEFAULT 0,
-  recent_hours REAL NOT NULL DEFAULT 0,
-  application_count INTEGER NOT NULL DEFAULT 0,
-  learning_count INTEGER NOT NULL DEFAULT 0,
-  skill_level REAL, confidence REAL,            -- both required, SPEC §20
-  estimate_accuracy REAL,
-  last_used_at INTEGER
-)
-
-task_knowledge(
-  task_id TEXT NOT NULL REFERENCES task(id),
-  knowledge_tag_id TEXT NOT NULL REFERENCES tag(id),
-  weight REAL, required_level REAL,
-  used INTEGER NOT NULL DEFAULT 0,
-  learning_gain REAL, confidence REAL,
-  source TEXT,                                  -- user / ai
-  PRIMARY KEY (task_id, knowledge_tag_id)
-)
-```
-
-`skill_level` and `confidence` **must coexist** (SPEC §20): the first estimates ability, the second how much evidence backs it. Keeping only one produces "three tasks and you are an expert".
-
-### 2.6 Context and decisions
-
-```sql
-context_fact(
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES project(id),
-  key TEXT NOT NULL, value TEXT NOT NULL,
-  source_type TEXT NOT NULL, source_id TEXT,
-  confidence REAL,
-  security_level TEXT NOT NULL DEFAULT 'INTERNAL',   -- PUBLIC/INTERNAL/CONFIDENTIAL/STRICT_LOCAL
-  created_at INTEGER NOT NULL,
-  superseded_by TEXT REFERENCES context_fact(id)     -- versioned, never overwritten
-)
-
-decision(
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES project(id),
-  title TEXT NOT NULL, reason TEXT,
-  decided_at INTEGER, created_at INTEGER NOT NULL
-)
-
-document(
-  id TEXT PRIMARY KEY,
-  project_id TEXT REFERENCES project(id),
-  path TEXT NOT NULL, kind TEXT, security_level TEXT NOT NULL DEFAULT 'INTERNAL',
-  created_at INTEGER NOT NULL
-)
-
-task_document(task_id TEXT NOT NULL, document_id TEXT NOT NULL, PRIMARY KEY(task_id, document_id))
-```
-
-`context_fact` **versions rather than overwrites** via `superseded_by` (SPEC §28): changing a parameter keeps the old value, marked superseded. The AI never reads stale data, and history survives.
-
----
-
-## 3. Task state machine
-
-```
-Inbox ──→ Clarifying ──→ Ready ──→ Scheduled ──→ Doing ──→ Review ──→ Done
-                            │           │           │
-                            └───────────┴───────────┴──→ Blocked
-                            └───────────┴───────────┴──→ Waiting
-                                                        └──→ Cancelled
-```
-
-| State | Meaning |
+| From | Allowed targets |
 | --- | --- |
-| Inbox | Captured, not yet clarified |
-| Clarifying | Working out what the next action is |
-| Ready | Actionable but unscheduled |
-| Scheduled | Placed in a time block |
-| Doing | In progress |
-| **Blocked** | **I cannot proceed** (missing skill, missing decision, unfinished prerequisite) |
-| **Waiting** | **Waiting on someone or something else** (a reply, a part, a test, an approval) |
-| Review | Finished, pending check |
-| Done / Cancelled | Terminal |
+| Inbox | Clarifying, Ready, Cancelled |
+| Clarifying | Inbox, Ready, Cancelled |
+| Ready | Doing, Scheduled (V0.2), Blocked, Waiting, Review, Done, Cancelled |
+| Scheduled (V0.2) | Ready, Doing, Blocked, Waiting, Review, Done, Cancelled |
+| Doing | Ready, Blocked, Waiting, Review, Done, Cancelled |
+| Blocked / Waiting | Ready, Cancelled |
+| Review | Ready (failed check), Done, Cancelled |
+| Done / Cancelled | Ready only through explicit reopen, preserving history |
 
-`Blocked` and `Waiting` are distinct and must not be merged (SPEC §9). Transition rules live in `domain/task/state.rs` and are **enforced in the domain layer** — never scattered into services or commands. An illegal transition returns a domain error and writes nothing.
+V0.1 has no Scheduled UI. Today's plan is a simple daily selection; scheduling is a V0.2 time_block. start from Inbox may clarify to Ready in the same command. Doing describes work in progress, not a running timer; pause need not change it. Blocked/Waiting pauses running sessions; completion/cancellation finishes them. A background session finishing never automatically completes its task.
 
----
+No hierarchy UI in V0.1. V0.2 times leaves by default; parents aggregate descendant intervals without duplicate counting. Children finishing do not automatically finish the parent. Parent/child and milestone assignments must share the project, reject cycles, and validate subtree moves transactionally.
 
-## 4. WorkSession lifecycle
+task_dependency stores one predecessor→successor direction; blocks/depends_on are views of it. Reject self-dependencies and dependency cycles; related/parallel do not block. time_block stores task_id/start_at/end_at/timezone independently and supports repeated scheduling.
 
-```
-created ──start──→ running ──pause──→ paused ──resume──→ running
-                     │                                     │
-                     ├──interrupt──→ running (new session) │
-                     │               original → paused      │
-                     └──finish───────────────────────────→ finished
-```
+## 6. Statistics and tags
 
-| State | Test |
-| --- | --- |
-| running | `ended_at IS NULL` and not paused |
-| paused | `ended_at IS NULL` and `paused_total_ms` already includes the current pause span |
-| finished | `ended_at IS NOT NULL` |
+Use half-open [from,to) ranges. Clip every effective interval: max(0,min(end,to)-max(start,from)). Use one snapshot now for open running intervals. Distinguish confirmed closed time from provisional live time. Exclude recovering/discarded sessions. DTOs carry measure, timezone, range, as_of and revision.
 
-Pausing **does not insert a row**; it accumulates `paused_total_ms` and records the pause start (in a companion field M05 defines). A task worked in three sittings therefore yields **three sessions**, matching SPEC §11's example (09:00–09:35 / 14:20–15:10 / 16:30–17:00).
+Human effort includes FOREGROUND only. Sum BACKGROUND/PASSIVE as separate machine measures; WAITING is separate. Never add concurrent machine durations to human totals.
 
-**Execution mode affects statistics, not storage**:
+Associated duration always counts each associated tag in full, regardless of weight; sums across tags may exceed total effort and must be labelled non-additive. Weighted effort allocates within each kind: finite weight in 0..1, NULL means unallocated. Totals below 1 leave an Unallocated remainder; totals above 1 are rejected. No silent normalization. Knowledge ancestor reports deduplicate intervals rather than summing parent/child associations.
 
-| mode | Statistical meaning |
-| --- | --- |
-| FOREGROUND | Counts as human effort |
-| BACKGROUND | Runs in parallel; human effort accounted separately |
-| PASSIVE | Machine/passive process (e.g. a simulation); not human effort |
-| WAITING | Waiting on something external; not human effort |
+Proposed default: recompute history using current tags/project assignments/weights and label reports accordingly. Exports retain the generated result and its accounting policy. Historical classification snapshots remain a user-review option. Knowledge weights live only in task_tag; task_knowledge stores required_level/used/learning_gain rather than duplicating weights.
 
-This is what guarantees SPEC §12's rule that "1h designing + 1h of AI generation ≠ 2h of human effort".
+## 7. AI and context migrations
 
----
+Use stable priority_json/estimated_json envelopes from V0.1: value, source(user/rule/ai), confirmed_at, updated_at; estimates use milliseconds. Add suggestion_id in V0.3. Source is origin, confirmation is authority: accepting AI does not relabel origin as user. Background jobs cannot overwrite confirmed values; explicit editing/re-adoption can.
 
-## 5. Completion quality
+ai_suggestion retains task/kind/input version, provider/model/prompt version, suggested value, original estimate, timestamps and pending/accepted/edited/rejected/stale outcomes. ai_feedback links suggestion_id. Keep rejected suggestions and post-adoption edits for valid acceptance/error statistics. Stale inputs invalidate suggestions. Self-reported model confidence differs from empirically calibrated confidence; insufficient evidence is Unknown.
 
-`quality` values (SPEC §24): `normal` / `reworked` / `review_failed` / `partially_done` / `abandoned`.
+V0.3 task/project security_level defaults to STRICT_LOCAL; M09/M10 whitelist outbound payloads. In V0.4, context_fact allows only one current value per project/key through a partial unique index WHERE superseded_by IS NULL; replacement inserts and links atomically. Documents retain content hash/modified time, and extraction caches inherit classification. task_document has real FKs. Reclassification never strips origin security metadata.
 
-Its purpose is to stop the system drawing a wrong conclusion: "finished fast = highly skilled". With it, M08 can separate "fast and clean" from "fast but reworked". It exists in two places — `task.quality` (task-level verdict) and `work_session.quality` (per-sitting verdict) — with different purposes; neither is derived from the other.
+knowledge_stat is rebuildable and carries algorithm_version/sample_count/computed_at. V0.5 ability scores are experimental, never inferred from total hours alone.
 
----
+## 8. Required M01/M05 cases
 
-## 6. Invariants the service layer must enforce
+Pause/restart, finish while paused, conflicting resume, concurrent starts, pauses across midnight, empty ranges, duplicate root tags, historical overlap, kill/restart within ten seconds, quit while running/paused, clock changes both ways, stale edits, report recomputation after corrections, pending exclusion and explicit confirmation.
 
-The schema can express only part of the truth. These four belong to `services/` and need tests:
+## 9. History, estimate baseline and database restore
 
-| # | Invariant | Why the schema cannot express it |
-| --- | --- | --- |
-| 1 | **At most one FOREGROUND session** | A unique index cannot say "only where mode = FOREGROUND and ended_at IS NULL" |
-| 2 | **`task.quality` is set only when status ⊆ {Done}** | Cross-table, cross-state conditional |
-| 3 | **`knowledge_stat.tag_id` must reference a tag of kind = knowledge** | SQLite has no conditional cross-table foreign key |
-| 4 | **Crash recovery: sessions with `ended_at IS NULL` past their heartbeat get `needs_review = 1`** | Requires a business-chosen time threshold |
+V0.1 task_change records state/quality/assignment edits in the same transaction, supporting reopen history and completion by date. daily_plan records selected local date/timezone; updated_at does not mean planned today. First start freezes the estimate envelope to baseline_estimate_json; later estimates do not overwrite it. Explicit rebasing is audited; estimates after work began are labelled non-pre-start. Default error compares confirmed human duration; incomplete tasks do not enter completed samples.
 
-The full meaning of (4) (SPEC §46, crash recovery):
+M01 full DDL maps every invariant to CHECK/index or transactional service validation. Interval edits target finished/recovering sessions only; finish/confirm running or paused records first. Failed edits never leave partial audit records.
 
-- On startup, scan for sessions where `ended_at IS NULL` and `last_heartbeat_at` is older than two minutes.
-- **Do not backfill `ended_at`.** Fabricated effort is worse than missing effort: it corrupts statistics, estimate prediction, and the proficiency model.
-- Set `needs_review = 1` and ask the user to confirm how that span should be attributed.
-- Basis: SPEC §5.3 `User > Rule > AI`, §57 "data must be explainable".
+Restore: stop timers/pause writes/close connections, consistently back up current DB, validate candidate in a temporary path (integrity/FKs/schema; reject future versions, back up and migrate old versions), switch recoverably in the same directory, reopen/validate. Roll back paths and reopen the original on failure. Never overwrite an open WAL database. Backups contain all required data; export/schema/application versions are distinct.
 
----
+## 10. Service contract additions
 
-## 7. Deviations from SPEC
-
-| Deviation | SPEC | This design | Rationale |
-| --- | --- | --- | --- |
-| No `task.actual_duration` | §8.4 lists the field | Aggregated from `work_session` | Avoids a second source of truth; see §2.2 |
-| No `Action` table | §3.2's WBS tree has an Action level | Task self-reference; an Action is a leaf Task | Two near-identical tables mean two repositories and two state machines |
-| AI metadata in JSON columns | §33 requires value/source/confidence/confirmed | Inline JSON columns, no EAV table | The field set is known at compile time and always read/written whole; EAV is for run-time-unknown attribute sets |
-| New `last_heartbeat_at` | Not mentioned | Added | SPEC §46 requires crash recovery; without a heartbeat the crashed span is unknowable |
-| New event-level `revision` | Not mentioned | Added | See `00-architecture.en.md` §5.2 |
-
----
-
-## 8. Indexes
-
-```sql
-CREATE INDEX idx_task_status        ON task(status);
-CREATE INDEX idx_task_project       ON task(project_id);
-CREATE INDEX idx_task_parent        ON task(parent_task_id);
-CREATE INDEX idx_task_deadline      ON task(deadline) WHERE deadline IS NOT NULL;
-CREATE INDEX idx_session_task       ON work_session(task_id);
-CREATE INDEX idx_session_started    ON work_session(started_at);
-CREATE INDEX idx_session_open       ON work_session(ended_at) WHERE ended_at IS NULL;
-CREATE INDEX idx_task_tag_tag       ON task_tag(tag_id);
-CREATE INDEX idx_context_fact_lookup ON context_fact(project_id, key) WHERE superseded_by IS NULL;
-CREATE INDEX idx_document_project   ON document(project_id);
-```
-
-`idx_session_open` is a **partial index** serving the two hottest queries: find the running session, and scan for crash recovery. At personal scale it holds single-digit rows.
-
-All timestamps are stored as **Unix milliseconds (INTEGER)** with no timezone attached; the presentation layer renders them in local time. This avoids daylight-saving and relocation ambiguity, and keeps SQLite's date functions out of business calculations.
+- Manual priority/estimate inputs use source=user and confirmed_at=operation time. Adopted AI retains origin with equal overwrite protection. Envelopes contain known fields, not arbitrary EAV attributes.
+- Explicit resume after recovery updates session.run_id to the current run and refreshes heartbeat; time_edit preserves original recovery attribution. Otherwise later startup may misclassify a resumed session as previous-run work.
+- Project states active/archived/done; archived projects cannot start new sessions but history remains editable. Goal active/done/dropped; Milestone open/done/cancelled. Full DDL defines importance/urgency/energy/difficulty ranges; V0.1 need not expose energy/difficulty inputs.
+- Task completion writes task_change; reports select completions by its timestamp, not updated_at/session end. Reopened work is labelled reopened, not falsely presented as still completed.
+- Pausable countdown budgets are execution timing; fixed time_block calendar endpoints do not move on pause. Never conflate them.
