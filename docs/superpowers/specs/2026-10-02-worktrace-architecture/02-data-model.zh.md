@@ -71,6 +71,10 @@ CREATE INDEX idx_session_task ON work_session(task_id);
 ```
 
 
+![ER（V0.1 核心表）](images/er-core-tables.svg)
+
+> 图：任务与计时这条链，外加两张审计表。橙色是事实依据 work_interval——统计只认它。
+
 完整 DDL 必须补齐 CHECK、NOT NULL、删除策略与索引，并逐次迁移。连接统一开启 foreign_keys；事务与备份由 M01 管理。
 
 - session.state：running / paused / recovering / finished / discarded。每个 running session 恰好有一个未结束的有效 interval；paused/finished/discarded 没有；recovering 可保留一个未定终点的 interval，不参与正常计时。

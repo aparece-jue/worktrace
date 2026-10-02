@@ -71,6 +71,8 @@ CREATE INDEX idx_session_task ON work_session(task_id);
 ```
 
 
+![ER (V0.1 core tables)](images/er-core-tables.svg)
+
 M01 supplies executable DDL, CHECKs, NOT NULLs, deletion policies and migrations. Enable foreign_keys on every connection.
 
 - Session state: running / paused / recovering / finished / discarded. A running session has exactly one open effective interval; paused/finished/discarded have none. Recovering may retain one uncertain endpoint and never advances normally.

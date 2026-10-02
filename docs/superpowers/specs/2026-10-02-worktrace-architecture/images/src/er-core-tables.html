@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Worktrace ER（V0.1 核心表）</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&family=Noto+Serif+TC:wght@400&family=Noto+Sans+TC:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{--paper:#FBF9F6;--ink:#2A2320;--muted:#6F6357;--accent:#D9603A;--rule:rgba(42,35,32,0.14);}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font-family:'Geist','Noto Sans TC',system-ui,sans-serif;
+       display:flex;justify-content:center;padding:3rem 1.5rem}
+  figure{margin:0;max-width:1000px;width:100%}
+  .eyebrow{font-family:'Geist Mono',monospace;font-size:11px;letter-spacing:.16em;
+           text-transform:uppercase;color:var(--muted);margin:0 0 .5rem}
+  h1{font-family:'Instrument Serif','Noto Serif TC',serif;font-weight:400;
+     font-size:1.75rem;margin:0 0 .35rem}
+  .sub{color:var(--muted);font-size:.9rem;margin:0 0 1.75rem}
+  svg{display:block;width:100%;height:auto}
+</style>
+</head>
+<body>
+<figure>
+  <p class="eyebrow">数据模型 · 逻辑结构 · §2</p>
+  <h1>ER（V0.1 核心表）</h1>
+  <p class="sub">任务与计时这条链，以及挂在它上面的两张审计表；辅助表与后续迁移表见下一张。</p>
+
+<svg viewBox="0 0 1000 900" role="img" aria-labelledby="er-core-title er-core-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="er-core-title">Worktrace V0.1 核心表的实体关系</title>
+  <desc id="er-core-desc">八张 V0.1 表及其基数关系：project 一对多 task，task 自引用出父子层级、一对多 task_change 与 work_session，work_session 一对多 work_interval 与 time_edit，application_run 一对多 work_session；app_meta 是只存 revision 的单行表，与任何表都没有外键。work_interval 用强调色标出，因为实际工时一律由有效区间聚合，两张审计表不是第二份统计真相源。</desc>
+
+  <defs>
+    <marker id="er-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="er-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 关系线（先画，箭头指向外键所在的一端） ===== -->
+  <path d="M 205 174 V 250" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#er-arrow)"/>
+  <path d="M 100 290 H 72 Q 64 290 64 298 V 324 Q 64 332 72 332 H 100"
+        fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#er-arrow)"/>
+  <path d="M 310 320 H 400" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#er-arrow)"/>
+  <path d="M 205 372 V 440" fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#er-arrow)"/>
+  <path d="M 205 576 V 630" fill="none" stroke="#D9603A" stroke-width="1.2" marker-end="url(#er-arrow-accent)"/>
+  <path d="M 340 530 H 372 Q 380 530 380 538 V 653 Q 380 661 388 661 H 420"
+        fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#er-arrow)"/>
+  <path d="M 700 310 H 660 Q 652 310 652 318 V 472 Q 652 480 644 480 H 340"
+        fill="none" stroke="#6F6357" stroke-width="1" marker-end="url(#er-arrow)"/>
+
+  <!-- ===== 基数（贴在端点旁，不压在线上） ===== -->
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="197" y="192" text-anchor="end">1</text>
+    <text x="197" y="242" text-anchor="end">N</text>
+    <text x="56" y="284" text-anchor="end">1</text>
+    <text x="56" y="326" text-anchor="end">N</text>
+    <text x="318" y="312">1</text>
+    <text x="392" y="312" text-anchor="end">N</text>
+    <text x="197" y="388" text-anchor="end">1</text>
+    <text x="197" y="432" text-anchor="end">N</text>
+    <text x="197" y="592" text-anchor="end">1</text>
+    <text x="197" y="622" text-anchor="end">N</text>
+    <text x="348" y="522">1</text>
+    <text x="412" y="653" text-anchor="end">N</text>
+    <text x="692" y="302" text-anchor="end">1</text>
+    <text x="348" y="472">N</text>
+  </g>
+
+  <!-- ===== project ===== -->
+  <rect x="100" y="80" width="210" height="94" rx="6" fill="#FBF9F6"/>
+  <rect x="100" y="80" width="210" height="94" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <rect x="108" y="86" width="44" height="12" rx="2" fill="transparent" stroke="rgba(107,155,199,0.45)" stroke-width="0.8"/>
+  <text x="130" y="95" fill="#3F6F9E" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">TABLE</text>
+  <text x="162" y="96" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">project</text>
+  <line x1="100" y1="106" x2="310" y2="106" stroke="rgba(107,155,199,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="110" y="122"># id TEXT</text>
+    <text x="110" y="136">→ goal_id TEXT　V0.2</text>
+    <text x="110" y="150">name TEXT</text>
+    <text x="110" y="164">status TEXT</text>
+  </g>
+
+  <!-- ===== app_meta（孤岛） ===== -->
+  <rect x="700" y="80" width="220" height="66" rx="6" fill="#FBF9F6"/>
+  <rect x="700" y="80" width="220" height="66" rx="6" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
+  <rect x="708" y="86" width="44" height="12" rx="2" fill="transparent" stroke="rgba(138,148,163,0.45)" stroke-width="0.8"/>
+  <text x="730" y="95" fill="#5C6675" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">TABLE</text>
+  <text x="762" y="96" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">app_meta</text>
+  <line x1="700" y1="106" x2="920" y2="106" stroke="rgba(138,148,163,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="710" y="122"># singleton INTEGER　单行</text>
+    <text x="710" y="136">revision INTEGER</text>
+  </g>
+
+  <!-- ===== task ===== -->
+  <rect x="100" y="250" width="210" height="122" rx="6" fill="#FBF9F6"/>
+  <rect x="100" y="250" width="210" height="122" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <rect x="108" y="256" width="44" height="12" rx="2" fill="transparent" stroke="rgba(107,155,199,0.45)" stroke-width="0.8"/>
+  <text x="130" y="265" fill="#3F6F9E" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">TABLE</text>
+  <text x="162" y="266" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">task</text>
+  <line x1="100" y1="276" x2="310" y2="276" stroke="rgba(107,155,199,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="110" y="292"># id TEXT</text>
+    <text x="110" y="306">→ project_id TEXT</text>
+    <text x="110" y="320">→ parent_task_id TEXT　自引用</text>
+    <text x="110" y="334">title TEXT</text>
+    <text x="110" y="348">status TEXT</text>
+    <text x="110" y="362">row_version INTEGER</text>
+  </g>
+
+  <!-- ===== task_change ===== -->
+  <rect x="400" y="270" width="230" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="400" y="270" width="230" height="80" rx="6" fill="#FBF1DC" stroke="#CBA758" stroke-width="1"/>
+  <rect x="408" y="276" width="44" height="12" rx="2" fill="transparent" stroke="rgba(203,167,88,0.45)" stroke-width="0.8"/>
+  <text x="430" y="285" fill="#9A7B2E" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">TABLE</text>
+  <text x="462" y="286" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">task_change</text>
+  <line x1="400" y1="296" x2="630" y2="296" stroke="rgba(203,167,88,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="410" y="312"># id TEXT</text>
+    <text x="410" y="326">→ task_id TEXT</text>
+    <text x="410" y="340">before_json / after_json</text>
+  </g>
+
+  <!-- ===== work_session ===== -->
+  <rect x="100" y="440" width="240" height="136" rx="6" fill="#FBF9F6"/>
+  <rect x="100" y="440" width="240" height="136" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <rect x="108" y="446" width="44" height="12" rx="2" fill="transparent" stroke="rgba(111,175,168,0.45)" stroke-width="0.8"/>
+  <text x="130" y="455" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">TABLE</text>
+  <text x="162" y="456" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">work_session</text>
+  <line x1="100" y1="466" x2="340" y2="466" stroke="rgba(111,175,168,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="110" y="482"># id TEXT</text>
+    <text x="110" y="496">→ task_id TEXT　→ run_id TEXT</text>
+    <text x="110" y="510">mode · state · timer_kind</text>
+    <text x="110" y="524">target_duration_ms INTEGER</text>
+    <text x="110" y="538">last_heartbeat_at INTEGER</text>
+    <text x="110" y="552">needs_review INTEGER</text>
+    <text x="110" y="566">row_version INTEGER</text>
+  </g>
+
+  <!-- ===== application_run ===== -->
+  <rect x="700" y="270" width="220" height="80" rx="6" fill="#FBF9F6"/>
+  <rect x="700" y="270" width="220" height="80" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <rect x="708" y="276" width="44" height="12" rx="2" fill="transparent" stroke="rgba(111,175,168,0.45)" stroke-width="0.8"/>
+  <text x="730" y="285" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">TABLE</text>
+  <text x="762" y="286" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">application_run</text>
+  <line x1="700" y1="296" x2="920" y2="296" stroke="rgba(111,175,168,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="710" y="312"># id TEXT　每次启动一行</text>
+    <text x="710" y="326">started_at INTEGER</text>
+    <text x="710" y="340">clean_exit_at INTEGER</text>
+  </g>
+
+  <!-- ===== time_edit ===== -->
+  <rect x="420" y="610" width="230" height="94" rx="6" fill="#FBF9F6"/>
+  <rect x="420" y="610" width="230" height="94" rx="6" fill="#FBF1DC" stroke="#CBA758" stroke-width="1"/>
+  <rect x="428" y="616" width="44" height="12" rx="2" fill="transparent" stroke="rgba(203,167,88,0.45)" stroke-width="0.8"/>
+  <text x="450" y="625" fill="#9A7B2E" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">TABLE</text>
+  <text x="482" y="626" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">time_edit</text>
+  <line x1="420" y1="636" x2="650" y2="636" stroke="rgba(203,167,88,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="430" y="652"># id TEXT</text>
+    <text x="430" y="666">→ session_id TEXT</text>
+    <text x="430" y="680">before_json / after_json</text>
+    <text x="430" y="694">reason TEXT</text>
+  </g>
+
+  <!-- ===== work_interval（事实依据，焦点） ===== -->
+  <rect x="100" y="630" width="230" height="108" rx="6" fill="#FBF9F6"/>
+  <rect x="100" y="630" width="230" height="108" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <rect x="108" y="636" width="44" height="12" rx="2" fill="transparent" stroke="rgba(217,96,58,0.45)" stroke-width="0.8"/>
+  <text x="130" y="645" fill="#D9603A" font-size="7" font-family="'Geist Mono',monospace" text-anchor="middle" letter-spacing="0.08em">FACT</text>
+  <text x="162" y="646" fill="#2A2320" font-size="11.5" font-weight="600" font-family="'Geist',sans-serif">work_interval</text>
+  <line x1="100" y1="656" x2="330" y2="656" stroke="rgba(217,96,58,0.35)" stroke-width="1"/>
+  <g font-family="'Geist Mono',monospace" font-size="8" fill="#6F6357">
+    <text x="110" y="672"># id TEXT</text>
+    <text x="110" y="686">→ session_id TEXT</text>
+    <text x="110" y="700">started_at INTEGER</text>
+    <text x="110" y="714">ended_at INTEGER</text>
+    <text x="110" y="728">voided_at INTEGER</text>
+  </g>
+
+  <!-- ===== 注记 ===== -->
+  <text x="40" y="782" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    这是逻辑结构，不是可直接执行的迁移脚本；完整 DDL（CHECK、NOT NULL、删除策略、索引）属于 M01。# 标主键，→ 标外键。</text>
+  <text x="40" y="802" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    不存 task.actual_duration / elapsed / remaining / paused_total_ms：统计一律由有效区间求得，两张审计表不是第二份统计真相源。</text>
+  <text x="40" y="822" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    外键默认 RESTRICT；有计时历史的任务用归档/软删除，项目归档保留全部历史。goal_id 与 milestone_id 到 V0.2 迁移时才加。</text>
+  <text x="40" y="842" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    部分唯一索引不在图内：前台至多一条 running、每个 session 至多一个开放区间——见 Session / interval 生命周期。</text>
+
+  <!-- ===== 图例（底部横条） ===== -->
+  <line x1="30" y1="862" x2="970" y2="862" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="882" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <rect x="105" y="873" width="16" height="10" rx="2" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+  <text x="127" y="882" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">主线实体</text>
+  <rect x="245" y="873" width="16" height="10" rx="2" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="267" y="882" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">计时链</text>
+  <rect x="380" y="873" width="16" height="10" rx="2" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
+  <text x="402" y="882" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">事实依据（焦点）</text>
+  <rect x="560" y="873" width="16" height="10" rx="2" fill="#FBF1DC" stroke="#CBA758" stroke-width="1"/>
+  <text x="582" y="882" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">审计表</text>
+  <rect x="690" y="873" width="16" height="10" rx="2" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
+  <text x="712" y="882" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">元数据（单行表，无外键）</text>
+</svg>
+</figure>
+</body>
+</html>
