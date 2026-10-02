@@ -34,6 +34,8 @@ V0.3 implements minimal M09 outbound policy before M10; V0.4 expands document ex
 
 > Dependency depth and project-wide fan-in for the V0.1 core loop. M02 domain is depended on by 9 modules and is the structural hub.
 
+![Module dependencies (service layer and expansion chain)](images/module-deps-services.svg)
+
 ## 3. Implementation deliverables
 
 Each vertical feature delivers command contracts, persistence, UI, meaningful tests and a demonstrable acceptance case. Avoid empty directories created only to look layered. Test transitions, rollback, recovery, concurrency and accounting boundaries rather than mechanically mirroring every function. Scope/dependencies follow 04/05; pending product choices follow 06.

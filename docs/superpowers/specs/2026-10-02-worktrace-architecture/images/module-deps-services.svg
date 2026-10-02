@@ -1,0 +1,174 @@
+<svg viewBox="0 0 1000 750" role="img" aria-labelledby="dep-svc-title dep-svc-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="dep-svc-title">Worktrace 模块依赖：服务层与扩展链</title>
+  <desc id="dep-svc-desc">V0.1 核心闭环（M00–M05 与 M12）压缩为底部一个方块。它上方是服务层与扩展链：虚线分组框内六个模块（M06 统计、M07 报告、M08 知识/估时、M09 上下文、M10 AI、M13 搜索）各自都直接依赖核心的 M01 存储与 M02 领域，图中把六条平行依赖汇总成一条加粗箭头，指向整个分组而不是某个模块。M06 是分组内的汇点（扇入 2），向上支撑 M07 报告与 M08 知识/估时；M09 向上支撑 M10 AI，且 V0.3 必须先完成 M09 最小外发策略再接 M10。M13 只依赖 M01/M02：不依赖 M06，也不要求尚未存在的表。M11 窗口画在分组之外，它压在 M00 平台与 M03 事件上，并经服务接口接入。配色：色相表示模块所在的层（青色服务层、石板色平台侧、暖灰为压缩块），青色的深浅表示它在链条中的作用程度，最深的是 M06。</desc>
+
+  <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
+    <marker id="ds-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+    </marker>
+    <marker id="ds-arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#D9603A"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#FBF9F6"/>
+
+  <!-- ===== 分组框（z 序最底；说明这一组为什么画在一起） ===== -->
+  <rect x="36" y="56" width="728" height="308" rx="6" fill="rgba(111,175,168,0.05)"
+        stroke="rgba(78,140,133,0.35)" stroke-width="1" stroke-dasharray="4,4"/>
+  <text x="52" y="78" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.12em">依赖 M01 存储与 M02 领域的 6 个模块 · V0.1 起逐版展开</text>
+
+  <!-- ===== 连线（先画，z 序在方框之下） ===== -->
+  <!-- 汇总依赖：六条 M01/M02 依赖压成一条，指向整个分组（焦点 1） -->
+  <path d="M 500 462 V 364" fill="none" stroke="#D9603A" stroke-width="1.4"
+        marker-end="url(#ds-arrow-accent)"/>
+  <!-- M06 -> M07 -->
+  <path d="M 164 264 V 164" fill="none" stroke="#6F6357" stroke-width="1"
+        marker-end="url(#ds-arrow)"/>
+  <!-- M06 -> M08：走两行之间的空档，右侧让开 M09 -> M10 的竖段 -->
+  <path d="M 224 264 V 204 Q 224 196 232 196 H 392 Q 400 196 400 188 V 164" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#ds-arrow)"/>
+  <!-- M09 -> M10：V0.3 的顺序约束（焦点 2） -->
+  <path d="M 370 264 V 240 Q 370 232 378 232 H 628 Q 636 232 636 224 V 164" fill="none"
+        stroke="#D9603A" stroke-width="1.2" marker-end="url(#ds-arrow-accent)"/>
+  <!-- 核心 -> M11：另一种核心依赖（M00 平台 / M03 事件），单独画 -->
+  <path d="M 730 504 H 852 Q 860 504 860 496 V 324" fill="none"
+        stroke="#6F6357" stroke-width="1" marker-end="url(#ds-arrow)"/>
+
+  <!-- ===== 连线标签：遮罩垫底，距所注的线 8px，均落在空画布上 ===== -->
+  <rect x="508" y="405" width="84" height="12" rx="2" fill="#FBF9F6"/>
+  <text x="550" y="414" fill="#D9603A" font-size="8" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.06em">M01 · M02 汇总</text>
+  <rect x="450" y="212" width="80" height="12" rx="2" fill="#FBF9F6"/>
+  <text x="490" y="221" fill="#D9603A" font-size="8" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.06em">先 M09 后 M10</text>
+  <rect x="868" y="406" width="64" height="12" rx="2" fill="#FBF9F6"/>
+  <text x="900" y="415" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.06em">M00 · M03</text>
+
+  <!-- ===== Rank 2：链条末端 ===== -->
+  <!-- M07 报告 -->
+  <rect x="76" y="104" width="176" height="60" rx="6" fill="#FBF9F6"/>
+  <rect x="76" y="104" width="176" height="60" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <rect x="86" y="109" width="30" height="13" rx="2" fill="transparent" stroke="rgba(168,204,200,0.55)" stroke-width="0.8"/>
+  <text x="101" y="119" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">V0.1</text>
+  <text x="164" y="135" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M07 报告</text>
+  <text x="164" y="153" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">导出 · 简单周回顾 · KPA</text>
+
+  <!-- M08 知识/估时 -->
+  <rect x="312" y="104" width="176" height="60" rx="6" fill="#FBF9F6"/>
+  <rect x="312" y="104" width="176" height="60" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <rect x="322" y="109" width="30" height="13" rx="2" fill="transparent" stroke="rgba(168,204,200,0.55)" stroke-width="0.8"/>
+  <text x="337" y="119" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">V0.2</text>
+  <text x="400" y="135" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M08 知识/估时</text>
+  <text x="400" y="153" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">误差与知识使用 · 实验能力模型</text>
+
+  <!-- M10 AI -->
+  <rect x="548" y="104" width="176" height="60" rx="6" fill="#FBF9F6"/>
+  <rect x="548" y="104" width="176" height="60" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <rect x="558" y="109" width="30" height="13" rx="2" fill="transparent" stroke="rgba(168,204,200,0.55)" stroke-width="0.8"/>
+  <text x="573" y="119" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">V0.3</text>
+  <text x="636" y="135" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M10 AI</text>
+  <text x="636" y="153" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">提供商调用 · 建议历史 · 采纳/反馈</text>
+
+  <!-- ===== Rank 1：分组内的服务层模块 + 分组外的 M11 ===== -->
+  <!-- M06 统计：分组内的汇点，作用程度最强 -->
+  <rect x="76" y="264" width="176" height="60" rx="6" fill="#FBF9F6"/>
+  <rect x="76" y="264" width="176" height="60" rx="6" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
+  <text x="244" y="278" fill="#3F7A73" font-size="7.5" font-family="'Geist Mono',monospace"
+        text-anchor="end" letter-spacing="0.06em">2 in</text>
+  <rect x="86" y="269" width="30" height="13" rx="2" fill="transparent" stroke="rgba(78,140,133,0.55)" stroke-width="0.8"/>
+  <text x="101" y="279" fill="#3F7A73" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">V0.1</text>
+  <text x="164" y="295" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M06 统计</text>
+  <text x="164" y="313" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">范围裁剪 · 人工/机器分离 · 权重</text>
+
+  <!-- M09 上下文 -->
+  <rect x="312" y="264" width="176" height="60" rx="6" fill="#FBF9F6"/>
+  <rect x="312" y="264" width="176" height="60" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="480" y="278" fill="#4E8C85" font-size="7.5" font-family="'Geist Mono',monospace"
+        text-anchor="end" letter-spacing="0.06em">1 in</text>
+  <rect x="322" y="269" width="30" height="13" rx="2" fill="transparent" stroke="rgba(111,175,168,0.55)" stroke-width="0.8"/>
+  <text x="337" y="279" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">V0.3</text>
+  <text x="400" y="295" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M09 上下文</text>
+  <text x="400" y="313" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">白名单与保密过滤</text>
+
+  <!-- M13 搜索：只压在 M01/M02 上 -->
+  <rect x="548" y="264" width="176" height="60" rx="6" fill="#FBF9F6"/>
+  <rect x="548" y="264" width="176" height="60" rx="6" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <rect x="558" y="269" width="30" height="13" rx="2" fill="transparent" stroke="rgba(168,204,200,0.55)" stroke-width="0.8"/>
+  <text x="573" y="279" fill="#4E8C85" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">V0.2</text>
+  <text x="636" y="295" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M13 搜索</text>
+  <text x="636" y="313" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">仅检索本版本已有实体 · 不依赖 M06</text>
+
+  <!-- M11 窗口：平台侧，画在分组之外 -->
+  <rect x="780" y="264" width="176" height="60" rx="6" fill="#FBF9F6"/>
+  <rect x="780" y="264" width="176" height="60" rx="6" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
+  <rect x="790" y="269" width="30" height="13" rx="2" fill="transparent" stroke="rgba(138,148,163,0.55)" stroke-width="0.8"/>
+  <text x="805" y="279" fill="#5C6675" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">V0.1</text>
+  <text x="868" y="295" fill="#2A2320" font-size="12" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">M11 窗口</text>
+  <text x="868" y="313" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
+        text-anchor="middle">托盘生命周期 · 平台回调接入服务</text>
+
+  <!-- ===== Rank 0：压缩后的 V0.1 核心闭环 ===== -->
+  <rect x="270" y="462" width="460" height="84" rx="6" fill="#FBF9F6"/>
+  <rect x="270" y="462" width="460" height="84" rx="6" fill="#EDE7E0" stroke="#A79C8E"
+        stroke-width="1" stroke-dasharray="5,4"/>
+  <rect x="282" y="470" width="42" height="13" rx="2" fill="transparent" stroke="rgba(167,156,142,0.60)" stroke-width="0.8"/>
+  <text x="303" y="480" fill="#7C7268" font-size="7" font-family="'Geist Mono',monospace"
+        text-anchor="middle" letter-spacing="0.08em">CORE</text>
+  <text x="500" y="514" fill="#2A2320" font-size="13" font-weight="600"
+        font-family="'Geist',sans-serif" text-anchor="middle">V0.1 核心闭环</text>
+  <text x="500" y="534" fill="#6F6357" font-size="9" font-family="'Geist Mono',monospace"
+        text-anchor="middle">M00–M05、M12 · 见图 3</text>
+
+  <!-- ===== 注记 ===== -->
+  <text x="40" y="596" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    本图不重画 V0.1 核心闭环内部（M12 → M05 → M04 → M01 → M02）与 M12 经 IPC 调用服务层这两组依赖；它们见 图 3。</text>
+  <text x="40" y="616" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    M06、M07、M08、M09、M10、M13 各自还直接依赖 M01 存储与 M02 领域：逐个画出是六条平行箭头，图中汇总为一条指向整个分组。</text>
+  <text x="40" y="636" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    M11 不在该汇总内——它压在 M00 平台与 M03 事件上，并经服务接口接入；托盘 V0.1、HUD V0.1b、Mini 待评估。</text>
+  <text x="40" y="656" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    V0.3 必须先完成 M09 最小外发策略，再接 M10；V0.4 才扩展文档提取。M13 不依赖 M06，也不要求尚未存在的表。</text>
+  <text x="40" y="676" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    V0.x 芯片 = 该能力首次落地的版本（取 01 职责表的版本列）；<tspan font-family="'Geist Mono',monospace" font-size="8.5">N in</tspan> 徽章 = 全项目有多少模块依赖它。</text>
+
+  <!-- ===== 图例（底部横条） ===== -->
+  <line x1="30" y1="706" x2="970" y2="706" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="726" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+        letter-spacing="0.14em">LEGEND</text>
+  <rect x="110" y="718" width="16" height="10" rx="2" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
+  <text x="132" y="726" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">扇入汇点 M06</text>
+  <rect x="300" y="718" width="16" height="10" rx="2" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+  <text x="322" y="726" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">服务层模块</text>
+  <rect x="460" y="718" width="16" height="10" rx="2" fill="#F1F7F6" stroke="#A8CCC8" stroke-width="1"/>
+  <text x="482" y="726" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">链条末端</text>
+  <rect x="600" y="718" width="16" height="10" rx="2" fill="#E8EBF0" stroke="#8A94A3" stroke-width="1"/>
+  <text x="622" y="726" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">平台侧 M11</text>
+  <rect x="740" y="718" width="16" height="10" rx="2" fill="#EDE7E0" stroke="#A79C8E"
+        stroke-width="1" stroke-dasharray="3,2"/>
+  <text x="762" y="726" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">压缩后的核心闭环</text>
+  <line x1="905" y1="723" x2="935" y2="723" stroke="#D9603A" stroke-width="1.4"/>
+  <text x="941" y="726" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">焦点</text>
+</svg>
