@@ -4,7 +4,7 @@
 | --- | --- |
 | 文档状态 | 设计草案（待评审） |
 | 日期 | 2026-10-02 |
-| 上游 | [`../../PROJECT_SPEC.md`](../../PROJECT_SPEC.md)、[`01-module-breakdown.zh.md`](01-module-breakdown.zh.md) |
+| 上游 | [`../../../PROJECT_SPEC.md`](../../../PROJECT_SPEC.md)、[`01-module-breakdown.zh.md`](01-module-breakdown.zh.md) |
 | 版本划分依据 | SPEC §51–§56 |
 | 英文版 | [`04-functional-spec.en.md`](04-functional-spec.en.md) |
 

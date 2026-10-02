@@ -34,6 +34,20 @@ Goal 1──n Project 1──n Milestone 1──n Task
 
 ## 2. 表结构
 
+### 2.0 表的版本归属
+
+本设计覆盖产品全周期，但**不是所有表都在 V0.1 建**：
+
+| 表 | 引入版本 |
+| --- | --- |
+| `goal` `project` `milestone` `task` `work_session` `tag` `task_tag` | V0.1 |
+| `knowledge_stat` `task_knowledge` | V0.2 |
+| `context_fact` `decision` `document` `task_document` | V0.4 |
+
+**迁移策略**：V0.1 只创建 V0.1 的表，后续版本通过迁移**新增**表，**不一次性建全**。
+
+理由：未使用的表会随需求演进而需要改动，提前建表等于提前冻结还没想清楚的结构 —— 那是 SPEC §57 反对的投机性设计。字段同理：`task` 表中服务于 V0.3 AI 元数据的 `priority_json` / `estimated_json`，允许在 V0.1 先建为普通列、到 V0.3 再迁移为信封结构。
+
 ### 2.1 目标与项目
 
 ```sql

@@ -4,7 +4,7 @@
 | --- | --- |
 | Status | Design draft (under review) |
 | Date | 2026-10-02 |
-| Upstream | [`../../PROJECT_SPEC.md`](../../PROJECT_SPEC.md), [`01-module-breakdown.en.md`](01-module-breakdown.en.md) |
+| Upstream | [`../../../PROJECT_SPEC.md`](../../../PROJECT_SPEC.md), [`01-module-breakdown.en.md`](01-module-breakdown.en.md) |
 | Version split follows | SPEC §51–§56 |
 | Chinese version | [`04-functional-spec.zh.md`](04-functional-spec.zh.md) |
 

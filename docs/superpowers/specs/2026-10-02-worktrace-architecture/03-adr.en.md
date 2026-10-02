@@ -44,7 +44,7 @@ Format: **Context → Decision → Rationale → Consequences → Rejected alter
 
 **Status**: decided
 
-**Context**: 13 modules must fit into one application. Options were a layered monolith, a microkernel with plugins, or a multi-crate workspace.
+**Context**: 14 modules must fit into one application. Options were a layered monolith, a microkernel with plugins, or a multi-crate workspace.
 
 **Decision**: Layered monolith. Modules decouple through an internal event bus. No plugin system, and no crate split for now.
 

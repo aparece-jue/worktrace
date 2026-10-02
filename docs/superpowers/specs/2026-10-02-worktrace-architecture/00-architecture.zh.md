@@ -4,7 +4,7 @@
 | --- | --- |
 | 文档状态 | 设计草案（待评审） |
 | 日期 | 2026-10-02 |
-| 上游文档 | [`../../PROJECT_SPEC.md`](../../PROJECT_SPEC.md) 产品设计草案 |
+| 上游文档 | [`../../../PROJECT_SPEC.md`](../../../PROJECT_SPEC.md) 产品设计草案 |
 | 适用版本 | V0.1 起 |
 | 英文版 | [`00-architecture.en.md`](00-architecture.en.md) |
 
@@ -198,4 +198,4 @@ Q3=A（Rust 单一真相源）能否落地，取决于这一层。
 | ADR-005 | Windows 优先 + 单一平台边界 `platform/` | 已定 |
 | ADR-006 | Rust 为唯一真相源，React 只持 UI 临时状态 | 已定 |
 
-详见 [`03-adr.md`](03-adr.md)。
+详见 [`03-adr.md`](03-adr.zh.md)。

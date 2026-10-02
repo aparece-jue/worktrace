@@ -4,7 +4,7 @@
 | --- | --- |
 | Status | Design draft (under review) |
 | Date | 2026-10-02 |
-| Upstream | [`../../PROJECT_SPEC.md`](../../PROJECT_SPEC.md) (product design draft) |
+| Upstream | [`../../../PROJECT_SPEC.md`](../../../PROJECT_SPEC.md) (product design draft) |
 | Applies to | V0.1 onward |
 | Chinese version | [`00-architecture.zh.md`](00-architecture.zh.md) |
 

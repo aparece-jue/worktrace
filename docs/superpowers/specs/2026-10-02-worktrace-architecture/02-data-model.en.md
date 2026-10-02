@@ -34,6 +34,20 @@ Goal 1──n Project 1──n Milestone 1──n Task
 
 ## 2. Tables
 
+### 2.0 Which tables belong to which milestone
+
+This design covers the whole product lifecycle, but **not every table is created in V0.1**:
+
+| Tables | Introduced in |
+| --- | --- |
+| `goal` `project` `milestone` `task` `work_session` `tag` `task_tag` | V0.1 |
+| `knowledge_stat` `task_knowledge` | V0.2 |
+| `context_fact` `decision` `document` `task_document` | V0.4 |
+
+**Migration strategy**: V0.1 creates only the V0.1 tables. Later milestones **add** tables through migrations rather than creating everything up front.
+
+Creating unused tables freezes structure that has not been thought through yet, and unused tables attract change requests — precisely the speculative design SPEC §57 warns against. The same applies to columns: `priority_json` and `estimated_json` on `task`, which serve V0.3's AI metadata, may start as plain columns in V0.1 and migrate to the envelope shape in V0.3.
+
 ### 2.1 Goals and projects
 
 ```sql
