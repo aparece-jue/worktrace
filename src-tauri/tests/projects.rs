@@ -1322,3 +1322,115 @@ fn completed_project_rejects_capture_binding_start_and_resume_without_changes() 
     );
     assert_eq!(f.count("time_edit"), audit_before);
 }
+
+/// 库里出现**无法识别**的 `project.status` 取值时，两个入口都按列报存储层错误，
+/// 而不是把它冒充成某个已知状态。
+///
+/// `paused` 不在 CHECK 的取值域里（`active`/`archived`/`done`），用
+/// `PRAGMA ignore_check_constraints` 绕过 CHECK 写进去——它模拟的正是「CHECK 被绕过」
+/// 或「更新版本写入的新取值被旧版本读到」（写法照
+/// `tests/transaction_boundary.rs::an_unknown_enum_value_fails_loudly_and_names_the_column`）。
+///
+/// 新建归属与 start 计时走的是同一条读路径：`project_repo::get_project` 的
+/// `ProjectStatus::parse` 失败 ⇒ `enum_error(4, "project.status", …)` ⇒ `map_sqlite`
+/// ⇒ `AppError::Storage`（对外 `STORAGE_ERROR`，`detail()` 里点名列名与读到的值）。
+/// 断言口径按文件头：**错误只用 `code()` 与 `detail()`**，不在 `message()` 上找中文
+/// （`Storage` 的对外文案是固定的一句，与库内容无关）。
+#[test]
+fn an_unknown_project_status_fails_by_column_for_capture_and_start_without_changes() {
+    let mut f = bootstrap();
+
+    // 绕过 CHECK 写一个读不懂的状态。这是**连接级**开关，写完立刻关回去：
+    // 后面的写入仍该由约束自己挡，不能靠这条 PRAGMA 继续放行。
+    f.db.connection()
+        .execute_batch(
+            "PRAGMA ignore_check_constraints=ON;
+             UPDATE project SET status='paused' WHERE id='p1';
+             PRAGMA ignore_check_constraints=OFF;",
+        )
+        .expect("绕过 CHECK 后应能写入取值域外的状态");
+    let ignoring: i64 =
+        f.db.connection()
+            .query_row("PRAGMA ignore_check_constraints", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(ignoring, 0, "写完脏值必须把连接级开关关回去");
+    // 脏值确实落库了：直连 SQL 读回来核对（`project_repo` 读它必然失败，不能当 oracle）。
+    let dirty: String =
+        f.db.connection()
+            .query_row("SELECT status FROM project WHERE id='p1'", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(dirty, "paused", "前置条件：库里必须是那个读不懂的取值");
+
+    // ① 新建任务并关联到该项目 —— `create_task` 的项目状态判定
+    let before = baseline(&f);
+    let err = catalog::create_task(&mut f.db, create_env(&f.epoch), "新任务", Some("p1"), 5000)
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        "STORAGE_ERROR",
+        "读不懂的状态是存储层失败，不是领域拒绝"
+    );
+    let detail = err.detail().unwrap_or_default().to_string();
+    assert!(
+        detail.contains("project.status"),
+        "诊断必须点名是哪一列，实际：{detail}"
+    );
+    assert!(
+        detail.contains("paused"),
+        "诊断应带上读到的值，实际：{detail}"
+    );
+    assert_unchanged(&f, "t1", &before);
+
+    // ② 该项目下的任务开始计时 —— `require_active_project` 的同一分支
+    let before = baseline(&f);
+    let session_rows_before = f.count("work_session");
+    let interval_rows_before = f.count("work_interval");
+    let checkpoint_rows_before = f.count("interval_checkpoint");
+    let clock = Arc::new(Mutex::new(FakeClock::new(1_700_000_000_000, 0)));
+    let mut coord = Coordinator::new(Box::new(Arc::clone(&clock)), "run-1");
+    let err = coord
+        .start(
+            &mut f.db,
+            StartRequest {
+                expected_data_epoch: f.epoch.clone(),
+                task_id: "t1".into(),
+                task_expected_version: 0,
+                mode: SessionMode::Foreground,
+                timer_kind: TimerKind::Stopwatch,
+                target_duration_ms: None,
+                expected_interval_ms: 30_000,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        err.code(),
+        "STORAGE_ERROR",
+        "start 必须走与新建归属同一条分支"
+    );
+    let detail = err.detail().unwrap_or_default().to_string();
+    assert!(
+        detail.contains("project.status"),
+        "诊断必须点名是哪一列，实际：{detail}"
+    );
+    assert!(
+        detail.contains("paused"),
+        "诊断应带上读到的值，实际：{detail}"
+    );
+    assert_unchanged(&f, "t1", &before);
+    // 「不留半条记录」：被拒的 start 连会话/区间/检查点都不许增行。
+    assert_eq!(
+        f.count("work_session"),
+        session_rows_before,
+        "被拒的启动不得留下会话行"
+    );
+    assert_eq!(
+        f.count("work_interval"),
+        interval_rows_before,
+        "被拒的启动不得留下区间行"
+    );
+    assert_eq!(
+        f.count("interval_checkpoint"),
+        checkpoint_rows_before,
+        "被拒的启动不得留下检查点行"
+    );
+}
