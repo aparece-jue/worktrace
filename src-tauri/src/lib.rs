@@ -4,13 +4,14 @@
 //! `commands` 不直连 SQL 也不接受 `Connection`；`storage` 不反向引用
 //! `commands` 也不调用 `platform`；`domain` 不做 IO。
 //!
-//! P1 只交付 `domain`/`platform`/`storage`/`commands` 的基座与 `error`，
-//! 业务服务（`services`）由 P2 起逐份加入。
+//! P1 交付 `domain`/`platform`/`storage`/`commands` 的基座与 `error`；
+//! `services` 自 P2 起逐份加入。
 
 pub mod commands;
 pub mod domain;
 pub mod error;
 pub mod platform;
+pub mod services;
 pub mod storage;
 
 pub use error::AppError;

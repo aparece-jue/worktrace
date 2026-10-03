@@ -427,6 +427,14 @@ impl Clock for std::sync::Mutex<FakeClock> {
     }
 }
 
+/// 转发给内层。让协调器可以持有 `Box<dyn Clock>` 而测试仍保留一份句柄去推进假时钟——
+/// 否则把 `FakeClock` 交出去之后就再也控制不了时序了。
+impl<T: Clock + ?Sized> Clock for std::sync::Arc<T> {
+    fn sample(&self) -> Result<ClockSample, SampleError> {
+        (**self).sample()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

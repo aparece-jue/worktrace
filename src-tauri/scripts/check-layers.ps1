@@ -58,6 +58,11 @@ $ok = $true
 $ok = (Test-LayerLeak 'src/domain'  'rusqlite|std::fs|platform::|storage::' 'domain')  -and $ok
 $ok = (Test-LayerLeak 'src/storage' 'platform::|commands::'                 'storage') -and $ok
 
+# services must not read the system clock directly -- time has to come through
+# platform::clock::Clock so FakeClock can drive it. Without this check a single
+# `Instant::now()` in a service silently makes the whole unit-testable seam leak.
+$ok = (Test-LayerLeak 'src/services' 'std::time|SystemTime|Instant::now'   'services') -and $ok
+
 if (-not $ok) {
     Write-Host 'LAYER CHECK FAILED'
     exit 1
