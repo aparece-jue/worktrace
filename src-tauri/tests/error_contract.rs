@@ -162,8 +162,11 @@ fn domain_error_messages_are_user_facing_chinese() {
             kind: "Domain",
             name: "写作".into(),
         },
+        // P4 Task 5（任务筛选、捕获与理清为待办）新增的两个变体。
+        DomainError::ContextTagRequired { kind: "Domain" },
+        DomainError::TaskNotClarifiable { status: "Doing" },
     ];
-    assert_eq!(cases.len(), 21, "21 个变体都要覆盖，加了新的记得补进来");
+    assert_eq!(cases.len(), 23, "23 个变体都要覆盖，加了新的记得补进来");
 
     for e in cases {
         let shown: AppError = e.into();

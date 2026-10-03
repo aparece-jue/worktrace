@@ -4,6 +4,7 @@
 //! 不自行 `begin`/`commit`，也不自行 `bump_revision`。一次业务写恰好加一次
 //! revision 的责任在服务层（总纲 §9）。
 
+use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::domain::error::DomainError;
@@ -113,11 +114,144 @@ pub fn get_task(conn: &Connection, id: &str) -> Result<Option<TaskRow>, AppError
         .map_err(map_sqlite)
 }
 
-pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRow>, AppError> {
-    let sql = format!("{SELECT} ORDER BY created_at, id");
+/// 项目筛选的**三值**表达（裁决 R-T5-a）。
+///
+/// 不用 `Option<Option<String>>`：那样「不限制项目」与「只要没有项目的」在类型上
+/// 长得一样，读代码的人得去翻调用点才知道收到的是哪一种。三者互不混同：
+/// `Any` 连没有项目的任务一起列，`None` 恰恰只要那些。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ProjectFilter {
+    /// 不限制项目。
+    #[default]
+    Any,
+    /// 只要**没有**项目的任务（`project_id IS NULL`）。
+    None,
+    /// 只要归属到指定项目的任务。
+    Id(String),
+}
+
+/// 任务筛选条件（裁决 R-T5-a）：三个字段**取交集**，未选择的条件不限制。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaskFilter {
+    /// 状态集合；空集合 = 不限制状态。
+    pub statuses: Vec<TaskStatus>,
+    pub project: ProjectFilter,
+    /// 情境（上下文）标签。**必须是 `Context` 类标签**——那条规则由服务入口
+    /// 拒绝（04 F-005 的「非法情境 ID 拒绝」），仓储这里是纯过滤：判断「哪一类」
+    /// 要读 `tag` 表，那是 `tag_repo` 的事，两边各管一段。
+    pub context_tag_id: Option<String>,
+}
+
+/// 分页窗口（裁决 R-T5-a）：`limit` 1..=100、`offset` >= 0，越界**拒绝**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Page {
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// 一页查询结果：`tasks` 是这一页，`total` 是**满足条件的总数**（与窗口无关）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskPage {
+    pub tasks: Vec<TaskRow>,
+    pub total: i64,
+}
+
+/// 按条件筛选任务（F-002 的轻量 GTD 列表）。
+///
+/// - 条件之间取交集；未选择的条件不限制。**空 `filter` 就是整表**——这正是被删掉的
+///   `list_tasks` 的语义（裁决 R-T5-d：无过滤的整表列表在 V0.1 没有别的消费者）；
+/// - 稳定排序 `created_at, id`，分页走 `limit` / `offset`；
+/// - 情境标签用 `EXISTS` 而不是 JOIN：一个任务挂多个标签时不会被放大成多行，
+///   `total` 因此数的是**任务**，不是 JOIN 的行数；
+/// - SQL 里只拼占位符**个数**（状态集合的长度来自代码），值一律参数绑定。
+pub fn list_tasks_filtered(
+    conn: &Connection,
+    filter: &TaskFilter,
+    page: Page,
+) -> Result<TaskPage, AppError> {
+    // 分页越界在这里就断掉：`LIMIT -1` 在 SQLite 里等于**不限制**、负数 `OFFSET`
+    // 等于 0——放过去不会报错，只会悄悄返回错误的一页（裁决 R-T5-a）。
+    require_page(page)?;
+
+    let (where_sql, params) = filter_clause(filter);
+    let total: i64 = conn
+        .query_row(
+            &format!("SELECT count(*) FROM task{where_sql}"),
+            rusqlite::params_from_iter(params.iter()),
+            |r| r.get(0),
+        )
+        .map_err(map_sqlite)?;
+
+    let sql = format!("{SELECT}{where_sql} ORDER BY created_at, id LIMIT ? OFFSET ?");
+    let mut window = params;
+    window.push(Value::Integer(page.limit));
+    window.push(Value::Integer(page.offset));
     let mut stmt = conn.prepare(&sql).map_err(map_sqlite)?;
-    let rows = stmt.query_map([], read_row).map_err(map_sqlite)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(window.iter()), read_row)
+        .map_err(map_sqlite)?;
+    let tasks = rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)?;
+
+    Ok(TaskPage { tasks, total })
+}
+
+/// 分页窗口的输入校验。文案是面向用户的中文（与 `require_active_project` 同一口径）：
+/// 调用方给的是页号与页大小时，「哪一项越界」就是用户唯一能采取行动的信息。
+fn require_page(page: Page) -> Result<(), AppError> {
+    if !(1..=100).contains(&page.limit) {
+        return Err(AppError::Domain {
+            detail: format!("「每页条数」只能是 1 到 100，收到的是 {}。", page.limit),
+        });
+    }
+    if page.offset < 0 {
+        return Err(AppError::Domain {
+            detail: format!("「跳过条数」不能是负数，收到的是 {}。", page.offset),
+        });
+    }
+    Ok(())
+}
+
+/// 筛选条件 → `WHERE` 片段 + 绑定参数。
+///
+/// 只有占位符是拼出来的，用户给的值（项目 ID、标签 ID）全部走参数绑定；
+/// 状态取值来自 `TaskStatus::as_str()`，同样当参数传，不拼进 SQL 文本。
+fn filter_clause(filter: &TaskFilter) -> (String, Vec<Value>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+
+    if !filter.statuses.is_empty() {
+        let holders = vec!["?"; filter.statuses.len()].join(", ");
+        clauses.push(format!("status IN ({holders})"));
+        params.extend(
+            filter
+                .statuses
+                .iter()
+                .map(|s| Value::Text(s.as_str().to_string())),
+        );
+    }
+    match &filter.project {
+        ProjectFilter::Any => {}
+        ProjectFilter::None => clauses.push("project_id IS NULL".to_string()),
+        ProjectFilter::Id(id) => {
+            clauses.push("project_id = ?".to_string());
+            params.push(Value::Text(id.clone()));
+        }
+    }
+    if let Some(tag_id) = &filter.context_tag_id {
+        clauses.push(
+            "EXISTS (SELECT 1 FROM task_tag
+                     WHERE task_tag.task_id = task.id AND task_tag.tag_id = ?)"
+                .to_string(),
+        );
+        params.push(Value::Text(tag_id.clone()));
+    }
+
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    (where_sql, params)
 }
 
 /// 状态跃迁。与 `task_change` **同一事务**。
@@ -471,7 +605,10 @@ pub fn set_task_project(
 /// 只看 `state='running'`：暂停/已结束的会话属于历史，不阻止后续的归属整理。
 /// （paused/finished 的任务本来也不在允许的状态集合里，这道守卫守的是
 /// 「状态与事实对不上」的数据。）
-fn has_running_session(conn: &Connection, task_id: &str) -> Result<bool, AppError> {
+///
+/// `pub(crate)`：理清入口（`services::catalog::clarify_ready`）要在**同一个事务**里
+/// 问同一个问题，判据只留这一处，别处不再写一份「正在计时」的 SQL。
+pub(crate) fn has_running_session(conn: &Connection, task_id: &str) -> Result<bool, AppError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM work_session WHERE task_id = ?1 AND state = 'running')",
         [task_id],

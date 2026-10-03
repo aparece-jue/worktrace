@@ -88,6 +88,20 @@ pub enum DomainError {
     /// 而 [`std::fmt::Display`] 经 `zh_kind` 打中文——用户不该看到 `Domain` 这种
     /// 内部标识（与 [`Self::TaskNotInClarifying`] 用 `zh_status` 是同一条规矩）。
     TagNameTaken { kind: &'static str, name: String },
+    // ── P4 Task 5（任务筛选、捕获与理清为待办）新增 ──────────────────────────
+    /// 筛选用的情境（上下文）标签不是 `Context` 类（04 F-005「非法情境 ID 拒绝」）。
+    ///
+    /// 与 [`Self::UnknownTag`] 分开：那条讲的是「这个标签不在」，这条讲的是
+    /// 「在，但用错了类别」——用户的下一步动作不同（重新选一个 vs 换个类别）。
+    /// `kind` 与 [`Self::TagNameTaken`] 同一口径：字段留代码里的原值，
+    /// 只有面向用户的 `Display` 经 `zh_kind` 翻成中文。
+    ContextTagRequired { kind: &'static str },
+    /// 「理清为待办」只接受 `Inbox`/`Clarifying` 的任务（裁决 R-T5-e）。
+    ///
+    /// `Doing → Ready`、`Review → Ready` 在 02 §5 的跃迁表里是**合法**的，但那些
+    /// 编排归 P3 的状态联动：这个最小入口不能变成绕过联动规则的旁路。
+    /// 所以这里要单独说清「这个入口只处理哪两个状态」，而不是借跃迁表的措辞。
+    TaskNotClarifiable { status: &'static str },
 }
 
 /// 任务状态的中文名。用户的提示语里不该出现 `Inbox` 这种内部标识。
@@ -188,6 +202,20 @@ impl std::fmt::Display for DomainError {
                     f,
                     "「{}」这一类里已经有叫「{name}」的标签了。",
                     zh_kind(kind)
+                )
+            }
+            Self::ContextTagRequired { kind } => {
+                write!(
+                    f,
+                    "「{}」类的标签不能用作上下文筛选，请换一个「上下文」类的标签。",
+                    zh_kind(kind)
+                )
+            }
+            Self::TaskNotClarifiable { status } => {
+                write!(
+                    f,
+                    "只有「收集箱」或「理清中」的任务能理清为待办，这个任务处于「{}」。",
+                    zh_status(status)
                 )
             }
         }
