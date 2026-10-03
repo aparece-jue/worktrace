@@ -155,3 +155,12 @@
 - [x] 无基线统计归属使用同次采样墙钟，与快照一致，不返回进程单调读数。
 - [x] boundary 范围校验后，通过观察前检测器副本复用短期/长期判据；真实 last 只由当前采样推进。正反约 233 ppm 自然漂移四小时后的可信边界可暂停，异常边界仍被拒绝。
 - [x] 新增 4 个回归，覆盖跨 run 装载继续、正反长期自然漂移及离开时间排除、瞬时边界跳变、无基线统计与快照一致。
+
+
+## 无基线统计与故障响应补全
+
+- [x] 装载旧 running 会话但无基线时统计返回 RECOVERY_REQUIRED，不按墙钟差补时；idle/paused 的展示墙钟回退不意味着工时可信。
+- [x] 临时文件库实际 SQLITE_FULL 验证 start 回滚、检查点保留/重试、异常恢复回滚/隔离；OS 磁盘耗尽及 WAL 写失败仍属平台验收。
+- [x] ErrorResponse 与服务层只读版本捕获已提供，覆盖恢复事务提交后的权威版本、元数据不可读、epoch 握手及脱敏。
+- [x] P7 将所有失败响应接入 capture_error_response，捕获位于原事务结束后及同一串行边界；不得以 timer.snapshot 补版本。
+- [x] **跨 run 的开放区间不得以「可信」方式闭合**：`EndSessionFacts` 增加 `run_id`，`end_session_in_tx` 在版本校验**之前**用 `StaleRunContext` 校验（映射 `RECOVERY_REQUIRED`），与 `checkpoint_repo::write` 同一判据——写检查点早就拒绝跨 run 写入，闭合区间这条更重的路径不能反而放行。修复前实测：真实工作 60 秒 + 停机一小时 ⇒ `duration_ms = 3_660_000` 且 `needs_review = false`。回归 `cross_run_open_interval_cannot_be_closed_as_trusted_effort` 覆盖 `pause` 与 `finish` 两条路径。

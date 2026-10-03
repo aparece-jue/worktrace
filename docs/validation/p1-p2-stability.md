@@ -22,7 +22,7 @@
 
 ## 自动验证
 
-- 全库 cargo test --offline -q：196 个测试通过，包括原有 P1/P2 套件与累计 31 个行为回归。
+- 全库 cargo test --offline -q：203 个测试通过，包括原有 P1/P2 套件与累计 38 个行为回归。
 - cargo fmt --check：通过。
 - cargo clippy --offline --all-targets -- -D warnings：通过。
 - scripts/check-layers.ps1：通过。
@@ -93,3 +93,34 @@ recovering 中新增墙钟异常的未接受校正标记不会随长期容差增
 system_pause 的 boundary 在范围校验后使用观察当前样本前的检测器副本，沿用相邻、短期与长期偏差判据；不推进真实 last。正反约 233 ppm 自然漂移四小时后的可信离开可暂停，离开后两分钟不计入工时；瞬时异常边界即使当前采样已正常也不接受。
 
 继续检查发现并修复无基线 stats_sample 将单调读数当归属终点的问题，改为同次采样墙钟，与 snapshot 一致。新增四个回归，回归套件合计 31 个，全库合计 196 个。本轮尚未提交，未推进后续阶段。正式平台验收、跨机器容差校准与外部图源同步守卫仍不计为完成。
+
+
+## 无基线统计隔离、存储容量故障与错误版本上下文
+
+旧 running 会话装载到无基线协调器后，stats_sample 返回 RECOVERY_REQUIRED，不按墙钟差补停机工时；idle/paused 展示时间仍可以使用同次采样墙钟，boundary 无基线时仍保守拒绝。accept_clock_correction 与 reestablish_anchor 的注释已归位。
+
+新增三个临时文件库集成测试：限制 SQLite max_page_count，并用容量写入实际触发 SQLITE_FULL（断言 DiskFull 码），分别验证 start 字段级回滚、心跳检查点不前移且释放容量后可重试、恢复审计失败整体回滚且隔离直至恢复成功。这是 SQLite 容量故障验证，不冒充 OS 磁盘耗尽、WAL 写失败或真实平台验收。
+
+新增 ErrorResponse 安全 DTO 与 services/error_response.rs：原操作结束后在同一串行服务边界调用，从一个只读事务读取 epoch/revision 及请求目标 task/session 版本；不调用会采样的 snapshot，错误文案不携带内部诊断。读取失败不返回部分版本上下文，requires_handshake=true；epoch 不匹配也要求重新握手。P7 IPC 尚未接线，需由其调用此服务捕获并序列化错误响应，不能宣称生产 IPC 已接入。
+
+本轮新增 6 个测试，回归共 37 个，全库共 202 个。
+
+
+## 跨 run 开放区间不得以「可信」方式闭合（评审发现并修复）
+
+上一轮的 `stats_sample` 隔离只挡住了**统计**入口，根因并没有被表达成不变量：判据是「无基线 && running」，而真正的规则是「**开放区间属于上一个 run**」。于是同一状态下 `pause`/`finish` 直接走到 `end_session_in_tx`（该原语当时**没有 run 校验**）闭合区间。探针实测（真实工作 60 秒 + 停机一小时）：
+
+```
+pause:  命令成功  started=…000000 ended=…660000 duration=3660000 needs_review=false
+finish: 命令成功  started=…000000 ended=…660000 duration=3660000 needs_review=false
+```
+
+即：**停机被写成 61 分钟已确认工时**。这与 02 §4 第 2 类（running 且有开放区间 → `recovering`、只标该区间 `needs_review=1`）以及 P7 计划「发现旧 run 的开放区间就拒绝启动业务计时」直接冲突。
+
+**同一个不变量其实早已在另一条路径上强制**：`checkpoint_repo::write` 用 `session_run != cp.run_id ⇒ DomainError::StaleRunContext`（映射 `RECOVERY_REQUIRED`）。写检查点拒绝跨 run 写入，而闭合区间这条更重的路径反而放行。
+
+改法（按原语层强制，两个调用点自动覆盖）：`EndSessionFacts` 增加 `run_id`，`end_session_in_tx` 在**版本校验之前**校验并复用 `StaleRunContext`——故障判据排在请求校验之前，避免给出会让客户端重试的 `VERSION_CONFLICT`。P3 的会话联动因此必须传当前 run（已写进 P3 计划），跨 run 会话先由启动扫描归一。
+
+回归 `cross_run_open_interval_cannot_be_closed_as_trusted_effort` 覆盖 `pause` 与 `finish`，断言返回 `RECOVERY_REQUIRED`、revision 不变、开放区间未被闭合（`ended_at`/`duration_ms` 仍为 `None`）。**反向验证**：把该校验从原语里去掉，回归失败（命令返回 `Ok`）——修复前它确实会写坏数据。
+
+本轮新增 1 个测试，回归共 38 个，全库共 203 个。外部图源同步守卫仍未加入：脚本在工作区而非仓库（`worktrace-sync-diagram.ps1` 的第 0 步是守卫的落点），已有“工作区已核对”的记录不能替代脚本实际路径，下一步接线前需加入内容哈希冲突守卫。

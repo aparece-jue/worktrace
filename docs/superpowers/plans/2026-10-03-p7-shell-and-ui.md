@@ -114,3 +114,5 @@
 
 - [ ] 展示独立全局待确认数量/入口，来自 P3 查询；不使用当前快照 pending_ms/needs_attention() 代替。P3 未接入前注明接口依赖，不能宣称旧记录提醒已完成。
 - [ ] 系统事件实测验证历史 boundary 不推进采样 last，当前样本检测一次；可信离开边界与同时发生的改时/单调钟故障不能互相覆盖。
+
+- [ ] IPC 失败响应接入 services/error_response::capture_error_response 与 ErrorResponse：读取提交后的 epoch/revision 和请求对象版本；在同一串行边界且原事务结束后捕获，不另调 timer.snapshot。requires_handshake 时先重新握手，不自动重试非幂等命令。
