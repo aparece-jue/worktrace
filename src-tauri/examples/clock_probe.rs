@@ -16,8 +16,8 @@
 //! 输出分两段：逐拍明细（可直接贴进记录表）与汇总（填「阈值结论」用）。
 
 use std::io::BufRead;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use worktrace_lib::platform::clock::{
@@ -32,16 +32,31 @@ fn parse_arg(args: &[String], name: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
-/// 人工操作标记的计数。回车一次加一；**具体落在哪一拍由主循环解析**——
-/// 读 stdin 的线程拿不到「当前采样」的单调值，硬取会引入另一个时钟读数。
-fn spawn_marker_reader(count: Arc<AtomicUsize>, done: Arc<AtomicBool>) {
+/// 人工操作标记：回车打一个，或输入标签（如 `lock` / `sleep` / `fast` / `slow`）再回车。
+///
+/// **落在哪一拍由主循环解析**——读 stdin 的线程拿不到「当前采样」的单调值，
+/// 在那里再取一次时钟会引入另一个读数，把要观测的东西搅浑。
+fn spawn_marker_reader(labels: Arc<Mutex<Vec<String>>>, done: Arc<AtomicBool>) {
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
-            if done.load(Ordering::Relaxed) || line.is_err() {
+            if done.load(Ordering::Relaxed) {
                 break;
             }
-            count.fetch_add(1, Ordering::Relaxed);
+            match line {
+                Ok(text) => {
+                    let label = text.trim().to_string();
+                    let label = if label.is_empty() {
+                        "-".to_string()
+                    } else {
+                        label
+                    };
+                    if let Ok(mut v) = labels.lock() {
+                        v.push(label);
+                    }
+                }
+                Err(_) => break,
+            }
         }
     });
 }
@@ -63,7 +78,8 @@ fn main() {
     println!("# duration_s    {seconds}");
     println!("# threshold_ms  {THRESHOLD_MS}（08 §1 的异常阈值，严格大于才越界）");
     println!("#");
-    println!("# 操作提示：要测锁屏 / 休眠 / 改系统时间时，先按回车打标记，再去做操作。");
+    println!("# 操作提示：要测锁屏 / 休眠 / 改系统时间时，先打一个标记再去做操作。");
+    println!("# 直接回车 = 无名标记；也可输入标签再回车，例如 lock / sleep / fast / slow。");
     println!("# 探针不会自己改系统时间。");
     println!("#");
     println!("idx,wall_ms,monotonic_ms,d_wall,d_mono,delta_gap,cum_gap,flag");
@@ -92,9 +108,9 @@ fn main() {
     let clock = SystemClock::new();
     let mut analyzer = DriftAnalyzer::new(interval_ms);
 
-    let marker_count = Arc::new(AtomicUsize::new(0));
+    let marker_labels: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let done = Arc::new(AtomicBool::new(false));
-    spawn_marker_reader(Arc::clone(&marker_count), Arc::clone(&done));
+    spawn_marker_reader(Arc::clone(&marker_labels), Arc::clone(&done));
 
     let total = (seconds * 1000 / interval_ms).max(1);
     let step = Duration::from_millis(interval_ms as u64);
@@ -137,15 +153,15 @@ fn main() {
         );
 
         // 打标记：主循环知道当前拍的单调值，所以在这里落真实数值。
-        let pending = marker_count.load(Ordering::Relaxed);
-        if pending > seen_markers {
-            for _ in seen_markers..pending {
+        let snapshot: Vec<String> = marker_labels.lock().map(|v| v.clone()).unwrap_or_default();
+        if snapshot.len() > seen_markers {
+            for label in &snapshot[seen_markers..] {
                 println!(
-                    "# MARKER at idx={} monotonic_ms={}",
+                    "# MARKER[{label}] at idx={} monotonic_ms={}",
                     d.index, d.monotonic_ms
                 );
             }
-            seen_markers = pending;
+            seen_markers = snapshot.len();
         }
         last = Some(s);
     }
