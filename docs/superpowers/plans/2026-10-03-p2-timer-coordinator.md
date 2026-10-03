@@ -29,7 +29,7 @@
 文件：anchor.rs、coordinator.rs、tests/timer_clock.rs。
 
 - [ ] Anchor { wall_at, monotonic_at }，A(M)=wall_at+(M-monotonic_at)。检查单调/墙钟倒退、采样失败、相邻增量差与累计偏差；两差任一绝对值 >2000ms 进入异常判断，恰好 2000ms 不超过阈值。
-- [ ] 每个命令、tick、查询和系统事件先检测，再决定是否持久化。30 秒只控制检查点频率，不能用于提前跳过异常检测。
+- [ ] 每个通过请求校验的命令、tick、查询和系统事件先检测，再决定是否持久化；用户命令先拒绝旧 epoch/旧版本请求，不借无效请求触发系统写入。30 秒只控制检查点频率，不能用于提前跳过异常检测。
 - [ ] 连续可信 run 中暂停、继续、结束后开始另一会话均沿用基线；start/resume 的 started_at 取 A(M)。没有可信基线才建立，成功心跳不得重置。
 - [ ] 新 run、休眠后或显式校正重新建基线，但先关闭/隔离旧开放事实，清理旧 Instant/区间单调起点；确认新归属与既有人工历史无冲突后才能开新区间。
 - [ ] 可信锁屏/休眠边界按策略 pause；延迟或边界不可信则 recovering。唤醒不自动继续；系统事件不受心跳间隔限制。
@@ -41,12 +41,12 @@
 
 业务接口：start(request, sample)、pause(request, sample)、resume(request, sample)、finish(request, sample)。request 包含 expected_data_epoch、task/session ID、修改对象的 expected_row_version；start 还带 timer_kind/target_duration_ms。具体 Rust 签名在 P1 真实接口基础上定稿并登记，不能用内部 read_meta 得到的 epoch 代替请求。
 
-- [ ] 先计划内存变化，同一事务检查请求 epoch/version、任务可执行/项目状态、前台占用与历史冲突，再调用 P1 仓储原语。
+- [ ] 串行边界内先检查请求 epoch/version 和目标存在性，再取得样本并检测；正常路径先计划内存变化，同一业务事务再次校验 epoch/version、任务可执行/项目状态、前台占用与历史冲突，再调用 P1 仓储原语。若检测异常，按总纲 §9 独立系统事务提交恢复状态，原用户命令返回 RECOVERY_REQUIRED，不执行原意图；响应携带该事务后的权威版本，不自动重试。
 - [ ] start 同事务理清任务、持久化预算、创建 session/open interval/elapsed=0 初始检查点、审计及 revision；首次估时基准在此冻结。失败不留下半条事实。
 - [ ] resume 校验 paused 且无待确认，以 A(M) 开新区间，创建 elapsed=0 检查点并更新 run_id/state/version，不清空 session 已用工时。
 - [ ] pause/finish 用已验证单调差关闭区间，保留 sampled_end_wall_at；finish 可从 paused 直接结束。recovering 拒绝普通工作命令，需 P3 reconcile。
 - [ ] 一个业务事务只加一次 revision。提交失败不应用内存；提交后内存应用或响应生成失败不得返回普通可重试失败，进入故障恢复并从已提交事实重建。
-- [ ] 测试：初始检查点与预算持久化、旧 epoch/version 拒绝、paused 直接 finish、占用冲突、每个写入步骤注入故障整体回滚、提交后故障不重复创建。
+- [ ] 测试：初始检查点与预算持久化、旧 epoch/version 拒绝（同时有异常仍不借此请求写入）、paused 直接 finish、占用冲突、每个写入步骤注入故障整体回滚（比较涉及记录及区间字段，不只计行数）、有效命令遇异常仅提交系统恢复事务、提交后故障不重复创建。
 
 ## Task 4：可信检查点与异常原子跃迁
 
@@ -56,8 +56,8 @@
 - [ ] 首次异常立即一次事务：保留最后成功检查点之前可信前缀、创建/标记不确定余段、保存候选采样与原因审计、session 设 recovering/needs_review 并增加 row_version/revision。没有检查点则整段待确认，零长度初始前缀可省略。
 - [ ] 提交后停止 live 暂计、释放前台占用、清理开放计时内存。余段有候选归属但不是正在运行的区间，不能建立新的单调运行起点。
 - [ ] 已 recovering 的重复事件返回现有恢复结果，不重复分割、审计或增加版本。不可信样本不能写入可信检查点。
-- [ ] snapshot 返回此前确认工时与待确认信息分列；后续确认由 P3 完成，P2 不偷偷接受候选时间。
-- [ ] 测试：有/无/初始零检查点、心跳失败后的异常、分割失败回滚、重复事件幂等、recovering 暂计冻结、待确认不影响既有闭合统计。
+- [ ] snapshot 返回此前确认工时与待确认信息分列；正常查询不加 revision，异常检测可提交独立系统恢复事务，随后返回该提交后的权威快照。后续确认由 P3 完成，P2 不偷偷接受候选时间。
+- [ ] 测试：有/无/初始零检查点、心跳失败后的异常、分割失败字段级回滚、重复事件幂等、recovering 暂计冻结、待确认不影响既有闭合统计、正常/异常查询 revision 口径。异常事务失败不得输出新的可信暂计，内存不应用未提交状态，明确进入故障处理。
 
 ## 完成门槛
 
