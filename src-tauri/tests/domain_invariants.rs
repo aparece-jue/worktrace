@@ -339,3 +339,55 @@ fn domain_strings_match_the_schema_checks() {
     );
     assert!(TaskStatus::parse("doing").is_none(), "状态串是大小写敏感的");
 }
+
+#[test]
+fn a_closed_trusted_fact_requires_duration() {
+    let missing = IntervalFacts {
+        range: IntervalRange::new(0, 100).unwrap(),
+        duration_ms: None,
+        needs_review: false,
+        voided: false,
+    };
+    assert_eq!(
+        missing.validate(),
+        Err(DomainError::TrustedIntervalWithoutDuration)
+    );
+    assert!(IntervalFacts {
+        needs_review: true,
+        ..missing
+    }
+    .validate()
+    .is_ok());
+    assert!(IntervalFacts {
+        voided: true,
+        ..missing
+    }
+    .validate()
+    .is_ok());
+    assert!(IntervalFacts {
+        range: IntervalRange::new(100, 100).unwrap(),
+        duration_ms: Some(0),
+        ..missing
+    }
+    .validate()
+    .is_ok());
+}
+
+#[test]
+fn negative_fact_ranges_are_rejected_even_without_duration() {
+    for (needs_review, voided) in [(false, false), (true, false), (false, true)] {
+        let broken = IntervalFacts {
+            range: IntervalRange { start: 100, end: 0 },
+            duration_ms: None,
+            needs_review,
+            voided,
+        };
+        assert_eq!(
+            broken.validate(),
+            Err(DomainError::NegativeInterval {
+                started_at: 100,
+                ended_at: 0,
+            })
+        );
+    }
+}

@@ -184,3 +184,11 @@ F-007 also tests wall/monotonic divergence, checkpoint failure and day boundarie
 F-007 also checks pause/resume under 500ms wall skew without overlap, cumulative divergence and no trusted write of anomalous samples. F-104 checks phase DTOs, rejected break resume, break from frozen work, next cycle from frozen break, occupancy rollback and phase-checkpoint restart.
 
 F-006/F-104 add the 08 §8 field matrix and cycle tests: unified pause/resume, rejected work commands on break, retained work/break progress on pause/restart, isolated cycles and original-cycle recomputation after reconciliation.
+
+## V0.1 lightweight GTD acceptance additions (user confirmed)
+
+F-002: Ready next-action, Waiting and Blocked lists support project/Context intersection filters, empty results and stable pagination; multiple tag associations never duplicate tasks. Listing next actions does not generate actions or introduce AI decomposition.
+F-004: P7 Projects UI creates, renames and archives projects, lists tasks and creates a first action. Archive retains history; stale versions are rejected. Project ideas can be entered manually as Project plus leaf Task; no automatic Inbox conversion/property migration or new Action entity.
+F-005: Context tags filter tasks; invalid context IDs are rejected and stale filter responses cannot override newer criteria. P4 supplies services, P7 pages, and P8 reuses their entry points from Today/review.
+
+P7 delivers minimal platform wiring and two-window experiments early. Before P3 it uses an isolated development database and never ignores old uncertain facts. P8 enables and validates task/session transitions and tray completion after P3 integration; early demonstrations do not complete F-003/F-011 acceptance.

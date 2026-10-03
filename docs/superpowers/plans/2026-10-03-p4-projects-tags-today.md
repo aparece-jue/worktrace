@@ -60,3 +60,17 @@
 - [ ] 登记服务输入/输出及真实 Rust 签名供 P5/P7 消费；项目/标签版本字段与迁移一致。实际 UI 选择和发布应用离线验收由 P7 完成，不能将仓储测试标为 UI 已验收。
 
 服务拥有事务并返回 epoch/revision；仓储只依赖 domain/shared error，不依赖 commands/platform。版本拒绝和任一步失败不得写审计、增加 revision 或留下部分变更。
+
+## Task 5：任务筛选查询（轻量 GTD 列表）
+
+文件：storage/task_repo.rs、services/catalog.rs、tests/task_filters.rs。
+
+- [ ] 提供 list_tasks_filtered(filter, page) 查询：filter 包含 status 集合、project_id 与 context_tag_id；未选择条件不限制，多条件取交集。project_id 区分“不限制”和“无项目”，不把二者共用 null。
+- [ ] context_tag_id 必须是 Context 标签；使用 EXISTS 或去重查询，多个标签关联不能重复返回任务或重复计数。参数绑定，不拼接用户输入 SQL。
+- [ ] 稳定排序 created_at/id，首版分页 limit/offset，limit 范围 1..100、offset 非负。数据、total、epoch/revision 在同一读事务取得；查询不增加 revision。
+- [ ] 服务提供捕获任务的创建/查询入口供 P7 消费，复用 P1 仓储，拥有事务及 epoch 校验；新建只增加一次 revision。
+- [ ] 测试：Ready/Waiting/Blocked、项目与情境组合、无项目、多标签去重、分页同时间戳稳定排序、非法情境/分页输入、空结果及只读 revision。
+
+下一步行动首版仅指 Ready 任务，不自动生成或拆分任务。Project 是多步工作容器，普通叶子 Task 可直接表示行动；不新增 Action 表或 Inbox 转项目命令。
+
+- [ ] catalog 的 clarify_ready(request) 校验 task 版本并复用 P1 跃迁原语，单事务写 task_change/revision；仅允许无运行会话的 Inbox/Clarifying → Ready。其它状态编排仍归 P3，不通过该入口绕过联动规则。

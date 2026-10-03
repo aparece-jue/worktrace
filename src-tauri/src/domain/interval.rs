@@ -81,6 +81,11 @@ impl IntervalFacts {
     /// 校验这批事实自洽。计划要求「记录损坏与普通待确认分开」——
     /// 不满足不变量的是**损坏**，不是待确认。
     pub fn validate(&self) -> DomainResult<()> {
+        // Public fields may be assembled from persisted facts without using new().
+        IntervalRange::new(self.range.start, self.range.end)?;
+        if !self.needs_review && !self.voided && self.duration_ms.is_none() {
+            return Err(DomainError::TrustedIntervalWithoutDuration);
+        }
         // 待确认与已作废不能同时成立（schema 的 ck_interval_voided 兜底）。
         if self.needs_review && self.voided {
             return Err(DomainError::PendingAndVoided);
