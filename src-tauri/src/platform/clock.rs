@@ -259,6 +259,84 @@ impl DriftAnalyzer {
     }
 }
 
+/// 一次时钟分辨率测量的结果。
+///
+/// 存在的理由：实测发现「累计偏差按 14ms/分钟增长」，但在下结论之前必须先排除
+/// **读取粒度**造成的假漂移——如果挂钟只能读到 15.6ms 的台阶，而单调钟能读到微秒，
+/// 那所谓的漂移可能只是取整偏差在单向累积，跟真实晶振毫无关系。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionReport {
+    pub samples: usize,
+    /// 最小的**非零**增量——该时钟的有效分辨率。
+    pub min_positive_ms: Option<i64>,
+    /// 出现过的不同增量值（升序）。台阶越少、间隔越整齐，量化越明显。
+    pub distinct_deltas: Vec<i64>,
+    /// 零增量占比（千分比）：同一刻度内连续读到相同值。
+    pub zero_ratio_permille: u32,
+    /// 最大增量：一次测量里最长的一次「跨台阶」。
+    pub max_delta_ms: i64,
+}
+
+/// 由一串相邻增量算出分辨率报告。纯函数，可测。
+pub fn resolution_report(deltas: &[i64]) -> ResolutionReport {
+    let samples = deltas.len();
+    let zeros = deltas.iter().filter(|d| **d == 0).count();
+    let min_positive = deltas.iter().filter(|d| **d > 0).copied().min();
+    let max_delta_ms = deltas.iter().copied().max().unwrap_or(0);
+
+    let mut distinct: Vec<i64> = deltas.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+
+    ResolutionReport {
+        samples,
+        min_positive_ms: min_positive,
+        distinct_deltas: distinct,
+        zero_ratio_permille: if samples == 0 {
+            0
+        } else {
+            ((zeros as u64 * 1000) / samples as u64) as u32
+        },
+        max_delta_ms,
+    }
+}
+
+/// 尽可能快地连续读两个时钟，测出它们各自的**实际分辨率**。
+///
+/// 返回 `(挂钟, 单调钟)`。这一步是为了把「累计偏差 14ms/分钟」这个观察拆开：
+/// 如果挂钟只能读到十几毫秒的台阶而单调钟能读到微秒，那 14ms/分钟多半是
+/// **取整偏差在单向累积**，不是真实晶振漂移，P2 也就不必为它改判据。
+pub fn measure_clock_resolution(n: usize) -> (ResolutionReport, ResolutionReport) {
+    let mut wall_deltas = Vec::with_capacity(n);
+    let mut prev_wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0);
+    for _ in 0..n {
+        let cur = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
+        wall_deltas.push(cur - prev_wall);
+        prev_wall = cur;
+    }
+
+    let mut mono_deltas = Vec::with_capacity(n);
+    let mut prev_mono = Instant::now();
+    for _ in 0..n {
+        let cur = Instant::now();
+        // 用整数纳秒算，避免 Duration 相减在极短间隔上退化成 0。
+        let d = cur.saturating_duration_since(prev_mono).as_nanos() as i64;
+        mono_deltas.push(d);
+        prev_mono = cur;
+    }
+
+    (
+        resolution_report(&wall_deltas),
+        resolution_report(&mono_deltas),
+    )
+}
+
 /// 可完全控制的假时钟。
 ///
 /// 两个数值**独立**推进——这正是要测的场景：挂钟被改而单调钟照走（用户改时间），
@@ -531,5 +609,37 @@ mod tests {
             monotonic_ms: 1600,
         });
         assert_eq!(a.report.worst_interval_gap_ms, 600, "晚了 600ms 才算偏离");
+    }
+    /// 分辨率报告要能认出「整齐的台阶」——那正是量化的特征。
+    #[test]
+    fn resolution_report_recognises_quantisation_steps() {
+        // 只出现 0 / 15 / 16 三种增量 → 明显是 15.6ms 量化的痕迹
+        let mut deltas = vec![0i64; 40];
+        deltas.extend([15i64, 16, 15, 0, 15, 16]);
+        let r = resolution_report(&deltas);
+        assert_eq!(r.samples, 46);
+        assert_eq!(r.min_positive_ms, Some(15));
+        assert_eq!(r.distinct_deltas, vec![0, 15, 16]);
+        assert_eq!(r.max_delta_ms, 16);
+        assert!(r.zero_ratio_permille > 800, "大部分采样落在同一刻度内");
+    }
+
+    /// 微秒级时钟不该出现大量零增量和台阶。
+    #[test]
+    fn a_fine_grained_clock_shows_many_distinct_deltas() {
+        let deltas: Vec<i64> = (1..=200).collect();
+        let r = resolution_report(&deltas);
+        assert_eq!(r.min_positive_ms, Some(1));
+        assert_eq!(r.distinct_deltas.len(), 200, "每个增量都不同");
+        assert_eq!(r.zero_ratio_permille, 0, "没有落在同一刻度内的采样");
+    }
+
+    #[test]
+    fn resolution_report_handles_empty_input() {
+        let r = resolution_report(&[]);
+        assert_eq!(r.samples, 0);
+        assert_eq!(r.min_positive_ms, None);
+        assert_eq!(r.zero_ratio_permille, 0);
+        assert_eq!(r.max_delta_ms, 0);
     }
 }

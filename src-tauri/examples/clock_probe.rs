@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use worktrace_lib::platform::clock::{
-    Clock, ClockSample, DriftAnalyzer, SystemClock, THRESHOLD_MS,
+    measure_clock_resolution, Clock, ClockSample, DriftAnalyzer, SystemClock, THRESHOLD_MS,
 };
 
 fn parse_arg(args: &[String], name: &str, default: i64) -> i64 {
@@ -67,6 +67,27 @@ fn main() {
     println!("# 探针不会自己改系统时间。");
     println!("#");
     println!("idx,wall_ms,monotonic_ms,d_wall,d_mono,delta_gap,cum_gap,flag");
+
+    // 先测两个时钟的实际分辨率：它决定「累计偏差」到底是真实漂移还是取整偏差。
+    // 单位是纳秒——毫秒粒度会把亚毫秒的差别抹平，看不出台阶。
+    {
+        let (wall, mono) = measure_clock_resolution(20_000);
+        println!("#");
+        println!("# ---- 时钟分辨率（纳秒）----");
+        for (name, r) in [("wall_systemtime", &wall), ("monotonic_instant", &mono)] {
+            println!(
+                "# {name}: samples={} min_positive_ns={:?} max_ns={} zero_permille={} distinct={:?}",
+                r.samples,
+                r.min_positive_ms,
+                r.max_delta_ms,
+                r.zero_ratio_permille,
+                r.distinct_deltas.iter().take(6).collect::<Vec<_>>()
+            );
+        }
+        println!("# 判读：distinct 里只有少数几个整齐的台阶值 → 该时钟粒度粗；");
+        println!("#       若挂钟粒度远粗于单调钟，则「累计偏差」多半是取整偏差在单向累积。");
+        println!("#");
+    }
 
     let clock = SystemClock::new();
     let mut analyzer = DriftAnalyzer::new(interval_ms);
