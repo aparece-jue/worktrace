@@ -1064,4 +1064,65 @@ mod commands {
             Some(c.coord.live().unwrap().id.as_str())
         );
     }
+    /// **提交后故障不重复创建**（计划原文）。
+    ///
+    /// 提交已经落库，之后的收尾失败走恢复语义。恢复路径必须是**纯重建**——
+    /// 反复重建多少次都不该多出一行事实，否则「恢复」本身就成了重复创建的来源。
+    #[test]
+    fn the_post_commit_recovery_path_never_creates_anything() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let req = c.start_req();
+        let out = c.coord.start(&mut c.db, req).unwrap();
+        let sid = out.snapshot.session_id.clone().unwrap();
+
+        let after_start = (
+            c.count("work_session"),
+            c.count("work_interval"),
+            c.count("interval_checkpoint"),
+            c.count("task_change"),
+            require_meta(c.db.connection()).unwrap().revision,
+        );
+        assert_eq!(after_start.0, 1, "只该有一个会话");
+
+        // 反复走重建入口——每一次都必须只是重建
+        for i in 0..5 {
+            let sample = c.clock.lock().unwrap().sample().unwrap();
+            let rebuilt = c
+                .coord
+                .rebuild_from_committed(c.db.connection(), &sid, sample)
+                .unwrap();
+            assert_eq!(
+                rebuilt.revision, after_start.4,
+                "第 {i} 次重建不该改 revision"
+            );
+            assert_eq!(rebuilt.snapshot.session_id.as_deref(), Some(sid.as_str()));
+        }
+
+        let after_rebuilds = (
+            c.count("work_session"),
+            c.count("work_interval"),
+            c.count("interval_checkpoint"),
+            c.count("task_change"),
+            require_meta(c.db.connection()).unwrap().revision,
+        );
+        assert_eq!(after_rebuilds, after_start, "重建路径不得多出任何一行事实");
+
+        // 失败的重建同样不创建
+        let sample = c.clock.lock().unwrap().sample().unwrap();
+        assert_eq!(
+            c.coord
+                .rebuild_from_committed(c.db.connection(), "no-such-session", sample)
+                .unwrap_err()
+                .code(),
+            "RECOVERY_REQUIRED"
+        );
+        let after_failure = (
+            c.count("work_session"),
+            c.count("work_interval"),
+            c.count("interval_checkpoint"),
+            c.count("task_change"),
+            require_meta(c.db.connection()).unwrap().revision,
+        );
+        assert_eq!(after_failure, after_start, "失败的重建也不得创建");
+    }
 }
