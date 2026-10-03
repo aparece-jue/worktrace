@@ -4,7 +4,7 @@
 
 **Goal:** 做出唯一持有计时内存状态的串行协调器：用同一次时钟采样同时产出区间事实与 tick 快照，并让墙钟与单调钟的分歧能被稳定地检测与分割。
 
-**Architecture:** 新增 `services/timer/`。协调器所有改状态的方法取 `&mut self`，因此进程内由借用检查器保证不会交错；跨命令的串行由 P6/P7 的单实例与调度接线提供。`anchor.rs` 是纯函数（只收数字），可穷举边界；`coordinator.rs` 是唯一把基线、仓储与时钟缝在一起的地方。时间一律经 `Clock::sample()` 一次性取得。
+**Architecture:** 新增 `services/timer/`。协调器所有改状态的方法取 `&mut self`，因此进程内由借用检查器保证不会交错；跨命令串行由 P7 的共享协调器执行边界与调度接线提供，P6 后续硬化；单实例不替代进程内串行。`anchor.rs` 是纯函数（只收数字），可穷举边界；`coordinator.rs` 是唯一把基线、仓储与时钟缝在一起的地方。时间一律经 `Clock::sample()` 一次性取得。
 
 **Tech Stack:** Rust 1.98 · rusqlite 0.40（沿用 P1）· 无新依赖
 
@@ -39,21 +39,24 @@
 
 ## Task 3：start/pause/resume/finish 原语与事务
 
-文件：coordinator.rs、tests/timer_commands.rs。
+文件：coordinator.rs、storage/task_repo.rs、storage/session_repo.rs、storage/time_edit_repo.rs、storage/mod.rs、tests/timer_commands.rs。
 
-业务接口：start(request, sample)、pause(request, sample)、resume(request, sample)、finish(request, sample)。request 包含 expected_data_epoch、task/session ID、修改对象的 expected_row_version；start 还带 timer_kind/target_duration_ms。具体 Rust 签名在 P1 真实接口基础上定稿并登记，不能用内部 read_meta 得到的 epoch 代替请求。
+公开入口：start(request)、pause(request)、resume(request)、finish(request)。先校验请求，再由协调器调用 Clock::sample()；调用方不得预先传入采样。内部事务原语才接收已验证样本；采样失败走异常路径，不伪造 ClockSample。request 包含 expected_data_epoch、task/session ID、修改对象的 expected_row_version；start 还带 timer_kind/target_duration_ms。具体 Rust 签名在 P1 真实接口基础上定稿并登记，不能用内部 read_meta 得到的 epoch 代替请求。
+- [ ] **与 P1 已实现的 `commands::envelope::WriteEnvelope` 的关系**：它只有**一个** `expected_row_version: Option<i64>`（P1 已落地，但目前除自身单测外**没有任何消费者**）。本计划的 `resume` 要同时校验任务与会话两份版本，**装不进这个信封**。定稿时二选一并在总纲登记：① 多对象命令的 request 直接带各自版本字段，`WriteEnvelope` 只服务**单对象更新**（P4 的项目/标签改动、P7 的简单修改）——此时 P4 必须真的用它，否则它就是死代码；② 把信封扩展成可承载多对象版本。**倾向前者**：信封的语义是「一次写一个对象」，硬塞两份版本会让「幂等关系增删不伪造实体版本」这条规则更难表达。
 
 - [ ] 串行边界内先检查请求 epoch/version 和目标存在性，再取得样本并检测；正常路径先计划内存变化，同一业务事务再次校验 epoch/version、任务可执行/项目状态、前台占用与历史冲突，再调用 P1 仓储原语。若检测异常，按总纲 §9 独立系统事务提交恢复状态，原用户命令返回 RECOVERY_REQUIRED，不执行原意图；响应携带该事务后的权威版本，不自动重试。
 - [ ] start 同事务理清任务、持久化预算、创建 session/open interval/elapsed=0 初始检查点、审计及 revision；首次估时基准在此冻结。失败不留下半条事实。
 - [ ] **「理清」是两步，不是一步**：02 §5 里 `Inbox → Doing` **不合法**，必须 `Inbox → Ready → Doing`；`Clarifying` 出发同理。F-002 要求 `start` 在同一命令内原子完成它，所以这里是同一事务里的**两次** `task_repo::transition_task`（各自的 `expected_row_version` 要按前一步的结果递进），**不是**把状态直接写成 Doing。直接跳会被跃迁表拒绝——P1 的测试已经把这个陷阱钉住了。
-- [ ] resume 校验 paused 且无待确认，以 A(M) 开新区间，创建 elapsed=0 检查点并更新 run_id/state/version，不清空 session 已用工时。
+- [ ] resume 校验 paused 且无待确认、项目可执行及前台占用；任务 Doing 保持，Ready 同事务转 Doing；Inbox/Clarifying/Waiting/Blocked/Review/Done/Cancelled/Scheduled 拒绝，不隐式解除等待或重开任务。请求携带 task 与 session 两份 expected_row_version，采样前及事务内均校验。先更新 session 为 running 及当前 run_id，再以 A(M) 开新区间、写 elapsed=0 检查点；同事务提交，不清空已用工时，返回任务/会话权威版本。
 - [ ] pause/finish 用已验证单调差关闭区间，保留 sampled_end_wall_at；finish 可从 paused 直接结束。recovering 拒绝普通工作命令，需 P3 reconcile。
+- [ ] P2 扩展 P1 仓储：task_repo 读取估时并冻结 baseline_estimate_json；session_repo 更新 run_id/needs_review、分割可信前缀与不确定余段；新增 time_edit_repo 写异常审计。签名实现时登记并供 P3 复用。仅接受调用方 Transaction，不自行提交或加 revision；协调器不嵌 SQL，不改 schema。无估时的首次 start 也以首次会话事实标识已冻结，后续不得因 baseline 为 null 重新冻结。
+- [ ] 测试：首次有/无估时冻结及后续不覆盖；resume 各任务状态与两份版本校验；新增仓储字段和审计失败同事务回滚。
 - [ ] 一个业务事务只加一次 revision。提交失败不应用内存；提交后内存应用或响应生成失败不得返回普通可重试失败，进入故障恢复并从已提交事实重建。
 - [ ] 测试：初始检查点与预算持久化、旧 epoch/version 拒绝（同时有异常仍不借此请求写入）、paused 直接 finish、占用冲突、每个写入步骤注入故障整体回滚（比较涉及记录及区间字段，不只计行数）、有效命令遇异常仅提交系统恢复事务、提交后故障不重复创建。
 
 ## Task 4：可信检查点与异常原子跃迁
 
-文件：coordinator.rs、tests/timer_checkpoint.rs、tests/timer_anomaly.rs。
+文件：coordinator.rs、storage/session_repo.rs、storage/time_edit_repo.rs、tests/timer_checkpoint.rs、tests/timer_anomaly.rs。
 
 - [ ] 正常样本可更新最后检测样本；另存最后成功持久化检查点，不能将内存可信点当作恢复事实。正常心跳约每 30 秒写检查点，不加 revision；失败不推进持久化标记，后续可重试。
 - [ ] **登记 `checkpoint_repo::write` 已经强制的三条（P1 已实现，违反会被运行期拒绝）**：
@@ -70,12 +73,17 @@
 
 
 - [ ] 对照 [总纲](2026-10-03-v01-plan-index.md) §5 第 9 条的权威清单（02 §8 必测案例、04 §9 集成用例、06 §4 实验）逐条确认与本计划相关的条目，并在验收记录里写明「已核对 / 不适用」。
-在 src-tauri 运行 cargo fmt --check、cargo test、cargo clippy --all-targets，并执行 P1 分层检查。P3 只能消费本计划已验证的事实与原语，不能重新实现一套时钟。
+在 src-tauri 运行 cargo fmt --check、cargo test、cargo clippy --all-targets，并执行 P1 分层检查。**本计划会改 P1 的 `task_repo`/`session_repo`/`mod.rs`，所以必须显式确认 P1 的 69 个测试无回归**——`cargo test` 虽然会跑到它们，但「跑到了」不等于「核对过」。P3 只能消费本计划已验证的事实与原语，不能重新实现一套时钟。
 
-人工平台实验记录机器/系统版本、事件到达延迟和行为：锁屏 30 分钟、休眠/唤醒、正反改时、关窗后继续。正式系统事件接线在 P6/P7 验收前完成，FakeClock 通过不代表实机通过。P2 核心测试可独立完成，平台验收状态另列。
+人工平台实验记录机器/系统版本、事件到达延迟和行为：锁屏 30 分钟、休眠/唤醒、正反改时、关窗后继续。P2 开工前完成独立探针验证；P7 建立正式系统事件接线并验证到达延迟及关窗行为；P6 硬化故障路径；P8 完成最终实机验收。FakeClock 通过不代表实机通过；P2 核心验收与后续平台验收分别列状态。
 
 ## 跨计划接缝
 
 - [ ] 为 P3 的任务状态编排提供同一事务中的暂停/结束原语和提交后内存应用计划；不让组合服务调用已自行提交的公开命令。
 - [ ] 为 P5 提供内部统计采样接缝：已验证样本、开放 interval_id、归属终点及对应 run/session_version；与一致数据库读快照在同一串行边界完成，避免闭合工时与 live 重复计入。
 - [ ] P6 维护态期间禁止所有采样写入；库切换成功或失败重开后均从持久化事实重建运行态，不复用旧 Instant。
+
+## 开工前时钟探针的交付物
+
+- [ ] 新增 src-tauri/examples/clock_probe.rs 与 docs/validation/p2-clock-mapping.md 记录模板。探针仅依赖 platform::clock，不依赖协调器或正式事件接线，不自动修改系统时间；锁屏、休眠、正反改时由人工操作。
+- [ ] 记录机器/系统版本、两个时钟采样序列、操作时点、观察结果、阈值结论与未验证项；完成后再实现协调器。探针不证明系统通知可靠性，事件边界与延迟由 P7 实测，P8 最终验收。
