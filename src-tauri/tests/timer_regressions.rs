@@ -1321,3 +1321,38 @@ fn cross_run_open_interval_cannot_be_closed_as_trusted_effort() {
         assert!(!ivs[0].needs_review, "kind={kind}");
     }
 }
+
+/// **调用时机错了会怎样**：同一连接上还有未结束的事务时，捕获读不到权威版本。
+///
+/// `capture_error_response` 的契约是「原操作事务结束后」调用。此时内部的
+/// `unchecked_transaction` 会失败，于是只能降级：`authority = None`、
+/// `requires_handshake = true`——安全，但**绝不返回半个上下文**，因为一个可能已经
+/// 过期的 revision 比没有更危险。这条测试把「时机错了」的结果钉住。
+#[test]
+fn error_response_capture_during_open_transaction_degrades_to_handshake() {
+    let h = setup();
+
+    // 调用方忘了先结束自己的事务
+    let tx = h.db.connection().unchecked_transaction().unwrap();
+    let during = worktrace_lib::services::error_response::capture_error_response(
+        &h.db,
+        &worktrace_lib::AppError::RecoveryRequired,
+        Some("t1"),
+        None,
+    );
+    assert!(during.authority.is_none(), "嵌套事务不应读到权威版本");
+    assert!(during.requires_handshake);
+    drop(tx);
+
+    // 事务结束后同一个调用能读到权威版本——说明刚才失败的原因确实只是时机
+    let after = worktrace_lib::services::error_response::capture_error_response(
+        &h.db,
+        &worktrace_lib::AppError::RecoveryRequired,
+        Some("t1"),
+        None,
+    );
+    let authority = after.authority.expect("事务结束后应能读到权威版本");
+    assert_eq!(authority.data_epoch, h.epoch);
+    assert_eq!(authority.task.unwrap().row_version, 0);
+    assert!(!after.requires_handshake);
+}
