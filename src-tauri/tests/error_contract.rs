@@ -150,13 +150,14 @@ fn domain_error_messages_are_user_facing_chinese() {
             expected: "run-1".into(),
             actual: "run-2".into(),
         },
-        // P4 Task 2（项目服务与任务归属）新增的四个变体。
+        // P4 Task 2（项目服务与任务归属）新增的五个变体。
+        DomainError::UnknownTask,
         DomainError::UnknownProject,
         DomainError::ProjectArchived,
         DomainError::TaskNotInClarifying { status: "Doing" },
         DomainError::TaskHasRunningSession,
     ];
-    assert_eq!(cases.len(), 18, "18 个变体都要覆盖，加了新的记得补进来");
+    assert_eq!(cases.len(), 19, "19 个变体都要覆盖，加了新的记得补进来");
 
     for e in cases {
         let shown: AppError = e.into();

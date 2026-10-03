@@ -49,6 +49,10 @@ pub enum DomainError {
     /// 它**不是**普通的参数错误——必须触发恢复流程，所以单独命名。
     StaleRunContext { expected: String, actual: String },
     // ── P4 Task 2（项目服务与任务归属）新增 ──────────────────────────────────
+    /// 目标任务不存在（已被删除，或请求里的 ID 从来不存在）。
+    ///
+    /// 语义是「找不到」，不是「为空」——所以不复用 [`Self::EmptyText`]。
+    UnknownTask,
     /// 目标项目不存在（已被删除，或请求里的 ID 从来不存在）。
     ///
     /// 与版本冲突分开：前者是「这条记录不在」，后者是「你手上的版本旧了」，
@@ -139,6 +143,7 @@ impl std::fmt::Display for DomainError {
             Self::StaleRunContext { expected, actual } => {
                 write!(f, "运行上下文已过期：期望 {expected}，实际 {actual}。")
             }
+            Self::UnknownTask => write!(f, "找不到这个任务。"),
             Self::UnknownProject => write!(f, "找不到这个项目。"),
             Self::ProjectArchived => write!(f, "项目已归档，不能把任务关联到它。"),
             Self::TaskNotInClarifying { status } => {

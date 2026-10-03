@@ -22,7 +22,7 @@ pub mod time_edit_repo;
 /// 这件事就没法顺手写出来。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome<T> {
-    /// 真的写入了：实体的 `row_version` 已经前进，调用方负责加一次 `revision`。
+    /// 真的写入了：新增了一行，或既有行的 `row_version` 已前进。调用方负责加一次 `revision`。
     Changed(T),
     /// 请求与现状一致：**没有写任何东西**，调用方不得加 `revision`。
     Unchanged(T),
@@ -34,13 +34,6 @@ impl<T> WriteOutcome<T> {
         match self {
             Self::Changed(value) => WriteOutcome::Changed(f(value)),
             Self::Unchanged(value) => WriteOutcome::Unchanged(f(value)),
-        }
-    }
-
-    /// 取出载荷（两种变体都有）。
-    pub fn into_value(self) -> T {
-        match self {
-            Self::Changed(value) | Self::Unchanged(value) => value,
         }
     }
 }

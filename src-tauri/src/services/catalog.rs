@@ -13,10 +13,10 @@
 
 use rusqlite::Transaction;
 
-use crate::commands::envelope::WriteEnvelope;
 use crate::domain::error::DomainError;
 use crate::domain::project::{self, ProjectStatus};
 use crate::domain::tag::{self, TagKind};
+use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
 use crate::storage::db::{map_sqlite, Db};
 use crate::storage::guards::guard_epoch;

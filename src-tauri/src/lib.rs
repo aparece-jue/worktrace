@@ -5,10 +5,12 @@
 //! `commands` 也不调用 `platform`；`domain` 不做 IO。
 //!
 //! P1 交付 `domain`/`platform`/`storage`/`commands` 的基座与 `error`；
-//! `services` 自 P2 起逐份加入。
+//! `services` 自 P2 起逐份加入。`envelope` 与 `error` 一样住在 crate 根：
+//! `storage` 与 `services` 都要用它，而它们不得依赖 `commands`。
 
 pub mod commands;
 pub mod domain;
+pub mod envelope;
 pub mod error;
 pub mod platform;
 pub mod services;

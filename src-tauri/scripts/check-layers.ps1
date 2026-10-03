@@ -1,8 +1,14 @@
 # Layering gate (P1 执行与完成门槛).
 #
 # Rules (01 section 2 / plan index section 9):
-#   domain  must not touch rusqlite, std::fs, platform:: or storage::
-#   storage must not touch platform:: or commands::
+#   domain   must not touch rusqlite, std::fs, platform:: or storage::
+#   storage  must not touch platform:: or commands::
+#   services must not touch std::time/SystemTime/Instant::now, nor commands::
+#
+# The services -> commands edge was added in P4 Task 2: the edge is the reverse of
+# the `commands -> services` direction. It slipped through once because nothing
+# checked it -- `WriteEnvelope` used to live in `commands::` and a service imported
+# it. The type now lives at the crate root; this rule keeps it that way.
 #
 # Why a real script instead of an inline snippet in the plan:
 #   A plain grep also matches the doc comments that *state* the rule, so the
@@ -61,7 +67,11 @@ $ok = (Test-LayerLeak 'src/storage' 'platform::|commands::'                 'sto
 # services must not read the system clock directly -- time has to come through
 # platform::clock::Clock so FakeClock can drive it. Without this check a single
 # `Instant::now()` in a service silently makes the whole unit-testable seam leak.
-$ok = (Test-LayerLeak 'src/services' 'std::time|SystemTime|Instant::now'   'services') -and $ok
+#
+# services must not touch commands:: either: that edge reverses the
+# `commands -> services` direction (P4 Task 2; see the header comment).
+# Both rules share this one check so the three output lines keep their shape.
+$ok = (Test-LayerLeak 'src/services' 'std::time|SystemTime|Instant::now|commands::' 'services') -and $ok
 
 if (-not $ok) {
     Write-Host 'LAYER CHECK FAILED'

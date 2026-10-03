@@ -394,7 +394,9 @@ pub fn set_task_project(
     project_id: Option<&str>,
     now: i64,
 ) -> Result<WriteOutcome<TaskRow>, AppError> {
-    let before = get_task(tx, task_id)?.ok_or(DomainError::EmptyText { field: "任务" })?;
+    // 「找不到」用 `UnknownTask`，不是 `EmptyText`：空文本说的是「给的值是空的」，
+    // 与「这条记录不在」是两回事（用户看到的文案也不同）。
+    let before = get_task(tx, task_id)?.ok_or(DomainError::UnknownTask)?;
     guard_row_version(before.row_version, expected_version)?;
 
     if !matches!(

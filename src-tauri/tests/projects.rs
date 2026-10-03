@@ -13,10 +13,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use worktrace_lib::commands::envelope::WriteEnvelope;
 use worktrace_lib::domain::project::ProjectStatus;
 use worktrace_lib::domain::session::{SessionMode, TimerKind};
 use worktrace_lib::domain::task::{TaskStatus, TransitionCause};
+use worktrace_lib::envelope::WriteEnvelope;
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::services::catalog::{self, ProjectTarget};
@@ -716,6 +716,26 @@ fn binding_to_an_unknown_project_is_refused() {
     .unwrap_err();
 
     assert_domain_error(err, "找不到这个项目");
+    assert_unchanged(&f, "t1", &before);
+}
+
+/// 未知任务：领域拒绝，且文案说的是「找不到」而不是「不能为空」。
+#[test]
+fn binding_an_unknown_task_is_a_domain_refusal() {
+    let mut f = bootstrap();
+    f.insert_project("p2", "项目二", "active", 1500);
+    let before = baseline(&f);
+
+    let err = catalog::set_task_project(
+        &mut f.db,
+        update_env(&f.epoch, 0),
+        "t404",
+        ProjectTarget::Bind("p2".into()),
+        5000,
+    )
+    .unwrap_err();
+
+    assert_domain_error(err, "找不到这个任务");
     assert_unchanged(&f, "t1", &before);
 }
 

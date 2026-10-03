@@ -8,7 +8,7 @@
 //! 的责任在服务层，总纲 §9）。
 //!
 //! 幂等（重命名成同名、归档已归档）在这里就断掉：返回
-//! [`WriteOutcome::Unchanged`]，**一行 SQL 都不发**。
+//! [`WriteOutcome::Unchanged`]，**不发任何写语句**（判定用的那条 SELECT 当然已经发过）。
 
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
