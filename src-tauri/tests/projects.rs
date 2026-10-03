@@ -7,7 +7,9 @@
 //!   且返回值明确表达「没有变化」（`WriteOutcome::Unchanged`）；
 //! - **错误**：断言 `code()` 字符串；文案口径用 `assert_domain_error`——CJK 判定落在
 //!   `detail()` 上。**不在 `message()` 上找中文**：它的模板 `操作不被允许：{detail}`
-//!   自带中文，对 `DOMAIN_ERROR` 恒真（Task 1 踩过的坑）。
+//!   自带中文，对 `DOMAIN_ERROR` 恒真（Task 1 踩过的坑）。**负断言除外**：
+//!   `!message().contains("已归档")` 这类「不得出现某说法」的检查不满足恒真前提，
+//!   是允许的（例如 done 项目的拒绝理由不得冒充「已归档」）。
 //!
 //! 建库样板照 `tests/transaction_boundary.rs::bootstrap`。
 
