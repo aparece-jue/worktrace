@@ -60,12 +60,26 @@
 - [x] src-tauri 下 cargo fmt --check、cargo test、cargo clippy --all-targets 通过，执行 P1 分层检查。
 - [x] P1/P2 测试无回归；P4 可在 P1 后独立实施，不需要等 P2。
 - [x] 登记服务输入/输出及真实 Rust 签名供 P5/P7 消费；项目/标签版本字段与迁移一致。实际 UI 选择和发布应用离线验收由 P7 完成，不能将仓储测试标为 UI 已验收。
-- [ ] **P7 接线前补齐接口兼容（总纲 §10）**：① 写结果 DTO 补 `data_epoch`（现在只有 `revision`）；
-  ② 项目/标签/任务标签读服务补同一读事务的 epoch/revision；③ 补完整项目列表服务（含 archived/done，供 Projects 页，
-  命令层不得直调 `project_repo`）。这三项是既有交付的**兼容收尾**，未完成前本计划「返回 epoch/revision」一条不算兑现；
-  跟踪编号见 [P1～P4 结果兼容性待评审清单](../../validation/p1-p4-review-backlog.md) 的 COMP-01 / COMP-03。
+- [x] **P7 接线前补齐接口兼容（总纲 §10）**（**已完成**，2026-10-04，提交 **27f8a7a**，门禁 350 passed / 0 failed）：
+  ① 写结果 DTO 补 `data_epoch` —— `services/tx.rs` 的 `settle` 改为返回 `WriteOutcome<(T, Settled{revision, data_epoch})>`，
+  `Changed` 先 `bump_revision`、两个分支都在同一写事务里用 `require_meta` 读回；11 个写入口（catalog 9 + daily_plan 2）
+  的 Change DTO（`ProjectChange`/`TaskProjectChange`/`TagChange`/`TaskTagsChange`/`TaskChange`/`DailyPlanChange`）全部带 `data_epoch`；
+  ② 项目/标签/任务标签读服务补同一读事务的 epoch/revision —— `list_projects`/`list_selectable_projects`/`list_tags`/`tags_of_task`
+  都收请求带来的 `expected_data_epoch`，在读事务内 `guard_epoch`，返回新增信封 `ProjectList`/`TagList` 的
+  `{items, data_epoch, revision}`（`list_tasks_filtered` 与 `plan_for` 已是这个形状，未改；仓储签名与实现未动）；
+  ③ 补完整项目列表服务 —— `catalog::list_projects(db, expected_data_epoch, Option<ProjectStatus>)`，`None` 含 archived/done、
+  `Some(s)` 只列该状态，`list_selectable_projects` 复用同一路径且仍只含 active，命令层不再直调 `project_repo`（原引导注释已删）。
+  用例共 9 条（全仓 341 → 350）：`projects.rs::write_results_carry_the_request_epoch_and_the_authoritative_revision`、
+  `tags.rs::tag_write_results_carry_the_request_epoch_and_the_authoritative_revision`、
+  `daily_plan.rs::plan_write_results_carry_the_request_epoch_and_the_authoritative_revision`；四个读信封用例
+  （`projects.rs::list_projects_returns_a_same_read_transaction_envelope`、
+  `projects.rs::the_selection_list_returns_a_same_read_transaction_envelope_with_active_projects_only`、
+  `tags.rs::list_tags_returns_a_same_read_transaction_envelope`、`tags.rs::tags_of_task_returns_a_same_read_transaction_envelope`）；
+  `projects.rs::the_full_project_list_covers_every_status_while_the_selection_entry_stays_active_only`；
+  `projects.rs::an_unknown_project_status_fails_by_column_for_binding_without_changes`。
+  跟踪编号见 [P1～P4 结果兼容性待评审清单](../../validation/p1-p4-review-backlog.md) 的 COMP-01 / COMP-03（两行已标已修复）。
 
-目标对外响应必须包含 epoch/revision；当前 P4 写 DTO 仅有 revision，部分单语句读尚无元数据，此兼容补全尚未完成，见总纲 §10 的 P7 接线前门禁。服务拥有事务；仓储只依赖 domain/shared error，不依赖 commands/platform。版本拒绝和任一步失败不得写审计、增加 revision 或留下部分变更。
+目标对外响应必须包含 epoch/revision：本计划的这一条**已兑现**（写 DTO 与项目/标签读服务；P2 的计时快照此前已满足）。P7 的 IPC 接线（命令层构造信封、接线 `capture_error_response`、迟到响应丢弃）仍不在本计划范围，见总纲 §10 的门禁第 4 项。服务拥有事务；仓储只依赖 domain/shared error，不依赖 commands/platform。版本拒绝和任一步失败不得写审计、增加 revision 或留下部分变更。
 
 ## Task 5：任务筛选查询（轻量 GTD 列表）
 

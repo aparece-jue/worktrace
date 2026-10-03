@@ -7,9 +7,9 @@
 
 | 编号 | 优先级 | 问题与证据 | 影响 | 建议与验收要求 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| COMP-01 | P2 | P2 TimerSnapshot 带 data_epoch/revision；P4 catalog 的 ProjectChange、TaskProjectChange、TagChange、TaskTagsChange、TaskChange 及 DailyPlanChange 仅带 revision；list_selectable_projects/list_tags/tags_of_task 返回裸列表。见 src-tauri/src/services/catalog.rs、services/daily_plan.rs | 对外响应不能统一执行旧 epoch/旧 revision 丢弃协议；多窗口和恢复接线存在缺口。当前尚未接 IPC，不声称已经发生缓存错乱 | 写结果的数据与 epoch/revision 在同一写事务取得，提交后返回；业务读结果在同一读事务取得数据和元数据。不得由 IPC 层提交后补读。明确查询请求的 epoch 校验及首次握手方式；覆盖一致快照、旧 epoch 拒绝及 P7 迟到响应丢弃 | 未修复，P7 接线前门禁 |
-| COMP-02 | P2 | task_repo::create_task 只拒绝 archived，Some(_) 放行 done；set_task_project 拒绝 done；require_active_project 拒绝所有非 active，却都提示“已归档”。见 src-tauri/src/storage/task_repo.rs | 可以创建归属 done 项目但随后无法计时的任务；新建与重新绑定规则不同，拒绝理由不准确。V0.1 无 done 创建入口，但 schema/读模型允许该状态 | 新建任务归属、重新绑定、start/resume 均仅允许 active；archived/done 历史可读。done 使用准确的中文拒绝理由。补新建、绑定、开始/恢复路径测试，拒绝时断言 revision、版本、审计和相关字段零变化 | 已修复（2026-10-04，提交 9e7a89a；追加「无法识别 `project.status`」用例后门禁 341 passed / 0 failed），回归验证见下方 |
-| COMP-03 | P2 | project_repo::list_projects 支持完整/按状态查询；catalog 只提供 active 的 list_selectable_projects，注释引导完整列表直接调用仓储。见 src-tauri/src/services/catalog.rs、storage/project_repo.rs | Projects 页查询归档历史缺少符合 commands→services 分层的服务入口 | 补完整项目列表服务及可选状态过滤，保留 active 选择入口，统一 COMP-01 响应信封；验证归档/done 历史可读、选择列表只含 active，命令层不直调仓储 | 未修复，P7 接线前门禁 |
+| COMP-01 | P2 | P2 TimerSnapshot 带 data_epoch/revision；P4 catalog 的 ProjectChange、TaskProjectChange、TagChange、TaskTagsChange、TaskChange 及 DailyPlanChange 仅带 revision；list_selectable_projects/list_tags/tags_of_task 返回裸列表。见 src-tauri/src/services/catalog.rs、services/daily_plan.rs | 对外响应不能统一执行旧 epoch/旧 revision 丢弃协议；多窗口和恢复接线存在缺口。当前尚未接 IPC，不声称已经发生缓存错乱 | 写结果的数据与 epoch/revision 在同一写事务取得，提交后返回；业务读结果在同一读事务取得数据和元数据。不得由 IPC 层提交后补读。明确查询请求的 epoch 校验及首次握手方式；覆盖一致快照、旧 epoch 拒绝及 P7 迟到响应丢弃 | 已修复（2026-10-04，提交 27f8a7a；门禁 350 passed / 0 failed），回归验证见下方 |
+| COMP-02 | P2 | task_repo::create_task 只拒绝 archived，Some(_) 放行 done；set_task_project 拒绝 done；require_active_project 拒绝所有非 active，却都提示“已归档”。见 src-tauri/src/storage/task_repo.rs | 可以创建归属 done 项目但随后无法计时的任务；新建与重新绑定规则不同，拒绝理由不准确。V0.1 无 done 创建入口，但 schema/读模型允许该状态 | 新建任务归属、重新绑定、start/resume 均仅允许 active；archived/done 历史可读。done 使用准确的中文拒绝理由。补新建、绑定、开始/恢复路径测试，拒绝时断言 revision、版本、审计和相关字段零变化 | 已修复（2026-10-04，提交 9e7a89a：**340 passed（当时）**；追加「无法识别 `project.status`」用例后 341，COMP-01/COMP-03 收尾后当前 350 passed / 0 failed），回归验证见下方 |
+| COMP-03 | P2 | project_repo::list_projects 支持完整/按状态查询；catalog 只提供 active 的 list_selectable_projects，注释引导完整列表直接调用仓储。见 src-tauri/src/services/catalog.rs、storage/project_repo.rs | Projects 页查询归档历史缺少符合 commands→services 分层的服务入口 | 补完整项目列表服务及可选状态过滤，保留 active 选择入口，统一 COMP-01 响应信封；验证归档/done 历史可读、选择列表只含 active，命令层不直调仓储 | 已修复（2026-10-04，提交 27f8a7a；门禁 350 passed / 0 failed），回归验证见下方 |
 
 优先级 P2 表示需在依赖功能接入前完成，不表示当前已出现数据损坏。三个问题属于既有交付的兼容收尾，不新增产品功能或实体。
 
@@ -60,6 +60,26 @@ COMP-02 已修复。**三处都不再冒充「已归档」，但新建/绑定与
 
 FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a89a），返回顺序未改变。
 
-门禁（在 **2fda0e8** 上重跑）：`cargo test --offline` **341 passed / 0 failed**（相对 `a3f9f80` 共含两条新增回归用例——done 项目三处拒绝口径、无法识别的 `project.status` 按列报错——故 339 → 341）；`cargo fmt --check`、`cargo clippy --all-targets --offline -- -D warnings`、`scripts/check-layers.ps1` 全绿。
+门禁数字与归属（三次实跑，不是同一个数）：**`9e7a89a`：340 passed（当时）**；**`2fda0e8`：341 passed（当时）**（相对 `a3f9f80` 共含两条新增回归用例——done 项目三处拒绝口径、无法识别的 `project.status` 按列报错，故 339 → 341）；**当前（COMP-01/COMP-03 收尾提交 `27f8a7a`）：350 passed / 0 failed**（本轮新增 9 条用例，见下）。三项检查（`cargo fmt --check`、`cargo clippy --all-targets --offline -- -D warnings`、`scripts/check-layers.ps1`）在各自提交上均全绿。
 
-COMP-01（统一响应信封）与 COMP-03（完整项目列表服务）仍未修，本轮未改动公开读取签名。
+## 2026-10-04 COMP-01 / COMP-03 收尾
+
+代码与测试提交 **27f8a7a**（`src-tauri/src/services/{tx,catalog,daily_plan}.rs`、`src-tauri/tests/{projects,tags,daily_plan}.rs`）。两项都不新增表/列/迁移，也不改 P2 的计时命令与 `TimerSnapshot`。
+
+**COMP-01 写路径**：`services/tx.rs` 新增 `pub(super) struct Settled { revision, data_epoch }`，`settle` 改为返回 `WriteOutcome<(T, Settled)>`——`Changed` 分支先 `bump_revision`，再与 `Unchanged` 分支一样用**同一个写事务里的** `require_meta` 读回库身份（不做提交后补读）。11 个写入口的 Change DTO 全部补上 `pub data_epoch: String`：`ProjectChange`（新建/改名/归档）、`TaskProjectChange`（任务归属）、`TagChange`（新建标签）、`TaskTagsChange`（打标/去标）、`TaskChange`（捕获/理清）、`DailyPlanChange`（加入/移除今日计划）。
+
+**COMP-01 读路径**：`catalog::list_projects` / `list_selectable_projects` / `list_tags` / `tags_of_task` 都改为收 `expected_data_epoch: &str`，在**同一个读事务内**用 `storage::guards::guard_epoch` 校验请求带来的期望值，并把数据与 `app_meta` 一起取回，返回新增的信封 `ProjectList { items, data_epoch, revision }` / `TagList { items, data_epoch, revision }`。`list_tasks_filtered`（catalog）与 `plan_for`（daily_plan）形状不变——它们是本形状的样板；`tags_of_task` 的内部写路径仍用 `tag_repo::tags_of_task(&tx, …)`。
+
+**COMP-03**：新增 `catalog::list_projects(db, expected_data_epoch, Option<ProjectStatus>)`——`status = None` 不限制（归档与 done 的历史都在），`Some(s)` 只列该状态；仓储 `project_repo::list_projects(conn, Option<ProjectStatus>)` 的语义与实现一字未动，服务直接使用。`list_selectable_projects` 复用同一条读路径并仍**只含 active**。原注释里那句「要完整列表用 `storage::project_repo::list_projects(conn, None)`」已删除，改为指向本模块的 `list_projects`。
+
+**覆盖用例（本轮新增 9 条，341 → 350）**：
+
+- 写结果带权威 epoch/revision（含 `Unchanged` 分支）：`projects.rs::write_results_carry_the_request_epoch_and_the_authoritative_revision`（新建项目、任务绑定、捕获、理清、改名幂等）、`tags.rs::tag_write_results_carry_the_request_epoch_and_the_authoritative_revision`（建标签、打标、去标与两种幂等）、`daily_plan.rs::plan_write_results_carry_the_request_epoch_and_the_authoritative_revision`（加入、移除与两种幂等）；每条都断言 DTO 的 `data_epoch` 等于请求带的 epoch 且等于 `app_meta` 现值、`revision` 与 `app_meta.revision` 一致。
+- 四个读服务各一条信封用例：正常读（`items` + `data_epoch`/`revision` 与库里一致，且**读完再写**之后先拿到的那份仍是读时版本，证明不是事后补读）与旧 epoch 拒绝（`DATA_EPOCH_MISMATCH`）且零变化（`revision`、项目/标签/关联/任务行数与字段、审计计数均不动）。
+- COMP-03 语义：`the_full_project_list_covers_every_status_while_the_selection_entry_stays_active_only`——active + archived + done 三种项目都在 `list_projects(epoch, None)` 里（归档/done 历史可读），`Some(Archived)` / `Some(Done)` 只列该状态，`list_selectable_projects` 只含 active。
+- 既有用例跟着改签名（`tests/projects.rs` 4 处、`tests/tags.rs` 的 `tags_of` 助手与 `list_tags` 各 1 处），断言只加强：原先直接调 `project_repo::list_projects(…, None)` 的那处历史可读断言改走服务入口，不再直调仓储。
+- 另补一条小用例 `projects.rs::an_unknown_project_status_fails_by_column_for_binding_without_changes`（独立测试函数，未并入既有用例）：用 `PRAGMA ignore_check_constraints` 写入 CHECK 挡不住的 `project.status='paused'`，验证 `set_task_project` 的 Bind 分支与新建/计时一样按列报 `STORAGE_ERROR`（`detail()` 含列名与脏值）且零变化。
+
+**门禁**（Windows，离线，提交 `27f8a7a` 上实跑）：`cargo test --offline` **350 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED。**反向验证**：去掉 `list_projects` 的 `guard_epoch` ⇒ 两条读信封用例变红；把 `Settled::read` 的 `data_epoch` 换成常量 ⇒ 写结果用例变红（`left: "not-the-epoch"`）。
+
+**仍未做**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃）与 UI 不在本轮范围；首次握手方式仍由 P7 在入口处决定（服务侧只承受「请求带来的期望 epoch」这一条规则）。

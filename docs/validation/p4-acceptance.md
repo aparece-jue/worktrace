@@ -107,8 +107,8 @@ P4 **不涉及**这四项（DB 执行边界与单调/墙钟映射已由 P1/P2 �
 | `storage::daily_plan_repo` | `plan_for(conn, &LocalDate, tz_key)`、`add_to_plan`、`remove_from_plan` |
 | `storage::task_repo` | 新增 `set_task_project`、`ProjectFilter/TaskFilter/Page/TaskPage/list_tasks_filtered`；**删除** `list_tasks`（零调用） |
 | `storage` | `WriteOutcome<T>{Changed,Unchanged}`、`require_task` |
-| `services::catalog` | `parse_tag_kind`、`normalize_tag_name`、`normalize_project_name`、`parse_project_status`；`create_project`/`rename_project`/`archive_project`/`list_selectable_projects`；`set_task_project(env, task_id, ProjectTarget)`；`create_tag`/`list_tags`/`tags_of_task`/`tag_task`/`untag_task`；`create_task`（捕获）、`clarify_ready`、`list_tasks_filtered`（只读，返回 `epoch/revision`） |
-| `services::daily_plan` | `parse_local_date`、`normalize_timezone`（返回**存储键**）、`system_timezone_name`、`local_date_at`；`plan_for`（只读）、`add_to_plan`、`remove_from_plan` |
+| `services::catalog` | `parse_tag_kind`、`normalize_tag_name`、`normalize_project_name`、`parse_project_status`；`create_project`/`rename_project`/`archive_project`；**`list_projects(db, expected_data_epoch, Option<ProjectStatus>)`**（`None` 不限制状态、`Some(s)` 只列该状态）与 `list_selectable_projects(db, expected_data_epoch)`（仍只含 active）；`set_task_project(env, task_id, ProjectTarget)`；`create_tag`/`tag_task`/`untag_task`；**`list_tags(db, expected_data_epoch, Option<TagKind>)`**、**`tags_of_task(db, expected_data_epoch, task_id)`**；`create_task`（捕获）、`clarify_ready`、`list_tasks_filtered`（只读，返回 `epoch/revision`）。**写结果 DTO**（`ProjectChange`/`TaskProjectChange`/`TagChange`/`TaskTagsChange`/`TaskChange`）均含 `data_epoch: String` + `revision: i64`；**读结果信封** `ProjectList`/`TagList` = `{ items, data_epoch, revision }`（COMP-01，提交 `27f8a7a`）。四个读入口都收**请求带来的** `expected_data_epoch`，在同一个读事务内 `guard_epoch` |
+| `services::daily_plan` | `parse_local_date`、`normalize_timezone`（返回**存储键**）、`system_timezone_name`、`local_date_at`；`plan_for`（只读，返回 `tasks` + `data_epoch` + `revision`）、`add_to_plan`、`remove_from_plan`（写结果 `DailyPlanChange` 含 `data_epoch` + `revision`） |
 | `services::error_response` | `capture_error_response(db, error, targets: &[AuthorityTarget]) -> ErrorResponse`；`ErrorAuthority{data_epoch, revision, records: Vec<RecordVersion>}`、`RecordVersion{kind: AuthorityKind, id, row_version: Option<i64>}` |
 | `envelope`（crate 根） | `WriteEnvelope::{for_create, for_update}`——IPC 层从 `crate::envelope` 引用 |
 
@@ -175,22 +175,23 @@ SQL 全参数化（含分页）；FK 的 `ON DELETE RESTRICT` 未被破坏；`se
    `"session"`/`"interval"`）、`guards.rs` 的 `no such {table}`、`coordinator.rs` 的 `"no such session"`；
    同批处理 `create_task` 对 `done` 项目放行（`task_repo.rs` 的 `Some(_) => {}`）与
    `require_active_project` 把 `done` 说成「已归档」。
-2. **口径已定、代码待补全（P7 前门禁）**：所有对外写结果必须回 `data_epoch`/`revision`（P2 已回、P4 只回 `revision`，尚待补全）；
-   同模块读路径两种 epoch 契约（一致性读带、单语句读不带）；同一列两种入参形状
-   （`create_task` 的 `Option<&str>` vs `set_task_project` 的 `ProjectTarget`）。
+2. **口径已定、代码已补全（P7 前门禁，2026-10-04 收口）**：所有对外写结果都回 `data_epoch`/`revision`（P2 计时快照早已回、P4 的 11 个写入口由提交 `27f8a7a` 补齐）；
+   项目/标签/任务标签读服务统一为「同一个读事务里 `guard_epoch` 并返回 `{items, data_epoch, revision}`」这一种 epoch 契约（`list_tasks_filtered` 与 `plan_for` 是样板，未改）。
+   **仍未收口的一项**：同一列两种入参形状（`create_task` 的 `Option<&str>` vs `set_task_project` 的 `ProjectTarget`）——这属接口造型，留待 P7 定 IPC 形状时一并处理，不属 COMP-01/COMP-03。
 3. **零调用公开面**：`guard_row_version_of`（建议直接删，而不是翻译它的英文）；`AuthorityTarget::new`、
    `LocalDate::{year,month,day}`、`parse_project_status`、`system_timezone_name` 保留并登记「P4 内无生产消费者」。
+   （本轮未新增零调用面：四个读入口都有测试消费者，`ProjectList`/`TagList` 是它们的返回类型。）
 4. **`daily_plan` 的 `(local_date, timezone)` 读索引**（需新迁移）与**容器拆分**
    （`services/catalog.rs` 已 509 行、四类职责，P7 再加任务命令时拆 `services/tasks.rs`）。
 5. **`WriteEnvelope::for_create` 的改名**（它在 4 处集合操作上语义错位）——P7 定 IPC 形状时一起做。
 
 ## 文档对齐后的兼容收尾
 
-P4 核心验收结论保留；完整响应信封、完整项目列表服务以及 done 项目检查一致性是 P7 接线前待完成的接口收尾，不标为已实现。（其中 **done 项目检查一致性已于 2026-10-04 修复并提交 `9e7a89a`**，见下方「2026-10-04 复审更新」；完整响应信封与完整项目列表服务仍未完成。）统一契约、验收要求及其它阶段归属见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。
+P4 核心验收结论保留；完整响应信封、完整项目列表服务以及 done 项目检查一致性属 P7 接线前的接口收尾。三项均已在 2026-10-04 收口：done 项目检查一致性提交 `9e7a89a`（其后 `2fda0e8` 补用例），完整响应信封（COMP-01）与完整项目列表服务（COMP-03）提交 **`27f8a7a`**——见下方「2026-10-04 复审更新」。统一契约、验收要求及其它阶段归属见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。
 
 ## 2026-10-04 复审更新
 
-历史记录中的 done 项目检查不一致现已修复并提交：COMP-02，提交 **9e7a89a**（其后追加「无法识别的 `project.status` 按列报错」回归用例，提交 **2fda0e8**），门禁 `cargo test --offline` 341 passed / 0 failed，`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`scripts/check-layers.ps1` 全绿。
+历史记录中的 done 项目检查不一致现已修复并提交：COMP-02，提交 **9e7a89a**（**当时门禁 `cargo test --offline` 340 passed / 0 failed**；其后追加「无法识别的 `project.status` 按列报错」回归用例，提交 **2fda0e8**，当时 341 passed），`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`scripts/check-layers.ps1` 全绿。
 
 事实口径（三处都不再冒充“已归档”，但新建/绑定与计时用的不是同一句话）：新建任务归属、重新绑定、start/resume 都只放行 active；新建/绑定走 `DomainError::NotInThisVersion`，渲染成“当前版本还没有「把任务关联到已完成的项目」这项功能。”；计时（start 与 resume 共用 `require_active_project`）渲染成“项目已完成，不能开始或继续计时。”。项目状态判定统一改走 `project_repo::get_project` 的 `ProjectStatus` 领域枚举，裸字符串加 `_` 兜底已删除：无法识别的 `project.status` 取值由 `project_repo` 按列报错，不再被说成“已完成”或“本版本不支持”。
 
@@ -198,4 +199,16 @@ P4 核心验收结论保留；完整响应信封、完整项目列表服务以�
 
 上面那句「无法识别的 `project.status` 取值按列报错」原本没有用例，2026-10-04 已补一条（`src-tauri/tests/projects.rs`，提交 **2fda0e8**）：`an_unknown_project_status_fails_by_column_for_capture_and_start_without_changes`。它用 `PRAGMA ignore_check_constraints` 把 CHECK 挡不住的 `project.status='paused'` 写进库（连接级开关，写完即关回），再验证 `catalog::create_task` 的新建归属与 `Coordinator::start` 计时两处都返回 `STORAGE_ERROR`，`detail()` 同时含列名 `project.status` 与脏值，且两处 `revision`、`project`/`task` 行数字段、`task_change` 计数均不变，启动那次另断三个计时表计数不变。测试总数随之 340 → 341。
 
-错误权威返回顺序注释亦已订正（FOLLOW-02，同一提交 9e7a89a，仅注释、返回顺序未变）。此前“未修”描述保留为当时证据，以本节和兼容待评审清单的最新状态为准。完整响应信封（COMP-01）与完整项目列表服务（COMP-03）仍未实现，不能视为 P7 门禁全部通过。
+错误权威返回顺序注释亦已订正（FOLLOW-02，同一提交 9e7a89a，仅注释、返回顺序未变）。此前“未修”描述保留为当时证据，以本节和兼容待评审清单的最新状态为准。
+
+## 2026-10-04 COMP-01 / COMP-03 收尾（提交 27f8a7a）
+
+**完整响应信封（COMP-01）**：`services/tx.rs` 新增 `Settled { revision, data_epoch }`，`settle` 返回 `WriteOutcome<(T, Settled)>`——`Changed` 分支先 `bump_revision`，再与 `Unchanged` 分支一样用**同一个写事务里的** `require_meta` 读回库身份（不做提交后补读）。11 个写入口（catalog 9 + daily_plan 2）的 Change DTO 全部补上 `data_epoch`。项目/标签/任务标签四个读服务改为收 `expected_data_epoch`，在**同一个读事务**内 `guard_epoch` 并返回 `{items, data_epoch, revision}`（新增 `ProjectList`/`TagList`）；`list_tasks_filtered` 与 `plan_for` 形状不变（样板）。
+
+**完整项目列表服务（COMP-03）**：新增 `catalog::list_projects(db, expected_data_epoch, Option<ProjectStatus>)`——`None` 不限制状态（归档与 done 历史可读）、`Some(s)` 只列该状态；`list_selectable_projects` 复用同一读路径且仍只含 active；仓储 `project_repo::list_projects` 的签名与实现一字未动；原注释里「要完整列表用 `storage::project_repo::list_projects(conn, None)`」的引导已删。既有用例里那处直调仓储的「历史仍读得到」断言改走服务入口。
+
+**用例（新增 9 条，341 → 350）**：三个写结果权威 epoch 用例（`projects.rs`/`tags.rs`/`daily_plan.rs` 各一条，含 `Unchanged` 分支）；四个读信封用例（正常读断言「读完再写仍保持读时版本」，旧 epoch 断言 `DATA_EPOCH_MISMATCH` 且零变化）；`the_full_project_list_covers_every_status_while_the_selection_entry_stays_active_only`；`an_unknown_project_status_fails_by_column_for_binding_without_changes`（`PRAGMA ignore_check_constraints` 写脏值，绑定路径按列报 `STORAGE_ERROR` 且零变化）。`tests/projects.rs` 4 处与 `tests/tags.rs` 2 处调用点随签名更新，断言只加强。
+
+**门禁**（提交 `27f8a7a` 上实跑）：`cargo test --offline` **350 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED。**反向验证**：去掉 `list_projects` 的 `guard_epoch` ⇒ 两条读信封用例红；`Settled::read` 返回常量 epoch ⇒ 写结果用例红（`left: "not-the-epoch"`）。
+
+**仍未完成**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃与首次握手）与 UI 不在本轮范围；`create_task` 的 `Option<&str>` 与 `set_task_project` 的 `ProjectTarget` 两种入参形状仍并存。
