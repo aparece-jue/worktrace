@@ -133,18 +133,33 @@ impl Fixture {
         task_repo::get_task(self.db.connection(), id).unwrap()
     }
 
-    /// 全部任务行（仓储的稳定排序）：行数与字段值一起钉住。
-    fn all_tasks(&self) -> Vec<TaskRow> {
-        task_repo::list_tasks_filtered(
-            self.db.connection(),
-            &TaskFilter::default(),
-            Page {
-                limit: 100,
-                offset: 0,
-            },
-        )
-        .unwrap()
-        .tasks
+    /// 全部任务行的快照，**直连 SQL**（`created_at, id` 顺序）。
+    ///
+    /// 刻意不走 `task_repo::list_tasks_filtered`：那是被测函数，拿它当 oracle 会让
+    /// 「已有记录字段值不变」这条断言在它静默返回空集/错集时退化成恒真
+    /// （评审 fix round 2 第 2 条）。行数另有一条独立断言（`baseline` 的 `task_rows`）。
+    fn task_snapshot(&self) -> Vec<TaskSnapshot> {
+        let mut stmt = self
+            .db
+            .connection()
+            .prepare(
+                "SELECT id, status, title, project_id, row_version, updated_at
+                 FROM task ORDER BY created_at, id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(TaskSnapshot {
+                    id: r.get(0)?,
+                    status: r.get(1)?,
+                    title: r.get(2)?,
+                    project_id: r.get(3)?,
+                    row_version: r.get(4)?,
+                    updated_at: r.get(5)?,
+                })
+            })
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
     }
 
     /// 直接插一个任务。**只用于布置前置状态**。
@@ -259,23 +274,46 @@ fn assert_page(result: &catalog::TaskQueryResult, expected_ids: &[&str], expecte
     );
 }
 
-/// 被拒 / 只读调用的「零变化」基线：`revision` + 全部任务行 + 审计行数一次抓齐。
+/// 任务行的**直连 SQL** 快照（不经被测的筛选查询，见 `task_snapshot`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskSnapshot {
+    id: String,
+    status: String,
+    title: String,
+    project_id: Option<String>,
+    row_version: i64,
+    updated_at: i64,
+}
+
+/// 被拒 / 只读调用的「零变化」基线：`revision` + 任务表行数 + 任务行快照 + 审计行数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Baseline {
     revision: i64,
-    tasks: Vec<TaskRow>,
+    tasks: Vec<TaskSnapshot>,
+    /// 独立的行数断言：即使快照本身出了问题，「行数不变」这条也还站着。
+    task_rows: i64,
     task_changes: i64,
 }
 
 fn baseline(f: &Fixture) -> Baseline {
+    let tasks = f.task_snapshot();
+    let task_rows = f.count("task");
+    // 快照必须真的读到了行：否则「字段值不变」会退化成「空对空」（评审 fix round 2 第 2 条）。
+    assert_eq!(
+        tasks.len() as i64,
+        task_rows,
+        "快照条数必须与 task 表行数一致（快照坏了就当场发现，而不是让断言恒真）"
+    );
+    assert!(task_rows > 0, "基线快照不能是空的");
     Baseline {
         revision: f.revision(),
-        tasks: f.all_tasks(),
+        tasks,
+        task_rows,
         task_changes: f.count("task_change"),
     }
 }
 
-/// ① `revision` 不变 ② 任务行数与字段值逐字不变 ③ 审计无新增。
+/// ① `revision` 不变 ② 任务表行数不变 ③ 任务行字段值逐字不变 ④ 审计无新增。
 fn assert_unchanged(f: &Fixture, before: &Baseline) {
     assert_eq!(
         f.revision(),
@@ -283,9 +321,14 @@ fn assert_unchanged(f: &Fixture, before: &Baseline) {
         "只读 / 被拒的调用不得改动 revision"
     );
     assert_eq!(
-        f.all_tasks(),
+        f.count("task"),
+        before.task_rows,
+        "任务表的行数不得变化（新建被拒时不许留半行）"
+    );
+    assert_eq!(
+        f.task_snapshot(),
         before.tasks,
-        "任务行不得有任何变化（含行数、状态、版本、归属、时间）"
+        "任务行不得有任何变化（含状态、版本、归属、标题、时间）"
     );
     assert_eq!(
         f.count("task_change"),
@@ -370,6 +413,40 @@ fn a_status_set_is_ored_within_itself_and_intersected_with_the_other_conditions(
     )
     .unwrap();
     assert_page(&ready_in_p1, &["t1"], 1);
+}
+
+/// **状态 + 项目 + 情境三条件同时在场**：交集，以及「项目子句 + `EXISTS` 子句」并存时的
+/// 参数绑定顺序（brief 的测试清单点名「项目与情境组合」；顺序错了这条会红）。
+///
+/// 先用 `tag_repo::get_tag` 确认这个标签确实是 `Context` 类——否则请求会在服务层的
+/// 前置校验里被拒，仓储的联合过滤一次都跑不到（评审 fix round 2 第 1 条）。
+#[test]
+fn a_status_set_combines_with_a_project_and_a_context_tag() {
+    let f = bootstrap();
+    let ctx_a = f.tag_id(TagKind::Context, "家里");
+    assert_eq!(
+        tag_repo::get_tag(f.db.connection(), &ctx_a)
+            .unwrap()
+            .expect("夹具里必须有这个标签")
+            .kind,
+        TagKind::Context,
+        "这条用例要的是「能过前置校验」的情境标签"
+    );
+
+    let result = ask(
+        &f,
+        TaskFilter {
+            statuses: vec![TaskStatus::Ready],
+            project: ProjectFilter::Id("p1".into()),
+            context_tag_id: Some(ctx_a),
+        },
+        page(100, 0),
+    )
+    .unwrap();
+
+    // 三个条件各排除掉一个候选：t5 是待办 + 家里但在 p2；t6 是待办但没有项目也没有标签；
+    // t3 挂着「家里」却在等待中。
+    assert_page(&result, &["t1"], 1);
 }
 
 /// 项目过滤是**三值**（裁决 R-T5-a）：不限制 / 无项目 / 指定项目，三者互不混同。
@@ -894,17 +971,34 @@ fn clarifying_a_clarifying_task_moves_it_to_ready() {
 }
 
 /// 其它状态一律拒绝——**包括跃迁表里合法、但不属于这个入口的那些**
-/// （`Doing → Ready`、`Review → Ready` 归 P3 的状态联动，裁决 R-T5-e）。
+/// （`Doing → Ready`、`Review → Ready`、`Blocked/Waiting → Ready` 归 P3 的状态联动，
+/// 裁决 R-T5-e）。
+///
+/// 每个状态配上**它自己的中文名**做 needle：把 `TaskNotClarifiable { status }` 写成
+/// 一个写死的状态名，这里就会红（评审 fix round 2 第 3 条）。
+/// `Review` 与 `Cancelled` 在夹具里没有，**就地布置**（其余用例的期望值不受影响）：
+/// 它们都是「已经走远」的一致状态——没有会话、也没有可理清的余地。
 #[test]
 fn clarifying_is_refused_for_every_other_status() {
     let mut f = bootstrap();
+    f.insert_task("treview", TaskStatus::Review, Some("p1"), 4000);
+    f.insert_task("tcancelled", TaskStatus::Cancelled, None, 4000);
     let before = baseline(&f);
 
-    for id in ["t1", "t7", "t3", "t4", "t5", "t6"] {
+    for (id, status, zh) in [
+        ("t1", TaskStatus::Ready, "待办"),
+        ("t7", TaskStatus::Doing, "进行中"),
+        ("t3", TaskStatus::Waiting, "等待中"),
+        ("t4", TaskStatus::Blocked, "受阻"),
+        ("treview", TaskStatus::Review, "复盘"),
+        ("tcancelled", TaskStatus::Cancelled, "已取消"),
+    ] {
+        assert_eq!(f.task(id).unwrap().status, status, "夹具前置状态");
         let version = f.task(id).unwrap().row_version;
         let err =
             catalog::clarify_ready(&mut f.db, update_env(&f.epoch, version), id, 5000).unwrap_err();
-        assert_domain_error(err, &["理清为待办"]);
+        let needle = format!("处于「{zh}」");
+        assert_domain_error(err, &["理清为待办", needle.as_str()]);
     }
 
     assert_unchanged(&f, &before);
