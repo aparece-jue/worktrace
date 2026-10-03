@@ -1,7 +1,7 @@
 # P1 / P2 验收核对记录
 
 日期：2026-10-03。核对对象：`9db5898` 之后 P1/P2 的全部改动（含用户手改的跨 run 采样隔离，
-以及本次核对中补的重复提交用例）。校验基线：**206 个测试**。
+以及本次核对中补的重复提交用例）。校验基线：**208 个测试**。
 
 **依据**：总纲 §5 第 9 条点名的三份权威清单（02 §8 / 04 §9 / 06 §4），加上 §5 第 1–8 条横切约定
 与两份计划自身的勾选项。
@@ -10,12 +10,12 @@
 
 ## 一、结论
 
-- **核心验收（库与服务层）：可以验收。** 206 个测试（43 单元 + 163 集成）全绿；
+- **核心验收（库与服务层）：可以验收。** 208 个测试（43 单元 + 165 集成）全绿；
   `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`scripts/check-layers.ps1`
   （domain/storage/services）、`git diff --check` 全过；权威清单中属于 P1/P2 的条目**逐条有指名用例**。
 - **平台验收：不在 P1/P2 的完成门槛内，尚未完成。** 分工见第七节。
-- **一处仍需用户裁定**（第四节第 3 条：可预期业务冲突被报成 `STORAGE_ERROR`），
-  一处**仍是缺口**（第四节第 1 条：跨午夜含暂停的端到端）。
+- **第四节的两处已在本次补齐**（用户裁定"都现在补"）：跨午夜含暂停由 **P2 验证事实、P5 验证分桶**
+  两边承接；前台占用冲突改为业务事务内的领域检查、返回 `DOMAIN_ERROR`。详见第四节。
 - **两份计划自身的勾选项**：P1 计划 **24/24 全部勾选**；P2 计划 65 勾选、5 未勾，
   而这 5 条**全部明确归后续计划**——P6 维护态期间禁止采样写入、P7/P8 平台接线与实机验收、
   P3 的同 run 显式接受校正、P3/P7 的旧 running 启动扫描。**没有一条落在 P1/P2 自身范围内**。
@@ -28,7 +28,7 @@
 | 2 | 暂停直接结束 | **已覆盖** | `a_paused_session_can_finish_directly` |
 | 3 | 恢复前台冲突 | **已覆盖**（错误码见四-3） | `a_second_foreground_start_is_refused_by_the_index`、`a_second_concurrent_foreground_start_is_refused_by_the_index`、`finishing_another_paused_session_preserves_active_timer` |
 | 4 | 并发 start | **已覆盖** | 同上两条索引用例 + `a_stale_epoch_request_writes_nothing` + `freezing_with_a_stale_version_is_refused` |
-| 5 | 跨午夜含暂停 | **缺口**（见四-1） | 域层公式：`a_session_crossing_midnight_splits_evenly`、`clipping_follows_the_spec_formula`；**端到端无** |
+| 5 | 跨午夜含暂停 | **已覆盖**（P2 事实 + P5 分桶） | P2：`pausing_across_midnight_keeps_pause_out_of_effort`（23:50 工作到 00:00 → 暂停两小时 → 次日 02:00 再工作 30 分钟 → 结束；暂停不计入、两段各自不跨午夜）；域层公式：`a_session_crossing_midnight_splits_evenly`、`clipping_follows_the_spec_formula`；分桶归 P5（见 P5 计划「跨午夜与日界分桶」） |
 | 6 | 空范围 | 域层已覆盖；查询归 P5 | 零长度区间合法：`zero_length_intervals_are_valid_but_negative_ones_are_not`；裁剪公式同上；空查询范围属统计 → P5 |
 | 7 | 同名根标签 | P1 已建机制，行为归 P4 | `uq_tag_root ON tag(kind,name) WHERE parent_id IS NULL`（`schema_v1.rs:187`）；**无测试踩过** → P4 Task 3 |
 | 8 | 历史工时重叠 | **已覆盖** | `rebased_clock_cannot_start_inside_confirmed_history` + `require_available_human_start`（在 start/resume 事务内） |
@@ -47,25 +47,35 @@
 | 2 | 磁盘不足 | **已覆盖**（SQLite 容量层；OS 层归 P6） | `sqlite_full_start_rolls_back_all_business_facts`、`sqlite_full_heartbeat_keeps_checkpoint_and_retries`、`sqlite_full_recovery_rolls_back_and_isolates_until_retry`（用 `max_page_count` 真实触发 `SQLITE_FULL`，且先断言原生错误码） |
 | 3 | 重复提交 | **已覆盖**（本轮补齐） | `replaying_the_same_start_request_is_refused_without_a_second_session`（重放同一条 `start` ⇒ `VERSION_CONFLICT`、会话数仍为 1、revision 不再增加、第一次的会话原样保留）、`the_post_commit_recovery_path_never_creates_anything`、`a_post_commit_failure_is_recovery_not_retryable`、`one_command_bumps_revision_exactly_once` |
 | 4 | 旧版本修改 | **已覆盖** | 同 02 §8 第 12 条 |
-| 5 | 跨午夜暂停 | **缺口**（见四-1） | 同 02 §8 第 5 条 |
+| 5 | 跨午夜暂停 | **已覆盖**（P2 事实 + P5 分桶） | 同 02 §8 第 5 条；P5 半边已写进 P5 计划 Task 1 |
 | 6 | 统计修正 | 归 P3/P5 | 同 02 §8 第 13 条 |
 
-## 四、核对中发现的三处
+## 四、核对中发现的三处（均已在本次补齐）
 
-1. **跨午夜含暂停仍是缺口（02 §8 与 04 §9 同时列了它）。**
-   域层裁剪公式有用例，但**没有端到端**：真实跑一段跨 00:00 的会话、中间暂停、再按日界求和。
-   要么在 P2 补一条端到端（FakeClock 推到 23:50 → pause → 跨日 resume → 断言两天的归属之和），
-   要么在 P5 的报表用例里点名承接。**现状是两边都没写**——这是本记录里唯一没有任何计划认领的清单条目。
-2. **重复提交（04 §9）：本轮补齐。** 见上表第 3 条。补之前只有"提交后失败不重复创建"这一类用例，
-   没有"重放同一请求"的直接证据。
-3. **待用户裁定：「已在计时时再 start/恢复」的错误码。**
-   `require_available_human_start` 的判据是 `i.ended_at > ?1`，而 running 区间的 `ended_at IS NULL`
-   使该比较为 NULL ⇒ **这条守卫看不见"正在计时"**；冲突最终由 `uq_running_foreground` 兜住，
-   返回 `STORAGE_ERROR`，用户看到「存储暂时不可用，请稍后重试」——一个可预期的**业务冲突被报成
-   基础设施故障**，而且文案引导重试（重试永远不会成功）。
-   状态不变量没破（`a_second_foreground_start_is_refused_by_the_index` 断言会话数仍为 1），
-   但**语义与文案都指错方向**。建议 P7 接线前补一条 domain 级检查（存在 running 前台时拒绝
-   start/resume，返回 `DOMAIN_ERROR` + 可理解文案），并同步改掉那条断言的期望码。
+1. **跨午夜含暂停（02 §8 与 04 §9 同时列了它）——按「P2 验证事实、P5 验证分桶」切开承接。**
+   - **P2（事实）**：`pausing_across_midnight_keeps_pause_out_of_effort`——23:50 工作到 00:00 →
+     暂停两小时跨过午夜 → 次日 02:00 继续 30 分钟 → 结束；断言暂停一毫秒不计入
+     （`active_ms = 40 分钟`）、两段区间各自的起止与 `duration_ms`、两段都可信，
+     且**没有任何一段跨越午夜**（日界恰好落在两段之间）。
+   - **P5（分桶）**：已写进 P5 计划 Task 1「跨午夜与日界分桶」——按查询时区实际日界拆分可信区间，
+     每日之和 == 不分组总和，跨日区间拆成两段且两段之和等于原时长，不同查询时区归属日期不同但总和相同。
+   - 归属因此明确：**事实从 P2 来，P5 不重造**。
+2. **重复提交（04 §9）：本轮补齐。** `replaying_the_same_start_request_is_refused_without_a_second_session`
+   —— 补之前只有"提交后失败不重复创建"这一类间接证据。
+3. **前台占用冲突的错误码：已修（原来是 `STORAGE_ERROR`）。**
+   根因：`require_available_human_start` 的判据 `i.ended_at > ?1` 对 running 区间
+   （`ended_at IS NULL`）为 NULL ⇒ **这条守卫看不见"正在计时"**，冲突一路落到唯一索引上，
+   被报成 `STORAGE_ERROR`（文案「存储暂时不可用，请稍后重试」）——可预期的业务冲突被报成
+   基础设施故障，还引导用户去重试一个永远不会成功的操作。
+   现在：新增 `session_repo::require_no_running_foreground(conn, exclude)`，在 `start`/`resume`
+   的**业务事务内**先判，`resume` 传 `Some(&session_id)` **排除目标自身**；
+   `uq_running_foreground` **保留为兜底**（`transaction_boundary.rs` 里那条绕过服务、
+   直连第二个连接写 `create_session` 的用例继续覆盖它）。
+   回归两条：`a_second_foreground_start_is_refused_as_a_domain_conflict`、
+   `resuming_while_another_foreground_runs_is_a_domain_conflict`，都断言 `DOMAIN_ERROR`、
+   文案含「正在计时」，且会话/区间/行版本/revision 一律不变。
+   **反向验证**：把 `start` 里那行领域检查去掉 ⇒ 测试失败并报
+   `left: "STORAGE_ERROR" / right: "DOMAIN_ERROR"`——正是修复前的行为。
 
 ## 五、06 §4 实现前技术验证
 
@@ -108,11 +118,11 @@ CHECK 边界 —— `the_boundary_at_2000ms_is_exact`；错误码一律断言 `c
 
 ## 八、证据与数字
 
-- **206 个测试** = 43 个库内单元测试（`src/`）+ 163 个集成测试（12 个套件）：
+- **208 个测试** = 43 个库内单元测试（`src/`）+ 165 个集成测试（12 个套件）：
   `domain_invariants` 18、`transaction_boundary` 14、`timer_clock` 12、`timer_anomaly` 11、
-  `timer_commands` 28、`timer_regressions` 40、`timer_seams` 10、`timer_snapshot` 9、
-  `error_contract` 6、`migrations` 6、`db_execution_boundary` 5、其余为库内单元。
-- 最近一次全量运行在本记录对应的合并状态上：`cargo test --offline` 206 passed / 0 failed；
+  `timer_commands` 30、`timer_regressions` 40、`timer_seams` 10、`timer_snapshot` 9、
+  `error_contract` 6、`migrations` 6、`db_execution_boundary` 5。
+- 最近一次全量运行在本记录对应的合并状态上：`cargo test --offline` 208 passed / 0 failed；
   `cargo fmt --check`、`cargo clippy --offline --all-targets -- -D warnings`、
   `scripts/check-layers.ps1`、`git diff --check` 均通过。
 - 本记录**不改变任何产品行为**，只补了一条清单缺口的测试（重复提交）。

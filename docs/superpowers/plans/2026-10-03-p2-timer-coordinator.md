@@ -171,3 +171,24 @@
 - [x] LiveSession 保留持久化 run_id。read_sample 在采样或异常事务之前拒绝旧 run 的 running 会话，不能依赖有无基线或只在闭合原语兜底。
 - [x] 回归覆盖有/无新 run 基线下 snapshot、tick、stats、heartbeat、system_pause、pause、finish 共 14 组路径；不增加 revision、不分割/闭合旧区间、不写恢复审计。
 - [ ] 旧 running 会话须先由 P3/P7 启动扫描恢复；paused 的 run_id 归一仍按既有 P3 规则，不改变为自动继续。
+
+
+## 验收核对补全：前台占用错误码与跨午夜事实
+
+- [x] **前台占用是可预期的领域冲突，不再报成存储故障**：新增
+  `session_repo::require_no_running_foreground(conn, exclude)`，在 `start`/`resume` 的**业务事务内**
+  先判；`resume` 传 `Some(&session_id)` **排除目标自身**。`uq_running_foreground` 保留为**兜底**
+  （`transaction_boundary.rs` 那条绕过服务、直连第二个连接写 `create_session` 的用例继续覆盖它）。
+  修复前：已在计时时再 `start` 一路落到唯一索引 ⇒ `STORAGE_ERROR`（文案「存储暂时不可用，
+  请稍后重试」），把业务规则报成基础设施故障还引导重试——根因是
+  `require_available_human_start` 的 `i.ended_at > ?1` 对 running 区间（`ended_at IS NULL`）不可见。
+  回归：`a_second_foreground_start_is_refused_as_a_domain_conflict`、
+  `resuming_while_another_foreground_runs_is_a_domain_conflict`——都断言 `DOMAIN_ERROR`，且
+  会话/区间/行版本/revision 一律不变。
+- [x] **跨午夜含暂停（02 §8 的 P2 半边：验证事实）**：`pausing_across_midnight_keeps_pause_out_of_effort`
+  —— 23:50 工作到 00:00 → 暂停两小时 → 次日 02:00 继续 30 分钟 → 结束；断言暂停一毫秒不计入
+  （`active_ms = 40 分钟`）、两段区间各自的起止与 `duration_ms`、两段都不 `needs_review`，
+  且**没有任何一段跨越午夜**。按查询时区**分桶到每一天**由 P5 承接（见 P5 计划
+  「跨午夜与日界分桶」）。
+- 注意（写测试时踩过）：`advance` 一次跳好几分钟会被判成**「疑似挂起」**（`expected_interval_ms = 30s`），
+  与真实采样节奏不符。用例里按 30 秒切片推进（`advance_in_ticks`）。

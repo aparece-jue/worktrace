@@ -22,7 +22,7 @@
 
 ## 自动验证
 
-- 全库 cargo test --offline -q：206 个测试通过，包括原有 P1/P2 套件与累计 41 个行为回归。
+- 全库 cargo test --offline -q：208 个测试通过，包括原有 P1/P2 套件与累计 43 个行为回归。
   （验收核对的逐条结论见同目录 `p1-p2-acceptance.md`。）
 - cargo fmt --check：通过。
 - cargo clippy --offline --all-targets -- -D warnings：通过。
@@ -163,7 +163,12 @@ LiveSession 增加持久化 run_id，统一 read_sample 在采样/异常事务�
 - 核对中补齐了 04 §9「重复提交」的缺口：`replaying_the_same_start_request_is_refused_without_a_second_session`
   （重放同一条 `start` ⇒ `VERSION_CONFLICT`、会话数为 1、revision 不再增加、第一次的会话原样保留）。
   回归因此为 41 个，全库为 **206** 个。
-- **仍缺一条**：跨午夜含暂停目前只有域层裁剪公式用例，没有端到端；02 §8 与 04 §9 都列了它，但没有任何计划认领。
-- **待用户裁定**：已在计时时再 `start`/恢复会由唯一索引兜住并报成 `STORAGE_ERROR`
-  （文案「存储暂时不可用，请稍后重试」），把可预期的业务冲突报成了基础设施故障——`require_available_human_start`
-  的判据 `i.ended_at > ?1` 对 running 区间（`ended_at IS NULL`）不可见。建议 P7 接线前补 domain 级检查。
+- **两条已于同日补齐**（用户裁定"都现在补"）：
+  ① 跨午夜含暂停按「**P2 验证事实、P5 验证分桶**」切开——P2 新增
+  `pausing_across_midnight_keeps_pause_out_of_effort`（23:50→00:00 工作、暂停两小时、
+  次日 02:00 再工作 30 分钟、结束；暂停不计入、两段各自不跨午夜），P5 计划 Task 1 新增
+  「跨午夜与日界分桶」承接分桶；
+  ② 前台占用冲突改为业务事务内的领域检查（`require_no_running_foreground`，`resume` 排除目标自身），
+  返回 `DOMAIN_ERROR` 而不是落到唯一索引报 `STORAGE_ERROR`；唯一索引保留为兜底。
+  反向验证：去掉 `start` 里那行检查 ⇒ 回归失败并报 `left: "STORAGE_ERROR" / right: "DOMAIN_ERROR"`。
+  回归因此为 43 个，全库为 **208** 个。
