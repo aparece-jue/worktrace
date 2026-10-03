@@ -27,6 +27,8 @@
 
 基线缺失时，无论是否已经装载暂停会话，start/resume 都必须先用当前采样初始化基线；“本 run 尚无会话”重定规则不能替代这一缺失检查。无基线的统计/快照归属终点使用同次采样墙钟，不能用进程单调读数代替时间戳。可信平台 boundary 先检查时间范围，再用当前观察之前的检测器副本复用短期、长期判据；副本不推进真实 last。平台可信边界可解释长间隔，但不能豁免时钟异常，不能把相对 A(M) 的累计偏差与短时间容差混用。
 
+跨 run 的 running 会话必须先由启动扫描恢复，不论当前协调器是否已有基线。协调器内存镜像保留会话 run_id，所有采样入口在采样与异常事务之前拒绝旧 running 行，返回 RECOVERY_REQUIRED；包括查询/统计/心跳/平台事件，不能先计算停机暂计再等待闭合守卫。paused 的启动归一和继续沿用 02 §4/§3。
+
 ## 2. 番茄钟阶段（V0.2）
 
 timer_kind=pomodoro 额外增加阶段状态：session 上是 phase(work/break)、phase_state(running/frozen)、cycle_index；work_budget_ms/break_budget_ms 在轮次表 pomodoro_cycle 上按轮取值，不在 session 上；进度存于 phase_checkpoint（休息）或由该轮区间派生（工作）。字段矩阵与状态版本见 §8。工作阶段沿用 running/paused 工作区间；休息阶段 session 保持 paused，无开放 work_interval，只运行独立阶段计时。休息不占前台槽位、不进入人工工时。

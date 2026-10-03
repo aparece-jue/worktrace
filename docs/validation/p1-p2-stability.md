@@ -22,7 +22,8 @@
 
 ## 自动验证
 
-- 全库 cargo test --offline -q：204 个测试通过，包括原有 P1/P2 套件与累计 39 个行为回归。
+- 全库 cargo test --offline -q：206 个测试通过，包括原有 P1/P2 套件与累计 41 个行为回归。
+  （验收核对的逐条结论见同目录 `p1-p2-acceptance.md`。）
 - cargo fmt --check：通过。
 - cargo clippy --offline --all-targets -- -D warnings：通过。
 - scripts/check-layers.ps1：通过。
@@ -139,3 +140,30 @@ finish: 命令成功  started=…000000 ended=…660000 duration=3660000 needs_r
 （三时区解析、`TimeZone::system()` 可读、`Mars/Olympus` 被拒、`2023-02-29` 被拒）；另记离线约束（门禁一律 `--offline`，未缓存 crate 需先经确认）与两个零调用 `pub fn` 的归属。
 
 本轮新增 1 个测试，回归共 39 个，全库共 **204** 个；`cargo fmt --check`、严格 Clippy、分层检查、`git diff --check` 均通过。正式平台验收、跨机器容差校准仍待完成。
+
+
+## 本轮审查并实施：跨 run 采样隔离
+
+审查基线为 9db5898，工作区初始干净；之前无基线统计、SQLITE_FULL、错误响应及跨 run 闭合守卫均保留。发现跨 run 隔离仍仅依赖无基线统计判据与闭合/检查点守卫：新 run 有基线后查询/统计可能先累计旧 running 区间，异常查询也可能先分割旧事实。
+
+LiveSession 增加持久化 run_id，统一 read_sample 在采样/异常事务之前拒绝旧 running 会话。新增一个参数化行为回归覆盖有/无新基线的七个入口共十四组路径，断言没有闭合、分割、审计或 revision 变化。原无基线旧 running 快照回归从“返回零暂计”收紧为 RECOVERY_REQUIRED；idle/paused 的展示时间回退规则不变。
+
+回归套件共 40 个，全库共 205 个。本轮尚未提交，未推进 P4。仓库外同步守卫已有上轮验收记录，但本轮工具可见路径未定位到脚本，不能独立重复其反向验证，不撤销历史记录或另建重复脚本。正式平台验收与跨机器容差校准仍待完成。
+
+本轮验证：205 个测试、严格 Clippy、格式检查、分层检查、Git diff 空白检查及改动文档本地链接/围栏检查全部通过。
+
+
+## 验收核对（2026-10-03）
+
+在 `9db5898` 之后做了一次按权威清单的逐条核对，结论落在 **`p1-p2-acceptance.md`**：
+02 §8 的 14 条、04 §9 的 6 条、06 §4 的前两项技术验证，以及 §5 第 1–8 条横切约定，
+逐条映射到可指名的测试或明确归属的后续计划。要点：
+
+- **P1 计划 24/24 全勾；P2 计划 65 勾、5 未勾，且 5 条全部明确归 P3/P6/P7/P8**，没有一条落在 P1/P2 自身范围内。
+- 核对中补齐了 04 §9「重复提交」的缺口：`replaying_the_same_start_request_is_refused_without_a_second_session`
+  （重放同一条 `start` ⇒ `VERSION_CONFLICT`、会话数为 1、revision 不再增加、第一次的会话原样保留）。
+  回归因此为 41 个，全库为 **206** 个。
+- **仍缺一条**：跨午夜含暂停目前只有域层裁剪公式用例，没有端到端；02 §8 与 04 §9 都列了它，但没有任何计划认领。
+- **待用户裁定**：已在计时时再 `start`/恢复会由唯一索引兜住并报成 `STORAGE_ERROR`
+  （文案「存储暂时不可用，请稍后重试」），把可预期的业务冲突报成了基础设施故障——`require_available_human_start`
+  的判据 `i.ended_at > ?1` 对 running 区间（`ended_at IS NULL`）不可见。建议 P7 接线前补 domain 级检查。

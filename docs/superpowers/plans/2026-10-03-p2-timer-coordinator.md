@@ -164,3 +164,10 @@
 - [x] ErrorResponse 与服务层只读版本捕获已提供，覆盖恢复事务提交后的权威版本、元数据不可读、epoch 握手及脱敏。
 - [x] P7 将所有失败响应接入 capture_error_response，捕获位于原事务结束后及同一串行边界；不得以 timer.snapshot 补版本。
 - [x] **跨 run 的开放区间不得以「可信」方式闭合**：`EndSessionFacts` 增加 `run_id`，`end_session_in_tx` 在版本校验**之前**用 `StaleRunContext` 校验（映射 `RECOVERY_REQUIRED`），与 `checkpoint_repo::write` 同一判据——写检查点早就拒绝跨 run 写入，闭合区间这条更重的路径不能反而放行。修复前实测：真实工作 60 秒 + 停机一小时 ⇒ `duration_ms = 3_660_000` 且 `needs_review = false`。回归 `cross_run_open_interval_cannot_be_closed_as_trusted_effort` 覆盖 `pause` 与 `finish` 两条路径。
+
+
+## 跨 run 采样入口隔离补全
+
+- [x] LiveSession 保留持久化 run_id。read_sample 在采样或异常事务之前拒绝旧 run 的 running 会话，不能依赖有无基线或只在闭合原语兜底。
+- [x] 回归覆盖有/无新 run 基线下 snapshot、tick、stats、heartbeat、system_pause、pause、finish 共 14 组路径；不增加 revision、不分割/闭合旧区间、不写恢复审计。
+- [ ] 旧 running 会话须先由 P3/P7 启动扫描恢复；paused 的 run_id 归一仍按既有 P3 规则，不改变为自动继续。
