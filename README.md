@@ -16,7 +16,7 @@ pnpm tauri dev
 - `cargo check --manifest-path src-tauri/Cargo.toml`：检查 Rust。
 
 ## 架构
-参考同级 test-tauri-project，使用 Tauri 2、React 19、TypeScript、Vite 和 pnpm，保留 Ant Design、MUI、Dockview 依赖。
+使用 Tauri 2、React 19、TypeScript、Vite 和 pnpm，保留 Ant Design、MUI、Dockview 依赖。
 
 - `src/App.tsx`：初始页面与 Rust 通信示例。
 - `src/components/`：共享组件目录。
