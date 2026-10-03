@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1000 930" role="img" aria-labelledby="epoch-title epoch-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="epoch-title">Worktrace 数据库恢复与 data_epoch 切换流程</title>
-  <desc id="epoch-desc">自上而下：恢复或替换数据库后先进入维护态，取消旧队列、查询与 AI 请求，新写入返回 DATA_RESTORE_IN_PROGRESS；随后验证临时候选库的完整性、外键与 schema。候选库不可用则还原原库与原 epoch 并强制重新握手；可用则生成全新 data_epoch，绝不沿用备份内的 epoch，此时恢复后的 revision 可以更低、只在新代次内比较。再经可回滚切换并重开，新 epoch 的权威快照使全部业务与计时缓存失效，旧 epoch 的响应、通知与未应用建议一律丢弃，最后依恢复章节扫描并创建当前运行记录，不沿用备份里的运行内存。代次切换是唯一的强调项。</desc>
+  <desc id="epoch-desc">自上而下：恢复或替换数据库前先进入维护态，取消旧队列、查询与 AI 请求，新写入返回 DATA_RESTORE_IN_PROGRESS；随后验证临时候选库的完整性、外键与 schema。候选库不可用则还原原库与原 epoch 并强制重新握手；可用则生成全新 data_epoch，绝不沿用备份内的 epoch，此时恢复后的 revision 可以更低、只在新代次内比较。再经可回滚切换并重开，新 epoch 的权威快照使全部业务与计时缓存失效，旧 epoch 的响应、通知与未应用建议一律丢弃，最后依恢复章节扫描并创建当前运行记录，不沿用备份里的运行内存。代次切换是唯一的强调项。</desc>
 
   <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
     <marker id="ep-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">

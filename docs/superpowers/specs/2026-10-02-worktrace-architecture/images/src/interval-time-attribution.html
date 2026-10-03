@@ -25,7 +25,7 @@
   <h1>区间时长与时间归属</h1>
   <p class="sub">三种时间各管一件事：墙钟负责归属，单调负责时长，两者之差负责发现「这段时间不可信」。</p>
 
-<svg viewBox="0 0 1000 790" role="img" aria-labelledby="ita-title ita-desc" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 1000 810" role="img" aria-labelledby="ita-title ita-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="ita-title">Worktrace 工作区间的三种时间与异常分割</title>
   <desc id="ita-desc">上半是正常关闭：开始采样墙钟 W0 与单调 M0，期间约每 30 秒同事务写一个检查点，关闭时用单调差得 duration_ms，统计的 ended_at 等于 started_at 加 duration_ms，可信闭合区间满足 duration_ms 等于 ended_at 减 started_at；原始墙钟关闭值只作诊断，不拿来直接减开始时间。下半是异常：每次采样比较相邻增量差与墙钟相对可信归属基线的累计偏差，差值绝对值超过 2000 毫秒、倒退、休眠或时钟变更、采样失效都走异常路径。异常时只保留到最后一个可信检查点的闭合前缀并照常计入，其后余段标 needs_review 且不计入，记录原始墙钟与候选单调增量，不按错误墙钟补时间；没有可信检查点则整个当前区间待确认。底部两块说明三种时间的分工与检查点持久化的字段。</desc><defs></defs>
 
@@ -97,17 +97,18 @@
         text-anchor="middle">没有可信检查点 → 整个当前区间待确认；已知且可信的锁屏 / 休眠边界走 pause，通知晚到或边界不可信才走 recovering</text>
 
   <!-- ================= 两块说明 ================= -->
-  <rect x="40" y="544" width="450" height="150" rx="6" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.12)" stroke-width="1"/>
+  <rect x="40" y="544" width="450" height="174" rx="6" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.12)" stroke-width="1"/>
   <text x="60" y="568" fill="#2A2320" font-size="10.5" font-weight="600" font-family="'Geist',sans-serif">三种时间，别混用</text>
   <g font-family="'Geist Mono',monospace" font-size="8.5" fill="#6F6357">
-    <text x="60" y="592">wall_at　　实际墙钟采样，只用于归属与诊断</text>
+    <text x="60" y="592">wall_at　　只用来建基线与诊断，不直接定归属</text>
     <text x="60" y="612">elapsed　　当前 run 的单调增量，跨重启不复用</text>
-    <text x="60" y="632">started_at / ended_at　　统计归属区间</text>
-    <text x="60" y="652">duration_ms　　同一事实的校验值，不能独立编辑</text>
+    <text x="60" y="632">归属基线　A(M) = anchor_wall_at + (M − anchor_monotonic)</text>
+    <text x="60" y="652">started_at / ended_at　　统计归属区间，由基线推出</text>
+    <text x="60" y="672">duration_ms　　同一事实的校验值，不能独立编辑</text>
   </g>
-  <text x="60" y="676" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">运行暂计由同一协调器采样单调增量，M06 用该次快照的归属终点，不另取 Date.now()</text>
+  <text x="60" y="698" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">阈值内小幅校时不改基线、不重写历史；M06 用同一快照的归属终点，不另取 Date.now()</text>
 
-  <rect x="510" y="544" width="450" height="150" rx="6" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.12)" stroke-width="1"/>
+  <rect x="510" y="544" width="450" height="174" rx="6" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.12)" stroke-width="1"/>
   <text x="530" y="568" fill="#2A2320" font-size="10.5" font-weight="600" font-family="'Geist',sans-serif">检查点 interval_checkpoint（约每 30 秒，同事务）</text>
   <g font-family="'Geist Mono',monospace" font-size="8.5" fill="#6F6357">
     <text x="530" y="592">interval_id · run_id</text>
@@ -115,28 +116,28 @@
     <text x="530" y="632">elapsed_ms（单调增量）</text>
     <text x="530" y="652">单调 Instant 本身不持久化</text>
   </g>
-  <text x="530" y="676" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">写检查点不增加业务 revision，改变区间或状态才增加；写失败不能把内存值当可恢复事实</text>
+  <text x="530" y="698" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">写检查点不增加业务 revision，改变区间或状态才增加；写失败不能把内存值当可恢复事实</text>
 
   <!-- ===== 注记 ===== -->
-  <text x="40" y="722" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    手工修正以用户确认的起止重新计算 duration_ms 并保留前后值审计；已知单调时长只作候选，不强迫用户接受。</text>
   <text x="40" y="742" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
+    手工修正以用户确认的起止重新计算 duration_ms 并保留前后值审计；已知单调时长只作候选，不强迫用户接受。</text>
+  <text x="40" y="762" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     2000ms 阈值是初始策略，平台实验后可版本化调整，不是精度承诺；跨日按查询时区实际日界裁剪，不假设每天都 24 小时。</text>
 
   <!-- ===== 图例（底部横条） ===== -->
-  <line x1="30" y1="756" x2="970" y2="756" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
-  <text x="30" y="776" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
+  <line x1="30" y1="776" x2="970" y2="776" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
+  <text x="30" y="796" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
         letter-spacing="0.14em">LEGEND</text>
-  <line x1="120" y1="772" x2="156" y2="772" stroke="#4E8C85" stroke-width="3"/>
-  <text x="166" y="776" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">可信前缀（计入）</text>
-  <line x1="300" y1="772" x2="336" y2="772" stroke="#D9603A" stroke-width="2" stroke-dasharray="6,4"/>
-  <text x="346" y="776" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">待确认余段（不计入）</text>
-  <circle cx="520" cy="772" r="5.5" fill="#D9603A"/>
-  <text x="534" y="776" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">最后可信检查点</text>
-  <circle cx="680" cy="772" r="3.5" fill="#6F6357"/>
-  <text x="694" y="776" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">常规检查点</text>
-  <rect x="800" y="767" width="16" height="10" rx="2" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.12)" stroke-width="1"/>
-  <text x="822" y="776" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">说明，不是流程节点</text>
+  <line x1="120" y1="792" x2="156" y2="792" stroke="#4E8C85" stroke-width="3"/>
+  <text x="166" y="796" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">可信前缀（计入）</text>
+  <line x1="300" y1="792" x2="336" y2="792" stroke="#D9603A" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="346" y="796" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">待确认余段（不计入）</text>
+  <circle cx="520" cy="792" r="5.5" fill="#D9603A"/>
+  <text x="534" y="796" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">最后可信检查点</text>
+  <circle cx="680" cy="792" r="3.5" fill="#6F6357"/>
+  <text x="694" y="796" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">常规检查点</text>
+  <rect x="800" y="787" width="16" height="10" rx="2" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.12)" stroke-width="1"/>
+  <text x="822" y="796" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">说明，不是流程节点</text>
 </svg>
 </figure>
 </body>

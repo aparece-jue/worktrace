@@ -41,7 +41,7 @@ Boundary details: start/resume atomically writes an initial elapsed_ms=0 checkpo
 
 ## 7. Continuous attribution anchor and phase commands (revision)
 
-Keep in-memory anchor_wall_at/anchor_monotonic for a continuous trusted run segment. Accounting endpoint A(M)=anchor_wall_at+(M-anchor_monotonic), including normal gaps/pauses between intervals; effort only counts open work intervals. Starts/resumes use the same sampled A, not fresh wall time; ends use start+interval monotonic work duration. Sub-threshold wall adjustments never reset the anchor/rewrite history, so a 500ms skew cannot overlap consecutive intervals.
+Keep in-memory anchor_wall_at/anchor_monotonic for a continuous trusted run segment. Attribution endpoint A(M)=anchor_wall_at+(M-anchor_monotonic), including normal gaps/pauses between intervals; effort only counts open work intervals. Starts/resumes use the same sampled A, not fresh wall time; ends use start+interval monotonic work duration. Sub-threshold wall adjustments never reset the anchor/rewrite history, so a 500ms skew cannot overlap consecutive intervals.
 
 Each sample checks abs(sampled_wall_at-A) and adjacent delta differences; either over 2000ms or a trusted system event triggers pause/recovery evaluation. Checkpoints never reset the anchor, preventing undetected cumulative drift. Sampling/detection/prefix confirmation/checkpoint writing is serialized; uncertain samples cannot be persisted as trusted first. New runs, wake and explicit reconciliation re-anchor without reusing Instant and validate attribution against history. Pending intervals are candidate ranges rather than confirmed overlap facts; later confirmation must validate against new work.
 
