@@ -291,7 +291,10 @@ fn system_events_go_through_the_same_detection_path() {
     );
 }
 
-/// 显式重建基线后，归属改用新参照且累计偏差从零起算。
+/// 重建归属基线后，归属改用新参照；**长期参照要显式接受校正才动**。
+///
+/// 这里的跳变是整整一小时——那是时钟校正，不是漂移。所以正确的顺序是
+/// 「重建归属 + **显式接受校正**」，只重建不承认的话长期界会继续盯着它。
 #[test]
 fn reestablishing_the_anchor_resets_attribution_and_drift() {
     let mut h = setup();
@@ -300,12 +303,24 @@ fn reestablishing_the_anchor_resets_attribution_and_drift() {
 
     // 系统时间被校正到真实时刻
     h.advance_wall_only(3_600_000);
+
+    // 只重建归属：长期界仍然看得见这一小时的跳变
     h.coord.reestablish_anchor(h.sample());
+    let _ = h.snapshot();
+    assert!(
+        h.coord.last_verdict().needs_recovery(),
+        "归属重建不等于承认这次跳变是校正：{:?}",
+        h.coord.last_verdict()
+    );
+
+    // 显式接受校正之后才恢复正常
+    h.coord.reestablish_anchor(h.sample());
+    h.coord.accept_clock_correction(h.sample());
     let _ = h.snapshot();
     assert_eq!(
         h.coord.last_verdict(),
         SampleVerdict::Trusted,
-        "重建后不该立刻判异常"
+        "接受校正后不该再判异常"
     );
 
     h.advance_both(1_000);

@@ -130,8 +130,17 @@ impl SampleVerdict {
 ///   两三小时后健康会话就会越界——那检测的不是异常，是时间流逝本身。
 #[derive(Debug, Clone, Copy)]
 pub struct AnchorState {
+    /// **归属基线**：算 `A(M)` 用。只在已提交的变更之后重建。
     anchor: Anchor,
+    /// **短期检测参照**：每次成功心跳前移。心跳本来每 30 秒一次，是天然的重新基准点。
     drift_ref: Anchor,
+    /// **进程生命期参照**：只有「已确认的时钟校正」才移动它。
+    ///
+    /// 为什么必须与上面两个分开：它守的是**机器走时特性**（NTP 校准速率、RTC 偏差、
+    /// 虚拟机 TSC），那是进程级的事实，与某一次会话、某一次暂停无关。若跟着
+    /// `reestablish` 一起重置，那么**每次休眠唤醒、每次暂停都会把长期偏差一笔勾销**
+    /// ——一台一天暂停几次的机器，长期界就永远不会触发，等于没有。
+    lifetime_ref: Anchor,
     last: Option<ClockSample>,
     expected_interval_ms: i64,
 }
@@ -143,6 +152,7 @@ impl AnchorState {
         Self {
             anchor: a,
             drift_ref: a,
+            lifetime_ref: a,
             last: Some(sample),
             expected_interval_ms,
         }
@@ -200,8 +210,8 @@ impl AnchorState {
             };
         }
         // 长期边界不随心跳清零。500 ppm 是初始自然漂移容差，并非精度保证。
-        let elapsed = (sample.monotonic_ms - self.anchor.monotonic_at).max(0);
-        let lifetime_gap = sample.wall_ms - self.anchor.attribute(sample.monotonic_ms);
+        let elapsed = (sample.monotonic_ms - self.lifetime_ref.monotonic_at).max(0);
+        let lifetime_gap = sample.wall_ms - self.lifetime_ref.attribute(sample.monotonic_ms);
         if lifetime_gap.abs()
             > threshold().saturating_add(elapsed.saturating_mul(NATURAL_DRIFT_PPM) / 1_000_000)
         {
@@ -214,6 +224,20 @@ impl AnchorState {
             return SampleVerdict::Suspended { gap_ms: d_mono };
         }
         SampleVerdict::Trusted
+    }
+
+    /// 接受一次**已确认的**时钟校正：把长期参照移到当前样本。
+    ///
+    /// 只在「偏差已经被检测到、记录在案、并已提交恢复事务」之后调用。
+    /// 不在检测时自动调用——那等于让故障自己把证据擦掉；
+    /// 也不在任何系统事件里调用——唤醒不是校正。
+    pub fn accept_clock_correction(&mut self, sample: ClockSample) {
+        self.lifetime_ref = Anchor::establish(sample);
+    }
+
+    /// 长期参照（诊断与测试用）。
+    pub fn lifetime_ref(&self) -> Anchor {
+        self.lifetime_ref
     }
 
     /// 一次**成功**心跳后调用：只前移累计偏差的参照点。
@@ -232,6 +256,8 @@ impl AnchorState {
         let a = Anchor::establish(sample);
         self.anchor = a;
         self.drift_ref = a;
+        // **不动 `lifetime_ref`**：见字段文档。重建归属基线是会话级的事，
+        // 而长期偏差守的是机器级的事，两者不该互相抵消。
         self.last = Some(sample);
     }
 }
@@ -379,14 +405,53 @@ mod detector_tests {
         );
     }
 
-    /// 重建基线后，`A(M)` 改用新参照，累计偏差也从零起算。
+    /// **重建归属基线不得移动长期参照。**
+    ///
+    /// 长期参照守的是机器走时特性（NTP 速率、RTC 偏差、虚拟机 TSC），那是进程级事实，
+    /// 与某一次会话、某一次暂停无关。若跟着 `reestablish` 一起重置，每次休眠唤醒、
+    /// 每次暂停都会把长期偏差一笔勾销——一天暂停几次的机器，长期界等于没有。
     #[test]
-    fn reestablishing_moves_both_reference_points() {
+    fn reestablishing_must_not_move_the_lifetime_reference() {
+        let mut st = AnchorState::establish(s(1_700_000_000_000, 0), 1_000);
+        let lifetime_before = st.lifetime_ref();
+        assert_eq!(lifetime_before.monotonic_at, 0);
+
+        // 走了 30 秒、积累了一点偏差，然后重建归属基线（比如一次可信的系统暂停）
+        st.observe(s(1_700_000_030_100, 30_000));
+        st.reestablish(s(1_700_000_030_100, 30_000));
+
+        assert_eq!(
+            st.lifetime_ref(),
+            lifetime_before,
+            "长期参照必须留在原处——它记的是机器的事，不是这次会话的事"
+        );
+        assert_eq!(st.attribute(30_000), 1_700_000_030_100, "归属改用新基线");
+
+        // 只有显式接受校正才移动它
+        st.accept_clock_correction(s(1_700_000_030_100, 30_000));
+        assert_eq!(st.lifetime_ref().monotonic_at, 30_000, "显式接受后才移动");
+    }
+
+    /// 重建基线后 `A(M)` 与短期参照改用新值，但**长期参照要显式接受校正才动**。
+    ///
+    /// 这条测试里那次跳变是 **1,000,000ms**——那正是长期界该抓的东西。
+    /// 「重建归属基线」是会话级动作，它**不能**顺手把机器级的长期偏差也勾销。
+    #[test]
+    fn reestablishing_moves_attribution_but_leaves_the_lifetime_reference_alone() {
         let mut st = AnchorState::establish(s(0, 0), 1_000);
         st.observe(s(60_000, 60_000));
         st.reestablish(s(1_000_000, 60_000)); // 挂钟被校正到真实时间
 
         assert_eq!(st.attribute(60_000), 1_000_000, "归属改用新基线");
-        assert_eq!(st.observe(s(1_001_000, 61_000)), SampleVerdict::Trusted);
+
+        // 只重建、没接受校正：长期界仍然盯着那 100 万毫秒
+        assert!(
+            st.observe(s(1_001_000, 61_000)).needs_recovery(),
+            "归属重建不等于承认这次跳变是校正"
+        );
+
+        // 显式接受之后才恢复正常
+        st.accept_clock_correction(s(1_001_000, 61_000));
+        assert_eq!(st.observe(s(1_002_000, 62_000)), SampleVerdict::Trusted);
     }
 }

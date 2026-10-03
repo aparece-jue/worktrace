@@ -474,3 +474,64 @@ fn v01_rejects_nonforeground_modes() {
             .unwrap();
     assert_eq!(n, 0);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 长期漂移界不得被无关的系统事件勾销
+// ─────────────────────────────────────────────────────────────────────────────
+
+use worktrace_lib::platform::clock::Clock;
+use worktrace_lib::services::timer::anchor::SampleVerdict;
+
+/// **系统事件不是时钟校正**：唤醒后长期界必须还在。
+///
+/// 改之前 `system_pause` 在「当前没有 running 会话」的分支里也调了
+/// `reestablish_anchor`，而它会把归属基线、短期参照、长期参照一起重置。
+/// 于是一台空闲时反复收到休眠/唤醒事件的机器，**每次事件都把长期偏差一笔勾销**，
+/// 长期界永远不会触发，等于没有。
+///
+/// 构造上要让**只有长期界可能触发**：
+/// - 每拍墙钟比单调钟多走 100ms，单拍增量差 100ms < 2000ms；
+/// - 每拍都调 `reanchor_drift_on_heartbeat`，短期累计偏差始终为 100ms；
+/// - 于是唯一判据就是「相对长期参照的偏差 vs 2000ms + elapsed×500ppm」。
+#[test]
+fn system_events_do_not_forgive_the_lifetime_drift_bound() {
+    let mut h = setup();
+    h.coord
+        .establish_anchor(h.clock.lock().unwrap().sample().unwrap());
+
+    // 15 拍：偏差 1500ms，长期界 2000 + 15000×500/1e6 = 2007ms → 尚未越界
+    for _ in 0..15 {
+        h.advance_mono_only(1_000);
+        h.advance_wall_only(1_100);
+        let s = h.clock.lock().unwrap().sample().unwrap();
+        let _ = h.coord.snapshot(&mut h.db).unwrap();
+        h.coord.reanchor_drift_on_heartbeat(s);
+    }
+    assert!(
+        !h.coord.last_verdict().needs_recovery(),
+        "15 拍时偏差 1500ms 还在界内：{:?}",
+        h.coord.last_verdict()
+    );
+
+    // 一次「没有会话在跑」的系统事件（比如空闲时系统自己睡了一下）
+    h.coord.system_pause(&mut h.db, None).unwrap();
+
+    // 再走 15 拍：累计偏差 3000ms，长期界 2000 + 30000×500/1e6 = 2015ms → 越界
+    for _ in 0..15 {
+        h.advance_mono_only(1_000);
+        h.advance_wall_only(1_100);
+        let s = h.clock.lock().unwrap().sample().unwrap();
+        let _ = h.coord.snapshot(&mut h.db).unwrap();
+        h.coord.reanchor_drift_on_heartbeat(s);
+    }
+
+    match h.coord.last_verdict() {
+        SampleVerdict::Drifted { cumulative_gap_ms } => {
+            assert_eq!(
+                cumulative_gap_ms, 3_000,
+                "偏差要从**进程开始**算，不能被中间那次系统事件勾销"
+            );
+        }
+        other => panic!("系统事件不该勾销长期界，实际判定 {other:?}"),
+    }
+}

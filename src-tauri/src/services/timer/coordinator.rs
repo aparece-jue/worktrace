@@ -165,6 +165,13 @@ impl Coordinator {
     ///
     /// **调用方必须先关闭/隔离旧的开放事实**：重建会让 `A(M)` 跳变，旧区间若还开着，
     /// 它的起点就与新归属对不上了。
+    /// 接受一次**已确认的**时钟校正。见 [`AnchorState::accept_clock_correction`]。
+    pub fn accept_clock_correction(&mut self, sample: ClockSample) {
+        if let Some(st) = self.anchor_state.as_mut() {
+            st.accept_clock_correction(sample);
+        }
+    }
+
     pub fn reestablish_anchor(&mut self, sample: ClockSample) {
         match self.anchor_state.as_mut() {
             Some(st) => st.reestablish(sample),
@@ -1013,6 +1020,10 @@ impl Coordinator {
         // 任何未闭合区间与归属对不上。
         if verdict != SampleVerdict::Unavailable {
             self.reestablish_anchor(sample);
+            // 偏差已经检测到、写进审计、恢复事务也提交了，此处才接受校正。
+            // 不在这里接受的话，同一份偏差会让此后每一拍都判成异常——
+            // 恢复之后就再也开不了新会话。
+            self.accept_clock_correction(sample);
         }
         self.build(db.connection(), sample, false)
     }
@@ -1063,7 +1074,12 @@ impl Coordinator {
             .clone()
             .filter(|l| l.state == SessionState::Running)
         else {
-            self.reestablish_anchor(sample);
+            // 没有正在运行的会话：**什么都不重建**。
+            // 这里原先调了 `reestablish_anchor`，于是每次系统事件都把归属基线、
+            // 短期参照和长期参照一并重置——一台空闲时反复收到休眠/唤醒事件的机器
+            // 会一直把长期偏差勾销，长期界永远不会触发。而且此处本来就没有开放区间，
+            // 重建归属基线也没有任何东西依赖它。（`read_sample` 已经更新过
+            // 检测器的「上一拍」。）
             return self.build(db.connection(), sample, false);
         };
         let Some(boundary) = trusted else {
