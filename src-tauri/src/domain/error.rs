@@ -67,10 +67,13 @@ pub enum DomainError {
     /// V0.1 只提供「理清阶段的可选归类」（F-002）：任务一旦开始，
     /// 归属与状态联动的修改都归 P3，不能从这个最小入口绕过去。
     TaskNotInClarifying { status: &'static str },
-    /// 任务正有会话在运行，改归属之前必须先停下来。
+    /// 任务正有会话在运行，整理类操作之前必须先停下来。
     ///
     /// 与 [`Self::TaskNotInClarifying`] 分开：那条讲的是任务的生命周期位置，
     /// 这条讲的是「此刻正在计时」——用户的下一步动作不同（停止计时 vs 无从下手）。
+    ///
+    /// 文案是**中性**的：两个调用方都走这条规则（`set_task_project` 的改归属与
+    /// `clarify_ready` 的理清为待办），句子不能只对其中一个成立（Task 5 fix round 1）。
     TaskHasRunningSession,
     // ── P4 Task 3（标签与幂等关联）新增 ────────────────────────────────────
     /// 目标标签不存在（已被删除，或请求里的 ID 从来不存在）。
@@ -195,7 +198,7 @@ impl std::fmt::Display for DomainError {
             Self::TaskNotInClarifying { status } => {
                 write!(f, "任务处于「{}」时不能改归属。", zh_status(status))
             }
-            Self::TaskHasRunningSession => write!(f, "任务正在计时，先停止后再改归属。"),
+            Self::TaskHasRunningSession => write!(f, "这个任务正在计时，请先停止计时再继续。"),
             Self::UnknownTag => write!(f, "找不到这个标签。"),
             Self::TagNameTaken { kind, name } => {
                 write!(

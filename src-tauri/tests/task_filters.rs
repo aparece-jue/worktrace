@@ -725,12 +725,36 @@ fn capturing_with_a_blank_title_is_refused_without_touching_the_database() {
     assert_unchanged(&f, &before);
 }
 
-/// 归属目标的兜底检查在 P1 仓储里（`create_task`）：已归档 / 不存在的项目一律拒绝。
+/// 归属到一个**不存在**的项目 ⇒ 领域拒绝，理由说的是「找不到这个项目」。
 ///
-/// 仓储那两条文案不是给用户看的（P1 遗留，本任务不改），所以这里**只断言被拒与
-/// 零变化**，不把坏文案钉死在测试里。
+/// 与归档那条各占一个用例：两种拒绝的理由必须**可辨别**（前端提示不同），
+/// 也把 P1 原先那句「「project」不能为空。」钉死在历史里（Task 5 fix round 1）。
 #[test]
-fn capturing_into_an_archived_or_unknown_project_is_refused() {
+fn capturing_into_an_unknown_project_is_refused_with_the_right_reason() {
+    let mut f = bootstrap();
+    let before = baseline(&f);
+
+    let err = catalog::create_task(
+        &mut f.db,
+        create_env(&f.epoch),
+        "想法",
+        Some("没有这个项目"),
+        5000,
+    )
+    .unwrap_err();
+
+    assert_domain_error(err, &["找不到这个项目"]);
+    assert_unchanged(&f, &before);
+}
+
+/// 归属到一个**已归档**的项目 ⇒ 领域拒绝，理由说的是「项目已归档」（F-004）。
+///
+/// 原先走 `IntervalOpenInWrongState{state:"project archived"}`，用户会读到一句关于
+/// 计时区间的胡话；现在与 `set_task_project` 用同一套词汇（Task 5 fix round 1）。
+/// 顺带补上计划 Task 2 第 4 条点名的「归档与创建竞态」：归档发生在事务内被判定，
+/// 不只依赖 UI 过滤。
+#[test]
+fn capturing_into_an_archived_project_is_refused_with_the_right_reason() {
     let mut f = bootstrap();
     f.db.connection()
         .execute(
@@ -741,13 +765,10 @@ fn capturing_into_an_archived_or_unknown_project_is_refused() {
         .unwrap();
     let before = baseline(&f);
 
-    for project in ["p9", "没有这个项目"] {
-        let err =
-            catalog::create_task(&mut f.db, create_env(&f.epoch), "想法", Some(project), 5000)
-                .unwrap_err();
-        assert_eq!(err.code(), "DOMAIN_ERROR");
-    }
+    let err = catalog::create_task(&mut f.db, create_env(&f.epoch), "想法", Some("p9"), 5000)
+        .unwrap_err();
 
+    assert_domain_error(err, &["项目已归档"]);
     assert_unchanged(&f, &before);
 }
 
@@ -900,8 +921,20 @@ fn clarifying_is_refused_while_a_session_is_running() {
     let err =
         catalog::clarify_ready(&mut f.db, update_env(&f.epoch, version), "t2", 5000).unwrap_err();
 
-    // 文案是 T2 已有的「任务正在计时，先停止后再改归属。」（同一条规则），
-    // 这里只断言「是领域拒绝且说得清」，不重复钉死那句话。
+    // 那句话中性化为「这个任务正在计时，请先停止计时再继续。」：同一条规则两个入口
+    // （改归属 / 理清为待办）共用，句子不能只对其中一个成立——这里做的正是理清，
+    // 所以它不得出现「改归属」（Task 5 fix round 1）。
+    {
+        let detail = err.detail().unwrap_or_default();
+        assert!(
+            !detail.contains("改归属"),
+            "计时文案不得只对「改归属」成立：{detail:?}"
+        );
+        assert!(
+            detail.contains("停止计时"),
+            "计时文案得说清下一步是停止计时：{detail:?}"
+        );
+    }
     assert_domain_error(err, &[]);
     assert_unchanged(&f, &before);
 }

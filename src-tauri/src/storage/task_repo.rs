@@ -52,6 +52,11 @@ fn read_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
 /// 新建任务。新任务状态为 `Inbox`，版本从 0 起。
 ///
 /// 归属到**已归档**的项目一律拒绝（F-004），且在事务内检查，不只依赖 UI 过滤。
+///
+/// 两条拒绝用与 [`set_task_project`] **同一套**领域变体（`UnknownProject` /
+/// `ProjectArchived`）：这是同一个判断的另一个入口，用户看到的理由必须一致。
+/// （原先借用 `EmptyText{field:"project"}` 与 `IntervalOpenInWrongState`，
+/// 用户会读到「「project」不能为空。」和一句关于计时区间的胡话——见 Task 5 fix round 1。）
 pub fn create_task(
     tx: &Transaction<'_>,
     id: &str,
@@ -73,13 +78,8 @@ pub fn create_task(
             .optional()
             .map_err(map_sqlite)?;
         match status.as_deref() {
-            None => return Err(DomainError::EmptyText { field: "project" }.into()),
-            Some("archived") => {
-                return Err(DomainError::IntervalOpenInWrongState {
-                    state: "project archived",
-                }
-                .into())
-            }
+            None => return Err(DomainError::UnknownProject.into()),
+            Some("archived") => return Err(DomainError::ProjectArchived.into()),
             Some(_) => {}
         }
     }
