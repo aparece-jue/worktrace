@@ -119,7 +119,7 @@ pub fn run() {
 }
 ```
 
-四个 `mod.rs` 先各写一行文档注释占位，例如 `src-tauri/src/domain/mod.rs`：
+四个 `mod.rs` 本任务只写一行模块级文档注释（内容由后续任务填充），例如 `src-tauri/src/domain/mod.rs`：
 
 ```rust
 //! 领域层：实体、跃迁表与校验。禁止 IO。
@@ -583,17 +583,18 @@ CREATE TABLE task_tag(
   PRIMARY KEY (task_id, tag_id)
 );
 
--- 02 §6：前台至多一条 running
+-- 索引名与定义逐条抄自 02 §2 的索引块，不得改名或改列：
+-- 名字是下游（迁移对比、诊断、测试）的稳定引用点。
 CREATE UNIQUE INDEX uq_running_foreground ON work_session(mode)
-  WHERE mode = 'FOREGROUND' AND state = 'running';
-
--- 02 §6：每个 session 至多一个开放区间
-CREATE UNIQUE INDEX uq_open_interval_per_session ON work_interval(session_id)
+  WHERE mode='FOREGROUND' AND state='running';
+CREATE UNIQUE INDEX uq_open_interval ON work_interval(session_id)
   WHERE ended_at IS NULL AND voided_at IS NULL;
-
-CREATE INDEX ix_task_status ON task(status);
-CREATE INDEX ix_interval_session ON work_interval(session_id, started_at);
-CREATE INDEX ix_session_state ON work_session(state);
+CREATE UNIQUE INDEX uq_tag_root ON tag(kind,name) WHERE parent_id IS NULL;
+CREATE UNIQUE INDEX uq_tag_child ON tag(kind,parent_id,name) WHERE parent_id IS NOT NULL;
+CREATE INDEX idx_interval_session ON work_interval(session_id);
+CREATE INDEX idx_task_project ON task(project_id);
+CREATE INDEX idx_task_status ON task(status);
+CREATE INDEX idx_session_task ON work_session(task_id);
 "#;
 ```
 
@@ -780,7 +781,7 @@ fn a_session_has_at_most_one_open_interval() {
         "INSERT INTO work_interval(id, session_id, started_at) VALUES ('i2', 's1', 10)",
         [],
     );
-    assert!(dup.is_err(), "同一 session 不得有两个开放区间（uq_open_interval_per_session）");
+    assert!(dup.is_err(), "同一 session 不得有两个开放区间（uq_open_interval）");
 
     // 闭合上一个之后可以再开
     c.execute("UPDATE work_interval SET ended_at = 100, duration_ms = 100 WHERE id = 'i1'", [])
@@ -790,6 +791,63 @@ fn a_session_has_at_most_one_open_interval() {
         [],
     )
     .unwrap();
+}
+
+#[test]
+fn indexes_match_the_spec_exactly() {
+    // 02 §2 的索引块是权威清单。名字与列都固定，下游（迁移对比、诊断、
+    // 长跑验收）按名字引用，改名或漏建都会在别处炸。
+    let db = fresh();
+    let mut found: Vec<String> = db
+        .conn()
+        .prepare(
+            "SELECT name FROM sqlite_master
+              WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    found.sort();
+
+    let expected = vec![
+        "idx_interval_session".to_string(),
+        "idx_session_task".to_string(),
+        "idx_task_project".to_string(),
+        "idx_task_status".to_string(),
+        "uq_open_interval".to_string(),
+        "uq_running_foreground".to_string(),
+        "uq_tag_child".to_string(),
+        "uq_tag_root".to_string(),
+    ];
+    assert_eq!(found, expected, "索引集合必须与 02 §2 逐字一致");
+}
+
+#[test]
+fn tag_names_are_unique_per_scope() {
+    // uq_tag_root / uq_tag_child：同一 kind 下根标签与同级子标签都不得重名
+    let db = fresh();
+    let c = db.conn();
+    let ins = |id: &str, kind: &str, name: &str, parent: Option<&str>| {
+        c.execute(
+            "INSERT INTO tag(id, kind, name, parent_id, created_at) VALUES (?1, ?2, ?3, ?4, 0)",
+            rusqlite::params![id, kind, name, parent],
+        )
+    };
+    ins("g1", "Domain", "Electronics", None).unwrap();
+    assert!(ins("g2", "Domain", "Electronics", None).is_err(), "同名根标签必须被拒");
+    // 不同 kind 下同名允许
+    ins("g3", "Activity", "Electronics", None).unwrap();
+
+    ins("g4", "Domain", "Analog", Some("g1")).unwrap();
+    assert!(
+        ins("g5", "Domain", "Analog", Some("g1")).is_err(),
+        "同一父节点下同名子标签必须被拒"
+    );
+    // 不同父节点下同名允许
+    ins("g6", "Domain", "Digital", None).unwrap();
+    ins("g7", "Domain", "Analog", Some("g6")).unwrap();
 }
 
 #[test]
@@ -864,11 +922,12 @@ Expected: **允许失败**。这一跑的目的不是通过，而是拿到"库�
 
 1. `trusted_closed_interval_must_have_matching_duration` 失败 → 检查 `ck_interval_duration` 是否写成了 `CASE` 形式。SQLite 把 CHECK 求值为 NULL 当作**通过**，而 `duration_ms = ended_at - started_at` 在 `duration_ms IS NULL` 时是 NULL，用 `OR` 连接会让"可信闭合却没有 duration_ms"整条溜过去。
 2. `only_one_running_foreground_session_is_allowed` 失败 → 确认 `uq_running_foreground` 的 `WHERE` 子句写全了 `mode='FOREGROUND' AND state='running'`；漏掉任一项都会把不该拦的行拦掉。
+3. `indexes_match_the_spec_exactly` 失败 → **按 02 §2 的索引块逐字补，不要自己起名**。规格里是 8 条：`uq_running_foreground`、`uq_open_interval`、`uq_tag_root`、`uq_tag_child`、`idx_interval_session`、`idx_task_project`、`idx_task_status`、`idx_session_task`。命名前缀是 `uq_`（唯一）与 `idx_`（普通），漏建 `uq_tag_root`/`uq_tag_child` 会让 F-005 的"同名标签"规则无处生效。
 
 - [ ] **Step 4: 重跑确认全绿**
 
 Run: `cargo test --test schema`
-Expected: `test result: ok. 5 passed`。
+Expected: `test result: ok. 7 passed`。
 
 - [ ] **Step 5: 提交**
 
@@ -2436,7 +2495,8 @@ git commit -m "test(m01,m02): 跨层集成覆盖完整 V0.1 写入链路"
 
 1. `cargo test` 全绿，且 `cargo test --lib` 与 `cargo test --test schema`、`cargo test --test foundation` 分别可独立运行。
 2. 迁移后的库恰有 V0.1 的 12 张表，**没有** `goal`/`milestone`，`project` 无 `goal_id`、`task` 无 `milestone_id`。
-3. 三条库级约束真在拦人：前台唯一 running、每 session 唯一开放区间、可信闭合区间的 `duration_ms = ended_at - started_at`。
+3. 四条库级约束真在拦人：前台唯一 running、每 session 唯一开放区间、**同 kind 同层标签不得重名**、可信闭合区间的 `duration_ms = ended_at - started_at`。
+   索引集合与 02 §2 的索引块**逐字一致**（8 条，名字与列都不许改）。
 4. `data_epoch` 是新库独有身份；`DATA_EPOCH_MISMATCH` 与 `VERSION_CONFLICT` 两个错误码可被断言，且错误文本不含 epoch 字面量。
 5. 一次业务写让 revision **恰好 +1**；任何被拒的调用（非法跃迁、空白标题、陈旧版本、未知会话）**revision 不变、审计不写、无半条记录**。
 6. `domain/` 不含任何 `rusqlite` / `std::fs` / `std::time` 引用；`storage/` 不引用 `platform::`。
