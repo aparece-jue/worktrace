@@ -176,7 +176,11 @@ fn domain_error_messages_are_user_facing_chinese() {
                 .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
             "用户文案必须是中文：{message}"
         );
-        // ② 不说内部标识：裸枚举名不该出现
+        // ② 不说内部标识：裸枚举名不该出现。
+        //
+        // 覆盖两类：任务状态名（`zh_status` 负责翻译）与四类标签的 kind
+        // （`zh_kind` 负责翻译，术语见 99-glossary §5）。两个映射表都**漏一个就红**——
+        // `TagNameTaken` 曾经直接把 `TagKind::as_str()` 印进文案，正是靠这里拦住。
         for banned in [
             "Inbox",
             "Clarifying",
@@ -185,10 +189,14 @@ fn domain_error_messages_are_user_facing_chinese() {
             "Waiting",
             "Blocked",
             "Done",
+            "Domain",
+            "Activity",
+            "Context",
+            "Report",
         ] {
             assert!(
                 !message.contains(banned),
-                "不得漏出内部状态名 {banned:?}：{message}"
+                "不得漏出内部标识 {banned:?}：{message}"
             );
         }
         // ③ 不承诺可以重试——这些拒绝与输入无关，重试一次还是被拒
@@ -197,4 +205,29 @@ fn domain_error_messages_are_user_facing_chinese() {
             "拒绝类文案不该说「重试」：{message}"
         );
     }
+}
+
+/// `TagNameTaken` 的两件事必须分开：字段留**代码里的取值**（诊断与 T6 的结构化载荷要用），
+/// 只有面向用户的 `Display` 走 `zh_kind` 翻成中文（术语见 99-glossary §5）。
+///
+/// 这条用例守的是「别用把字段改成中文的办法去修泄漏」——那样结构化载荷就废了。
+#[test]
+fn tag_name_taken_keeps_the_code_value_and_renders_chinese() {
+    use worktrace_lib::domain::error::DomainError;
+
+    let e = DomainError::TagNameTaken {
+        kind: "Context",
+        name: "家里".into(),
+    };
+    match &e {
+        DomainError::TagNameTaken { kind, name } => {
+            assert_eq!(*kind, "Context", "字段保留原值，供诊断与结构化载荷");
+            assert_eq!(name, "家里");
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        e.to_string(),
+        "「上下文」这一类里已经有叫「家里」的标签了。"
+    );
 }

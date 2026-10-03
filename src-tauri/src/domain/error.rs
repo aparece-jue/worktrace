@@ -83,6 +83,10 @@ pub enum DomainError {
     /// 唯一性口径：kind + 规范化后的名字 + **大小写敏感**（02 §2、`uq_tag_root`）。
     /// 带上 `kind` 与 `name`，用户看到的是「哪一类里的哪个名字」被拒，而不是
     /// 「数据库里有一条唯一约束」——存储层的唯一索引只是并发下的兜底（裁决 R-T3-f）。
+    ///
+    /// `kind` 保留**代码里的原值**（`TagKind::as_str()`）：它供诊断与结构化载荷用，
+    /// 而 [`std::fmt::Display`] 经 `zh_kind` 打中文——用户不该看到 `Domain` 这种
+    /// 内部标识（与 [`Self::TaskNotInClarifying`] 用 `zh_status` 是同一条规矩）。
     TagNameTaken { kind: &'static str, name: String },
 }
 
@@ -99,6 +103,22 @@ fn zh_status(raw: &str) -> &str {
         "Review" => "复盘",
         "Done" => "已完成",
         "Cancelled" => "已取消",
+        other => other,
+    }
+}
+
+/// 标签类别的中文名，术语以 99-glossary §5 的「标签体系」为准
+/// （Domain/Activity/Context/Report → 领域/活动/上下文/汇报）。
+///
+/// 与 [`zh_status`] 同一理由：四类标签是给用户看的概念，`Domain` 这种取值是
+/// 代码与库里的内部标识，不该出现在提示语里。`Knowledge` 不在 V0.1 的取值域
+/// （`TagKind::parse` 不认它），所以这里没有它的映射。
+fn zh_kind(raw: &str) -> &str {
+    match raw {
+        "Domain" => "领域",
+        "Activity" => "活动",
+        "Context" => "上下文",
+        "Report" => "汇报",
         other => other,
     }
 }
@@ -164,7 +184,11 @@ impl std::fmt::Display for DomainError {
             Self::TaskHasRunningSession => write!(f, "任务正在计时，先停止后再改归属。"),
             Self::UnknownTag => write!(f, "找不到这个标签。"),
             Self::TagNameTaken { kind, name } => {
-                write!(f, "「{kind}」这一类里已经有叫「{name}」的标签了。")
+                write!(
+                    f,
+                    "「{}」这一类里已经有叫「{name}」的标签了。",
+                    zh_kind(kind)
+                )
             }
         }
     }

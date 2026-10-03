@@ -333,7 +333,7 @@ fn tag_names_are_trimmed_before_they_are_stored_and_compared() {
     )
     .unwrap_err();
 
-    assert_domain_error(err, &["Domain", "写作"]);
+    assert_domain_error(err, &["领域", "写作"]);
     assert_unchanged(&f, "t1", &before);
 }
 
@@ -354,8 +354,9 @@ fn duplicate_names_are_refused_within_a_kind_but_allowed_across_kinds() {
         2_100,
     )
     .unwrap_err();
-    assert_eq!(err.code(), "DOMAIN_ERROR", "重名是领域拒绝，不是存储错误");
-    assert_domain_error(err, &["Domain", "写作"]);
+    // 重名是领域拒绝（`assert_domain_error` 已断 `code()`），不是 SQLite 的 UNIQUE
+    // 冒泡出来的 `STORAGE_ERROR`；文案里给的是中文类别名，不是 `Domain` 这种内部取值。
+    assert_domain_error(err, &["领域", "写作"]);
     assert_unchanged(&f, "t1", &before);
 
     // 跨 kind 同名是另一个标签（唯一索引是 (kind, name)）。
