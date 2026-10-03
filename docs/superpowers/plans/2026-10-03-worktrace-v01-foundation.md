@@ -18,48 +18,48 @@
 
 ## Task 1：运行环境与共享错误
 
-- [ ] 在 src-tauri 下记录实际 Rust/Cargo 版本，验证 SQLite bundled、UUID、错误派生、临时文件测试依赖，选定可编译版本并更新 Cargo.toml/Cargo.lock；不依据文档中的预设版本推断已经可用。
-- [ ] 新建 domain/mod.rs、storage/mod.rs、platform/mod.rs、commands/mod.rs、error.rs；在 lib.rs 导出，保留 greet。
-- [ ] error::AppError 提供稳定 code/message/脱敏 detail；storage 不依赖 commands。领域错误分别映射非法状态、占用冲突、待恢复、版本冲突，不把所有错误压成 DOMAIN_ERROR。
-- [ ] commands::envelope::WriteEnvelope 保存 expected_data_epoch 与 expected_row_version；新建只需 epoch，修改既有对象必须版本。关系增删的幂等操作单列，不伪造实体版本。
-- [ ] tests/error_contract.rs：未知记录、非法状态、epoch/version 冲突均可区分；错误不包含数据库路径、SQL、业务正文。
+- [x] 在 src-tauri 下记录实际 Rust/Cargo 版本，验证 SQLite bundled、UUID、错误派生、临时文件测试依赖，选定可编译版本并更新 Cargo.toml/Cargo.lock；不依据文档中的预设版本推断已经可用。
+- [x] 新建 domain/mod.rs、storage/mod.rs、platform/mod.rs、commands/mod.rs、error.rs；在 lib.rs 导出，保留 greet。
+- [x] error::AppError 提供稳定 code/message/脱敏 detail；storage 不依赖 commands。领域错误分别映射非法状态、占用冲突、待恢复、版本冲突，不把所有错误压成 DOMAIN_ERROR。
+- [x] commands::envelope::WriteEnvelope 保存 expected_data_epoch 与 expected_row_version；新建只需 epoch，修改既有对象必须版本。关系增删的幂等操作单列，不伪造实体版本。
+- [x] tests/error_contract.rs：未知记录、非法状态、epoch/version 冲突均可区分；错误不包含数据库路径、SQL、业务正文。
 
 ## Task 2：数据库执行边界与迁移
 
 文件：storage/db.rs、storage/migrations.rs、storage/schema_v1.rs、platform/paths.rs、tests/migrations.rs。
 
-- [ ] 小实验比较串行数据库工作线程与受控阻塞边界，记录选择；不得将 Connection 跨 await 持锁或直接放进 UI 回调执行长操作。
-- [ ] Db::open(path)/open_in_memory() 配置 foreign_keys、busy_timeout；磁盘数据库验证 WAL，内存测试不要求 WAL。
-- [ ] migrate 在一个事务内执行 DDL 和 user_version；失败回滚全部表和版本。现有库迁移前由初始化流程做一致备份，备份失败拒绝迁移；未来版本拒绝写入。
-- [ ] 完整 DDL 以附录为起点，补全状态/质量组合、非负版本、允许 mode/kind、外键 RESTRICT 和服务校验。V0.1 不接受 Scheduled、BACKGROUND/PASSIVE/WAITING 写入，不建 Goal/Milestone/番茄钟表。
-- [ ] tests/migrations.rs：空库初始化、重复启动、未来版本拒绝、故障中断后无半套表、备份失败不迁移。尚无 UI 时用临时文件验证。
+- [x] 小实验比较串行数据库工作线程与受控阻塞边界，记录选择；不得将 Connection 跨 await 持锁或直接放进 UI 回调执行长操作。
+- [x] Db::open(path)/open_in_memory() 配置 foreign_keys、busy_timeout；磁盘数据库验证 WAL，内存测试不要求 WAL。
+- [x] migrate 在一个事务内执行 DDL 和 user_version；失败回滚全部表和版本。现有库迁移前由初始化流程做一致备份，备份失败拒绝迁移；未来版本拒绝写入。
+- [x] 完整 DDL 以附录为起点，补全状态/质量组合、非负版本、允许 mode/kind、外键 RESTRICT 和服务校验。V0.1 不接受 Scheduled、BACKGROUND/PASSIVE/WAITING 写入，不建 Goal/Milestone/番茄钟表。
+- [x] tests/migrations.rs：空库初始化、重复启动、未来版本拒绝、故障中断后无半套表、备份失败不迁移。尚无 UI 时用临时文件验证。
 
 ## Task 3：领域不变量与时钟接缝
 
 文件：domain/task.rs、domain/session.rs、domain/interval.rs、domain/error.rs、platform/clock.rs。
 
-- [ ] TaskStatus/TransitionCause 实现 02 §5 的 V0.1 跃迁；Scheduled 拒绝，终态只显式 reopen。
-- [ ] SessionState/SessionMode/TimerKind、IntervalFacts/IntervalRange：running 恰一开放可信区间，paused/finished/discarded 无开放有效区间，recovering 停止正常计时。记录损坏与普通待确认分开。
-- [ ] ClosedIntervalFacts { ended_at, duration_ms, sampled_end_wall_at, needs_review }：协调器已验证的闭合事实，供 Task 4 的 close_interval 落库。仓储**不得**由 wall-now 自行推算其中任何一项。
-- [ ] Clock::sample() 返回 ClockSample { wall_ms, monotonic_ms }；SystemClock 的 Instant 仅当前 run 有效。FakeClock 可独立推进/回拨两个数值并注入采样失败。
-- [ ] tests/domain_invariants.rs 覆盖允许/拒绝跃迁、0 长度半开区间、重叠、待确认和作废排除；无需一仓储函数一个机械测试。
+- [x] TaskStatus/TransitionCause 实现 02 §5 的 V0.1 跃迁；Scheduled 拒绝，终态只显式 reopen。
+- [x] SessionState/SessionMode/TimerKind、IntervalFacts/IntervalRange：running 恰一开放可信区间，paused/finished/discarded 无开放有效区间，recovering 停止正常计时。记录损坏与普通待确认分开。
+- [x] ClosedIntervalFacts { ended_at, duration_ms, sampled_end_wall_at, needs_review }：协调器已验证的闭合事实，供 Task 4 的 close_interval 落库。仓储**不得**由 wall-now 自行推算其中任何一项。
+- [x] Clock::sample() 返回 ClockSample { wall_ms, monotonic_ms }；SystemClock 的 Instant 仅当前 run 有效。FakeClock 可独立推进/回拨两个数值并注入采样失败。
+- [x] tests/domain_invariants.rs 覆盖允许/拒绝跃迁、0 长度半开区间、重叠、待确认和作废排除；无需一仓储函数一个机械测试。
 
 ## Task 4：事务接口、元数据与仓储
 
 文件：storage/meta.rs、storage/guards.rs、storage/task_repo.rs、storage/session_repo.rs、storage/checkpoint_repo.rs、tests/transaction_boundary.rs。
 
-- [ ] Meta/read_meta/init_meta/bump_revision；epoch 初始化 UUID，业务服务成功提交时 bump_revision 恰一次，无操作/拒绝/心跳不增加。
-- [ ] guard_epoch(tx, expected)/guard_row_version(actual, expected) 在调用方写事务内检查；禁止将读到的 epoch 当请求 expected 值比较自身。
-- [ ] 写入接口统一接受 &Transaction；仓储不得 begin/commit 或自行 bump_revision。单独服务包装拥有事务；组合服务可复用同一事务。
-- [ ] task_repo 提供 create_task(tx, title, project_id, now)、get_task/list_tasks、transition_task(tx, id, expected_version, target, cause, now)，任务变化与 task_change 同事务；已归档项目禁止新归属。
-- [ ] session_repo::create_session(tx, task_id, run_id, mode, timer_kind, target_duration_ms, attributed_start) 持久化模式、预算与初始区间；调用方同事务保存 elapsed=0 检查点。mode 必填（DDL 是 NOT NULL；V0.1 只写 FOREGROUND，其余取值由服务拒绝）。倒计时预算必须正数，正计时必须 null。
-- [ ] close_interval(tx, id, ClosedIntervalFacts)/open_interval(tx, session_id, attributed_start)/update_session_state(tx, id, expected_version, target) 接收协调器已验证事实；不得用 wall-now 在仓储计算工时。
-- [ ] checkpoint_repo::write(tx, Checkpoint)/latest(conn, interval_id)；检查 run/interval 对应、归属和 elapsed 一致。心跳服务拥有独立短事务，不加 revision。
-- [ ] tests/transaction_boundary.rs：同一事务理清任务+建立会话+初始检查点+审计，只加一次 revision；末步骤故障全部回滚；预算重新打开库后仍存在；并发前台 start 仅一次成功。
+- [x] Meta/read_meta/init_meta/bump_revision；epoch 初始化 UUID，业务服务成功提交时 bump_revision 恰一次，无操作/拒绝/心跳不增加。
+- [x] guard_epoch(tx, expected)/guard_row_version(actual, expected) 在调用方写事务内检查；禁止将读到的 epoch 当请求 expected 值比较自身。
+- [x] 写入接口统一接受 &Transaction；仓储不得 begin/commit 或自行 bump_revision。单独服务包装拥有事务；组合服务可复用同一事务。
+- [x] task_repo 提供 create_task(tx, title, project_id, now)、get_task/list_tasks、transition_task(tx, id, expected_version, target, cause, now)，任务变化与 task_change 同事务；已归档项目禁止新归属。
+- [x] session_repo::create_session(tx, task_id, run_id, mode, timer_kind, target_duration_ms, attributed_start) 持久化模式、预算与初始区间；调用方同事务保存 elapsed=0 检查点。mode 必填（DDL 是 NOT NULL；V0.1 只写 FOREGROUND，其余取值由服务拒绝）。倒计时预算必须正数，正计时必须 null。
+- [x] close_interval(tx, id, ClosedIntervalFacts)/open_interval(tx, session_id, attributed_start)/update_session_state(tx, id, expected_version, target) 接收协调器已验证事实；不得用 wall-now 在仓储计算工时。
+- [x] checkpoint_repo::write(tx, Checkpoint)/latest(conn, interval_id)；检查 run/interval 对应、归属和 elapsed 一致。心跳服务拥有独立短事务，不加 revision。
+- [x] tests/transaction_boundary.rs：同一事务理清任务+建立会话+初始检查点+审计，只加一次 revision；末步骤故障全部回滚；预算重新打开库后仍存在；并发前台 start 仅一次成功。
 
 ## 执行与完成门槛
 
-- [ ] 对照 [总纲](2026-10-03-v01-plan-index.md) §5 第 9 条的权威清单（02 §8 必测案例、04 §9 集成用例、06 §4 实验）逐条确认与本计划相关的条目，并在验收记录里写明「已核对 / 不适用」。
+- [x] 对照 [总纲](2026-10-03-v01-plan-index.md) §5 第 9 条的权威清单（02 §8 必测案例、04 §9 集成用例、06 §4 实验）逐条确认与本计划相关的条目，并在验收记录里写明「已核对 / 不适用」。
 
 在 src-tauri 运行 cargo fmt --check、cargo test、cargo clippy --all-targets。P1 通过只表示基础库正确，F-ID 的应用/UI 验收仍归后续计划。提交文件范围以上述文件及 Cargo 配置为准，不提交无关改动。
 
