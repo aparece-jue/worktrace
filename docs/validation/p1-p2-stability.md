@@ -22,7 +22,7 @@
 
 ## 自动验证
 
-- 全库 cargo test --offline -q：203 个测试通过，包括原有 P1/P2 套件与累计 38 个行为回归。
+- 全库 cargo test --offline -q：204 个测试通过，包括原有 P1/P2 套件与累计 39 个行为回归。
 - cargo fmt --check：通过。
 - cargo clippy --offline --all-targets -- -D warnings：通过。
 - scripts/check-layers.ps1：通过。
@@ -123,4 +123,19 @@ finish: 命令成功  started=…000000 ended=…660000 duration=3660000 needs_r
 
 回归 `cross_run_open_interval_cannot_be_closed_as_trusted_effort` 覆盖 `pause` 与 `finish`，断言返回 `RECOVERY_REQUIRED`、revision 不变、开放区间未被闭合（`ended_at`/`duration_ms` 仍为 `None`）。**反向验证**：把该校验从原语里去掉，回归失败（命令返回 `Ok`）——修复前它确实会写坏数据。
 
-本轮新增 1 个测试，回归共 38 个，全库共 203 个。外部图源同步守卫仍未加入：脚本在工作区而非仓库（`worktrace-sync-diagram.ps1` 的第 0 步是守卫的落点），已有“工作区已核对”的记录不能替代脚本实际路径，下一步接线前需加入内容哈希冲突守卫。
+本轮新增 1 个测试，回归共 38 个，全库共 203 个。
+
+
+## 进 P4 之前的收尾
+
+**§9 错误响应的调用时机边界（代码）。** `capture_error_response` 的契约是「原操作事务结束后」调用；测试把「时机错了会怎样」钉住：同一连接上还有未结束事务时，内部 `unchecked_transaction` 失败 ⇒ `authority = None`、`requires_handshake = true`（安全降级，**不返回半个上下文**——可能过期的 revision 比没有更危险）；随后断言事务结束后同一调用能读到权威版本，证明刚才失败的原因确实只是时机。P7 接线正对着这个时机。
+
+**「没有基线就不产出可信工时」（08 §1 中英）。** 三个入口的宽容度不同，原先读起来像遗漏，现写明是**有意的**：归属终点退回同次采样墙钟（只是把事实**放置**到时间轴上）；统计返回 `RECOVERY_REQUIRED`（不按墙钟差补开放区间）；可信离开边界**无参照可验，保守拒绝**（该情形走 recovering）。
+
+**同步脚本防呆（仓库外）。** `worktrace-sync-diagram.ps1` 新增 0b 步「仓库那份更新则拒绝」，与 `worktrace-apply-src.ps1` 同一纪律。反向验证：在仓库侧植入一处更新 ⇒ `ABORT: repo ahead …`、退出码 1，且中止发生在**任何拷贝之前**；还原后恢复 `no divergence`。上一轮正是靠手工比对才发现图源镜像落后——那类事故现在有了机器门禁。
+
+**P4 开工前核实（写进 P4 计划）。** 四张表与既有符号核对通过；时区库从「待选型」变成已选定并离线实测：默认特性**构建不了**（会拉缓存里没有的 `jiff-static`），推荐行为
+`jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform"] }`
+（三时区解析、`TimeZone::system()` 可读、`Mars/Olympus` 被拒、`2023-02-29` 被拒）；另记离线约束（门禁一律 `--offline`，未缓存 crate 需先经确认）与两个零调用 `pub fn` 的归属。
+
+本轮新增 1 个测试，回归共 39 个，全库共 **204** 个；`cargo fmt --check`、严格 Clippy、分层检查、`git diff --check` 均通过。正式平台验收、跨机器容差校准仍待完成。
