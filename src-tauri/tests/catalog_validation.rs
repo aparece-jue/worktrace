@@ -20,17 +20,25 @@ use worktrace_lib::storage::meta::init_meta;
 use worktrace_lib::storage::migrations::migrate;
 use worktrace_lib::storage::task_repo;
 
-/// 校验类失败一律是 `DOMAIN_ERROR`，且**文案是中文**——前端只按 `code` 分支，
-/// 用户只看到 `message`（00 §4）。
+/// 校验类失败一律是 `DOMAIN_ERROR`，且 `detail` 是**用户读得懂的中文**。
+///
+/// 为什么断言落在 `detail` 而不是 `message`：前端只按 `code` 分支，而 `detail` 会被
+/// `AppError::Domain` 的 Display 原样拼进用户看到的句子（00 §4），
+/// 「文案口径」这条规则的载体就是它。
+///
+/// 两个恒真陷阱（评审指出后修正，别再写回去）：
+/// - `detail().is_some()`：上一行的 `code() == "DOMAIN_ERROR"` 已经蕴含它
+///   （`AppError::Domain` 必定带 detail），断言不可能失败；
+/// - 在 `message()` 上找中文：它的模板是 `format!("操作不被允许：{detail}")`，
+///   模板自带中文，于是 detail 是空白、是英文、是 SQL 片段都照样通过。
 fn assert_domain_error(err: AppError) -> AppError {
     assert_eq!(err.code(), "DOMAIN_ERROR", "校验失败应当是领域拒绝");
-    assert!(err.detail().is_some(), "领域拒绝要留下可诊断的 detail");
+    let detail = err.detail().unwrap_or_default();
     assert!(
-        err.message()
+        detail
             .chars()
             .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
-        "面向用户的文案必须是中文：{}",
-        err.message()
+        "领域拒绝的 detail 必须是中文（空串、英文、SQL 片段都不许）：{detail:?}"
     );
     err
 }
@@ -286,22 +294,18 @@ fn the_local_day_follows_the_selected_zone() {
 /// 日期换算复用同一套时区校验：没校验过的名字不许拿来算日期。
 #[test]
 fn the_date_conversion_rejects_zones_that_never_passed_validation() {
-    let err = daily_plan::local_date_at("Mars/Olympus", 0).unwrap_err();
-    assert_eq!(err.code(), "DOMAIN_ERROR");
-    assert_eq!(
-        daily_plan::local_date_at("", 0).unwrap_err().code(),
-        "DOMAIN_ERROR"
-    );
+    assert_domain_error(daily_plan::local_date_at("Mars/Olympus", 0).unwrap_err());
+    assert_domain_error(daily_plan::local_date_at("", 0).unwrap_err());
 }
 
 /// 超出可表示范围的时刻**报错**，不做静默钳制。
 ///
 /// 钳制会把一个坏时刻变成一个看起来合理的日期，那正是「日期错了一天」
-/// 这类最难查的缺陷的来源。
+/// 这类最难查的缺陷的来源。这条 detail 是**手写**的（不是 `DomainError` 渲染出来的），
+/// 所以它必须经过 `assert_domain_error` 的中文断言——手写文案正是最容易写成英文的地方。
 #[test]
 fn an_out_of_range_instant_is_rejected_instead_of_clamped() {
-    let err = daily_plan::local_date_at("UTC", i64::MAX).unwrap_err();
-    assert_eq!(err.code(), "DOMAIN_ERROR");
+    assert_domain_error(daily_plan::local_date_at("UTC", i64::MAX).unwrap_err());
     assert!(daily_plan::local_date_at("UTC", i64::MIN).is_err());
 }
 
@@ -358,14 +362,10 @@ fn the_tag_kind_entry_distinguishes_blank_from_unknown() {
         TagKind::Context
     );
 
-    let unknown = catalog::parse_tag_kind("Knowledge").unwrap_err();
-    assert_eq!(unknown.code(), "DOMAIN_ERROR");
+    let unknown = assert_domain_error(catalog::parse_tag_kind("Knowledge").unwrap_err());
     assert!(unknown.message().contains("Knowledge"), "{unknown:?}");
 
-    assert_eq!(
-        catalog::parse_tag_kind("").unwrap_err().code(),
-        "DOMAIN_ERROR"
-    );
+    assert_domain_error(catalog::parse_tag_kind("").unwrap_err());
 }
 
 /// 名字只去首尾空白；大小写是**有意义**的（`Abc` 与 `abc` 是两个标签）。
@@ -394,10 +394,7 @@ fn blank_tag_names_are_rejected() {
             tag::normalize_name(raw).unwrap_err(),
             DomainError::EmptyText { field: "标签名" }
         );
-        assert_eq!(
-            catalog::normalize_tag_name(raw).unwrap_err().code(),
-            "DOMAIN_ERROR"
-        );
+        assert_domain_error(catalog::normalize_tag_name(raw).unwrap_err());
     }
 }
 
@@ -463,11 +460,7 @@ fn the_project_status_entry_rejects_done_and_unknown_values() {
         ProjectStatus::Archived
     );
     for raw in ["done", "Active", "", "deleted"] {
-        assert_eq!(
-            catalog::parse_project_status(raw).unwrap_err().code(),
-            "DOMAIN_ERROR",
-            "{raw:?} 不该被写路径接受"
-        );
+        assert_domain_error(catalog::parse_project_status(raw).unwrap_err());
     }
 }
 
@@ -550,10 +543,7 @@ fn the_project_status_column_holds_done_even_though_v01_never_writes_it() {
         insert("p-bad", "deleted").is_err(),
         "取值域外的状态由 CHECK 兜底"
     );
-    assert_eq!(
-        catalog::parse_project_status("done").unwrap_err().code(),
-        "DOMAIN_ERROR"
-    );
+    assert_domain_error(catalog::parse_project_status("done").unwrap_err());
 }
 
 /// `daily_plan.local_date` 的 GLOB 只管**形状**：`2023-02-30` 写得进去。
