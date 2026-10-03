@@ -1424,3 +1424,84 @@ fn old_running_session_is_isolated_before_sampling_with_or_without_new_anchor() 
         }
     }
 }
+
+/// **故障恢复路径也必须拦住跨 run 的 running 会话。**
+///
+/// `read_sample` 里有守卫，但 `retry_recovery` 的**故障分支自己要取样本**（它必须绕开
+/// `refuse_if_faulted` 才能重试恢复事务）。修复前它会以本 run 的身份分割上一个 run 的
+/// 开放区间、把它置 `recovering`、写 `time_edit` 审计、加 revision——探针实测：
+/// `ended_at` 被写成候选终点、`needs_review = true`、审计 0 → 1、revision 1 → 2。
+/// 这与 02 §4（先由启动扫描做四类判定）和 P7「发现旧 run 的开放区间要拒绝、不自动修复」
+/// 直接冲突；也让 08 §1 那句「**所有**采样入口都拒绝」不再成立。
+#[test]
+fn retry_recovery_refuses_a_cross_run_running_session() {
+    let mut h = setup();
+    h.start();
+    h.advance(60_000);
+    let first_sid = h.coord.live().unwrap().id.clone();
+
+    // ① 打进故障态：注入审计失败，让异常事务失败
+    h.db.connection()
+        .execute_batch(
+            "CREATE TRIGGER fail_audit BEFORE INSERT ON time_edit \
+             BEGIN SELECT RAISE(ABORT,'injected'); END;",
+        )
+        .unwrap();
+    h.advance_wall_only(5_000);
+    assert!(h.coord.snapshot(&mut h.db).is_err(), "异常事务应当失败");
+    assert!(h.coord.is_faulted());
+    h.db.connection()
+        .execute_batch("DROP TRIGGER fail_audit;")
+        .unwrap();
+
+    // ② 造一个「别的 run 的 running 会话」（唯一索引只允许一个 running 前台，先把前者停下）
+    h.db.connection()
+        .execute_batch(&format!(
+            "UPDATE work_interval SET ended_at=started_at+1000, duration_ms=1000 \
+               WHERE session_id='{first_sid}' AND ended_at IS NULL; \
+             UPDATE work_session SET state='paused' WHERE id='{first_sid}'; \
+             INSERT INTO application_run(id,started_at) VALUES('run-0',0); \
+             INSERT INTO work_session(id,task_id,run_id,mode,state,timer_kind,started_at,row_version) \
+             VALUES('s0','t1','run-0','FOREGROUND','running','stopwatch',0,0); \
+             INSERT INTO work_interval(id,session_id,started_at,voided_at,duration_ms,needs_review) \
+             VALUES('i0','s0',1700000000000,NULL,NULL,0);"
+        ))
+        .unwrap();
+    h.coord.load_session(h.db.connection(), "s0").unwrap();
+    assert!(h.coord.is_faulted(), "装载不得清除故障态");
+
+    let rev = h.revision();
+    h.advance(30_000);
+    assert_eq!(
+        h.coord.retry_recovery(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED",
+        "旧 run 的 running 会话不能由本 run 的故障恢复处理"
+    );
+
+    // ③ 旧 run 的事实一行都不能动
+    let row = worktrace_lib::storage::session_repo::get_session(h.db.connection(), "s0")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, SessionState::Running);
+    assert!(!row.needs_review);
+    assert_eq!(row.row_version, 0);
+    let ivs = worktrace_lib::storage::session_repo::intervals_of_session(h.db.connection(), "s0")
+        .unwrap();
+    assert_eq!(ivs[0].ended_at, None, "开放区间不得被闭合");
+    assert_eq!(ivs[0].duration_ms, None);
+    assert!(!ivs[0].needs_review);
+    let audits: i64 =
+        h.db.connection()
+            .query_row(
+                "SELECT COUNT(*) FROM time_edit WHERE session_id='s0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+    assert_eq!(audits, 0, "不得为旧 run 写审计");
+    assert_eq!(h.revision(), rev);
+    assert!(
+        h.coord.is_faulted(),
+        "被拒后仍应留在故障态，等真正的恢复路径"
+    );
+}

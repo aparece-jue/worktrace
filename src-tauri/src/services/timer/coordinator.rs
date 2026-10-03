@@ -823,10 +823,13 @@ impl Coordinator {
         )
     }
 
-    fn read_sample(&mut self, db: &mut Db) -> Result<ClockSample, AppError> {
-        self.refuse_if_faulted()?;
-        // 新 run 即使已有自己的基线，也不能解释旧 run 的开放工时。
-        // 在采样/异常事务之前隔离，避免快照暂计或分割把停机时间变成事实。
+    /// 跨 run 的 running 会话必须先由启动扫描恢复——**所有取样入口共用这一条判据**。
+    ///
+    /// 为什么不只写在 `read_sample` 里：`retry_recovery` 的故障分支**自己要取样本**
+    /// （它必须绕开 `refuse_if_faulted` 才能重试恢复事务）。漏掉那一处就会出现
+    /// 「本 run 以恢复流程分割上一个 run 的开放区间、置 recovering、写审计、加 revision」，
+    /// 与 02 §4（先由启动扫描做四类判定）和 P7「发现旧 run 的开放区间要拒绝、不自动修复」冲突。
+    fn refuse_stale_run_session(&self) -> Result<(), AppError> {
         if self
             .live
             .as_ref()
@@ -834,6 +837,14 @@ impl Coordinator {
         {
             return Err(AppError::RecoveryRequired);
         }
+        Ok(())
+    }
+
+    fn read_sample(&mut self, db: &mut Db) -> Result<ClockSample, AppError> {
+        self.refuse_if_faulted()?;
+        // 新 run 即使已有自己的基线，也不能解释旧 run 的开放工时。
+        // 在采样/异常事务之前隔离，避免快照暂计或分割把停机时间变成事实。
+        self.refuse_stale_run_session()?;
         match self.clock.sample() {
             Ok(sample) => Ok(sample),
             Err(_) => {
@@ -1164,6 +1175,8 @@ impl Coordinator {
         if self.live.is_none() && session_repo::running_foreground(db.connection())?.is_some() {
             return Err(AppError::RecoveryRequired);
         }
+        // 与 `read_sample` 同一判据：故障恢复**也**不能以本 run 的身份处理旧 run 的开放事实。
+        self.refuse_stale_run_session()?;
         let sample = self
             .clock
             .sample()

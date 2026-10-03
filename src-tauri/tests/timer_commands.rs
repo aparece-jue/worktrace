@@ -1053,55 +1053,59 @@ mod commands {
         const DAY: i64 = 86_400_000;
         let base = 1_700_000_000_000i64;
         let midnight = (base / DAY + 1) * DAY;
-        let before_midnight = 600_000i64; // 23:50 → 00:00，工作 10 分钟
+        let before_midnight = 600_000i64; // 午夜前工作 10 分钟
         let pause_span = 7_200_000i64; // 暂停两小时
         let after_midnight = 1_800_000i64; // 次日再工作 30 分钟
 
-        let mut c = setup(TaskStatus::Ready, None);
-        c.advance(midnight - before_midnight - base); // 推到 23:50
-        let start_req = c.start_req();
-        let started = c.coord.start(&mut c.db, start_req).unwrap();
-        let sid = started.snapshot.session_id.clone().unwrap();
+        // 保留午夜恰好暂停，并覆盖 23:55 暂停、01:55 恢复的真正跨午夜暂停。
+        for pause_lead in [0, 300_000] {
+            let pause_at = midnight - pause_lead;
+            let mut c = setup(TaskStatus::Ready, None);
+            c.advance(pause_at - before_midnight - base); // 午夜前开始
+            let start_req = c.start_req();
+            let started = c.coord.start(&mut c.db, start_req).unwrap();
+            let sid = started.snapshot.session_id.clone().unwrap();
 
-        advance_in_ticks(&mut c, before_midnight); // 恰好到 00:00
-        let version = c.coord.live().unwrap().row_version;
-        let pause_req = c.session_req(&sid, version);
-        c.coord.pause(&mut c.db, pause_req).unwrap();
+            advance_in_ticks(&mut c, before_midnight); // 推进至暂停边界
+            let version = c.coord.live().unwrap().row_version;
+            let pause_req = c.session_req(&sid, version);
+            c.coord.pause(&mut c.db, pause_req).unwrap();
 
-        advance_in_ticks(&mut c, pause_span); // 暂停期间跨过午夜
-        let version = c.coord.live().unwrap().row_version;
-        let task_version = c.task_version();
-        let resume_req = c.resume_req(&sid, task_version, version);
-        c.coord.resume(&mut c.db, resume_req).unwrap();
+            advance_in_ticks(&mut c, pause_span); // 暂停期间跨过午夜
+            let version = c.coord.live().unwrap().row_version;
+            let task_version = c.task_version();
+            let resume_req = c.resume_req(&sid, task_version, version);
+            c.coord.resume(&mut c.db, resume_req).unwrap();
 
-        advance_in_ticks(&mut c, after_midnight);
-        let version = c.coord.live().unwrap().row_version;
-        let finish_req = c.session_req(&sid, version);
-        let finished = c.coord.finish(&mut c.db, finish_req).unwrap();
+            advance_in_ticks(&mut c, after_midnight);
+            let version = c.coord.live().unwrap().row_version;
+            let finish_req = c.session_req(&sid, version);
+            let finished = c.coord.finish(&mut c.db, finish_req).unwrap();
 
-        let ivs = session_repo::intervals_of_session(c.db.connection(), &sid).unwrap();
-        assert_eq!(ivs.len(), 2, "暂停把工作切成两段，不该多出第三个区间");
-        assert_eq!(ivs[0].started_at, midnight - before_midnight);
-        assert_eq!(ivs[0].ended_at, Some(midnight));
-        assert_eq!(ivs[0].duration_ms, Some(before_midnight));
-        assert_eq!(ivs[1].started_at, midnight + pause_span);
-        assert_eq!(
-            ivs[1].ended_at,
-            Some(midnight + pause_span + after_midnight)
-        );
-        assert_eq!(ivs[1].duration_ms, Some(after_midnight));
-        assert!(
-            ivs.iter().all(|i| !i.needs_review && i.voided_at.is_none()),
-            "这两段都是可信事实，不是待确认"
-        );
-        assert_eq!(
-            finished.snapshot.active_ms,
-            before_midnight + after_midnight,
-            "暂停的两小时不计入工时"
-        );
-        // 日界恰好落在两段之间：没有任何一段跨越午夜（P5 将按此分桶）
-        assert!(ivs[0].ended_at.unwrap() <= midnight);
-        assert!(ivs[1].started_at >= midnight);
+            let ivs = session_repo::intervals_of_session(c.db.connection(), &sid).unwrap();
+            assert_eq!(ivs.len(), 2, "暂停把工作切成两段，不该多出第三个区间");
+            assert_eq!(ivs[0].started_at, pause_at - before_midnight);
+            assert_eq!(ivs[0].ended_at, Some(pause_at));
+            assert_eq!(ivs[0].duration_ms, Some(before_midnight));
+            assert_eq!(ivs[1].started_at, pause_at + pause_span);
+            assert_eq!(
+                ivs[1].ended_at,
+                Some(pause_at + pause_span + after_midnight)
+            );
+            assert_eq!(ivs[1].duration_ms, Some(after_midnight));
+            assert!(
+                ivs.iter().all(|i| !i.needs_review && i.voided_at.is_none()),
+                "这两段都是可信事实，不是待确认"
+            );
+            assert_eq!(
+                finished.snapshot.active_ms,
+                before_midnight + after_midnight,
+                "暂停的两小时不计入工时"
+            );
+            // 两种情形日界都落在两段之间：没有任何一段跨越午夜（P5 将按此分桶）
+            assert!(ivs[0].ended_at.unwrap() <= midnight);
+            assert!(ivs[1].started_at >= midnight);
+        }
     }
 
     /// **重复提交同一请求**（04 §9 的「重复提交」）：客户端把同一条 `start` 重放一次，
