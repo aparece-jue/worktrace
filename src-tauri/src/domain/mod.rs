@@ -5,5 +5,8 @@
 
 pub mod error;
 pub mod interval;
+pub mod localdate;
+pub mod project;
 pub mod session;
+pub mod tag;
 pub mod task;

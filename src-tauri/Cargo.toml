@@ -30,6 +30,13 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
 
+# P4：时区与日历（02 §9 的「今日」按用户时区算，不取 updated_at）。
+# 必须用**非默认特性**：默认特性会拉 `jiff-static`，本机离线缓存里没有它，
+# `cargo test --offline` 会直接失败（已实测）。
+# `tzdb-bundle-platform` 把 IANA 库打进产物（Windows 打包不依赖系统 tzdata）；
+# `tz-system` 让「今日」能默认取机器时区（本机实测 Asia/Shanghai）。
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform"] }
+
 [dev-dependencies]
 tempfile = "3"
 
