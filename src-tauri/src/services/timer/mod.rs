@@ -5,4 +5,5 @@
 
 pub mod anchor;
 pub mod coordinator;
+pub mod primitives;
 pub mod snapshot;

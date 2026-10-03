@@ -1004,3 +1004,102 @@ impl Coordinator {
         Ok(total)
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P5 的统计采样接缝
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一次统计采样。
+///
+/// **为什么需要专门的接缝**：统计要把「已确认闭合工时」和「当前开放区间的暂计」
+/// 加起来，而这两者必须来自**同一个瞬间**。若先查闭合再查开放，中间夹了一次采样，
+/// 同一段时间就会被算两遍（区间刚好在两次查询之间闭合时最明显）。
+///
+/// 这里保证三件事：
+/// 1. 样本、区间分类、归属终点都出自**同一次调用**，也就是同一个串行边界；
+/// 2. `closed_trusted_ms` 只累加**已闭合且可信**的区间，`live_ms` 只算**当前开放**那一段，
+///    一遍回放分出来，**互斥**；
+/// 3. `attributed_end` 是 `A(M)`——开放区间暂计到这里为止，调用方不要自己再取挂钟。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatsSample {
+    pub run_id: String,
+    pub session_id: Option<String>,
+    pub session_version: Option<i64>,
+    /// 当前开放区间 id。没有在计时的区间时为 `None`。
+    pub open_interval_id: Option<String>,
+    /// 归属终点 `A(M)`。
+    pub attributed_end: i64,
+    /// 已确认可信闭合工时。**不含** `live_ms`。
+    pub closed_trusted_ms: i64,
+    /// 当前开放区间的暂计。与 `closed_trusted_ms` **互斥**，不会重复计入。
+    pub live_ms: i64,
+    pub state: Option<SessionState>,
+}
+
+impl StatsSample {
+    /// 两段之和。调用方要用总工时就用它，别自己加——加错了就是重复计入。
+    pub fn total_ms(&self) -> i64 {
+        self.closed_trusted_ms + self.live_ms
+    }
+}
+
+impl Coordinator {
+    /// 取一次统计采样。检测到异常时**先提交恢复事务**，再以恢复语义返回 Err——
+    /// 统计不能基于不可信的事实。
+    pub fn stats_sample(&mut self, db: &mut Db) -> Result<StatsSample, AppError> {
+        self.refuse_if_faulted()?;
+        let sample = self
+            .clock
+            .sample()
+            .map_err(|_| AppError::RecoveryRequired)?;
+        let verdict = self.observe(sample);
+        if verdict.needs_recovery() {
+            let _ = self.handle_anomaly(db, sample, verdict)?;
+            return Err(AppError::RecoveryRequired);
+        }
+        let attributed_end = self.attribute(sample.monotonic_ms);
+
+        let Some(live) = self.live.clone() else {
+            return Ok(StatsSample {
+                run_id: self.run_id.clone(),
+                session_id: None,
+                session_version: None,
+                open_interval_id: None,
+                attributed_end,
+                closed_trusted_ms: 0,
+                live_ms: 0,
+                state: None,
+            });
+        };
+
+        // **一遍回放**分出两段：闭合可信的进 closed，当前开放的进 live。
+        // 用 `if/else` 而不是两次 `filter`——那样一个区间就可能同时落进两边。
+        let mut closed_trusted_ms = 0;
+        let mut open_interval_id = None;
+        let mut live_ms = 0;
+        for iv in session_repo::intervals_of_session(db.connection(), &live.id)? {
+            let voided = iv.voided_at.is_some();
+            match iv.ended_at {
+                Some(_) if !voided && !iv.needs_review => {
+                    closed_trusted_ms += iv.duration_ms.unwrap_or(0);
+                }
+                None if !voided && live.state == SessionState::Running => {
+                    open_interval_id = Some(iv.id.clone());
+                    live_ms = (attributed_end - iv.started_at).max(0);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(StatsSample {
+            run_id: self.run_id.clone(),
+            session_id: Some(live.id),
+            session_version: Some(live.row_version),
+            open_interval_id,
+            attributed_end,
+            closed_trusted_ms,
+            live_ms,
+            state: Some(live.state),
+        })
+    }
+}
