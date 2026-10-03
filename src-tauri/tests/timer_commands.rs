@@ -525,3 +525,470 @@ fn a_failure_in_the_last_step_rolls_back_field_by_field() {
         "revision 不得前进"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 命令层：start / pause / resume / finish
+// ─────────────────────────────────────────────────────────────────────────────
+
+mod commands {
+    use std::sync::{Arc, Mutex};
+
+    use worktrace_lib::domain::session::{SessionMode, SessionState, TimerKind};
+    use worktrace_lib::domain::task::TaskStatus;
+    use worktrace_lib::platform::clock::FakeClock;
+    use worktrace_lib::services::timer::coordinator::{
+        Coordinator, ResumeRequest, SessionRequest, StartRequest,
+    };
+    use worktrace_lib::storage::db::Db;
+    use worktrace_lib::storage::meta::{init_meta, require_meta};
+    use worktrace_lib::storage::migrations::migrate;
+    use worktrace_lib::storage::session_repo;
+    use worktrace_lib::storage::task_repo;
+
+    struct Cmd {
+        _dir: tempfile::TempDir,
+        db: Db,
+        clock: Arc<Mutex<FakeClock>>,
+        coord: Coordinator,
+        epoch: String,
+    }
+
+    fn setup(task_status: TaskStatus, estimate: Option<&str>) -> Cmd {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Db::open(dir.path().join("w.db")).unwrap();
+        migrate(db.connection()).unwrap();
+        let tx = db.connection_mut().unchecked_transaction().unwrap();
+        let meta = init_meta(&tx).unwrap();
+        tx.execute(
+            "INSERT INTO application_run(id, started_at) VALUES('run-1', 0)",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO project(id,name,row_version,status,created_at,updated_at)
+             VALUES('p1','项目',0,'active',0,0)",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO task(id,project_id,title,status,estimated_json,row_version,
+                              created_at,updated_at)
+             VALUES('t1','p1','任务',?1,?2,0,0,0)",
+            rusqlite::params![task_status.as_str(), estimate],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+
+        let clock = Arc::new(Mutex::new(FakeClock::new(1_700_000_000_000, 0)));
+        let coord = Coordinator::new(Box::new(Arc::clone(&clock)), "run-1");
+        Cmd {
+            _dir: dir,
+            db,
+            clock,
+            coord,
+            epoch: meta.data_epoch,
+        }
+    }
+
+    impl Cmd {
+        fn start_req(&self) -> StartRequest {
+            StartRequest {
+                expected_data_epoch: self.epoch.clone(),
+                task_id: "t1".into(),
+                task_expected_version: 0,
+                mode: SessionMode::Foreground,
+                timer_kind: TimerKind::Stopwatch,
+                target_duration_ms: None,
+                expected_interval_ms: 30_000,
+            }
+        }
+
+        fn session_req(&self, session_id: &str, version: i64) -> SessionRequest {
+            SessionRequest {
+                expected_data_epoch: self.epoch.clone(),
+                session_id: session_id.into(),
+                session_expected_version: version,
+            }
+        }
+
+        fn resume_req(&self, session_id: &str, tv: i64, sv: i64) -> ResumeRequest {
+            ResumeRequest {
+                expected_data_epoch: self.epoch.clone(),
+                task_id: "t1".into(),
+                task_expected_version: tv,
+                session_id: session_id.into(),
+                session_expected_version: sv,
+            }
+        }
+
+        fn advance(&self, ms: i64) {
+            self.clock.lock().unwrap().advance_both(ms);
+        }
+
+        fn advance_wall_only(&self, ms: i64) {
+            self.clock.lock().unwrap().advance_wall(ms);
+        }
+
+        fn advance_mono_only(&self, ms: i64) {
+            self.clock.lock().unwrap().advance_monotonic(ms);
+        }
+
+        fn task_status(&self) -> TaskStatus {
+            task_repo::get_task(self.db.connection(), "t1")
+                .unwrap()
+                .unwrap()
+                .status
+        }
+
+        fn task_version(&self) -> i64 {
+            task_repo::get_task(self.db.connection(), "t1")
+                .unwrap()
+                .unwrap()
+                .row_version
+        }
+
+        fn count(&self, table: &str) -> i64 {
+            self.db
+                .connection()
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        }
+    }
+
+    /// `start` 建起完整链条：会话 + 区间 + 初始检查点 + 任务 Doing + 恰好一次 revision。
+    #[test]
+    fn start_builds_the_whole_chain() {
+        let mut c = setup(TaskStatus::Ready, Some(r#"{"p50":60000}"#));
+        let rev_before = require_meta(c.db.connection()).unwrap().revision;
+
+        let req = c.start_req();
+        let out = c.coord.start(&mut c.db, req).unwrap();
+
+        assert_eq!(out.revision, rev_before + 1, "一次业务写只加一次");
+        assert_eq!(c.task_status(), TaskStatus::Doing);
+        assert_eq!(c.count("work_session"), 1);
+        assert_eq!(c.count("work_interval"), 1);
+        assert_eq!(c.count("interval_checkpoint"), 1, "初始检查点 elapsed=0");
+        assert_eq!(c.count("task_change"), 2, "理清 + 起做各一条审计");
+        assert_eq!(out.snapshot.state, Some(SessionState::Running));
+        assert_eq!(out.snapshot.active_ms, 0, "刚起步暂计为 0");
+    }
+
+    /// **「理清」是两步**：02 §5 里 `Inbox → Doing` 不合法，必须 `Inbox → Ready → Doing`。
+    #[test]
+    fn start_from_inbox_clarifies_through_ready_first() {
+        let mut c = setup(TaskStatus::Inbox, None);
+        let req = c.start_req();
+        c.coord.start(&mut c.db, req).unwrap();
+
+        assert_eq!(c.task_status(), TaskStatus::Doing);
+        assert_eq!(c.count("task_change"), 3, "冻结基准、Ready、Doing 各一条");
+        // 版本链：冻结基准 0→1，Ready 1→2，Doing 2→3
+        assert_eq!(c.task_version(), 3, "冻结基准也算一次任务改动");
+    }
+
+    /// 首次 start 冻结估时基准，之后再 start（新会话）不覆盖。
+    #[test]
+    fn start_freezes_the_estimate_baseline_once() {
+        let mut c = setup(TaskStatus::Ready, Some(r#"{"p50":111}"#));
+        let req = c.start_req();
+        c.coord.start(&mut c.db, req).unwrap();
+        let baseline = task_repo::read_estimate(c.db.connection(), "t1")
+            .unwrap()
+            .unwrap()
+            .baseline_estimate_json;
+        assert_eq!(baseline, Some(r#"{"p50":111}"#.into()));
+
+        // 用户改估时后重开会话
+        c.db.connection()
+            .execute(
+                "UPDATE task SET estimated_json='{\"p50\":999}' WHERE id='t1'",
+                [],
+            )
+            .unwrap();
+        c.advance(1_000);
+        let sid = c.coord.live().unwrap().id.clone();
+        let sv = c.coord.live().unwrap().row_version;
+        let req = c.session_req(&sid, sv);
+        c.coord.finish(&mut c.db, req).unwrap();
+
+        let tv = c.task_version();
+        let mut req = c.start_req();
+        req.task_expected_version = tv;
+        c.coord.start(&mut c.db, req).unwrap();
+
+        let after = task_repo::read_estimate(c.db.connection(), "t1")
+            .unwrap()
+            .unwrap()
+            .baseline_estimate_json;
+        assert_eq!(
+            after,
+            Some(r#"{"p50":111}"#.into()),
+            "基准不得被第二次 start 覆盖"
+        );
+    }
+
+    /// `pause` 用已验证的单调差闭合区间，并把工时冻结下来。
+    #[test]
+    fn pause_closes_the_interval_with_a_verified_difference() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let req = c.start_req();
+        c.coord.start(&mut c.db, req).unwrap();
+        c.advance(7_000);
+
+        let sid = c.coord.live().unwrap().id.clone();
+        let sv = c.coord.live().unwrap().row_version;
+        let req = c.session_req(&sid, sv);
+        let out = c.coord.pause(&mut c.db, req).unwrap();
+
+        assert_eq!(out.snapshot.state, Some(SessionState::Paused));
+        assert_eq!(out.snapshot.active_ms, 7_000);
+        assert_eq!(c.count("work_interval"), 1);
+
+        let iv = session_repo::intervals_of_session(c.db.connection(), &sid).unwrap();
+        assert!(iv[0].ended_at.is_some(), "区间已闭合");
+        assert_eq!(iv[0].duration_ms, Some(7_000), "可信闭合区间带 duration");
+        assert_eq!(
+            iv[0].sampled_end_wall_at,
+            Some(1_700_000_007_000),
+            "保留采样到的结束挂钟"
+        );
+
+        // 暂停后再走时间也不涨
+        c.advance(60_000);
+        let snap = c.coord.snapshot(c.db.connection()).unwrap();
+        assert_eq!(snap.active_ms, 7_000);
+    }
+
+    /// **`paused` 可直接 `finish`**（02 §3）。
+    #[test]
+    fn a_paused_session_can_finish_directly() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let req = c.start_req();
+        c.coord.start(&mut c.db, req).unwrap();
+        c.advance(3_000);
+        let sid = c.coord.live().unwrap().id.clone();
+        let sv = c.coord.live().unwrap().row_version;
+        let req = c.session_req(&sid, sv);
+        c.coord.pause(&mut c.db, req).unwrap();
+
+        let sv2 = c.coord.live().unwrap().row_version;
+        let req = c.session_req(&sid, sv2);
+        let out = c.coord.finish(&mut c.db, req).unwrap();
+        assert_eq!(out.snapshot.state, Some(SessionState::Finished));
+        assert_eq!(out.snapshot.active_ms, 3_000, "暂停期间的时长不计入");
+        assert_eq!(
+            c.count("work_interval"),
+            1,
+            "暂停时已闭合，finish 不再开新区间"
+        );
+    }
+
+    /// `resume` **两份版本都要对**。
+    #[test]
+    fn resume_validates_both_versions() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let req = c.start_req();
+        c.coord.start(&mut c.db, req).unwrap();
+        c.advance(2_000);
+        let sid = c.coord.live().unwrap().id.clone();
+        let sv = c.coord.live().unwrap().row_version;
+        let req = c.session_req(&sid, sv);
+        c.coord.pause(&mut c.db, req).unwrap();
+
+        let tv = c.task_version();
+        let sv2 = c.coord.live().unwrap().row_version;
+
+        // 任务版本错
+        let bad_task = c.resume_req(&sid, tv + 99, sv2);
+        assert_eq!(
+            c.coord.resume(&mut c.db, bad_task).unwrap_err().code(),
+            "VERSION_CONFLICT"
+        );
+
+        // 会话版本错
+        let bad_sess = c.resume_req(&sid, tv, sv2 + 99);
+        assert_eq!(
+            c.coord.resume(&mut c.db, bad_sess).unwrap_err().code(),
+            "VERSION_CONFLICT"
+        );
+
+        // 都对才通过，并开新区间、不清空已用工时
+        let req = c.resume_req(&sid, tv, sv2);
+        let out = c.coord.resume(&mut c.db, req).unwrap();
+        assert_eq!(out.snapshot.state, Some(SessionState::Running));
+        assert_eq!(c.count("work_interval"), 2, "续接开新区间");
+        c.advance(1_000);
+        let snap = c.coord.snapshot(c.db.connection()).unwrap();
+        assert_eq!(snap.active_ms, 3_000, "2 秒旧工时 + 1 秒新暂计，不清空");
+    }
+
+    /// `resume` 拒绝不在 `Ready`/`Doing` 的任务——**不隐式解除等待、不重开已结束的任务**。
+    #[test]
+    fn resume_refuses_tasks_that_are_not_ready_or_doing() {
+        for status in [
+            TaskStatus::Waiting,
+            TaskStatus::Blocked,
+            TaskStatus::Done,
+            TaskStatus::Inbox,
+        ] {
+            let mut c = setup(status, None);
+            // 手工造一个 paused 会话（绕过 start，因为 start 会改任务状态）
+            c.db.connection()
+                .execute(
+                    "INSERT INTO work_session(id,task_id,run_id,mode,state,timer_kind,
+                                              started_at,row_version)
+                     VALUES('s1','t1','run-1','FOREGROUND','paused','stopwatch',0,0)",
+                    [],
+                )
+                .unwrap();
+            let req = c.resume_req("s1", 0, 0);
+            let err = c.coord.resume(&mut c.db, req).unwrap_err();
+            assert_eq!(err.code(), "DOMAIN_ERROR", "{status:?} 不该被允许继续");
+            assert_eq!(c.count("work_interval"), 0, "{status:?} 被拒时不得开区间");
+        }
+    }
+
+    /// **旧 epoch 直接拒绝，不写入任何东西**（尤其不得借无效请求写异常事实）。
+    #[test]
+    fn a_stale_epoch_is_rejected_before_any_sampling_or_writing() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let rev_before = require_meta(c.db.connection()).unwrap().revision;
+
+        let mut req = c.start_req();
+        req.expected_data_epoch = "epoch-from-a-previous-database".into();
+        let err = c.coord.start(&mut c.db, req).unwrap_err();
+
+        assert_eq!(err.code(), "DATA_EPOCH_MISMATCH");
+        assert_eq!(c.count("work_session"), 0);
+        assert_eq!(c.count("work_interval"), 0);
+        assert_eq!(c.count("task_change"), 0);
+        assert_eq!(c.task_status(), TaskStatus::Ready, "任务状态不得变化");
+        assert_eq!(
+            require_meta(c.db.connection()).unwrap().revision,
+            rev_before
+        );
+    }
+
+    /// **有效命令遇异常**：返回 `RECOVERY_REQUIRED`，**原意图不执行**，也不写库。
+    #[test]
+    fn an_anomaly_makes_the_command_refuse_without_executing() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let req = c.start_req();
+        c.coord.start(&mut c.db, req).unwrap();
+        let sid = c.coord.live().unwrap().id.clone();
+        let sv = c.coord.live().unwrap().row_version;
+        let sessions_before = c.count("work_session");
+        let rev_before = require_meta(c.db.connection()).unwrap().revision;
+
+        // 单调钟走 1 秒、挂钟走 31 秒 → 单拍增量差 30 秒，判为跳变。
+        // 注意不能只 advance(30_000)：那样两个时钟同步推进，是正常的一拍，不是异常。
+        c.advance_mono_only(1_000);
+        c.advance_wall_only(31_000);
+        let req = c.session_req(&sid, sv);
+        let err = c.coord.pause(&mut c.db, req).unwrap_err();
+
+        assert_eq!(err.code(), "RECOVERY_REQUIRED");
+        assert_eq!(c.count("work_session"), sessions_before, "不得新建会话");
+        assert_eq!(
+            require_meta(c.db.connection()).unwrap().revision,
+            rev_before,
+            "原意图不执行，也不加 revision"
+        );
+        let iv = session_repo::intervals_of_session(c.db.connection(), &sid).unwrap();
+        assert_eq!(iv[0].ended_at, None, "区间不该被闭合——原意图没执行");
+    }
+
+    /// **占用冲突**：前台只能有一个 running 会话（`uq_running_foreground`）。
+    #[test]
+    fn a_second_foreground_start_is_refused_by_the_index() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let req = c.start_req();
+        c.coord.start(&mut c.db, req).unwrap();
+
+        // 第二个任务
+        c.db.connection()
+            .execute(
+                "INSERT INTO task(id,title,status,row_version,created_at,updated_at)
+                 VALUES('t2','第二个','Ready',0,0,0)",
+                [],
+            )
+            .unwrap();
+        let mut req = c.start_req();
+        req.task_id = "t2".into();
+        let err = c.coord.start(&mut c.db, req).unwrap_err();
+
+        assert_eq!(err.code(), "STORAGE_ERROR", "唯一索引应拦下第二个前台会话");
+        assert_eq!(c.count("work_session"), 1);
+    }
+
+    /// `recovering` 拒绝普通工作命令，需 P3 的 `reconcile`。
+    #[test]
+    fn a_recovering_session_refuses_normal_commands() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let req = c.start_req();
+        c.coord.start(&mut c.db, req).unwrap();
+        let sid = c.coord.live().unwrap().id.clone();
+        c.db.connection()
+            .execute(
+                "UPDATE work_session SET state='recovering', needs_review=1 WHERE id=?1",
+                [&sid],
+            )
+            .unwrap();
+        c.coord.load_session(c.db.connection(), &sid).unwrap();
+        let sv = c.coord.live().unwrap().row_version;
+
+        let req = c.session_req(&sid, sv);
+        assert_eq!(
+            c.coord.pause(&mut c.db, req).unwrap_err().code(),
+            "RECOVERY_REQUIRED"
+        );
+        let req = c.session_req(&sid, sv);
+        assert_eq!(
+            c.coord.finish(&mut c.db, req).unwrap_err().code(),
+            "RECOVERY_REQUIRED"
+        );
+    }
+
+    /// **采样失败不得伪造样本**：命令拒绝，且不写任何东西。
+    #[test]
+    fn a_failed_sample_makes_the_command_refuse() {
+        let mut c = setup(TaskStatus::Ready, None);
+        c.clock.lock().unwrap().fail_forever();
+
+        let req = c.start_req();
+        let err = c.coord.start(&mut c.db, req).unwrap_err();
+        assert_eq!(err.code(), "RECOVERY_REQUIRED");
+        assert_eq!(c.count("work_session"), 0);
+        assert_eq!(c.task_status(), TaskStatus::Ready);
+    }
+
+    /// 整个链条的失败注入：末步骤故障 → 字段级回滚。
+    #[test]
+    fn a_failure_anywhere_leaves_no_partial_facts() {
+        let mut c = setup(TaskStatus::Ready, Some(r#"{"p50":1}"#));
+        // 把 task 的估时字段改成一个会撞 CHECK 的值不行——改成让 session 的预算非法：
+        let mut req = c.start_req();
+        req.timer_kind = TimerKind::Countdown;
+        req.target_duration_ms = Some(0); // 倒计时预算必须为正 → 被拒
+
+        let err = c.coord.start(&mut c.db, req).unwrap_err();
+        assert_eq!(err.code(), "DOMAIN_ERROR");
+
+        // 字段级核对
+        assert_eq!(c.count("work_session"), 0, "不得留会话");
+        assert_eq!(c.count("work_interval"), 0, "不得留区间");
+        assert_eq!(c.count("interval_checkpoint"), 0, "不得留检查点");
+        assert_eq!(c.task_status(), TaskStatus::Ready, "任务状态不得变化");
+        assert_eq!(c.task_version(), 0, "任务版本不得前进");
+        assert_eq!(
+            task_repo::read_estimate(c.db.connection(), "t1")
+                .unwrap()
+                .unwrap()
+                .baseline_estimate_json,
+            None,
+            "基准不得残留"
+        );
+        assert_eq!(c.count("task_change"), 0, "不得留审计");
+    }
+}

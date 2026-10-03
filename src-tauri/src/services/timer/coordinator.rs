@@ -10,17 +10,65 @@
 //! - **命令**（Task 3）：先校验请求，再由协调器采样——**调用方不得预先传入采样**，
 //!   否则就能「先采样再校验请求」，违反总纲 §9。
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
-use crate::domain::interval::IntervalFacts;
-use crate::domain::session::{SessionState, TimerBudget, TimerKind};
+use crate::domain::interval::{ClosedIntervalFacts, IntervalFacts};
+use crate::domain::session::{SessionMode, SessionState, TimerBudget, TimerKind};
+use crate::domain::task::{TaskStatus, TransitionCause};
 use crate::error::AppError;
 use crate::platform::clock::{Clock, ClockSample};
-use crate::storage::meta::require_meta;
-use crate::storage::session_repo;
+use crate::storage::checkpoint_repo::{self, Checkpoint};
+use crate::storage::db::{map_sqlite, Db};
+use crate::storage::guards::{guard_epoch, guard_row_version};
+use crate::storage::meta::{bump_revision, require_meta};
+use crate::storage::session_repo::{self, SessionStateUpdate};
+use crate::storage::task_repo;
 
 use super::anchor::{AnchorState, SampleVerdict};
 use super::snapshot::TimerSnapshot;
+
+/// 一次 `start` 请求。
+///
+/// **公开入口只收请求，不收采样**：先校验请求，再由协调器采样。若让调用方传采样，
+/// 它就能「先采样再校验」，而总纲 §9 明确要求「失败直接拒绝用户命令，
+/// 不借该无效请求采样或写异常事实」。
+#[derive(Debug, Clone)]
+pub struct StartRequest {
+    pub expected_data_epoch: String,
+    pub task_id: String,
+    pub task_expected_version: i64,
+    pub mode: SessionMode,
+    pub timer_kind: TimerKind,
+    pub target_duration_ms: Option<i64>,
+    /// 时钟的预期采样间隔；用于识别挂起。
+    pub expected_interval_ms: i64,
+}
+
+/// 一次 `pause` / `finish` 请求。
+#[derive(Debug, Clone)]
+pub struct SessionRequest {
+    pub expected_data_epoch: String,
+    pub session_id: String,
+    pub session_expected_version: i64,
+}
+
+/// 一次 `resume` 请求。**两份版本**：任务与会话各自有自己的并发版本。
+#[derive(Debug, Clone)]
+pub struct ResumeRequest {
+    pub expected_data_epoch: String,
+    pub task_id: String,
+    pub task_expected_version: i64,
+    pub session_id: String,
+    pub session_expected_version: i64,
+}
+
+/// 命令成功后的产物。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutcome {
+    pub snapshot: TimerSnapshot,
+    /// 本次事务后的权威 `revision`。前端据此丢弃过期响应。
+    pub revision: i64,
+}
 
 /// 协调器在内存里持有的会话事实。**每一条都能在库里找到对应行**——
 /// 它不是第二份真相源，只是避免每次查询都重新聚合的缓存。
@@ -263,4 +311,441 @@ pub const HEARTBEAT_INTERVAL_MS: i64 = 30_000;
 /// 只读地构造一个计时类型，供测试与 P7 的展示层复用。
 pub fn timer_kind_of(state: &LiveSession) -> TimerKind {
     state.budget.kind
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 命令（Task 3）
+//
+// 统一顺序（总纲 §9）：
+//   ① 校验请求（epoch / 存在性 / 版本）——失败**直接拒绝，不采样、不写任何东西**
+//   ② 取一次采样并检测
+//   ③ 有异常 → 返回 RECOVERY_REQUIRED，不执行原意图（恢复事务由 Task 4 落）
+//   ④ 正常路径 → 一个业务事务里再校验一次、调用仓储原语、恰好加一次 revision
+//   ⑤ 提交成功后才应用内存
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl Coordinator {
+    /// 开始一次会话。
+    ///
+    /// 「理清」在这里是**两步**：02 §5 里 `Inbox → Doing` 不合法，必须
+    /// `Inbox → Ready → Doing`。两次跃迁各自的 `expected_row_version` 按前一步的结果递进。
+    pub fn start(&mut self, db: &mut Db, req: StartRequest) -> Result<CommandOutcome, AppError> {
+        // ① 校验请求——此阶段绝不采样
+        {
+            let conn = db.connection();
+            guard_epoch_ro(conn, &req.expected_data_epoch)?;
+            guard_row_version_of_ro(conn, "task", &req.task_id, req.task_expected_version)?;
+        }
+
+        // ② 采样 + 检测。命令入口**自己**采样，调用方不得预先传入。
+        let sample = self
+            .clock
+            .sample()
+            .map_err(|_| AppError::RecoveryRequired)?;
+        if let Some(st) = self.anchor_state.as_mut() {
+            if st.observe(sample).needs_recovery() {
+                // ③ 不执行原意图。恢复事务（分割 + recovering）归 Task 4。
+                return Err(AppError::RecoveryRequired);
+            }
+        }
+        if self.anchor_state.is_none() {
+            self.establish_anchor(sample);
+        }
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let interval_id = uuid::Uuid::new_v4().to_string();
+        let attributed_start = self.attribute(sample.monotonic_ms);
+        let now_wall = sample.wall_ms;
+
+        // ④ 一个业务事务
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        guard_epoch(&tx, &req.expected_data_epoch)?;
+
+        // 首次 start 冻结估时基准（判据是「还没有任何会话」，见 task_repo）
+        let frozen = task_repo::freeze_baseline_estimate(
+            &tx,
+            &req.task_id,
+            req.task_expected_version,
+            now_wall,
+        )?;
+        let mut version = match frozen {
+            task_repo::FreezeOutcome::Frozen { new_version, .. } => new_version,
+            task_repo::FreezeOutcome::AlreadyFrozen { .. } => req.task_expected_version,
+        };
+
+        // 理清：Inbox/Clarifying → Ready → Doing；Ready → Doing；Doing 保持
+        let current = task_repo::get_task(&tx, &req.task_id)?.ok_or_else(|| AppError::Domain {
+            detail: "任务不存在。".into(),
+        })?;
+        if current.status == TaskStatus::Inbox || current.status == TaskStatus::Clarifying {
+            let clarified = task_repo::transition_task(
+                &tx,
+                &req.task_id,
+                version,
+                TaskStatus::Ready,
+                TransitionCause::User,
+                now_wall,
+            )?;
+            version = clarified.row_version;
+        }
+        if task_repo::get_task(&tx, &req.task_id)?.map(|t| t.status) != Some(TaskStatus::Doing) {
+            let started = task_repo::transition_task(
+                &tx,
+                &req.task_id,
+                version,
+                TaskStatus::Doing,
+                TransitionCause::User,
+                now_wall,
+            )?;
+            version = started.row_version;
+        }
+        let _ = version;
+
+        session_repo::create_session(
+            &tx,
+            &session_id,
+            &req.task_id,
+            &self.run_id,
+            req.mode,
+            req.timer_kind,
+            req.target_duration_ms,
+            attributed_start,
+            &interval_id,
+        )?;
+
+        checkpoint_repo::write(
+            &tx,
+            &Checkpoint {
+                interval_id: interval_id.clone(),
+                run_id: self.run_id.clone(),
+                wall_at: now_wall,
+                attribution_at: attributed_start,
+                elapsed_ms: 0,
+            },
+        )?;
+
+        let revision = bump_revision(&tx)?;
+        tx.commit().map_err(map_sqlite)?;
+
+        // ⑤ 提交成功后才应用内存
+        self.load_session(db.connection(), &session_id)?;
+        Ok(CommandOutcome {
+            snapshot: self.build(db.connection(), sample, false)?,
+            revision,
+        })
+    }
+}
+
+/// 只读的 epoch 校验：命令的**第一阶段**用，此时还没有事务。
+fn guard_epoch_ro(conn: &Connection, expected: &str) -> Result<(), AppError> {
+    let actual: String = conn
+        .query_row(
+            "SELECT data_epoch FROM app_meta WHERE singleton = 1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(map_sqlite)?;
+    if actual != expected {
+        return Err(AppError::DataEpochMismatch);
+    }
+    Ok(())
+}
+
+/// 只读的版本校验：同上，用于第一阶段。
+fn guard_row_version_of_ro(
+    conn: &Connection,
+    table: &'static str,
+    id: &str,
+    expected: i64,
+) -> Result<(), AppError> {
+    let sql = format!("SELECT row_version FROM {table} WHERE id = ?1");
+    let actual: Option<i64> = conn
+        .query_row(&sql, [id], |r| r.get(0))
+        .optional()
+        .map_err(map_sqlite)?;
+    match actual {
+        None => Err(AppError::Domain {
+            detail: "记录不存在。".into(),
+        }),
+        Some(v) => crate::storage::guards::guard_row_version(v, expected),
+    }
+}
+
+/// 归属：`A(M)`。没有基线时退回采样本身的挂钟值。
+impl Coordinator {
+    fn attribute(&self, monotonic_ms: i64) -> i64 {
+        match self.anchor_state.as_ref() {
+            Some(st) => st.attribute(monotonic_ms),
+            None => monotonic_ms,
+        }
+    }
+}
+
+impl Coordinator {
+    /// 暂停。用已验证的单调差闭合当前区间。
+    pub fn pause(&mut self, db: &mut Db, req: SessionRequest) -> Result<CommandOutcome, AppError> {
+        self.validate_session_request(db, &req)?;
+        let sample = self.sample_and_detect()?;
+        let attributed_end = self.attribute(sample.monotonic_ms);
+
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        guard_epoch(&tx, &req.expected_data_epoch)?;
+
+        let session =
+            session_repo::get_session(&tx, &req.session_id)?.ok_or_else(|| AppError::Domain {
+                detail: "会话不存在。".into(),
+            })?;
+        guard_row_version(session.row_version, req.session_expected_version)?;
+        if session.state == SessionState::Recovering {
+            return Err(AppError::RecoveryRequired);
+        }
+        let (interval_id, started_at) = self.require_open_interval(&tx, &req.session_id)?;
+
+        close_with(
+            &tx,
+            &interval_id,
+            attributed_end,
+            started_at,
+            sample.wall_ms,
+        )?;
+        session_repo::update_session_state(
+            &tx,
+            &req.session_id,
+            session.row_version,
+            SessionState::Paused,
+            SessionStateUpdate {
+                ended_at: Some(attributed_end),
+                ..Default::default()
+            },
+        )?;
+
+        let revision = bump_revision(&tx)?;
+        tx.commit().map_err(map_sqlite)?;
+        self.load_session(db.connection(), &req.session_id)?;
+        Ok(CommandOutcome {
+            snapshot: self.build(db.connection(), sample, false)?,
+            revision,
+        })
+    }
+
+    /// 继续。**两份版本**：任务与会话各有自己的并发版本。
+    ///
+    /// 任务状态：`Doing` 保持、`Ready` 同事务转 `Doing`，其余一律拒绝——
+    /// **不隐式解除等待、也不重开已结束的任务**。发现目标不行就报错让用户去改，
+    /// 而不是替他做决定。
+    pub fn resume(&mut self, db: &mut Db, req: ResumeRequest) -> Result<CommandOutcome, AppError> {
+        {
+            let conn = db.connection();
+            guard_epoch_ro(conn, &req.expected_data_epoch)?;
+            guard_row_version_of_ro(conn, "task", &req.task_id, req.task_expected_version)?;
+            guard_row_version_of_ro(
+                conn,
+                "work_session",
+                &req.session_id,
+                req.session_expected_version,
+            )?;
+        }
+        let sample = self.sample_and_detect()?;
+        let attributed_start = self.attribute(sample.monotonic_ms);
+        let interval_id = uuid::Uuid::new_v4().to_string();
+
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        guard_epoch(&tx, &req.expected_data_epoch)?;
+
+        let session =
+            session_repo::get_session(&tx, &req.session_id)?.ok_or_else(|| AppError::Domain {
+                detail: "会话不存在。".into(),
+            })?;
+        guard_row_version(session.row_version, req.session_expected_version)?;
+        if session.state != SessionState::Paused {
+            return Err(AppError::Domain {
+                detail: "只有已暂停的会话可以继续。".into(),
+            });
+        }
+        // paused 且无待确认
+        for iv in session_repo::intervals_of_session(&tx, &req.session_id)? {
+            if iv.needs_review && iv.voided_at.is_none() {
+                return Err(AppError::RecoveryRequired);
+            }
+        }
+
+        let task = task_repo::get_task(&tx, &req.task_id)?.ok_or_else(|| AppError::Domain {
+            detail: "任务不存在。".into(),
+        })?;
+        guard_row_version(task.row_version, req.task_expected_version)?;
+        let mut version = task.row_version;
+        if task.status == TaskStatus::Ready {
+            version = task_repo::transition_task(
+                &tx,
+                &req.task_id,
+                version,
+                TaskStatus::Doing,
+                TransitionCause::User,
+                sample.wall_ms,
+            )?
+            .row_version;
+        } else if task.status != TaskStatus::Doing {
+            return Err(AppError::Domain {
+                detail: "任务不在可继续的状态。".into(),
+            });
+        }
+        let _ = version;
+
+        // 先切 run_id 与状态，再开新区间——顺序与计划一致
+        session_repo::update_session_state(
+            &tx,
+            &req.session_id,
+            session.row_version,
+            SessionState::Running,
+            SessionStateUpdate {
+                run_id: Some(&self.run_id),
+                ..Default::default()
+            },
+        )?;
+        session_repo::open_interval(&tx, &interval_id, &req.session_id, attributed_start)?;
+        checkpoint_repo::write(
+            &tx,
+            &Checkpoint {
+                interval_id: interval_id.clone(),
+                run_id: self.run_id.clone(),
+                wall_at: sample.wall_ms,
+                attribution_at: attributed_start,
+                elapsed_ms: 0,
+            },
+        )?;
+
+        let revision = bump_revision(&tx)?;
+        tx.commit().map_err(map_sqlite)?;
+        self.load_session(db.connection(), &req.session_id)?;
+        Ok(CommandOutcome {
+            snapshot: self.build(db.connection(), sample, false)?,
+            revision,
+        })
+    }
+
+    /// 结束。**可以从 `paused` 直接结束**（02 §3）。
+    pub fn finish(&mut self, db: &mut Db, req: SessionRequest) -> Result<CommandOutcome, AppError> {
+        self.validate_session_request(db, &req)?;
+        let sample = self.sample_and_detect()?;
+        let attributed_end = self.attribute(sample.monotonic_ms);
+
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        guard_epoch(&tx, &req.expected_data_epoch)?;
+
+        let session =
+            session_repo::get_session(&tx, &req.session_id)?.ok_or_else(|| AppError::Domain {
+                detail: "会话不存在。".into(),
+            })?;
+        guard_row_version(session.row_version, req.session_expected_version)?;
+        if session.state == SessionState::Recovering {
+            return Err(AppError::RecoveryRequired);
+        }
+        // running 才有关闭区间的动作；paused 直接设终态
+        if session.state == SessionState::Running {
+            let (interval_id, started_at) = self.require_open_interval(&tx, &req.session_id)?;
+            close_with(
+                &tx,
+                &interval_id,
+                attributed_end,
+                started_at,
+                sample.wall_ms,
+            )?;
+        }
+
+        session_repo::update_session_state(
+            &tx,
+            &req.session_id,
+            session.row_version,
+            SessionState::Finished,
+            SessionStateUpdate {
+                ended_at: Some(attributed_end),
+                ..Default::default()
+            },
+        )?;
+
+        let revision = bump_revision(&tx)?;
+        tx.commit().map_err(map_sqlite)?;
+        self.load_session(db.connection(), &req.session_id)?;
+        Ok(CommandOutcome {
+            snapshot: self.build(db.connection(), sample, false)?,
+            revision,
+        })
+    }
+}
+
+impl Coordinator {
+    /// 命令第一阶段：只校验请求，**不采样**。
+    fn validate_session_request(&self, db: &Db, req: &SessionRequest) -> Result<(), AppError> {
+        let conn = db.connection();
+        guard_epoch_ro(conn, &req.expected_data_epoch)?;
+        guard_row_version_of_ro(
+            conn,
+            "work_session",
+            &req.session_id,
+            req.session_expected_version,
+        )
+    }
+
+    /// 采样并检测。异常时返回 `RECOVERY_REQUIRED`，**不执行原意图**。
+    fn sample_and_detect(&mut self) -> Result<ClockSample, AppError> {
+        let sample = self
+            .clock
+            .sample()
+            .map_err(|_| AppError::RecoveryRequired)?;
+        if let Some(st) = self.anchor_state.as_mut() {
+            if st.observe(sample).needs_recovery() {
+                return Err(AppError::RecoveryRequired);
+            }
+        }
+        Ok(sample)
+    }
+
+    /// 取出当前开放区间；没有就报错。
+    fn require_open_interval(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        session_id: &str,
+    ) -> Result<(String, i64), AppError> {
+        for iv in session_repo::intervals_of_session(tx, session_id)? {
+            if iv.ended_at.is_none() && iv.voided_at.is_none() {
+                return Ok((iv.id, iv.started_at));
+            }
+        }
+        Err(AppError::Domain {
+            detail: "当前没有正在计时的区间。".into(),
+        })
+    }
+}
+
+/// 用协调器已验证的单调差闭合区间。**仓储不推算工时**。
+fn close_with(
+    tx: &rusqlite::Transaction<'_>,
+    interval_id: &str,
+    attributed_end: i64,
+    started_at: i64,
+    sampled_end_wall_at: i64,
+) -> Result<(), AppError> {
+    session_repo::close_interval(
+        tx,
+        interval_id,
+        ClosedIntervalFacts {
+            ended_at: attributed_end,
+            duration_ms: Some((attributed_end - started_at).max(0)),
+            sampled_end_wall_at,
+            needs_review: false,
+        },
+    )?;
+    Ok(())
 }
