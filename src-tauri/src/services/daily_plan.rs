@@ -143,13 +143,15 @@ pub struct DailyPlanView {
     pub revision: i64,
 }
 
-/// 加入 / 移除的产物：这一天**当前**的计划 + 提交后的 `revision`。
+/// 加入 / 移除的产物：这一天**当前**的计划 + 提交后的 `revision` 与库身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailyPlanChange {
     /// 按 `task.created_at, task.id` 稳定排序。
     pub tasks: Vec<TaskRow>,
     /// 提交后的权威 `revision`；`Unchanged` 时与调用前相等。
     pub revision: i64,
+    /// 这次写所在的库身份（与 `revision` **同一写事务**取得，提交后返回）。
+    pub data_epoch: String,
 }
 
 /// 读某一天（某个时区）的今日选择列表。**纯读**：不开写事务、不加 `revision`、
@@ -212,7 +214,11 @@ pub fn add_to_plan(
     let tasks = daily_plan_repo::plan_for(&tx, &date, &timezone)?;
     tx.commit().map_err(map_sqlite)?;
 
-    Ok(settled.map(|(_, revision)| DailyPlanChange { tasks, revision }))
+    Ok(settled.map(|(_, s)| DailyPlanChange {
+        tasks,
+        revision: s.revision,
+        data_epoch: s.data_epoch,
+    }))
 }
 
 /// 把一个任务从某一天（某个时区）的今日计划里移除。口径与 [`add_to_plan`] 完全对称，
@@ -236,5 +242,9 @@ pub fn remove_from_plan(
     let tasks = daily_plan_repo::plan_for(&tx, &date, &timezone)?;
     tx.commit().map_err(map_sqlite)?;
 
-    Ok(settled.map(|(_, revision)| DailyPlanChange { tasks, revision }))
+    Ok(settled.map(|(_, s)| DailyPlanChange {
+        tasks,
+        revision: s.revision,
+        data_epoch: s.data_epoch,
+    }))
 }

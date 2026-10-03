@@ -13,6 +13,11 @@
 //! （它在自己的读事务里做 epoch 校验，把数据 / 总数 / epoch / revision 一起交回）。
 //! 仓储仍不提交、不加 revision。
 //!
+//! COMP-01/COMP-03 收尾：写结果 DTO 一并带 `data_epoch`（与 `revision` 同在写事务
+//! 里读回）；项目与标签的查询入口都收**请求带来的** epoch，并在同一个读事务里校验它、
+//! 取数据与元数据，返回 `{items, data_epoch, revision}` 信封；完整项目列表
+//! （[`list_projects`]，可选状态过滤）也在本模块，调用方不直调仓储。
+//!
 //! 统一口径：文本输入先去掉首尾空白，全空白视为空输入；取值域匹配**大小写敏感**
 //! （与 schema 的 CHECK 一致）。
 
@@ -131,6 +136,8 @@ pub struct ProjectChange {
     pub project: ProjectRow,
     /// 提交后的权威 `revision`；`Unchanged` 时与调用前相等。
     pub revision: i64,
+    /// 这次写所在的库身份（与 `revision` **同一写事务**取得，提交后返回）。
+    pub data_epoch: String,
 }
 
 /// 任务归属写命令的产物。
@@ -139,6 +146,8 @@ pub struct TaskProjectChange {
     pub task: TaskRow,
     /// 提交后的权威 `revision`；`Unchanged` 时与调用前相等。
     pub revision: i64,
+    /// 这次写所在的库身份（与 `revision` **同一写事务**取得，提交后返回）。
+    pub data_epoch: String,
 }
 
 /// 新建项目（F-004）。`WriteEnvelope::for_create`：新建实体只需要 epoch。
@@ -159,9 +168,16 @@ pub fn create_project(
     let id = uuid::Uuid::new_v4().to_string();
     let project = project_repo::create_project(&tx, &id, &name, now)?;
     let revision = bump_revision(&tx)?;
+    // 库身份与版本在同一事务里读回（COMP-01 裁决 R-A）：提交后补读会让「这次写
+    // 发生在哪个库」由另一个时刻的快照回答。
+    let data_epoch = require_meta(&tx)?.data_epoch;
     tx.commit().map_err(map_sqlite)?;
 
-    Ok(WriteOutcome::Changed(ProjectChange { project, revision }))
+    Ok(WriteOutcome::Changed(ProjectChange {
+        project,
+        revision,
+        data_epoch,
+    }))
 }
 
 /// 重命名（F-004）。`WriteEnvelope::for_update`：带 epoch 与项目版本。
@@ -179,8 +195,11 @@ pub fn rename_project(
 
     let tx = write_tx(db, &env)?;
     let outcome = project_repo::rename_project(&tx, project_id, expected, &name, now)?;
-    let settled =
-        settle(&tx, outcome)?.map(|(project, revision)| ProjectChange { project, revision });
+    let settled = settle(&tx, outcome)?.map(|(project, s)| ProjectChange {
+        project,
+        revision: s.revision,
+        data_epoch: s.data_epoch,
+    });
     tx.commit().map_err(map_sqlite)?;
     Ok(settled)
 }
@@ -199,18 +218,78 @@ pub fn archive_project(
 
     let tx = write_tx(db, &env)?;
     let outcome = project_repo::archive_project(&tx, project_id, expected, now)?;
-    let settled =
-        settle(&tx, outcome)?.map(|(project, revision)| ProjectChange { project, revision });
+    let settled = settle(&tx, outcome)?.map(|(project, s)| ProjectChange {
+        project,
+        revision: s.revision,
+        data_epoch: s.data_epoch,
+    });
     tx.commit().map_err(map_sqlite)?;
     Ok(settled)
 }
 
+/// 完整项目列表的**读结果信封**（COMP-01）：`items` 与 `data_epoch` / `revision`
+/// 出自**同一个读事务**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectList {
+    /// 按 `created_at, id` 稳定排序。
+    pub items: Vec<ProjectRow>,
+    /// 这次读看到的库身份。
+    pub data_epoch: String,
+    /// 这次读看到的业务版本。读**不**改它。
+    pub revision: i64,
+}
+
+/// 标签列表的**读结果信封**（COMP-01）：`items` 与 `data_epoch` / `revision`
+/// 出自**同一个读事务**。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagList {
+    /// 按 `created_at, id` 稳定排序。
+    pub items: Vec<TagRow>,
+    /// 这次读看到的库身份。
+    pub data_epoch: String,
+    /// 这次读看到的业务版本。读**不**改它。
+    pub revision: i64,
+}
+
+/// 完整项目列表（COMP-03）：`status` 为 `None` 时**不限制状态**——归档与 `done`
+/// 的历史都在里面；为 `Some(s)` 时只列该状态。仓储的
+/// `project_repo::list_projects(conn, Option<ProjectStatus>)` 已经是这个语义，直接用。
+///
+/// 纯读：不开写事务、不加 `revision`。为了「数据与元数据出自同一读事务」，这里显式
+/// 开一个只读事务，`guard_epoch` 在事务内跑（形状与 [`list_tasks_filtered`] 一致）。
+pub fn list_projects(
+    db: &Db,
+    expected_data_epoch: &str,
+    status: Option<ProjectStatus>,
+) -> Result<ProjectList, AppError> {
+    let tx = db
+        .connection()
+        .unchecked_transaction()
+        .map_err(map_sqlite)?;
+    guard_epoch(&tx, expected_data_epoch)?;
+
+    let items = project_repo::list_projects(&tx, status)?;
+    let meta = require_meta(&tx)?;
+    // 读事务什么都没写：直接结束它（回滚一个只读事务不改变任何事实），
+    // 免得读代码的人以为这里还欠一个 `commit`。
+    drop(tx);
+
+    Ok(ProjectList {
+        items,
+        data_epoch: meta.data_epoch,
+        revision: meta.revision,
+    })
+}
+
 /// 新建任务时可选的项目列表：**只列 active**（F-004），按 `created_at, id` 稳定排序。
 ///
-/// 纯读：不开写事务、不加 revision。归档项目从这里消失，但它们的历史仍在库里
-/// （要完整列表用 `storage::project_repo::list_projects(conn, None)`）。
-pub fn list_selectable_projects(db: &Db) -> Result<Vec<ProjectRow>, AppError> {
-    project_repo::list_projects(db.connection(), Some(ProjectStatus::Active))
+/// 归档/done 项目从这里消失，但它们的历史仍在库里——完整列表用本模块的
+/// [`list_projects`]（`status = None` 含全部状态）。两个入口共用同一段读事务骨架。
+pub fn list_selectable_projects(
+    db: &Db,
+    expected_data_epoch: &str,
+) -> Result<ProjectList, AppError> {
+    list_projects(db, expected_data_epoch, Some(ProjectStatus::Active))
 }
 
 /// 给已有任务指定/解除项目（F-002 的「可选项目」）。
@@ -230,8 +309,11 @@ pub fn set_task_project(
 
     let tx = write_tx(db, &env)?;
     let outcome = task_repo::set_task_project(&tx, task_id, expected, target.as_project_id(), now)?;
-    let settled =
-        settle(&tx, outcome)?.map(|(task, revision)| TaskProjectChange { task, revision });
+    let settled = settle(&tx, outcome)?.map(|(task, s)| TaskProjectChange {
+        task,
+        revision: s.revision,
+        data_epoch: s.data_epoch,
+    });
     tx.commit().map_err(map_sqlite)?;
     Ok(settled)
 }
@@ -257,6 +339,8 @@ pub struct TagChange {
     pub tag: TagRow,
     /// 提交后的权威 `revision`。
     pub revision: i64,
+    /// 这次写所在的库身份（与 `revision` **同一写事务**取得，提交后返回）。
+    pub data_epoch: String,
 }
 
 /// 打标 / 去标写命令的产物：这个任务**当前**的标签集合。
@@ -265,6 +349,8 @@ pub struct TaskTagsChange {
     pub tags: Vec<TagRow>,
     /// 提交后的权威 `revision`；`Unchanged` 时与调用前相等。
     pub revision: i64,
+    /// 这次写所在的库身份（与 `revision` **同一写事务**取得，提交后返回）。
+    pub data_epoch: String,
 }
 
 /// 新建标签（F-005）。`WriteEnvelope::for_create`：新建实体只需要 epoch。
@@ -290,21 +376,69 @@ pub fn create_tag(
     let id = uuid::Uuid::new_v4().to_string();
     let tag = tag_repo::create_tag(&tx, &id, kind, &name, now)?;
     let revision = bump_revision(&tx)?;
+    // 库身份与版本在同一事务里读回（COMP-01 裁决 R-A）。
+    let data_epoch = require_meta(&tx)?.data_epoch;
     tx.commit().map_err(map_sqlite)?;
 
-    Ok(WriteOutcome::Changed(TagChange { tag, revision }))
+    Ok(WriteOutcome::Changed(TagChange {
+        tag,
+        revision,
+        data_epoch,
+    }))
 }
 
 /// 标签选择器的数据源：全部标签，可按 kind 过滤（四类各一组）。
 ///
-/// 纯读：不开写事务、不加 revision、不要 epoch（数据新鲜度由调用方决定何时重拉）。
-pub fn list_tags(db: &Db, kind: Option<TagKind>) -> Result<Vec<TagRow>, AppError> {
-    tag_repo::list_tags(db.connection(), kind)
+/// 纯读：不开写事务、不加 revision。与其它查询入口同一形状——`guard_epoch` 与
+/// 元数据读都落在**同一个读事务**里，返回 [`TagList`] 信封。
+pub fn list_tags(
+    db: &Db,
+    expected_data_epoch: &str,
+    kind: Option<TagKind>,
+) -> Result<TagList, AppError> {
+    let tx = db
+        .connection()
+        .unchecked_transaction()
+        .map_err(map_sqlite)?;
+    guard_epoch(&tx, expected_data_epoch)?;
+
+    let items = tag_repo::list_tags(&tx, kind)?;
+    let meta = require_meta(&tx)?;
+    // 读事务什么都没写：直接结束它（回滚一个只读事务不改变任何事实）。
+    drop(tx);
+
+    Ok(TagList {
+        items,
+        data_epoch: meta.data_epoch,
+        revision: meta.revision,
+    })
 }
 
-/// 某个任务身上的标签。纯读，口径同 [`list_tags`]。
-pub fn tags_of_task(db: &Db, task_id: &str) -> Result<Vec<TagRow>, AppError> {
-    tag_repo::tags_of_task(db.connection(), task_id)
+/// 某个任务身上的标签。纯读，口径与信封同 [`list_tags`]。
+///
+/// 写路径（[`tag_task`] / [`untag_task`]）在同一写事务里用
+/// `tag_repo::tags_of_task(&tx, …)` 读回集合，不经过这里。
+pub fn tags_of_task(
+    db: &Db,
+    expected_data_epoch: &str,
+    task_id: &str,
+) -> Result<TagList, AppError> {
+    let tx = db
+        .connection()
+        .unchecked_transaction()
+        .map_err(map_sqlite)?;
+    guard_epoch(&tx, expected_data_epoch)?;
+
+    let items = tag_repo::tags_of_task(&tx, task_id)?;
+    let meta = require_meta(&tx)?;
+    // 读事务什么都没写：直接结束它（回滚一个只读事务不改变任何事实）。
+    drop(tx);
+
+    Ok(TagList {
+        items,
+        data_epoch: meta.data_epoch,
+        revision: meta.revision,
+    })
 }
 
 /// 打标（F-005）：把**一个**标签加到**一个**任务上。
@@ -329,7 +463,11 @@ pub fn tag_task(
     let tags = tag_repo::tags_of_task(&tx, task_id)?;
     tx.commit().map_err(map_sqlite)?;
 
-    Ok(settled.map(|(_, revision)| TaskTagsChange { tags, revision }))
+    Ok(settled.map(|(_, s)| TaskTagsChange {
+        tags,
+        revision: s.revision,
+        data_epoch: s.data_epoch,
+    }))
 }
 
 /// 去标：把**一个**标签从**一个**任务上移除。口径与 [`tag_task`] 完全对称，
@@ -347,7 +485,11 @@ pub fn untag_task(
     let tags = tag_repo::tags_of_task(&tx, task_id)?;
     tx.commit().map_err(map_sqlite)?;
 
-    Ok(settled.map(|(_, revision)| TaskTagsChange { tags, revision }))
+    Ok(settled.map(|(_, s)| TaskTagsChange {
+        tags,
+        revision: s.revision,
+        data_epoch: s.data_epoch,
+    }))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,6 +502,8 @@ pub struct TaskChange {
     pub task: TaskRow,
     /// 提交后的权威 `revision`。
     pub revision: i64,
+    /// 这次写所在的库身份（与 `revision` **同一写事务**取得，提交后返回）。
+    pub data_epoch: String,
 }
 
 /// 捕获一个任务（F-002 的 Inbox 入口）。`WriteEnvelope::for_create`：新建只需要 epoch。
@@ -388,9 +532,15 @@ pub fn create_task(
     let id = uuid::Uuid::new_v4().to_string();
     let task = task_repo::create_task(&tx, &id, title, project_id, now)?;
     let revision = bump_revision(&tx)?;
+    // 库身份与版本在同一事务里读回（COMP-01 裁决 R-A）。
+    let data_epoch = require_meta(&tx)?.data_epoch;
     tx.commit().map_err(map_sqlite)?;
 
-    Ok(WriteOutcome::Changed(TaskChange { task, revision }))
+    Ok(WriteOutcome::Changed(TaskChange {
+        task,
+        revision,
+        data_epoch,
+    }))
 }
 
 /// 把任务理清为待办（F-002）。`WriteEnvelope::for_update`（epoch + **任务**版本）。
@@ -439,9 +589,15 @@ pub fn clarify_ready(
         now,
     )?;
     let revision = bump_revision(&tx)?;
+    // 库身份与版本在同一事务里读回（COMP-01 裁决 R-A）。
+    let data_epoch = require_meta(&tx)?.data_epoch;
     tx.commit().map_err(map_sqlite)?;
 
-    Ok(TaskChange { task, revision })
+    Ok(TaskChange {
+        task,
+        revision,
+        data_epoch,
+    })
 }
 
 /// 筛选查询的请求（R-T5-b）：条件 + 分页窗口 + 请求方手上的库身份。

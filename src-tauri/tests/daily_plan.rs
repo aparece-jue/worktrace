@@ -801,3 +801,37 @@ fn a_failed_audit_write_leaves_no_half_plan_row() {
         f.plan_snapshot()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMP-01：写结果的信封（数据与元数据同一次写事务取得）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 今日计划写结果的 `data_epoch` 等于请求带的 epoch、也等于 `app_meta` 现值，
+/// `revision` 等于 `app_meta.revision`——`Changed` 与 `Unchanged` 两个分支都要带。
+///
+/// 加入与移除两条入口各断一次「真的写了」与「幂等重复」，后者最容易漏：
+/// 它不写库，但前端同样要靠这两个值判断响应是否过期。
+#[test]
+fn plan_write_results_carry_the_request_epoch_and_the_authoritative_revision() {
+    let mut f = bootstrap();
+    let meta = require_meta(f.db.connection()).unwrap();
+
+    let added = expect_changed(add(&mut f, "t1", DAY1, UTC).unwrap());
+    assert_eq!(added.data_epoch, f.epoch, "写结果必须带上请求里的库身份");
+    assert_eq!(added.data_epoch, meta.data_epoch);
+    assert_eq!(added.revision, f.revision(), "revision 与 app_meta 一致");
+    assert_eq!(ids(&added.tasks), ["t1"]);
+
+    let again = expect_unchanged(add(&mut f, "t1", DAY1, UTC).unwrap());
+    assert_eq!(again.data_epoch, f.epoch, "幂等返回同样要带库身份");
+    assert_eq!(again.revision, f.revision());
+
+    let removed = expect_changed(remove(&mut f, "t1", DAY1, UTC).unwrap());
+    assert_eq!(removed.data_epoch, f.epoch);
+    assert_eq!(removed.revision, f.revision());
+    assert!(removed.tasks.is_empty(), "移除后这一天不再有这个任务");
+
+    let nothing = expect_unchanged(remove(&mut f, "t1", DAY1, UTC).unwrap());
+    assert_eq!(nothing.data_epoch, f.epoch);
+    assert_eq!(nothing.revision, f.revision());
+}

@@ -380,9 +380,9 @@ fn creating_a_project_writes_an_active_row_and_bumps_revision_once() {
     );
     assert_eq!(f.count("project"), 2);
 
-    let selectable = catalog::list_selectable_projects(&f.db).unwrap();
+    let selectable = catalog::list_selectable_projects(&f.db, &f.epoch).unwrap();
     assert!(
-        selectable.iter().any(|p| p.id == change.project.id),
+        selectable.items.iter().any(|p| p.id == change.project.id),
         "新建的项目应当出现在新建任务的选择列表里"
     );
 }
@@ -640,7 +640,9 @@ fn the_selection_list_hides_archived_projects_while_the_history_stays() {
         |projects: Vec<ProjectRow>| -> Vec<String> { projects.into_iter().map(|p| p.id).collect() };
 
     assert_eq!(
-        ids(catalog::list_selectable_projects(&f.db).unwrap()),
+        ids(catalog::list_selectable_projects(&f.db, &f.epoch)
+            .unwrap()
+            .items),
         vec!["p1".to_string(), "p2".to_string()],
         "只列 active，按 created_at, id 稳定排序"
     );
@@ -650,14 +652,16 @@ fn the_selection_list_hides_archived_projects_while_the_history_stays() {
     );
 
     assert_eq!(
-        ids(catalog::list_selectable_projects(&f.db).unwrap()),
+        ids(catalog::list_selectable_projects(&f.db, &f.epoch)
+            .unwrap()
+            .items),
         vec!["p2".to_string()],
         "归档后立刻从选择列表消失"
     );
     assert_eq!(
-        ids(project_repo::list_projects(f.db.connection(), None).unwrap()),
+        ids(catalog::list_projects(&f.db, &f.epoch, None).unwrap().items),
         vec!["p1".to_string(), "p2".to_string(), "p3".to_string()],
-        "历史（含归档）仍然读得到：列表过滤不等于删除"
+        "历史（含归档）仍然读得到：列表过滤不等于删除（走服务入口，不直调仓储）"
     );
 }
 
@@ -1158,8 +1162,9 @@ fn done_projects_are_readable_but_not_writable_in_v01() {
         "读路径必须读得懂 done"
     );
     assert!(
-        !catalog::list_selectable_projects(&f.db)
+        !catalog::list_selectable_projects(&f.db, &f.epoch)
             .unwrap()
+            .items
             .iter()
             .any(|p| p.id == "pdone"),
         "done 项目不该出现在新建任务的选择列表里"
@@ -1432,5 +1437,239 @@ fn an_unknown_project_status_fails_by_column_for_capture_and_start_without_chang
         f.count("interval_checkpoint"),
         checkpoint_rows_before,
         "被拒的启动不得留下检查点行"
+    );
+}
+
+/// 绑定路径读的是同一个枚举：库里出现**无法识别**的 `project.status` 时，
+/// `set_task_project` 也必须按列报错，而不是把它冒充成某个已知状态。
+///
+/// 手法与上一条相同（`PRAGMA ignore_check_constraints` 写入 CHECK 挡不住的脏值，
+/// 写完立刻关回 OFF）：`set_task_project` 的 Bind 分支读
+/// `project_repo::get_project`，`ProjectStatus::parse` 失败 ⇒ 存储层错误，
+/// `detail()` 里点名列名与读到的值；拒绝时 `revision`、项目/任务行、审计零变化。
+#[test]
+fn an_unknown_project_status_fails_by_column_for_binding_without_changes() {
+    let mut f = bootstrap();
+
+    f.db.connection()
+        .execute_batch(
+            "PRAGMA ignore_check_constraints=ON;
+             UPDATE project SET status='paused' WHERE id='p1';
+             PRAGMA ignore_check_constraints=OFF;",
+        )
+        .expect("绕过 CHECK 后应能写入取值域外的状态");
+    let ignoring: i64 =
+        f.db.connection()
+            .query_row("PRAGMA ignore_check_constraints", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(ignoring, 0, "写完脏值必须把连接级开关关回去");
+
+    let before = baseline(&f);
+    let err = catalog::set_task_project(
+        &mut f.db,
+        update_env(&f.epoch, 0),
+        "t1",
+        ProjectTarget::Bind("p1".into()),
+        5000,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err.code(),
+        "STORAGE_ERROR",
+        "读不懂的状态是存储层失败，不是领域拒绝"
+    );
+    let detail = err.detail().unwrap_or_default().to_string();
+    assert!(
+        detail.contains("project.status"),
+        "诊断必须点名是哪一列，实际：{detail}"
+    );
+    assert!(
+        detail.contains("paused"),
+        "诊断应带上读到的值，实际：{detail}"
+    );
+    assert_unchanged(&f, "t1", &before);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMP-01：写结果与查询读结果的信封（数据与元数据同事务取得）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 写结果的 `data_epoch` 等于请求带的 epoch、也等于 `app_meta` 现值，`revision`
+/// 等于 `app_meta.revision`——`Changed` 与 `Unchanged` 两个分支都要带。
+///
+/// 覆盖项目、任务归属、任务捕获与理清四类写入口的 DTO；断言口径与 COMP-01 的验收
+/// 要求一致：这两个值出自**那次写所在的事务**（不是调用方传进去的副本，也不是提交后
+/// 另开一次读补出来的）。
+#[test]
+fn write_results_carry_the_request_epoch_and_the_authoritative_revision() {
+    let mut f = bootstrap();
+    let meta = require_meta(f.db.connection()).unwrap();
+
+    let created = expect_changed(
+        catalog::create_project(&mut f.db, create_env(&f.epoch), "新项目", 2000).unwrap(),
+    );
+    assert_eq!(created.data_epoch, f.epoch, "写结果必须带上请求里的库身份");
+    assert_eq!(created.data_epoch, meta.data_epoch);
+    assert_eq!(created.revision, meta.revision + 1, "一次业务写恰好 +1");
+    assert_eq!(created.revision, f.revision(), "revision 与 app_meta 一致");
+
+    let bound = expect_changed(
+        catalog::set_task_project(
+            &mut f.db,
+            update_env(&f.epoch, 0),
+            "t1",
+            ProjectTarget::Bind(created.project.id.clone()),
+            2100,
+        )
+        .unwrap(),
+    );
+    assert_eq!(bound.data_epoch, f.epoch);
+    assert_eq!(bound.revision, f.revision());
+
+    let captured = expect_changed(
+        catalog::create_task(&mut f.db, create_env(&f.epoch), "新任务", None, 2200).unwrap(),
+    );
+    assert_eq!(captured.data_epoch, f.epoch);
+    assert_eq!(captured.revision, f.revision());
+
+    let clarified = catalog::clarify_ready(
+        &mut f.db,
+        update_env(&f.epoch, captured.task.row_version),
+        &captured.task.id,
+        2300,
+    )
+    .unwrap();
+    assert_eq!(clarified.data_epoch, f.epoch);
+    assert_eq!(clarified.revision, f.revision());
+
+    // 幂等重复（改成同名）：`Unchanged` 分支同样要给出权威 epoch/revision，
+    // 否则「没有变化」的响应会缺掉前端做旧响应丢弃所需的元数据。
+    let renamed = expect_unchanged(
+        catalog::rename_project(&mut f.db, update_env(&f.epoch, 0), "p1", "项目一", 2400).unwrap(),
+    );
+    assert_eq!(renamed.data_epoch, f.epoch, "幂等返回同样要带库身份");
+    assert_eq!(renamed.revision, f.revision());
+}
+
+/// `list_projects` 的读信封：① items 与 `data_epoch` / `revision` 出自同一次读
+/// （读完之后库再动，先拿到的那份仍是**读时**的版本）；② 旧 epoch 被拒且零变化。
+#[test]
+fn list_projects_returns_a_same_read_transaction_envelope() {
+    let mut f = bootstrap();
+    f.insert_project("p2", "项目二", "archived", 1500);
+
+    let listed = catalog::list_projects(&f.db, &f.epoch, None).unwrap();
+    assert_eq!(listed.data_epoch, f.epoch);
+    assert_eq!(listed.revision, f.revision(), "revision 与库里的现值一致");
+    assert_eq!(
+        listed
+            .items
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["p1", "p2"],
+        "items 按 created_at, id 稳定排序"
+    );
+
+    // 读完再写：信封是**读时**的快照。若实现改成提交/返回后补读一次元数据，
+    // 这里的 revision 会跟着库一起前进，断言立刻变红。
+    expect_changed(
+        catalog::create_project(&mut f.db, create_env(&f.epoch), "项目三", 2000).unwrap(),
+    );
+    assert_eq!(
+        listed.revision,
+        f.revision() - 1,
+        "信封里的 revision 是读时的值，不是事后补读"
+    );
+    assert_eq!(listed.data_epoch, f.epoch, "业务写不改库身份");
+
+    let before = baseline(&f);
+    let err = catalog::list_projects(&f.db, "epoch-from-another-db", None).unwrap_err();
+    assert_eq!(err.code(), "DATA_EPOCH_MISMATCH");
+    assert_unchanged(&f, "t1", &before);
+}
+
+/// 选择列表返回同一形状的信封，**只含 active**；旧 epoch 同样被拒且零变化。
+#[test]
+fn the_selection_list_returns_a_same_read_transaction_envelope_with_active_projects_only() {
+    let f = bootstrap();
+    f.insert_project("p2", "项目二", "active", 1500);
+    f.insert_project("p3", "项目三", "archived", 1600);
+    f.insert_project("pdone", "已完成项目", "done", 1700);
+
+    let listed = catalog::list_selectable_projects(&f.db, &f.epoch).unwrap();
+    assert_eq!(listed.data_epoch, f.epoch);
+    assert_eq!(listed.revision, f.revision());
+    assert_eq!(
+        listed
+            .items
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["p1", "p2"],
+        "选择列表只含 active，按 created_at, id 稳定排序"
+    );
+
+    let before = baseline(&f);
+    let err = catalog::list_selectable_projects(&f.db, "epoch-from-another-db").unwrap_err();
+    assert_eq!(err.code(), "DATA_EPOCH_MISMATCH");
+    assert_unchanged(&f, "t1", &before);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMP-03：完整项目列表服务（可选状态过滤）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 完整列表覆盖三种状态：`status = None` 不限制（归档与 done 的历史都读得到），
+/// `Some(s)` 只列该状态；新建任务的选择入口仍然只含 active。
+#[test]
+fn the_full_project_list_covers_every_status_while_the_selection_entry_stays_active_only() {
+    let f = bootstrap(); // p1: active
+    f.insert_project("p2", "项目二", "archived", 1500);
+    f.insert_project("pdone", "已完成项目", "done", 1600);
+
+    let all = catalog::list_projects(&f.db, &f.epoch, None).unwrap();
+    assert_eq!(
+        all.items.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        ["p1", "p2", "pdone"],
+        "status=None 不限制状态：归档与 done 的历史都读得到"
+    );
+    assert_eq!(
+        all.items.iter().map(|p| p.status).collect::<Vec<_>>(),
+        [
+            ProjectStatus::Active,
+            ProjectStatus::Archived,
+            ProjectStatus::Done
+        ],
+        "三种状态都按原样读回来（读路径必须读得懂 done）"
+    );
+
+    let archived = catalog::list_projects(&f.db, &f.epoch, Some(ProjectStatus::Archived)).unwrap();
+    assert_eq!(
+        archived
+            .items
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["p2"],
+        "按状态过滤只列该状态"
+    );
+
+    let done = catalog::list_projects(&f.db, &f.epoch, Some(ProjectStatus::Done)).unwrap();
+    assert_eq!(
+        done.items.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+        ["pdone"]
+    );
+
+    let selectable = catalog::list_selectable_projects(&f.db, &f.epoch).unwrap();
+    assert_eq!(
+        selectable
+            .items
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        ["p1"],
+        "选择入口只含 active（归档与 done 都不在）"
     );
 }

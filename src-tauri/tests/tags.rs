@@ -87,7 +87,9 @@ impl Fixture {
     }
 
     fn tags_of(&self, task_id: &str) -> Vec<TagRow> {
-        catalog::tags_of_task(&self.db, task_id).unwrap()
+        catalog::tags_of_task(&self.db, &self.epoch, task_id)
+            .unwrap()
+            .items
     }
 
     /// 全部关联的快照：行数、字段值与 `weight` 一起钉住。
@@ -394,7 +396,9 @@ fn tag_reads_are_scoped_by_kind_and_by_task() {
     let context = f.create_tag(TagKind::Context, "家里", 2_001);
     let report = f.create_tag(TagKind::Report, "周报", 2_002);
 
-    let only_context = catalog::list_tags(&f.db, Some(TagKind::Context)).unwrap();
+    let only_context = catalog::list_tags(&f.db, &f.epoch, Some(TagKind::Context))
+        .unwrap()
+        .items;
     assert_eq!(
         only_context,
         vec![context.clone()],
@@ -879,4 +883,148 @@ fn relation_commands_are_epoch_only_and_fake_no_entity_version() {
         1 + 1,
         "只有 revision 前进（建标签 1 次 + 打标 1 次）"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMP-01：写结果与查询读结果的信封（数据与元数据同事务取得）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 标签写结果的 `data_epoch` 等于请求带的 epoch、也等于 `app_meta` 现值，
+/// `revision` 等于 `app_meta.revision`——`Changed` 与 `Unchanged` 两个分支都要带。
+///
+/// 覆盖建标签与「打标 / 去标」这一对显式集合操作，两种幂等重复各断一次。
+#[test]
+fn tag_write_results_carry_the_request_epoch_and_the_authoritative_revision() {
+    let mut f = bootstrap();
+    let meta = require_meta(f.db.connection()).unwrap();
+
+    let created = expect_changed(
+        catalog::create_tag(
+            &mut f.db,
+            create_env(&f.epoch),
+            TagKind::Domain.as_str(),
+            "写作",
+            None,
+            2_000,
+        )
+        .unwrap(),
+    );
+    assert_eq!(created.data_epoch, f.epoch, "写结果必须带上请求里的库身份");
+    assert_eq!(created.data_epoch, meta.data_epoch);
+    assert_eq!(created.revision, f.revision(), "revision 与 app_meta 一致");
+
+    let tagged = expect_changed(
+        catalog::tag_task(
+            &mut f.db,
+            create_env(&f.epoch),
+            "t1",
+            &created.tag.id,
+            3_000,
+        )
+        .unwrap(),
+    );
+    assert_eq!(tagged.data_epoch, f.epoch);
+    assert_eq!(tagged.revision, f.revision());
+    assert_eq!(tagged.tags, vec![created.tag.clone()]);
+
+    let again = expect_unchanged(
+        catalog::tag_task(
+            &mut f.db,
+            create_env(&f.epoch),
+            "t1",
+            &created.tag.id,
+            3_100,
+        )
+        .unwrap(),
+    );
+    assert_eq!(again.data_epoch, f.epoch, "幂等返回同样要带库身份");
+    assert_eq!(again.revision, f.revision());
+
+    let untagged = expect_changed(
+        catalog::untag_task(
+            &mut f.db,
+            create_env(&f.epoch),
+            "t1",
+            &created.tag.id,
+            3_200,
+        )
+        .unwrap(),
+    );
+    assert_eq!(untagged.data_epoch, f.epoch);
+    assert_eq!(untagged.revision, f.revision());
+    assert!(untagged.tags.is_empty(), "去标后集合为空");
+
+    let nothing = expect_unchanged(
+        catalog::untag_task(
+            &mut f.db,
+            create_env(&f.epoch),
+            "t1",
+            &created.tag.id,
+            3_300,
+        )
+        .unwrap(),
+    );
+    assert_eq!(nothing.data_epoch, f.epoch);
+    assert_eq!(nothing.revision, f.revision());
+}
+
+/// `list_tags` 的读信封：① items 与 `data_epoch` / `revision` 出自同一次读
+/// （读完之后库再动，先拿到的那份仍是**读时**的版本）；② 旧 epoch 被拒且零变化。
+#[test]
+fn list_tags_returns_a_same_read_transaction_envelope() {
+    let mut f = bootstrap();
+    let domain = f.create_tag(TagKind::Domain, "写作", 2_000);
+    let context = f.create_tag(TagKind::Context, "家里", 2_001);
+
+    let listed = catalog::list_tags(&f.db, &f.epoch, None).unwrap();
+    assert_eq!(listed.data_epoch, f.epoch);
+    assert_eq!(listed.revision, f.revision(), "revision 与库里的现值一致");
+    assert_eq!(listed.items, vec![domain.clone(), context.clone()]);
+
+    let only_context = catalog::list_tags(&f.db, &f.epoch, Some(TagKind::Context)).unwrap();
+    assert_eq!(
+        only_context.items,
+        vec![context.clone()],
+        "按 kind 过滤只列这一类"
+    );
+    assert_eq!(only_context.revision, f.revision());
+
+    // 读完再写：信封是**读时**的快照（提交后补读会让 revision 跟着库前进）。
+    f.create_tag(TagKind::Report, "周报", 2_002);
+    assert_eq!(
+        listed.revision,
+        f.revision() - 1,
+        "信封里的 revision 是读时的值，不是事后补读"
+    );
+    assert_eq!(listed.data_epoch, f.epoch, "业务写不改库身份");
+
+    let before = baseline(&f);
+    let err = catalog::list_tags(&f.db, "epoch-from-another-db", None).unwrap_err();
+    assert_eq!(err.code(), "DATA_EPOCH_MISMATCH");
+    assert_unchanged(&f, "t1", &before);
+}
+
+/// `tags_of_task` 的读信封：作用域只到那个任务，`data_epoch` / `revision` 同一次读
+/// 取得；旧 epoch 被拒且零变化（拒绝发生在读之前，不留任何痕迹）。
+#[test]
+fn tags_of_task_returns_a_same_read_transaction_envelope() {
+    let mut f = bootstrap();
+    let report = f.create_tag(TagKind::Report, "周报", 2_000);
+    expect_changed(
+        catalog::tag_task(&mut f.db, create_env(&f.epoch), "t2", &report.id, 3_000).unwrap(),
+    );
+
+    let t2 = catalog::tags_of_task(&f.db, &f.epoch, "t2").unwrap();
+    assert_eq!(t2.data_epoch, f.epoch);
+    assert_eq!(t2.revision, f.revision(), "revision 与库里的现值一致");
+    assert_eq!(t2.items, vec![report.clone()]);
+
+    let t1 = catalog::tags_of_task(&f.db, &f.epoch, "t1").unwrap();
+    assert!(t1.items.is_empty(), "关联不会串到别的任务");
+    assert_eq!(t1.revision, f.revision());
+
+    let before = baseline_of(&f, "t2");
+    let err = catalog::tags_of_task(&f.db, "epoch-from-another-db", "t2").unwrap_err();
+    assert_eq!(err.code(), "DATA_EPOCH_MISMATCH");
+    assert_unchanged(&f, "t2", &before);
 }
