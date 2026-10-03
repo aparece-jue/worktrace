@@ -442,15 +442,42 @@ impl Coordinator {
             },
         )?;
 
-        let revision = bump_revision(&tx)?;
+        let _revision = bump_revision(&tx)?;
         tx.commit().map_err(map_sqlite)?;
+        // 提交之后的失败一律走恢复语义，不给可重试错误——事务已经落库了。
+        self.rebuild_from_committed(db.connection(), &session_id, sample)
+    }
+}
 
-        // ⑤ 提交成功后才应用内存
-        self.load_session(db.connection(), &session_id)?;
-        Ok(CommandOutcome {
-            snapshot: self.build(db.connection(), sample, false)?,
-            revision,
-        })
+impl Coordinator {
+    /// **提交之后的收尾**：应用内存、生成响应。
+    ///
+    /// 关键约定（计划原文）：事务已经落库了，所以这里失败**不得返回普通可重试失败**
+    /// ——客户端拿到可重试错误就会重发，而重发会**重复创建**（第二次 start 会开出
+    /// 第二个会话）。一律映射为 [`AppError::RecoveryRequired`]：语义是
+    /// 「状态已变，去按已提交事实对账」，不是「再试一次」。
+    ///
+    /// 映射前会尽量从**已提交事实**重建一次运行态；重建也失败就清掉 live，
+    /// 不让旧内存冒充已提交状态，交给 P3 的对账流程接手。
+    pub fn rebuild_from_committed(
+        &mut self,
+        conn: &Connection,
+        session_id: &str,
+        sample: ClockSample,
+    ) -> Result<CommandOutcome, AppError> {
+        if self.load_session(conn, session_id).is_err() {
+            self.live = None;
+            return Err(AppError::RecoveryRequired);
+        }
+        let snapshot = match self.build(conn, sample, false) {
+            Ok(s) => s,
+            Err(_) => return Err(AppError::RecoveryRequired),
+        };
+        let revision = match require_meta(conn) {
+            Ok(m) => m.revision,
+            Err(_) => return Err(AppError::RecoveryRequired),
+        };
+        Ok(CommandOutcome { snapshot, revision })
     }
 }
 
@@ -540,13 +567,10 @@ impl Coordinator {
             },
         )?;
 
-        let revision = bump_revision(&tx)?;
+        let _revision = bump_revision(&tx)?;
         tx.commit().map_err(map_sqlite)?;
-        self.load_session(db.connection(), &req.session_id)?;
-        Ok(CommandOutcome {
-            snapshot: self.build(db.connection(), sample, false)?,
-            revision,
-        })
+        // 提交之后的失败一律走恢复语义，不给可重试错误——事务已经落库了。
+        self.rebuild_from_committed(db.connection(), &req.session_id, sample)
     }
 
     /// 继续。**两份版本**：任务与会话各有自己的并发版本。
@@ -638,13 +662,10 @@ impl Coordinator {
             },
         )?;
 
-        let revision = bump_revision(&tx)?;
+        let _revision = bump_revision(&tx)?;
         tx.commit().map_err(map_sqlite)?;
-        self.load_session(db.connection(), &req.session_id)?;
-        Ok(CommandOutcome {
-            snapshot: self.build(db.connection(), sample, false)?,
-            revision,
-        })
+        // 提交之后的失败一律走恢复语义，不给可重试错误——事务已经落库了。
+        self.rebuild_from_committed(db.connection(), &req.session_id, sample)
     }
 
     /// 结束。**可以从 `paused` 直接结束**（02 §3）。
@@ -690,13 +711,10 @@ impl Coordinator {
             },
         )?;
 
-        let revision = bump_revision(&tx)?;
+        let _revision = bump_revision(&tx)?;
         tx.commit().map_err(map_sqlite)?;
-        self.load_session(db.connection(), &req.session_id)?;
-        Ok(CommandOutcome {
-            snapshot: self.build(db.connection(), sample, false)?,
-            revision,
-        })
+        // 提交之后的失败一律走恢复语义，不给可重试错误——事务已经落库了。
+        self.rebuild_from_committed(db.connection(), &req.session_id, sample)
     }
 }
 
@@ -823,7 +841,7 @@ impl Coordinator {
             .map_err(map_sqlite)?;
         checkpoint_repo::write(&tx, &cp)?;
         tx.commit().map_err(map_sqlite)?;
-
+        // 提交之后的失败一律走恢复语义，不给可重试错误——事务已经落库了。
         self.last_checkpoint = Some(cp);
         self.last_checkpoint_monotonic = Some(sample.monotonic_ms);
         // 成功心跳前移累计偏差的**参照点**（不是归属基线）。
@@ -903,20 +921,17 @@ impl Coordinator {
         let _revision = bump_revision(&tx)?;
         tx.commit().map_err(map_sqlite)?;
 
-        // 提交后才重建内存：开放区间没了、状态是 recovering，
-        // 于是 live 暂计自动停止、前台占用自动释放（`uq_running_foreground`
-        // 只约束 running）。**不建立新的单调运行起点**。
+        // 提交后才重建内存：开放区间没了、状态是 recovering，于是 live 暂计自动停止、
+        // 前台占用自动释放（`uq_running_foreground` 只约束 running）。
+        // **不建立新的单调运行起点**。
         self.load_session(db.connection(), &live.id)?;
         self.last_checkpoint = None;
         self.last_checkpoint_monotonic = None;
 
-        // **重建归属基线**。异常已经被承认并落库，旧基线的偏差（实测可达几十秒）
-        // 会一直留在参照点里，导致此后每一次观察都判成累计漂移——那样恢复之后
-        // 就再也开不了新会话了。
-        //
-        // 旧开放事实已经在上面分割完毕（前缀闭合、余段待确认），所以这里重建不会
-        // 让任何未闭合区间与归属对不上。注意这**不是**「建立新的单调运行起点」：
-        // 余段仍然是待确认的候选，没有被当成正在运行的区间。
+        // **重建归属基线**。异常已经被承认并落库，旧基线的偏差（实测可达几十秒）会一直
+        // 留在参照点里，导致此后每一次观察都判成累计漂移——那样恢复之后就再也开不了
+        // 新会话了。旧开放事实已在上面分割完毕（前缀闭合、余段待确认），所以重建不会让
+        // 任何未闭合区间与归属对不上。
         self.reestablish_anchor(sample);
 
         self.build(db.connection(), sample, false)

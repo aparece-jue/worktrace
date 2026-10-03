@@ -535,7 +535,7 @@ mod commands {
 
     use worktrace_lib::domain::session::{SessionMode, SessionState, TimerKind};
     use worktrace_lib::domain::task::TaskStatus;
-    use worktrace_lib::platform::clock::FakeClock;
+    use worktrace_lib::platform::clock::{Clock, FakeClock};
     use worktrace_lib::services::timer::coordinator::{
         Coordinator, ResumeRequest, SessionRequest, StartRequest,
     };
@@ -1015,5 +1015,53 @@ mod commands {
             "基准不得残留"
         );
         assert_eq!(c.count("task_change"), 0, "不得留审计");
+    }
+    /// **提交之后的失败不得返回普通可重试失败**（计划原文）。
+    ///
+    /// 事务已经落库了，客户端拿到可重试错误就会重发，而重发会**重复创建**
+    /// （第二次 start 会开出第二个会话）。所以收尾失败一律是恢复语义。
+    #[test]
+    fn a_post_commit_failure_is_recovery_not_retryable() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let sample = c.clock.lock().unwrap().sample().unwrap();
+
+        // 直接走收尾入口，给一个不存在的会话——模拟「提交成功但内存重建失败」
+        let err = c
+            .coord
+            .rebuild_from_committed(c.db.connection(), "no-such-session", sample)
+            .unwrap_err();
+
+        assert_eq!(err.code(), "RECOVERY_REQUIRED", "必须是恢复语义");
+        for retryable in [
+            "DOMAIN_ERROR",
+            "STORAGE_ERROR",
+            "VERSION_CONFLICT",
+            "DATA_EPOCH_MISMATCH",
+        ] {
+            assert_ne!(err.code(), retryable, "{retryable} 会让客户端重发");
+        }
+        assert!(c.coord.live().is_none(), "内存不得保留冒充已提交状态的旧值");
+        assert!(
+            !err.message().contains("no-such-session"),
+            "内部标识不进用户文案"
+        );
+    }
+
+    /// 正常路径的收尾仍然成功，并返回**已提交事实**里的权威 revision。
+    #[test]
+    fn a_successful_commit_returns_the_authoritative_revision() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let req = c.start_req();
+        let out = c.coord.start(&mut c.db, req).unwrap();
+
+        assert_eq!(
+            out.revision,
+            require_meta(c.db.connection()).unwrap().revision,
+            "响应里的 revision 必须等于库里那个"
+        );
+        assert_eq!(
+            out.snapshot.session_id.as_deref(),
+            Some(c.coord.live().unwrap().id.as_str())
+        );
     }
 }
