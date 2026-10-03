@@ -58,6 +58,6 @@ COMP-02 已修复。**三处都不再冒充「已归档」，但新建/绑定与
 
 FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a89a），返回顺序未改变。
 
-门禁（在 9e7a89a 上重跑）：`cargo test --offline` **340 passed / 0 failed**（本轮只加强断言、未新增测试函数，总数不变）；`cargo fmt --check`、`cargo clippy --all-targets --offline -- -D warnings`、`scripts/check-layers.ps1` 全绿。
+门禁（在 9e7a89a 上重跑）：`cargo test --offline` **340 passed / 0 failed**（本次补强只加强断言；相对上一提交 `a3f9f80` 还含新增的那条回归用例，故 339 → 340）；`cargo fmt --check`、`cargo clippy --all-targets --offline -- -D warnings`、`scripts/check-layers.ps1` 全绿。
 
 COMP-01（统一响应信封）与 COMP-03（完整项目列表服务）仍未修，本轮未改动公开读取签名。
