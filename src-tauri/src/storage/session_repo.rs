@@ -418,6 +418,34 @@ pub fn running_foreground(conn: &Connection) -> Result<Option<SessionRow>, AppEr
     .optional()
     .map_err(map_sqlite)
 }
+/// 拒绝「已有别的前台会话正在计时」这一**可预期的领域冲突**。
+///
+/// 与 `uq_running_foreground` 的分工：唯一索引是**兜底**（防并发与绕过服务的写入路径），
+/// 本函数是**业务事务内的前置检查**——让调用方拿到 `DOMAIN_ERROR` 与可理解的文案，
+/// 而不是把一个可预期的冲突报成 `STORAGE_ERROR`（用户会看到「存储暂时不可用，请稍后重试」
+/// 并被引导去重试一个永远不会成功的操作）。
+///
+/// `exclude` 供 `resume` 使用：目标会话自身不算占用。
+pub fn require_no_running_foreground(
+    conn: &Connection,
+    exclude: Option<&str>,
+) -> Result<(), AppError> {
+    let taken: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM work_session \
+             WHERE mode='FOREGROUND' AND state='running' AND id <> ?1)",
+            [exclude.unwrap_or("")],
+            |r| r.get(0),
+        )
+        .map_err(map_sqlite)?;
+    if taken {
+        return Err(AppError::Domain {
+            detail: "已有正在计时的前台会话，请先暂停或结束它。".into(),
+        });
+    }
+    Ok(())
+}
+
 /// 新归属不能落入既有可信人工时间，或越过未来已有记录。
 pub fn require_available_human_start(conn: &Connection, start: i64) -> Result<(), AppError> {
     let conflict: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM work_interval i JOIN work_session s ON s.id=i.session_id WHERE s.mode='FOREGROUND' AND i.voided_at IS NULL AND i.needs_review=0 AND i.ended_at>?1)", [start], |r|r.get(0)).map_err(map_sqlite)?;

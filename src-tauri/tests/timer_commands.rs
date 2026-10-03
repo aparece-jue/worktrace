@@ -924,12 +924,25 @@ mod commands {
         );
     }
 
-    /// **占用冲突**：前台只能有一个 running 会话（`uq_running_foreground`）。
+    /// **占用冲突是可预期的领域冲突，不是存储故障**：前台只能有一个 running 会话。
+    ///
+    /// 修复前这条冲突会一路落到 `uq_running_foreground`，报成 `STORAGE_ERROR`
+    /// （文案「存储暂时不可用，请稍后重试」）——把一个业务规则报成基础设施故障，
+    /// 还引导用户去重试一个永远不会成功的操作。根因是 `require_available_human_start`
+    /// 的判据 `i.ended_at > ?1` 对 running 区间（`ended_at IS NULL`）为 NULL，看不见"正在计时"。
+    /// 现在业务事务内的 `require_no_running_foreground` 先判，唯一索引仍是兜底
+    /// （`transaction_boundary.rs` 里另有绕过服务、直连第二个连接写 `create_session` 的用例）。
     #[test]
-    fn a_second_foreground_start_is_refused_by_the_index() {
+    fn a_second_foreground_start_is_refused_as_a_domain_conflict() {
         let mut c = setup(TaskStatus::Ready, None);
         let req = c.start_req();
-        c.coord.start(&mut c.db, req).unwrap();
+        let first = c.coord.start(&mut c.db, req).unwrap();
+        let rev = require_meta(c.db.connection()).unwrap().revision;
+        let sid = first.snapshot.session_id.clone().unwrap();
+        let before = session_repo::get_session(c.db.connection(), &sid)
+            .unwrap()
+            .unwrap();
+        let ivs_before = session_repo::intervals_of_session(c.db.connection(), &sid).unwrap();
 
         // 第二个任务
         c.db.connection()
@@ -943,8 +956,152 @@ mod commands {
         req.task_id = "t2".into();
         let err = c.coord.start(&mut c.db, req).unwrap_err();
 
-        assert_eq!(err.code(), "STORAGE_ERROR", "唯一索引应拦下第二个前台会话");
+        assert_eq!(
+            err.code(),
+            "DOMAIN_ERROR",
+            "前台占用是业务规则，不是存储故障"
+        );
+        assert!(
+            err.message().contains("正在计时"),
+            "文案要说明为什么被拒：{}",
+            err.message()
+        );
+        // 被拒之后：会话、区间、版本、revision 一律不变
         assert_eq!(c.count("work_session"), 1);
+        assert_eq!(c.count("work_interval"), 1);
+        assert_eq!(require_meta(c.db.connection()).unwrap().revision, rev);
+        let after = session_repo::get_session(c.db.connection(), &sid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.row_version, before.row_version);
+        assert_eq!(after.ended_at, before.ended_at);
+        assert_eq!(
+            session_repo::intervals_of_session(c.db.connection(), &sid).unwrap(),
+            ivs_before
+        );
+    }
+
+    /// **计时中恢复另一个会话**：同样是领域冲突（`resume` 排除目标自身）。
+    #[test]
+    fn resuming_while_another_foreground_runs_is_a_domain_conflict() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let start_req = c.start_req();
+        let first = c.coord.start(&mut c.db, start_req).unwrap();
+        let paused_id = first.snapshot.session_id.clone().unwrap();
+        let version = first.snapshot.session_version.unwrap();
+        let pause_req = c.session_req(&paused_id, version);
+        c.coord.pause(&mut c.db, pause_req).unwrap();
+
+        // 第二个任务开始计时，占用前台
+        c.db.connection()
+            .execute(
+                "INSERT INTO task(id,title,status,row_version,created_at,updated_at)
+                 VALUES('t2','第二个','Ready',0,0,0)",
+                [],
+            )
+            .unwrap();
+        let mut req = c.start_req();
+        req.task_id = "t2".into();
+        c.coord.start(&mut c.db, req).unwrap();
+
+        let rev = require_meta(c.db.connection()).unwrap().revision;
+        let before = session_repo::get_session(c.db.connection(), &paused_id)
+            .unwrap()
+            .unwrap();
+        let t1_version = c.task_version();
+        let resume = ResumeRequest {
+            expected_data_epoch: c.epoch.clone(),
+            task_id: "t1".into(),
+            task_expected_version: t1_version,
+            session_id: paused_id.clone(),
+            session_expected_version: before.row_version,
+        };
+        let err = c.coord.resume(&mut c.db, resume).unwrap_err();
+
+        assert_eq!(err.code(), "DOMAIN_ERROR");
+        assert_eq!(c.count("work_session"), 2, "不得开出第三个会话");
+        assert_eq!(c.count("work_interval"), 2, "不得为恢复开出新区间");
+        assert_eq!(require_meta(c.db.connection()).unwrap().revision, rev);
+        let after = session_repo::get_session(c.db.connection(), &paused_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.state, SessionState::Paused, "目标会话必须仍是暂停");
+        assert_eq!(after.row_version, before.row_version);
+    }
+
+    /// 按 30 秒切片推进并各取一次快照。**一次跳好几分钟会被判成「疑似挂起」**
+    /// （`expected_interval_ms = 30s`），那与真实采样节奏不符，不是本用例要验的东西。
+    fn advance_in_ticks(c: &mut Cmd, ms: i64) {
+        let mut left = ms;
+        while left > 0 {
+            let step = left.min(30_000);
+            c.advance(step);
+            c.coord.snapshot(&mut c.db).unwrap();
+            left -= step;
+        }
+    }
+
+    /// **跨午夜含暂停**（02 §8）。P2 负责验证**事实**：午夜前工作 → 暂停跨过午夜 →
+    /// 次日继续 → 结束；暂停的两小时一毫秒都不计入，两段区间与总工时都正确，
+    /// 而且两段各自落在自己那一天（不跨越日界）。
+    ///
+    /// 按查询时区把可信区间**分桶到每一天**是 P5 的报表测试，见 P5 计划
+    /// 「跨午夜与日界分桶」——归属这样切开：**P2 验证事实，P5 验证分桶**。
+    #[test]
+    fn pausing_across_midnight_keeps_pause_out_of_effort() {
+        const DAY: i64 = 86_400_000;
+        let base = 1_700_000_000_000i64;
+        let midnight = (base / DAY + 1) * DAY;
+        let before_midnight = 600_000i64; // 23:50 → 00:00，工作 10 分钟
+        let pause_span = 7_200_000i64; // 暂停两小时
+        let after_midnight = 1_800_000i64; // 次日再工作 30 分钟
+
+        let mut c = setup(TaskStatus::Ready, None);
+        c.advance(midnight - before_midnight - base); // 推到 23:50
+        let start_req = c.start_req();
+        let started = c.coord.start(&mut c.db, start_req).unwrap();
+        let sid = started.snapshot.session_id.clone().unwrap();
+
+        advance_in_ticks(&mut c, before_midnight); // 恰好到 00:00
+        let version = c.coord.live().unwrap().row_version;
+        let pause_req = c.session_req(&sid, version);
+        c.coord.pause(&mut c.db, pause_req).unwrap();
+
+        advance_in_ticks(&mut c, pause_span); // 暂停期间跨过午夜
+        let version = c.coord.live().unwrap().row_version;
+        let task_version = c.task_version();
+        let resume_req = c.resume_req(&sid, task_version, version);
+        c.coord.resume(&mut c.db, resume_req).unwrap();
+
+        advance_in_ticks(&mut c, after_midnight);
+        let version = c.coord.live().unwrap().row_version;
+        let finish_req = c.session_req(&sid, version);
+        let finished = c.coord.finish(&mut c.db, finish_req).unwrap();
+
+        let ivs = session_repo::intervals_of_session(c.db.connection(), &sid).unwrap();
+        assert_eq!(ivs.len(), 2, "暂停把工作切成两段，不该多出第三个区间");
+        assert_eq!(ivs[0].started_at, midnight - before_midnight);
+        assert_eq!(ivs[0].ended_at, Some(midnight));
+        assert_eq!(ivs[0].duration_ms, Some(before_midnight));
+        assert_eq!(ivs[1].started_at, midnight + pause_span);
+        assert_eq!(
+            ivs[1].ended_at,
+            Some(midnight + pause_span + after_midnight)
+        );
+        assert_eq!(ivs[1].duration_ms, Some(after_midnight));
+        assert!(
+            ivs.iter().all(|i| !i.needs_review && i.voided_at.is_none()),
+            "这两段都是可信事实，不是待确认"
+        );
+        assert_eq!(
+            finished.snapshot.active_ms,
+            before_midnight + after_midnight,
+            "暂停的两小时不计入工时"
+        );
+        // 日界恰好落在两段之间：没有任何一段跨越午夜（P5 将按此分桶）
+        assert!(ivs[0].ended_at.unwrap() <= midnight);
+        assert!(ivs[1].started_at >= midnight);
     }
 
     /// **重复提交同一请求**（04 §9 的「重复提交」）：客户端把同一条 `start` 重放一次，

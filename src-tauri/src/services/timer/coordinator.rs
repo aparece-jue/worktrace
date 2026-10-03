@@ -432,6 +432,8 @@ impl Coordinator {
         guard_epoch(&tx, &req.expected_data_epoch)?;
 
         require_active_project(&tx, &req.task_id)?;
+        // 前台槽位是**可预期的领域冲突**，在业务事务内先判；唯一索引仍是兜底。
+        session_repo::require_no_running_foreground(&tx, None)?;
         session_repo::require_available_human_start(&tx, attributed_start)?;
         // 首次 start 冻结估时基准（判据是「还没有任何会话」，见 task_repo）
         let frozen = task_repo::freeze_baseline_estimate(
@@ -714,6 +716,9 @@ impl Coordinator {
             return Err(AppError::RecoveryRequired);
         }
         require_active_project(&tx, &req.task_id)?;
+        // 同上（`start` 的检查）：**排除目标自身**——要恢复的这个会话不算占用，
+        // 占用它的是别人；唯一索引仍是兜底。
+        session_repo::require_no_running_foreground(&tx, Some(&req.session_id))?;
         session_repo::require_available_human_start(&tx, attributed_start)?;
         // paused 且无待确认
         for iv in session_repo::intervals_of_session(&tx, &req.session_id)? {
