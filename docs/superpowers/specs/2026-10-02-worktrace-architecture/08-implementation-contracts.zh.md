@@ -25,6 +25,10 @@ timer_kind=pomodoro 额外保存 phase(work/break)、cycle_index、work_budget_m
 
 工作到点只提示，仍记实际工作及超时；用户显式开始休息才闭合工作区间并切 break。休息到点只提示，用户显式开始下一轮才重新检查前台占用并打开区间；占用冲突保持 break/paused。暂停冻结当前阶段，继续休息不等于 resume 工作。锁屏/休眠冻结阶段，醒来显式继续；重启后工作按区间恢复规则，休息按持久检查点恢复为冻结，不补停机时间。完成任务结束所有阶段。工作段预算与整次 session 工时分别显示，不能用累计工时减每轮预算。
 
+![番茄钟阶段](images/pomodoro-phases.svg)
+
+> 图：休息是阶段而不是会话状态——它跑在 paused 的 session 里，没有工作区间，也不计人工工时。
+
 ## 3. 成果、背景与版本依赖
 
 V0.4 增加最小 outcome(id、project_id、task_id 可空、title、body、occurred_at 可空、source、confirmed_at、row_version) 和 outcome_source；Agent 的 outcome 在此版即有目标实体。project_note/decision/context_fact 与引用都具备 row_version、来源和确认历史。occurred_at 是用户确认或导出者声明的成果日期，不是 task 完成时间；未知用 null。AI 拆分只创建用户选中的子任务，不隐式改父任务状态。

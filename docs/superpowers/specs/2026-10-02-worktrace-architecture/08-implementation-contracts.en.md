@@ -17,6 +17,8 @@ Close the trusted prefix at the last checkpoint; mark only the uncertain remaind
 
 Persist phase(work/break), cycle_index, work_budget_ms, break_budget_ms, phase_elapsed_ms checkpoint and state version. Work uses normal intervals; break keeps session paused with no open work_interval and an independent phase clock. Break neither occupies foreground nor counts effort. Work expiry alerts and continues overtime until explicit break; break expiry alerts until explicit next work cycle, rechecking occupancy. A conflict stays break/paused. Phase pause freezes elapsed; resuming break is not work resume. Lock/suspend freezes the phase, explicit continuation after wake; restart recovers work via intervals and break frozen at checkpoint, never backfills downtime. Task completion ends all phases. Per-cycle budget is separate from cumulative session effort.
 
+![Pomodoro phases](images/pomodoro-phases.svg)
+
 ## 3. Outcomes and version dependencies
 
 V0.4 adds minimal outcome(id/project_id/nullable task_id/title/body/nullable occurred_at/source/confirmed_at/row_version) and outcome_source so Agent outcome import has a target. Notes/decisions/facts/references have row_version, provenance and confirmation history. occurred_at is the declared/confirmed outcome date, never task completion; unknown=null. Adopted subtasks never implicitly change parent state. V0.5 extends categories/self-assessment/practice/action reviews using those entities. Import mappings validate target type/ID/existence, not unconstrained strings.
