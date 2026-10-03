@@ -968,8 +968,13 @@ fn tag_write_results_carry_the_request_epoch_and_the_authoritative_revision() {
     assert_eq!(nothing.revision, f.revision());
 }
 
-/// `list_tags` 的读信封：① items 与 `data_epoch` / `revision` 出自同一次读
-/// （读完之后库再动，先拿到的那份仍是**读时**的版本）；② 旧 epoch 被拒且零变化。
+/// `list_tags` 的读信封：① 返回 `items` + `data_epoch` + `revision`，两个元数据等于
+/// **读当时**库里的值；② 旧 epoch 被拒且零变化。
+///
+/// 口径要说准：「与 `items` 同一次读」由**结构**保证——服务在一次
+/// `unchecked_transaction` 内同时取数据与 `app_meta`。本用例**证明不了**「没有在返回前
+/// 补读一次元数据」：无并发写时那种实现给出同一个 revision（要可观察地证伪需要第二连接
+/// 并发写 + 快照校验，已登记在 `docs/validation/p1-p4-review-backlog.md` 的遗留里）。
 #[test]
 fn list_tags_returns_a_same_read_transaction_envelope() {
     let mut f = bootstrap();
@@ -989,12 +994,13 @@ fn list_tags_returns_a_same_read_transaction_envelope() {
     );
     assert_eq!(only_context.revision, f.revision());
 
-    // 读完再写：信封是**读时**的快照（提交后补读会让 revision 跟着库前进）。
+    // 读完再写一次：核对信封里的 revision 等于**读之前**记下的库版本。
+    // 这不是「没有事后补读」的证据（见上方 doc 的口径）：无并发写时两种实现同值。
+    let read_time = f.revision();
     f.create_tag(TagKind::Report, "周报", 2_002);
     assert_eq!(
-        listed.revision,
-        f.revision() - 1,
-        "信封里的 revision 是读时的值，不是事后补读"
+        listed.revision, read_time,
+        "信封里的 revision 等于读之前记下的库版本（这条不构成「没有补读」的证据）"
     );
     assert_eq!(listed.data_epoch, f.epoch, "业务写不改库身份");
 
@@ -1004,8 +1010,11 @@ fn list_tags_returns_a_same_read_transaction_envelope() {
     assert_unchanged(&f, "t1", &before);
 }
 
-/// `tags_of_task` 的读信封：作用域只到那个任务，`data_epoch` / `revision` 同一次读
-/// 取得；旧 epoch 被拒且零变化（拒绝发生在读之前，不留任何痕迹）。
+/// `tags_of_task` 的读信封：作用域只到那个任务，返回 `items` + `data_epoch` +
+/// `revision`，两个元数据等于**读当时**库里的值；旧 epoch 被拒且零变化。
+///
+/// 「与 `items` 同一次读」由**结构**保证（服务在一次 `unchecked_transaction` 内同时取
+/// 数据与 `app_meta`）；本用例不声称能证伪「返回前补读」——无并发写时两种实现同值。
 #[test]
 fn tags_of_task_returns_a_same_read_transaction_envelope() {
     let mut f = bootstrap();

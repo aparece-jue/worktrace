@@ -1463,6 +1463,12 @@ fn an_unknown_project_status_fails_by_column_for_binding_without_changes() {
             .query_row("PRAGMA ignore_check_constraints", [], |r| r.get(0))
             .unwrap();
     assert_eq!(ignoring, 0, "写完脏值必须把连接级开关关回去");
+    // 脏值确实落库了：直连 SQL 读回来核对（`project_repo` 读它必然失败，不能当 oracle）。
+    let dirty: String =
+        f.db.connection()
+            .query_row("SELECT status FROM project WHERE id='p1'", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(dirty, "paused", "前置条件：库里必须是那个读不懂的取值");
 
     let before = baseline(&f);
     let err = catalog::set_task_project(
@@ -1498,9 +1504,12 @@ fn an_unknown_project_status_fails_by_column_for_binding_without_changes() {
 /// 写结果的 `data_epoch` 等于请求带的 epoch、也等于 `app_meta` 现值，`revision`
 /// 等于 `app_meta.revision`——`Changed` 与 `Unchanged` 两个分支都要带。
 ///
-/// 覆盖项目、任务归属、任务捕获与理清四类写入口的 DTO；断言口径与 COMP-01 的验收
-/// 要求一致：这两个值出自**那次写所在的事务**（不是调用方传进去的副本，也不是提交后
-/// 另开一次读补出来的）。
+/// 覆盖项目、任务归属、任务捕获与理清四类写入口的 DTO。**这条用例能证明的是**：
+/// 返回值等于**写当时**库里的权威值（请求 epoch 与库现值在本用例里相同）。而
+/// `guard_epoch` 通过之后，「回显请求里带来的 epoch」与「在同一事务里读 `app_meta`」
+/// 原理上不可区分——所以断言本身**分不出**这两种实现；「与写在同一事务取得」由结构
+/// 保证：服务只经 `services::tx::settle`（或同一事务里的 `require_meta`）取这两个值，
+/// `tx.commit()` 之后没有第二次读。
 #[test]
 fn write_results_carry_the_request_epoch_and_the_authoritative_revision() {
     let mut f = bootstrap();
@@ -1552,8 +1561,13 @@ fn write_results_carry_the_request_epoch_and_the_authoritative_revision() {
     assert_eq!(renamed.revision, f.revision());
 }
 
-/// `list_projects` 的读信封：① items 与 `data_epoch` / `revision` 出自同一次读
-/// （读完之后库再动，先拿到的那份仍是**读时**的版本）；② 旧 epoch 被拒且零变化。
+/// `list_projects` 的读信封：① 返回 `items` + `data_epoch` + `revision`，两个元数据
+/// 等于**读当时**库里的值；② 旧 epoch 被拒且零变化。
+///
+/// 口径要说准：「与 `items` 同一次读」由**结构**保证——服务在一次
+/// `unchecked_transaction` 内同时取数据与 `app_meta`。本用例**证明不了**「没有在返回前
+/// 补读一次元数据」：无并发写时那种实现给出同一个 revision（要可观察地证伪需要第二连接
+/// 并发写 + 快照校验，已登记在 `docs/validation/p1-p4-review-backlog.md` 的遗留里）。
 #[test]
 fn list_projects_returns_a_same_read_transaction_envelope() {
     let mut f = bootstrap();
@@ -1572,15 +1586,15 @@ fn list_projects_returns_a_same_read_transaction_envelope() {
         "items 按 created_at, id 稳定排序"
     );
 
-    // 读完再写：信封是**读时**的快照。若实现改成提交/返回后补读一次元数据，
-    // 这里的 revision 会跟着库一起前进，断言立刻变红。
+    // 读完再写一次：核对信封里的 revision 等于**读之前**记下的库版本。
+    // 这不是「没有事后补读」的证据（见上方 doc 的口径）：无并发写时两种实现同值。
+    let read_time = f.revision();
     expect_changed(
         catalog::create_project(&mut f.db, create_env(&f.epoch), "项目三", 2000).unwrap(),
     );
     assert_eq!(
-        listed.revision,
-        f.revision() - 1,
-        "信封里的 revision 是读时的值，不是事后补读"
+        listed.revision, read_time,
+        "信封里的 revision 等于读之前记下的库版本（这条不构成「没有补读」的证据）"
     );
     assert_eq!(listed.data_epoch, f.epoch, "业务写不改库身份");
 
