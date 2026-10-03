@@ -130,7 +130,7 @@ fn pausing_freezes_active_ms() {
     h.interval("i2", 1_700_000_000_000, None, false, false);
     h.coord.load_session(h.db.connection(), "s1").unwrap();
     h.advance(5_000);
-    let running = h.coord.snapshot(h.db.connection()).unwrap();
+    let running = h.coord.snapshot(&mut h.db).unwrap();
     assert_eq!(running.active_ms, 15_000, "已确认 10s + 暂计 5s");
 
     // 暂停：库里没有开放区间了，状态也变了
@@ -145,7 +145,7 @@ fn pausing_freezes_active_ms() {
     h.coord.load_session(h.db.connection(), "s1").unwrap();
 
     h.advance(60_000); // 暂停期间过了一分钟
-    let paused = h.coord.snapshot(h.db.connection()).unwrap();
+    let paused = h.coord.snapshot(&mut h.db).unwrap();
     assert_eq!(paused.active_ms, 15_000, "暂停后不得再增长");
     assert_eq!(paused.state, Some(SessionState::Paused));
     assert!(!paused.is_running());
@@ -159,13 +159,13 @@ fn countdown_reports_remaining_then_overtime_and_stopwatch_reports_nothing() {
     h.start(0);
 
     h.advance(3_000);
-    let early = h.coord.snapshot(h.db.connection()).unwrap();
+    let early = h.coord.snapshot(&mut h.db).unwrap();
     assert_eq!(early.remaining_ms, Some(7_000));
     assert_eq!(early.overtime_ms, Some(0), "未超时为 0，不是 None");
     assert_eq!(early.timer_kind, Some(TimerKind::Countdown));
 
     h.advance(10_000); // 共 13 秒，超 3 秒
-    let late = h.coord.snapshot(h.db.connection()).unwrap();
+    let late = h.coord.snapshot(&mut h.db).unwrap();
     assert_eq!(late.remaining_ms, Some(0), "超时后剩余不为负");
     assert_eq!(late.overtime_ms, Some(3_000));
 
@@ -174,7 +174,7 @@ fn countdown_reports_remaining_then_overtime_and_stopwatch_reports_nothing() {
     s.interval("i1", 1_700_000_000_000, None, false, false);
     s.start(0);
     s.advance(99_000);
-    let sw = s.coord.snapshot(s.db.connection()).unwrap();
+    let sw = s.coord.snapshot(&mut s.db).unwrap();
     assert_eq!(sw.remaining_ms, None, "正计时没有剩余");
     assert_eq!(sw.overtime_ms, None, "正计时不会超时");
 }
@@ -188,8 +188,8 @@ fn snapshot_and_tick_agree_on_the_same_sample() {
     h.advance(4_000);
 
     // 时钟不动 → 两次调用看到的是同一个采样
-    let snap = h.coord.snapshot(h.db.connection()).unwrap();
-    let tick = h.coord.tick(h.db.connection()).unwrap();
+    let snap = h.coord.snapshot(&mut h.db).unwrap();
+    let tick = h.coord.tick(&mut h.db).unwrap();
 
     assert_eq!(snap.as_of, tick.as_of, "as_of 必须一致");
     assert_eq!(snap.active_ms, tick.active_ms, "active_ms 必须一致");
@@ -288,7 +288,7 @@ fn intervals_of_session_splits_trusted_pending_and_voided() {
     );
 
     h.advance(3_000);
-    let snap = h.coord.snapshot(h.db.connection()).unwrap();
+    let snap = h.coord.snapshot(&mut h.db).unwrap();
     assert_eq!(snap.active_ms, 8_000, "5s 已确认 + 3s 暂计");
 }
 
@@ -308,7 +308,7 @@ fn a_recovering_session_accrues_no_live_time() {
     h.coord.load_session(h.db.connection(), "s1").unwrap();
 
     h.advance(30_000);
-    let snap = h.coord.snapshot(h.db.connection()).unwrap();
+    let snap = h.coord.snapshot(&mut h.db).unwrap();
     assert_eq!(snap.active_ms, 3_000, "recovering 不得叠加可疑 live");
     assert!(snap.needs_attention());
     assert!(!snap.is_running());
@@ -326,7 +326,7 @@ fn an_idle_coordinator_returns_an_idle_snapshot() {
 
     let clock = Arc::new(Mutex::new(FakeClock::new(1_700_000_000_000, 0)));
     let mut coord = Coordinator::new(Box::new(clock), "run-1");
-    let snap = coord.snapshot(db.connection()).unwrap();
+    let snap = coord.snapshot(&mut db).unwrap();
 
     assert_eq!(snap.session_id, None);
     assert_eq!(snap.active_ms, 0);
@@ -343,7 +343,7 @@ fn tick_seq_keeps_counting_across_sessions_within_a_run() {
     h.start(0);
 
     for _ in 0..3 {
-        h.coord.tick(h.db.connection()).unwrap();
+        h.coord.tick(&mut h.db).unwrap();
     }
     assert_eq!(h.coord.tick_seq(), 3);
 
@@ -361,7 +361,7 @@ fn tick_seq_keeps_counting_across_sessions_within_a_run() {
         )
         .unwrap();
     h.coord.load_session(h.db.connection(), "s2").unwrap();
-    let snap = h.coord.tick(h.db.connection()).unwrap();
+    let snap = h.coord.tick(&mut h.db).unwrap();
     assert_eq!(snap.tick_seq, 4, "新会话不清零 tick_seq");
     assert_eq!(snap.session_id.as_deref(), Some("s2"));
 }

@@ -28,6 +28,11 @@ pub struct TimerSnapshot {
     pub as_of: i64,
     /// 已确认可信工时 + 当前可信开放区间的暂计。
     pub active_ms: i64,
+    /// **待确认**的那一段（有候选归属但没被用户确认）。
+    ///
+    /// 与 `active_ms` **分列**（计划要求）：待确认的时间不是工时，混在一起会让
+    /// 用户以为已经算上了。`None` 表示没有待确认段。
+    pub pending_ms: Option<i64>,
     pub state: Option<SessionState>,
     pub timer_kind: Option<TimerKind>,
     /// 倒计时的剩余毫秒；**正计时为 `None`**（没有「剩余」这回事）。
@@ -54,6 +59,7 @@ impl TimerSnapshot {
             tick_seq,
             as_of,
             active_ms: 0,
+            pending_ms: None,
             state: None,
             timer_kind: None,
             remaining_ms: None,

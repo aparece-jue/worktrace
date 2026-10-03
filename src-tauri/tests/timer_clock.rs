@@ -83,7 +83,7 @@ impl H {
         self.clock.lock().unwrap().sample().unwrap()
     }
     fn snapshot(&mut self) -> worktrace_lib::services::timer::snapshot::TimerSnapshot {
-        self.coord.snapshot(self.db.connection()).unwrap()
+        self.coord.snapshot(&mut self.db).unwrap()
     }
 }
 
@@ -131,9 +131,13 @@ fn the_boundary_at_2000ms_is_exact() {
     }
 }
 
-/// 挂钟回拨 500ms：事实不再可信，且**归属不因此倒退**到把工时算成负数。
+/// 挂钟回拨 500ms：事实不再可信，走**恢复事务**；且工时不出现负数。
+///
+/// Task 4 之后这条的行为变了：异常采样会**先提交独立系统恢复事务**再返回，
+/// 所以会话进 `recovering`、live 暂计归零，待确认段单列在 `pending_ms`。
+/// 这正是总纲 §9 要的——检测异常的查询确实写了库。
 #[test]
-fn a_500ms_wall_setback_is_flagged_and_does_not_produce_negative_work() {
+fn a_500ms_wall_setback_triggers_the_recovery_transaction() {
     let mut h = setup();
     h.advance_both(10_000);
     assert_eq!(h.snapshot().active_ms, 10_000, "前 10 秒正常累计");
@@ -148,9 +152,16 @@ fn a_500ms_wall_setback_is_flagged_and_does_not_produce_negative_work() {
         SampleVerdict::WallBackwards { d_wall_ms: -500 },
         "回拨必须被标出来"
     );
-    // 归属走单调钟，所以暂计不受墙钟回拨影响
-    assert_eq!(snap.active_ms, 11_000, "暂计按单调钟算，不因墙钟回拨而倒退");
-    assert!(snap.active_ms >= 0);
+    // 恢复事务已提交：没有可信检查点 → 整段待确认
+    assert_eq!(
+        snap.state,
+        Some(worktrace_lib::domain::session::SessionState::Recovering)
+    );
+    assert!(snap.needs_attention());
+    assert_eq!(snap.active_ms, 0, "没有可信前缀，已确认工时为 0");
+    assert_eq!(snap.pending_ms, Some(11_000), "整段进入待确认，且**单列**");
+    assert!(snap.active_ms >= 0, "工时不因墙钟回拨变成负数");
+    assert!(!snap.is_running(), "recovering 不再是 running");
 }
 
 /// 单调钟倒退是硬故障，与挂钟倒退分开判定。
@@ -177,7 +188,7 @@ fn a_failed_sample_is_not_silently_replaced() {
     let mut h = setup();
     h.clock.lock().unwrap().fail_forever();
 
-    let err = h.coord.snapshot(h.db.connection()).unwrap_err();
+    let err = h.coord.snapshot(&mut h.db).unwrap_err();
     assert_eq!(
         err.code(),
         "RECOVERY_REQUIRED",
@@ -332,7 +343,7 @@ fn without_an_anchor_there_is_nothing_to_judge() {
 
     let clock = Arc::new(Mutex::new(FakeClock::new(1_700_000_000_000, 0)));
     let mut coord = Coordinator::new(Box::new(clock), "run-1");
-    let snap = coord.snapshot(db.connection()).unwrap();
+    let snap = coord.snapshot(&mut db).unwrap();
 
     assert_eq!(snap.session_id, None);
     assert_eq!(snap.as_of, 1_700_000_000_000, "退回采样本身的挂钟值");

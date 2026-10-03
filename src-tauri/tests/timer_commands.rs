@@ -756,7 +756,7 @@ mod commands {
 
         // 暂停后再走时间也不涨
         c.advance(60_000);
-        let snap = c.coord.snapshot(c.db.connection()).unwrap();
+        let snap = c.coord.snapshot(&mut c.db).unwrap();
         assert_eq!(snap.active_ms, 7_000);
     }
 
@@ -819,7 +819,7 @@ mod commands {
         assert_eq!(out.snapshot.state, Some(SessionState::Running));
         assert_eq!(c.count("work_interval"), 2, "续接开新区间");
         c.advance(1_000);
-        let snap = c.coord.snapshot(c.db.connection()).unwrap();
+        let snap = c.coord.snapshot(&mut c.db).unwrap();
         assert_eq!(snap.active_ms, 3_000, "2 秒旧工时 + 1 秒新暂计，不清空");
     }
 
@@ -870,9 +870,17 @@ mod commands {
         );
     }
 
-    /// **有效命令遇异常**：返回 `RECOVERY_REQUIRED`，**原意图不执行**，也不写库。
+    /// **有效命令遇异常**：原意图不执行，但**独立系统恢复事务已提交**（总纲 §9）。
+    ///
+    /// Task 4 之后这条的行为是：
+    /// - 用户命令返回 `RECOVERY_REQUIRED`，**不做它想做的事**（区间不由它闭合）；
+    /// - 但检测到的异常作为**独立系统状态事务**落库——会话转 `recovering`、
+    ///   区间被分割、写审计、`revision + 1`。
+    ///
+    /// 所以「被拒的用户命令自身不改 revision」这条要读准：这里加的那一次是**系统事务**
+    /// 加的，不是用户命令加的。
     #[test]
-    fn an_anomaly_makes_the_command_refuse_without_executing() {
+    fn an_anomaly_makes_the_command_refuse_but_commits_the_recovery_transaction() {
         let mut c = setup(TaskStatus::Ready, None);
         let req = c.start_req();
         c.coord.start(&mut c.db, req).unwrap();
@@ -888,15 +896,32 @@ mod commands {
         let req = c.session_req(&sid, sv);
         let err = c.coord.pause(&mut c.db, req).unwrap_err();
 
-        assert_eq!(err.code(), "RECOVERY_REQUIRED");
+        assert_eq!(err.code(), "RECOVERY_REQUIRED", "用户命令被拒");
         assert_eq!(c.count("work_session"), sessions_before, "不得新建会话");
+
+        // 系统恢复事务已提交
         assert_eq!(
             require_meta(c.db.connection()).unwrap().revision,
-            rev_before,
-            "原意图不执行，也不加 revision"
+            rev_before + 1,
+            "系统事务自己加一次 revision"
         );
+        assert_eq!(
+            c.coord.live().unwrap().state,
+            SessionState::Recovering,
+            "会话已转 recovering"
+        );
+
+        // **原意图没执行**：pause 本该把区间闭合并置 paused；现在区间是被**分割**的
         let iv = session_repo::intervals_of_session(c.db.connection(), &sid).unwrap();
-        assert_eq!(iv[0].ended_at, None, "区间不该被闭合——原意图没执行");
+        assert_eq!(iv.len(), 1, "没有可信检查点 → 整段待确认，不新增区间");
+        assert!(
+            iv[0].needs_review,
+            "区间是被标成待确认，不是被 pause 正常闭合"
+        );
+        assert_eq!(
+            iv[0].duration_ms, None,
+            "待确认段没有 duration——它不是已确认工时"
+        );
     }
 
     /// **占用冲突**：前台只能有一个 running 会话（`uq_running_foreground`）。

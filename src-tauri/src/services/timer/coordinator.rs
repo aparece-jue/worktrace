@@ -23,6 +23,7 @@ use crate::storage::guards::{guard_epoch, guard_row_version};
 use crate::storage::meta::{bump_revision, require_meta};
 use crate::storage::session_repo::{self, SessionStateUpdate};
 use crate::storage::task_repo;
+use crate::storage::time_edit_repo::{self, TimeEdit};
 
 use super::anchor::{AnchorState, SampleVerdict};
 use super::snapshot::TimerSnapshot;
@@ -94,6 +95,11 @@ pub struct Coordinator {
     /// 最近一次判定的结果。命令/查询/系统事件都经同一条路径，所以这里是
     /// 「上一个人看到的事实可不可信」的唯一出口。
     last_verdict: SampleVerdict,
+    /// **最后一次成功持久化的检查点**。异常分割的可信前缀由它决定——
+    /// 内存里的「可信点」不能当恢复事实（计划原文）。
+    last_checkpoint: Option<Checkpoint>,
+    /// 上次写检查点时的单调读数，用于判断是否到了 30 秒。
+    last_checkpoint_monotonic: Option<i64>,
     live: Option<LiveSession>,
 }
 
@@ -105,6 +111,8 @@ impl Coordinator {
             tick_seq: 0,
             anchor_state: None,
             last_verdict: SampleVerdict::Trusted,
+            last_checkpoint: None,
+            last_checkpoint_monotonic: None,
             live: None,
         }
     }
@@ -200,28 +208,46 @@ impl Coordinator {
         Ok(())
     }
 
+    /// 观察一次采样并记录判定。**每个入口只调一次**——同一个采样看两次，
+    /// 第二次的增量恒为 0，会把刚判出来的异常覆盖成 `Trusted`。
+    fn observe(&mut self, sample: ClockSample) -> SampleVerdict {
+        let v = match self.anchor_state.as_mut() {
+            Some(st) => st.observe(sample),
+            None => SampleVerdict::Trusted,
+        };
+        self.last_verdict = v;
+        v
+    }
+
     /// 查询快照。**自己也取一次采样**，不走 `&self` 绕过检测。
-    pub fn snapshot(&mut self, conn: &Connection) -> Result<TimerSnapshot, AppError> {
-        // 采样失败**不得伪造**一个 ClockSample 继续。事实取不到就是取不到，
-        // 走恢复路径让用户确认——用 RECOVERY_REQUIRED 而不是带技术细节的
-        // DOMAIN_ERROR：后者的 message() 会把 detail 原样拼进用户文案。
+    /// 查询快照。**自己也取一次采样**，不走 `&self` 绕过检测。
+    ///
+    /// 检测到异常时**先提交独立系统恢复事务**，再返回该事务之后的权威快照——
+    /// 所以这次查询确实写了库，调用方不能宣称「查询全程只读」（计划原文）。
+    pub fn snapshot(&mut self, db: &mut Db) -> Result<TimerSnapshot, AppError> {
         let sample = self
             .clock
             .sample()
             .map_err(|_| AppError::RecoveryRequired)?;
-        self.build(conn, sample, false)
+        let verdict = self.observe(sample);
+        if verdict.needs_recovery() {
+            return self.handle_anomaly(db, sample, verdict);
+        }
+        self.build(db.connection(), sample, false)
     }
 
     /// 推进一步。与 [`Coordinator::snapshot`] 的唯一区别是 `tick_seq` 前进一格。
-    pub fn tick(&mut self, conn: &Connection) -> Result<TimerSnapshot, AppError> {
-        // 采样失败**不得伪造**一个 ClockSample 继续。事实取不到就是取不到，
-        // 走恢复路径让用户确认——用 RECOVERY_REQUIRED 而不是带技术细节的
-        // DOMAIN_ERROR：后者的 message() 会把 detail 原样拼进用户文案。
+    /// 推进一步。与 [`Coordinator::snapshot`] 的唯一区别是 `tick_seq` 前进一格。
+    pub fn tick(&mut self, db: &mut Db) -> Result<TimerSnapshot, AppError> {
         let sample = self
             .clock
             .sample()
             .map_err(|_| AppError::RecoveryRequired)?;
-        self.build(conn, sample, true)
+        let verdict = self.observe(sample);
+        if verdict.needs_recovery() {
+            return self.handle_anomaly(db, sample, verdict);
+        }
+        self.build(db.connection(), sample, true)
     }
 
     /// 客户端手上的会话版本是否已经过期。
@@ -244,13 +270,7 @@ impl Coordinator {
     ) -> Result<TimerSnapshot, AppError> {
         let meta = require_meta(conn)?;
 
-        // **先检测，再决定怎么用这个样本**。判定结果对外可见（`last_verdict`），
-        // 由 Task 3/4 决定要不要提交恢复事务；本任务只负责「看见了什么」。
-        self.last_verdict = match self.anchor_state.as_mut() {
-            Some(st) => st.observe(sample),
-            None => SampleVerdict::Trusted,
-        };
-
+        // 检测**不在这里**做：入口已经 `observe` 过一次，结果在 `last_verdict`。
         let as_of = match self.anchor_state.as_ref() {
             Some(st) => st.attribute(sample.monotonic_ms),
             // 没有基线时只能退回采样本身的挂钟值。取值仍来自**同一次采样**，
@@ -286,6 +306,8 @@ impl Coordinator {
             _ => 0,
         };
 
+        // 待确认段与已确认工时**分列**：它还不是工时，混在一起会让人以为算上了。
+        let pending = self.pending_ms_of(conn, &live.id)?;
         let active_ms = live.closed_trusted_ms + live_ms;
         Ok(TimerSnapshot {
             data_epoch: meta.data_epoch,
@@ -296,6 +318,7 @@ impl Coordinator {
             tick_seq: self.tick_seq,
             as_of,
             active_ms,
+            pending_ms: if pending > 0 { Some(pending) } else { None },
             state: Some(live.state),
             timer_kind: Some(live.budget.kind),
             remaining_ms: live.budget.remaining_ms(active_ms),
@@ -338,16 +361,8 @@ impl Coordinator {
         }
 
         // ② 采样 + 检测。命令入口**自己**采样，调用方不得预先传入。
-        let sample = self
-            .clock
-            .sample()
-            .map_err(|_| AppError::RecoveryRequired)?;
-        if let Some(st) = self.anchor_state.as_mut() {
-            if st.observe(sample).needs_recovery() {
-                // ③ 不执行原意图。恢复事务（分割 + recovering）归 Task 4。
-                return Err(AppError::RecoveryRequired);
-            }
-        }
+        //    异常时先提交恢复事务再拒绝——不执行原意图（总纲 §9）。
+        let sample = self.sample_and_detect(db)?;
         if self.anchor_state.is_none() {
             self.establish_anchor(sample);
         }
@@ -488,7 +503,7 @@ impl Coordinator {
     /// 暂停。用已验证的单调差闭合当前区间。
     pub fn pause(&mut self, db: &mut Db, req: SessionRequest) -> Result<CommandOutcome, AppError> {
         self.validate_session_request(db, &req)?;
-        let sample = self.sample_and_detect()?;
+        let sample = self.sample_and_detect(db)?;
         let attributed_end = self.attribute(sample.monotonic_ms);
 
         let tx = db
@@ -551,7 +566,7 @@ impl Coordinator {
                 req.session_expected_version,
             )?;
         }
-        let sample = self.sample_and_detect()?;
+        let sample = self.sample_and_detect(db)?;
         let attributed_start = self.attribute(sample.monotonic_ms);
         let interval_id = uuid::Uuid::new_v4().to_string();
 
@@ -635,7 +650,7 @@ impl Coordinator {
     /// 结束。**可以从 `paused` 直接结束**（02 §3）。
     pub fn finish(&mut self, db: &mut Db, req: SessionRequest) -> Result<CommandOutcome, AppError> {
         self.validate_session_request(db, &req)?;
-        let sample = self.sample_and_detect()?;
+        let sample = self.sample_and_detect(db)?;
         let attributed_end = self.attribute(sample.monotonic_ms);
 
         let tx = db
@@ -698,16 +713,17 @@ impl Coordinator {
         )
     }
 
-    /// 采样并检测。异常时返回 `RECOVERY_REQUIRED`，**不执行原意图**。
-    fn sample_and_detect(&mut self) -> Result<ClockSample, AppError> {
+    /// 采样并检测。异常时**先提交独立系统恢复事务**，再返回 `RECOVERY_REQUIRED`
+    /// ——原用户命令不执行，但恢复状态已经被落库（总纲 §9）。
+    fn sample_and_detect(&mut self, db: &mut Db) -> Result<ClockSample, AppError> {
         let sample = self
             .clock
             .sample()
             .map_err(|_| AppError::RecoveryRequired)?;
-        if let Some(st) = self.anchor_state.as_mut() {
-            if st.observe(sample).needs_recovery() {
-                return Err(AppError::RecoveryRequired);
-            }
+        let verdict = self.observe(sample);
+        if verdict.needs_recovery() {
+            let _ = self.handle_anomaly(db, sample, verdict)?;
+            return Err(AppError::RecoveryRequired);
         }
         Ok(sample)
     }
@@ -748,4 +764,174 @@ fn close_with(
         },
     )?;
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 心跳与异常原子跃迁（Task 4）
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl Coordinator {
+    /// 最后一次**成功持久化**的检查点。异常分割只看它，不看内存里的可信点。
+    pub fn last_checkpoint(&self) -> Option<&Checkpoint> {
+        self.last_checkpoint.as_ref()
+    }
+
+    /// 心跳：约每 30 秒写一次检查点。**不加 revision**（00 §5）。
+    ///
+    /// 返回是否真的写了。失败**不推进持久化标记**，所以下一次还会重试；
+    /// 也**不会**把内存里的可信点当成已持久化的事实。
+    pub fn heartbeat(&mut self, db: &mut Db) -> Result<bool, AppError> {
+        let Some(live) = self.live.clone() else {
+            return Ok(false);
+        };
+        if live.state != SessionState::Running {
+            return Ok(false);
+        }
+        let Some((interval_id, started_at)) = live.open_interval.clone() else {
+            return Ok(false);
+        };
+        // 不可信就不写——否则会把可疑样本固化成恢复事实。
+        if self.last_verdict.needs_recovery() {
+            return Ok(false);
+        }
+
+        let sample = self
+            .clock
+            .sample()
+            .map_err(|_| AppError::RecoveryRequired)?;
+        let due = match self.last_checkpoint_monotonic {
+            None => true,
+            Some(prev) => sample.monotonic_ms - prev >= HEARTBEAT_INTERVAL_MS,
+        };
+        if !due {
+            return Ok(false);
+        }
+
+        let attributed = self.attribute(sample.monotonic_ms);
+        let cp = Checkpoint {
+            interval_id: interval_id.clone(),
+            run_id: self.run_id.clone(),
+            wall_at: sample.wall_ms,
+            attribution_at: attributed,
+            elapsed_ms: (attributed - started_at).max(0),
+        };
+
+        // 心跳有自己的短事务，且**不加 revision**。
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        checkpoint_repo::write(&tx, &cp)?;
+        tx.commit().map_err(map_sqlite)?;
+
+        self.last_checkpoint = Some(cp);
+        self.last_checkpoint_monotonic = Some(sample.monotonic_ms);
+        // 成功心跳前移累计偏差的**参照点**（不是归属基线）。
+        self.reanchor_drift_on_heartbeat(sample);
+        Ok(true)
+    }
+
+    /// 异常跃迁：**一次独立系统事务**保住可信前缀、把余段标成待确认、写审计、
+    /// 会话置 `recovering`，`revision + 1`。随后返回提交后的**权威快照**。
+    ///
+    /// 这是总纲 §9 里那个「独立系统状态事务」：它**不是**用户命令的执行结果，
+    /// 所以既不执行用户意图，也不因用户命令被拒而回滚。
+    ///
+    /// 幂等：已经 `recovering` 就返回现有结果，不重复分割、不重复写审计、不加版本。
+    pub fn handle_anomaly(
+        &mut self,
+        db: &mut Db,
+        sample: ClockSample,
+        verdict: SampleVerdict,
+    ) -> Result<TimerSnapshot, AppError> {
+        let Some(live) = self.live.clone() else {
+            // 没有会话：没有可恢复的事实，直接返回快照。
+            return self.build(db.connection(), sample, false);
+        };
+
+        // 幂等出口：重复事件不重复分割。
+        if live.state == SessionState::Recovering {
+            return self.build(db.connection(), sample, false);
+        }
+
+        let candidate_end = self.attribute(sample.monotonic_ms);
+        let trusted_until = self.last_checkpoint.as_ref().map(|c| c.attribution_at);
+        let reason = match verdict {
+            SampleVerdict::MonotonicBackwards { .. } => "monotonic clock went backwards",
+            SampleVerdict::WallBackwards { .. } => "wall clock went backwards",
+            SampleVerdict::Jumped { .. } => "clock jumped",
+            SampleVerdict::Drifted { .. } => "cumulative clock drift",
+            SampleVerdict::Trusted | SampleVerdict::Suspended { .. } => "not an anomaly",
+        };
+
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        let split = session_repo::split_for_anomaly(&tx, &live.id, trusted_until, candidate_end)?;
+
+        time_edit_repo::write(
+            &tx,
+            &TimeEdit {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id: live.id.clone(),
+                before_json: format!(
+                    "{{\"open_interval\":{:?},\"trusted_until\":{:?}}}",
+                    live.open_interval.as_ref().map(|(id, _)| id.clone()),
+                    trusted_until
+                ),
+                after_json: format!(
+                    "{{\"trusted_interval\":{:?},\"pending_interval\":{:?},\"candidate_end\":{}}}",
+                    split.trusted_interval_id, split.pending_interval_id, split.candidate_end
+                ),
+                reason: Some(reason.to_string()),
+                created_at: sample.wall_ms,
+            },
+        )?;
+
+        session_repo::update_session_state(
+            &tx,
+            &live.id,
+            live.row_version,
+            SessionState::Recovering,
+            SessionStateUpdate {
+                needs_review: Some(true),
+                ..Default::default()
+            },
+        )?;
+
+        let _revision = bump_revision(&tx)?;
+        tx.commit().map_err(map_sqlite)?;
+
+        // 提交后才重建内存：开放区间没了、状态是 recovering，
+        // 于是 live 暂计自动停止、前台占用自动释放（`uq_running_foreground`
+        // 只约束 running）。**不建立新的单调运行起点**。
+        self.load_session(db.connection(), &live.id)?;
+        self.last_checkpoint = None;
+        self.last_checkpoint_monotonic = None;
+
+        // **重建归属基线**。异常已经被承认并落库，旧基线的偏差（实测可达几十秒）
+        // 会一直留在参照点里，导致此后每一次观察都判成累计漂移——那样恢复之后
+        // 就再也开不了新会话了。
+        //
+        // 旧开放事实已经在上面分割完毕（前缀闭合、余段待确认），所以这里重建不会
+        // 让任何未闭合区间与归属对不上。注意这**不是**「建立新的单调运行起点」：
+        // 余段仍然是待确认的候选，没有被当成正在运行的区间。
+        self.reestablish_anchor(sample);
+
+        self.build(db.connection(), sample, false)
+    }
+
+    /// 待确认时长：所有 `needs_review=1` 且未作废的区间跨度之和。
+    fn pending_ms_of(&self, conn: &Connection, session_id: &str) -> Result<i64, AppError> {
+        let mut total = 0;
+        for iv in session_repo::intervals_of_session(conn, session_id)? {
+            if iv.needs_review && iv.voided_at.is_none() {
+                if let Some(end) = iv.ended_at {
+                    total += (end - iv.started_at).max(0);
+                }
+            }
+        }
+        Ok(total)
+    }
 }

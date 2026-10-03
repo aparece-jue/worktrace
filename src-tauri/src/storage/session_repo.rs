@@ -294,3 +294,109 @@ pub fn update_session_state(
         detail: "session vanished".into(),
     })
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 异常分割（P2 Task 4）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一次异常分割的结果，供协调器写审计与重建内存。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnomalySplit {
+    /// 可信前缀的区间 id（保留原 id；`None` 表示没有可信前缀）。
+    pub trusted_interval_id: Option<String>,
+    /// 可信前缀的结束时刻（= 最后成功检查点的归属时刻）。
+    pub trusted_until: Option<i64>,
+    /// 待确认余段的区间 id（`None` 表示余段为零长度、已省略）。
+    pub pending_interval_id: Option<String>,
+    /// 余段的候选结束时刻。**是候选，不是已确认事实**。
+    pub candidate_end: i64,
+}
+
+/// 把会话当前的开放区间按「最后成功检查点」切成可信前缀与待确认余段。
+///
+/// 规则（P2 Task 4）：
+/// - 有检查点：原区间在检查点处闭合（**它本身就是可信前缀**，id 不变），
+///   另开一段从检查点到候选结束的余段并标 `needs_review=1`。
+/// - 没有检查点：**整段待确认**——原区间直接标 `needs_review=1` 并在候选结束处闭合。
+/// - 前缀零长度（检查点正好在区间起点）时**省略前缀**，不建零长度区间。
+///
+/// 待确认余段的 `duration_ms` 为 `NULL`：它还没有被确认，不能算成工时。
+/// schema 的 `ck_interval_duration` 只要求**可信闭合**必须有 duration，正好允许这一点。
+pub fn split_for_anomaly(
+    tx: &Transaction<'_>,
+    session_id: &str,
+    trusted_until: Option<i64>,
+    candidate_end: i64,
+) -> Result<AnomalySplit, AppError> {
+    let open = tx
+        .query_row(
+            "SELECT id, started_at FROM work_interval
+              WHERE session_id = ?1 AND ended_at IS NULL AND voided_at IS NULL",
+            [session_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(map_sqlite)?;
+
+    let Some((open_id, started_at)) = open else {
+        // 没有开放区间（例如异常在暂停期间被发现）：无需分割。
+        return Ok(AnomalySplit {
+            trusted_interval_id: None,
+            trusted_until: None,
+            pending_interval_id: None,
+            candidate_end,
+        });
+    };
+
+    // 可信前缀只在「检查点确实推进过」时才存在；零长度前缀省略。
+    if let Some(end) = trusted_until.filter(|t| *t > started_at) {
+        // 原区间在检查点处闭合，成为可信前缀
+        tx.execute(
+            "UPDATE work_interval SET ended_at = ?1, duration_ms = ?2, sampled_end_wall_at = ?1
+              WHERE id = ?3",
+            rusqlite::params![end, end - started_at, open_id],
+        )
+        .map_err(map_sqlite)?;
+
+        // 余段：从检查点到候选结束，待确认、无 duration
+        let pending_id = uuid::Uuid::new_v4().to_string();
+        let remainder_end = candidate_end.max(end);
+        if remainder_end > end {
+            tx.execute(
+                "INSERT INTO work_interval(id, session_id, started_at, ended_at, duration_ms,
+                                           sampled_end_wall_at, needs_review)
+                 VALUES(?1, ?2, ?3, ?4, NULL, ?4, 1)",
+                rusqlite::params![pending_id, session_id, end, remainder_end],
+            )
+            .map_err(map_sqlite)?;
+            return Ok(AnomalySplit {
+                trusted_interval_id: Some(open_id),
+                trusted_until: Some(end),
+                pending_interval_id: Some(pending_id),
+                candidate_end: remainder_end,
+            });
+        }
+        return Ok(AnomalySplit {
+            trusted_interval_id: Some(open_id),
+            trusted_until: Some(end),
+            pending_interval_id: None,
+            candidate_end: end,
+        });
+    }
+
+    // 没有可信前缀：整段待确认
+    let end = candidate_end.max(started_at);
+    tx.execute(
+        "UPDATE work_interval SET ended_at = ?1, duration_ms = NULL, sampled_end_wall_at = ?1,
+                                  needs_review = 1
+          WHERE id = ?2",
+        rusqlite::params![end, open_id],
+    )
+    .map_err(map_sqlite)?;
+    Ok(AnomalySplit {
+        trusted_interval_id: None,
+        trusted_until: None,
+        pending_interval_id: Some(open_id),
+        candidate_end: end,
+    })
+}
