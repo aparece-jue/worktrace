@@ -5,7 +5,7 @@ use crate::error::{
 use crate::storage::{db::Db, meta::require_meta, project_repo, session_repo, tag_repo, task_repo};
 
 /// 在原操作事务结束后、同一串行服务边界内调用。请求按**目标**逐条给出，
-/// 响应按同一份顺序逐条返回（P4 Task 6，裁决 R-T6-a/b）。
+/// 响应按 kind 白名单顺序分组、同 kind 内按请求顺序逐条返回（P4 Task 6，裁决 R-T6-a/b）。
 ///
 /// - `kind` 是白名单枚举，决定读哪张表；表名只来自下面那个 `match` 的分支，
 ///   **绝不**拼进 SQL；

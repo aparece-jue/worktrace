@@ -245,6 +245,8 @@ struct Baseline {
     projects: Vec<ProjectSnapshot>,
     /// 独立的行数断言：即使快照本身出了问题，「行数不变」这条也还站着。
     project_rows: i64,
+    /// 目标表（`task`）的行数：同理，快照之外再钉一道。
+    task_rows: i64,
     task: Option<TaskSnapshot>,
     task_changes: i64,
 }
@@ -260,6 +262,11 @@ fn baseline_of(f: &Fixture, task_id: &str) -> Baseline {
         "项目快照条数必须与 project 表行数一致（快照坏了就当场发现，而不是让断言恒真）"
     );
     assert!(project_rows > 0, "基线快照不能是空的");
+    let task_rows = f.count("task");
+    assert!(
+        task_rows > 0,
+        "基线里的 task 表不能是空的，否则「行数不变」是空对空"
+    );
     let task = f.task_snapshot(task_id);
     assert!(
         task.is_some(),
@@ -269,6 +276,7 @@ fn baseline_of(f: &Fixture, task_id: &str) -> Baseline {
         revision: f.revision(),
         projects,
         project_rows,
+        task_rows,
         task,
         task_changes: f.count("task_change"),
     }
@@ -278,7 +286,8 @@ fn baseline(f: &Fixture) -> Baseline {
     baseline_of(f, "t1")
 }
 
-/// ① `revision` 不变 ② 项目行数与字段值一个不动 ③ 目标任务字段逐字不变 ④ 审计无新增。
+/// ① `revision` 不变 ② 项目行数与字段值一个不动 ③ 目标表（`task`）行数与目标任务
+/// 字段逐字不变 ④ 审计无新增。
 fn assert_unchanged(f: &Fixture, task_id: &str, before: &Baseline) {
     assert_eq!(
         f.revision(),
@@ -295,6 +304,7 @@ fn assert_unchanged(f: &Fixture, task_id: &str, before: &Baseline) {
         before.projects,
         "项目行不得有任何变化（含行数、名字、状态、版本、时间）"
     );
+    assert_eq!(f.count("task"), before.task_rows, "task 表行数不得变化");
     assert_eq!(
         f.task_snapshot(task_id),
         before.task,
@@ -1177,4 +1187,136 @@ fn done_projects_are_readable_but_not_writable_in_v01() {
         ProjectStatus::Done,
         "done 行一个字没动"
     );
+}
+
+#[test]
+fn completed_project_rejects_capture_binding_start_and_resume_without_changes() {
+    use worktrace_lib::services::timer::coordinator::{ResumeRequest, SessionRequest};
+    let mut f = bootstrap();
+    f.insert_project("completed", "已完成项目", "done", 1500);
+    let before = baseline_of(&f, "t1");
+    let err = catalog::create_task(
+        &mut f.db,
+        create_env(&f.epoch),
+        "新任务",
+        Some("completed"),
+        5000,
+    )
+    .unwrap_err();
+    assert!(
+        !err.message().contains("已归档"),
+        "新建不得把「本版本不支持」说成「已归档」：{}",
+        err.message()
+    );
+    assert_domain_error(err, "已完成");
+    assert_unchanged(&f, "t1", &before);
+    let err = catalog::set_task_project(
+        &mut f.db,
+        update_env(&f.epoch, 0),
+        "t1",
+        ProjectTarget::Bind("completed".into()),
+        5000,
+    )
+    .unwrap_err();
+    assert!(
+        !err.message().contains("已归档"),
+        "关联不得把「本版本不支持」说成「已归档」：{}",
+        err.message()
+    );
+    assert_domain_error(err, "已完成");
+    assert_unchanged(&f, "t1", &before);
+    f.db.connection()
+        .execute("UPDATE project SET status='done' WHERE id='p1'", [])
+        .unwrap();
+    let before = baseline_of(&f, "t1");
+    let session_rows_before = f.count("work_session");
+    let interval_rows_before = f.count("work_interval");
+    let checkpoint_rows_before = f.count("interval_checkpoint");
+    let clock = Arc::new(Mutex::new(FakeClock::new(1_700_000_000_000, 0)));
+    let mut coord = Coordinator::new(Box::new(Arc::clone(&clock)), "run-1");
+    let start = StartRequest {
+        expected_data_epoch: f.epoch.clone(),
+        task_id: "t1".into(),
+        task_expected_version: 0,
+        mode: SessionMode::Foreground,
+        timer_kind: TimerKind::Stopwatch,
+        target_duration_ms: None,
+        expected_interval_ms: 30_000,
+    };
+    let err = coord.start(&mut f.db, start.clone()).unwrap_err();
+    assert!(
+        !err.message().contains("已归档"),
+        "计时不得把「项目已完成」说成「已归档」：{}",
+        err.message()
+    );
+    assert_domain_error(err, "已完成");
+    assert_unchanged(&f, "t1", &before);
+    // 「不留半条记录」：被拒的 start 连会话/区间/检查点都不许增行。
+    assert_eq!(
+        f.count("work_session"),
+        session_rows_before,
+        "被拒的启动不得留下会话行"
+    );
+    assert_eq!(
+        f.count("work_interval"),
+        interval_rows_before,
+        "被拒的启动不得留下区间行"
+    );
+    assert_eq!(
+        f.count("interval_checkpoint"),
+        checkpoint_rows_before,
+        "被拒的启动不得留下检查点行"
+    );
+    f.db.connection()
+        .execute("UPDATE project SET status='active' WHERE id='p1'", [])
+        .unwrap();
+    let started = coord.start(&mut f.db, start).unwrap();
+    let snapshot = started.snapshot;
+    let paused = coord
+        .pause(
+            &mut f.db,
+            SessionRequest {
+                expected_data_epoch: f.epoch.clone(),
+                session_id: snapshot.session_id.unwrap(),
+                session_expected_version: snapshot.session_version.unwrap(),
+            },
+        )
+        .unwrap();
+    f.db.connection()
+        .execute("UPDATE project SET status='done' WHERE id='p1'", [])
+        .unwrap();
+    let before = baseline_of(&f, "t1");
+    let snapshot = paused.snapshot;
+    let session_id = snapshot.session_id.clone().unwrap();
+    let session_before =
+        worktrace_lib::storage::session_repo::get_session(f.db.connection(), &session_id).unwrap();
+    let intervals_before =
+        worktrace_lib::storage::session_repo::intervals_of_session(f.db.connection(), &session_id)
+            .unwrap();
+    let audit_before = f.count("time_edit");
+    let task_version = f.task("t1").unwrap().row_version;
+    let err = coord
+        .resume(
+            &mut f.db,
+            ResumeRequest {
+                expected_data_epoch: f.epoch.clone(),
+                session_id: snapshot.session_id.clone().unwrap(),
+                session_expected_version: snapshot.session_version.unwrap(),
+                task_id: "t1".into(),
+                task_expected_version: task_version,
+            },
+        )
+        .unwrap_err();
+    assert_domain_error(err, "已完成");
+    assert_unchanged(&f, "t1", &before);
+    assert_eq!(
+        worktrace_lib::storage::session_repo::get_session(f.db.connection(), &session_id).unwrap(),
+        session_before
+    );
+    assert_eq!(
+        worktrace_lib::storage::session_repo::intervals_of_session(f.db.connection(), &session_id)
+            .unwrap(),
+        intervals_before
+    );
+    assert_eq!(f.count("time_edit"), audit_before);
 }

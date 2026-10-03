@@ -56,9 +56,11 @@ pub(crate) fn read_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
 ///
 /// 归属到**已归档**的项目一律拒绝（F-004），且在事务内检查，不只依赖 UI 过滤。
 ///
-/// 两条拒绝用与 [`set_task_project`] **同一套**领域变体（`UnknownProject` /
-/// `ProjectArchived`）：这是同一个判断的另一个入口，用户看到的理由必须一致。
-/// （原先借用 `EmptyText{field:"project"}` 与 `IntervalOpenInWrongState`，
+/// 三条拒绝用与 [`set_task_project`] **同一套**领域变体（`UnknownProject` /
+/// `ProjectArchived` / `NotInThisVersion`）：这是同一个判断的另一个入口，
+/// 用户看到的理由必须逐字一致。状态判定同样走 `project_repo::get_project` 的领域枚举，
+/// 库里出现**无法识别**的取值时由它按列报 `UnknownEnumValue`，不会被这里误说成
+/// 「已完成」。（原先借用 `EmptyText{field:"project"}` 与 `IntervalOpenInWrongState`，
 /// 用户会读到「「project」不能为空。」和一句关于计时区间的胡话——见 Task 5 fix round 1。）
 pub fn create_task(
     tx: &Transaction<'_>,
@@ -74,16 +76,21 @@ pub fn create_task(
         .into());
     }
     if let Some(pid) = project_id {
-        let status: Option<String> = tx
-            .query_row("SELECT status FROM project WHERE id = ?1", [pid], |r| {
-                r.get(0)
-            })
-            .optional()
-            .map_err(map_sqlite)?;
-        match status.as_deref() {
-            None => return Err(DomainError::UnknownProject.into()),
-            Some("archived") => return Err(DomainError::ProjectArchived.into()),
-            Some(_) => {}
+        // 与 `set_task_project` 逐字同一条读路径：状态判定走领域枚举。库里出现
+        // **无法识别**的取值时由 `project_repo` 按列报 `UnknownEnumValue`，
+        // 而不是在这里被 `_` 兜底说成「本版本不支持」。
+        let project = crate::storage::project_repo::get_project(tx, pid)?
+            .ok_or(DomainError::UnknownProject)?;
+        match project.status {
+            ProjectStatus::Active => {}
+            ProjectStatus::Archived => return Err(DomainError::ProjectArchived.into()),
+            // `done` 在 V0.1 写不出来；读到它说明库来自更新的版本，不去动它。
+            ProjectStatus::Done => {
+                return Err(DomainError::NotInThisVersion {
+                    what: "把任务关联到已完成的项目",
+                }
+                .into())
+            }
         }
     }
 
@@ -501,22 +508,32 @@ fn json_or_null(v: Option<&str>) -> String {
 }
 
 /// 开始/继续计时必须在调用方事务内检查归属项目。
+///
+/// 状态判定走 `project_repo::get_project` 的领域枚举（与 [`set_task_project`] 同一条
+/// 读路径）：`done` / `archived` 的对外文案一字不变；库里出现**无法识别**的取值时，
+/// 由 `project_repo` 按列报 `UnknownEnumValue`，不会再被这里说成「已完成」。
 pub fn require_active_project(conn: &Connection, task_id: &str) -> Result<(), AppError> {
     let task = get_task(conn, task_id)?.ok_or_else(|| AppError::Domain {
         detail: "任务不存在。".into(),
     })?;
     if let Some(project_id) = task.project_id {
-        let status: String = conn
-            .query_row(
-                "SELECT status FROM project WHERE id=?1",
-                [project_id],
-                |r| r.get(0),
-            )
-            .map_err(map_sqlite)?;
-        if status != "active" {
-            return Err(AppError::Domain {
-                detail: "项目已归档，不能开始或继续计时。".into(),
-            });
+        let project = crate::storage::project_repo::get_project(conn, &project_id)?
+            // 项目行不存在只可能来自数据被绕过外键改坏（`task.project_id` 有 FK）。
+            // 保持原先 `query_row` 未加 `optional()` 时的失败类别：存储层失败，
+            // 不在这里新造一句领域文案。
+            .ok_or_else(|| map_sqlite(rusqlite::Error::QueryReturnedNoRows))?;
+        match project.status {
+            ProjectStatus::Active => {}
+            ProjectStatus::Archived => {
+                return Err(AppError::Domain {
+                    detail: "项目已归档，不能开始或继续计时。".into(),
+                })
+            }
+            ProjectStatus::Done => {
+                return Err(AppError::Domain {
+                    detail: "项目已完成，不能开始或继续计时。".into(),
+                })
+            }
         }
     }
     Ok(())
