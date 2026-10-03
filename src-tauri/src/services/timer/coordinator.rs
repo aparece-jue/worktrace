@@ -19,7 +19,7 @@ use crate::platform::clock::{Clock, ClockSample};
 use crate::storage::meta::require_meta;
 use crate::storage::session_repo;
 
-use super::anchor::Anchor;
+use super::anchor::{AnchorState, SampleVerdict};
 use super::snapshot::TimerSnapshot;
 
 /// 协调器在内存里持有的会话事实。**每一条都能在库里找到对应行**——
@@ -41,8 +41,11 @@ pub struct Coordinator {
     clock: Box<dyn Clock + Send>,
     run_id: String,
     tick_seq: u64,
-    /// 归属基线。`None` 表示尚未建立（此时算不出暂计）。
-    anchor: Option<Anchor>,
+    /// 归属基线 + 采样检测状态。`None` 表示尚未建立（此时算不出暂计）。
+    anchor_state: Option<AnchorState>,
+    /// 最近一次判定的结果。命令/查询/系统事件都经同一条路径，所以这里是
+    /// 「上一个人看到的事实可不可信」的唯一出口。
+    last_verdict: SampleVerdict,
     live: Option<LiveSession>,
 }
 
@@ -52,7 +55,8 @@ impl Coordinator {
             clock,
             run_id: run_id.into(),
             tick_seq: 0,
-            anchor: None,
+            anchor_state: None,
+            last_verdict: SampleVerdict::Trusted,
             live: None,
         }
     }
@@ -69,9 +73,36 @@ impl Coordinator {
         self.live.as_ref()
     }
 
-    /// 建立归属基线。Task 2 会约束「什么时候才允许重建」；本任务只提供入口。
+    /// 最近一次采样的判定。
+    pub fn last_verdict(&self) -> SampleVerdict {
+        self.last_verdict
+    }
+
+    /// 建立归属基线。只在**没有可信基线**时调用（Task 2）。
     pub fn establish_anchor(&mut self, sample: ClockSample) {
-        self.anchor = Some(Anchor::establish(sample));
+        self.anchor_state = Some(AnchorState::establish(sample, HEARTBEAT_INTERVAL_MS));
+    }
+
+    /// 一次**成功**心跳后前移累计偏差的参照点。
+    ///
+    /// **不碰归属基线**——心跳每 30 秒一次，若让它重置基线，`A(M)` 会随心跳跳变，
+    /// 区间起点随之漂移。改成这样是实测逼出来的：挂钟与单调钟以 10–14 ms/分钟单向
+    /// 分叉，累计偏差若永远对着 run 起点算，两三小时后健康会话就会被误判为异常。
+    pub fn reanchor_drift_on_heartbeat(&mut self, sample: ClockSample) {
+        if let Some(st) = self.anchor_state.as_mut() {
+            st.reanchor_drift_on_heartbeat(sample);
+        }
+    }
+
+    /// 显式重建归属基线（新 run、休眠唤醒后、用户显式校正）。
+    ///
+    /// **调用方必须先关闭/隔离旧的开放事实**：重建会让 `A(M)` 跳变，旧区间若还开着，
+    /// 它的起点就与新归属对不上了。
+    pub fn reestablish_anchor(&mut self, sample: ClockSample) {
+        match self.anchor_state.as_mut() {
+            Some(st) => st.reestablish(sample),
+            None => self.establish_anchor(sample),
+        }
     }
 
     /// 从持久化事实装载会话的内存镜像。
@@ -123,17 +154,25 @@ impl Coordinator {
 
     /// 查询快照。**自己也取一次采样**，不走 `&self` 绕过检测。
     pub fn snapshot(&mut self, conn: &Connection) -> Result<TimerSnapshot, AppError> {
-        let sample = self.clock.sample().map_err(|_| AppError::Domain {
-            detail: "clock sample unavailable".into(),
-        })?;
+        // 采样失败**不得伪造**一个 ClockSample 继续。事实取不到就是取不到，
+        // 走恢复路径让用户确认——用 RECOVERY_REQUIRED 而不是带技术细节的
+        // DOMAIN_ERROR：后者的 message() 会把 detail 原样拼进用户文案。
+        let sample = self
+            .clock
+            .sample()
+            .map_err(|_| AppError::RecoveryRequired)?;
         self.build(conn, sample, false)
     }
 
     /// 推进一步。与 [`Coordinator::snapshot`] 的唯一区别是 `tick_seq` 前进一格。
     pub fn tick(&mut self, conn: &Connection) -> Result<TimerSnapshot, AppError> {
-        let sample = self.clock.sample().map_err(|_| AppError::Domain {
-            detail: "clock sample unavailable".into(),
-        })?;
+        // 采样失败**不得伪造**一个 ClockSample 继续。事实取不到就是取不到，
+        // 走恢复路径让用户确认——用 RECOVERY_REQUIRED 而不是带技术细节的
+        // DOMAIN_ERROR：后者的 message() 会把 detail 原样拼进用户文案。
+        let sample = self
+            .clock
+            .sample()
+            .map_err(|_| AppError::RecoveryRequired)?;
         self.build(conn, sample, true)
     }
 
@@ -156,8 +195,16 @@ impl Coordinator {
         advance_tick: bool,
     ) -> Result<TimerSnapshot, AppError> {
         let meta = require_meta(conn)?;
-        let as_of = match self.anchor {
-            Some(a) => a.attribute(sample.monotonic_ms),
+
+        // **先检测，再决定怎么用这个样本**。判定结果对外可见（`last_verdict`），
+        // 由 Task 3/4 决定要不要提交恢复事务；本任务只负责「看见了什么」。
+        self.last_verdict = match self.anchor_state.as_mut() {
+            Some(st) => st.observe(sample),
+            None => SampleVerdict::Trusted,
+        };
+
+        let as_of = match self.anchor_state.as_ref() {
+            Some(st) => st.attribute(sample.monotonic_ms),
             // 没有基线时只能退回采样本身的挂钟值。取值仍来自**同一次采样**，
             // 不会引入第二个瞬间。
             None => sample.wall_ms,
@@ -179,9 +226,9 @@ impl Coordinator {
         };
 
         // 暂计只加**当前可信开放区间**：非 running、没有基线、或没有开放区间都不加。
-        let live_ms = match (&self.anchor, &live.open_interval, live.state) {
+        let live_ms = match (&self.anchor_state, &live.open_interval, live.state) {
             (_, Some((_, started_at)), SessionState::Running) => {
-                let a = self.anchor.expect("matched above");
+                let a = self.anchor_state.as_ref().expect("matched above");
                 // 基线倒退时暂计会是负数——截到 0，异常由 Task 2 检测后分割，
                 // 不在这里把负数当成工时。
                 a.attribute(sample.monotonic_ms)
@@ -208,6 +255,10 @@ impl Coordinator {
         })
     }
 }
+
+/// 心跳间隔（08 §1：约每 30 秒）。它**只控制检查点频率**，
+/// 绝不能用来提前跳过异常检测——异常必须每一拍都看。
+pub const HEARTBEAT_INTERVAL_MS: i64 = 30_000;
 
 /// 只读地构造一个计时类型，供测试与 P7 的展示层复用。
 pub fn timer_kind_of(state: &LiveSession) -> TimerKind {
