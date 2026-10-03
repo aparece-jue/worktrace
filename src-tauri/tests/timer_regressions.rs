@@ -985,3 +985,94 @@ fn wall_jump_before_first_session_rebases_instead_of_shifting_attribution() {
     assert_eq!(snap.state, Some(SessionState::Running));
     assert_eq!(snap.active_ms, 1_000);
 }
+
+#[test]
+fn loaded_paused_session_without_anchor_can_resume_in_new_run() {
+    let mut h = setup();
+    h.start();
+    h.advance(1_000);
+    let req = session_request(&h);
+    h.coord.pause(&mut h.db, req).unwrap();
+    let sid = h.coord.live().unwrap().id.clone();
+    h.coord = Coordinator::new(Box::new(Arc::clone(&h.clock)), "run-2");
+    h.db.connection()
+        .execute(
+            "INSERT INTO application_run(id,started_at) VALUES('run-2',0)",
+            [],
+        )
+        .unwrap();
+    h.coord.load_session(h.db.connection(), &sid).unwrap();
+    let task = worktrace_lib::storage::task_repo::get_task(h.db.connection(), "t1")
+        .unwrap()
+        .unwrap();
+    let req = ResumeRequest {
+        expected_data_epoch: h.epoch.clone(),
+        task_id: "t1".into(),
+        task_expected_version: task.row_version,
+        session_id: sid.clone(),
+        session_expected_version: h.coord.live().unwrap().row_version,
+    };
+    let expected = h.clock.lock().unwrap().sample().unwrap().wall_ms;
+    let result = h.coord.resume(&mut h.db, req).unwrap();
+    assert_eq!(result.snapshot.state, Some(SessionState::Running));
+    let intervals =
+        worktrace_lib::storage::session_repo::intervals_of_session(h.db.connection(), &sid)
+            .unwrap();
+    assert_eq!(
+        intervals
+            .iter()
+            .find(|i| i.ended_at.is_none())
+            .unwrap()
+            .started_at,
+        expected
+    );
+    h.advance(1_000);
+    assert_eq!(h.coord.snapshot(&mut h.db).unwrap().active_ms, 2_000);
+}
+
+#[test]
+fn trusted_boundary_after_four_hours_natural_drift_pauses() {
+    for drift in [-7, 7] {
+        let mut h = setup();
+        h.start();
+        for _ in 0..480 {
+            h.advance(30_000);
+            h.advance_wall_only(drift);
+            h.coord.heartbeat(&mut h.db).unwrap();
+        }
+        h.advance(1_000);
+        let boundary = h.clock.lock().unwrap().sample().unwrap();
+        h.advance(120_000);
+        let snap = h.coord.system_pause(&mut h.db, Some(boundary)).unwrap();
+        assert_eq!(snap.state, Some(SessionState::Paused), "drift={drift}");
+        assert_eq!(snap.active_ms, 14_401_000);
+        assert!(!snap.needs_attention());
+    }
+}
+
+#[test]
+fn transient_boundary_wall_jump_is_not_accepted_when_current_sample_is_normal() {
+    let mut h = setup();
+    h.start();
+    h.advance(1_000);
+    let mut boundary = h.clock.lock().unwrap().sample().unwrap();
+    boundary.wall_ms += 5_000;
+    h.advance(10_000);
+    let snap = h.coord.system_pause(&mut h.db, Some(boundary)).unwrap();
+    assert_eq!(snap.state, Some(SessionState::Recovering));
+}
+
+#[test]
+fn statistics_without_anchor_use_sampled_wall_time_like_snapshot() {
+    let mut h = setup();
+    h.advance(1_000);
+    let revision = h.revision();
+    let expected = h.clock.lock().unwrap().sample().unwrap().wall_ms;
+    let stats = h.coord.stats_sample(&mut h.db).unwrap();
+    let snap = h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(stats.attributed_end, expected);
+    assert_eq!(stats.attributed_end, snap.as_of);
+    assert_eq!(stats.session_id, None);
+    assert_eq!(stats.total_ms(), 0);
+    assert_eq!(h.revision(), revision);
+}

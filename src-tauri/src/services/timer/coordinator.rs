@@ -408,18 +408,18 @@ impl Coordinator {
         // **本 run 还没有过会话**时基线没有连续性要保：没有任何开放事实挂在旧归属上，
         // 长期参照的「进程生命期」语义也还没有可牵连的工时。用当前样本整体重定。
         //
-        // 判据必须是 `live.is_none()` 而不是 `anchor_state.is_none()`：run 初始化就会
+        // 判据必须包含 `live.is_none()`，不能仅检查 `anchor_state.is_none()`：run 初始化就会
         // 建立基线（08 §1 对 lifetime_ref 的要求），此时若发生墙钟跳变，
         // `try_handle_anomaly` 在没有会话时什么都不做，而 `anchor_state.is_none()` 又为假
         // ——新会话的 `started_at` 会拿旧基线算，整整偏出跳变量（NTP 步进时是几分钟/
         // 几小时，之后按日期分桶的统计跟着错）。
-        if self.live.is_none() {
+        if self.anchor_state.is_none() || self.live.is_none() {
             self.establish_anchor(sample);
         }
 
         let session_id = uuid::Uuid::new_v4().to_string();
         let interval_id = uuid::Uuid::new_v4().to_string();
-        let attributed_start = self.attribute(sample.monotonic_ms);
+        let attributed_start = self.attribute(sample);
         let now_wall = sample.wall_ms;
 
         // ④ 一个业务事务
@@ -606,12 +606,12 @@ fn guard_row_version_of_ro(
     }
 }
 
-/// 归属：`A(M)`。没有基线时退回采样本身的挂钟值。
+/// 归属：`A(M)`。没有基线时使用同次采样墙钟，不能把进程单调读数当时间戳。
 impl Coordinator {
-    fn attribute(&self, monotonic_ms: i64) -> i64 {
+    fn attribute(&self, sample: ClockSample) -> i64 {
         match self.anchor_state.as_ref() {
-            Some(st) => st.attribute(monotonic_ms),
-            None => monotonic_ms,
+            Some(st) => st.attribute(sample.monotonic_ms),
+            None => sample.wall_ms,
         }
     }
 }
@@ -622,7 +622,7 @@ impl Coordinator {
         self.refuse_if_faulted()?;
         self.validate_session_request(db, &req)?;
         let sample = self.sample_and_detect(db)?;
-        let attributed_end = self.attribute(sample.monotonic_ms);
+        let attributed_end = self.attribute(sample);
 
         let tx = db
             .connection_mut()
@@ -679,10 +679,11 @@ impl Coordinator {
         let sample = self.sample_and_detect(db)?;
         // 同上（`start` 的注释）：本 run 还没有装载过会话时（典型是跨 run 恢复一个
         // 暂停会话），旧基线不属于这个 run，用当前样本整体重定。
-        if self.live.is_none() {
+        // 已装载会话但基线缺失也必须初始化，不能将单调读数误当归属时间。
+        if self.anchor_state.is_none() || self.live.is_none() {
             self.establish_anchor(sample);
         }
-        let attributed_start = self.attribute(sample.monotonic_ms);
+        let attributed_start = self.attribute(sample);
         let interval_id = uuid::Uuid::new_v4().to_string();
 
         let tx = db
@@ -774,7 +775,7 @@ impl Coordinator {
         self.refuse_if_faulted()?;
         self.validate_session_request(db, &req)?;
         let sample = self.sample_and_detect(db)?;
-        let attributed_end = self.attribute(sample.monotonic_ms);
+        let attributed_end = self.attribute(sample);
 
         let tx = db
             .connection_mut()
@@ -893,7 +894,7 @@ impl Coordinator {
             return Ok(false);
         }
 
-        let attributed = self.attribute(sample.monotonic_ms);
+        let attributed = self.attribute(sample);
         let cp = Checkpoint {
             interval_id: interval_id.clone(),
             run_id: self.run_id.clone(),
@@ -1028,7 +1029,7 @@ impl Coordinator {
             return self.build(db.connection(), sample, false);
         }
 
-        let candidate_end = self.attribute(sample.monotonic_ms);
+        let candidate_end = self.attribute(sample);
         let trusted_until = self.last_checkpoint.as_ref().map(|c| c.attribution_at);
         let reason = match verdict {
             SampleVerdict::MonotonicBackwards { .. } => "monotonic clock went backwards",
@@ -1166,7 +1167,8 @@ impl Coordinator {
         boundary: Option<ClockSample>,
     ) -> Result<TimerSnapshot, AppError> {
         self.refuse_if_faulted()?;
-        let previous = self.anchor_state.as_ref().and_then(|a| a.last());
+        let boundary_state = self.anchor_state;
+        let previous = boundary_state.as_ref().and_then(|a| a.last());
         let sample = self.read_sample(db)?;
         // 只观察当前样本一次；历史 boundary 只作校验，不能推进 last。
         let verdict = self.observe(sample);
@@ -1175,12 +1177,12 @@ impl Coordinator {
                 b.monotonic_ms >= p.monotonic_ms
                     && b.monotonic_ms <= sample.monotonic_ms
                     && b.wall_ms >= p.wall_ms
-                    && (b.wall_ms - self.attribute(b.monotonic_ms)).abs()
-                        <= super::anchor::threshold()
-                            + (b.monotonic_ms - p.monotonic_ms)
-                                .max(0)
-                                .saturating_mul(super::anchor::NATURAL_DRIFT_PPM)
-                                / 1_000_000
+                    && b.wall_ms <= sample.wall_ms
+                    // 用观察前的检测器副本复用三参照点规则，不推进真实 last。
+                    // 平台可信边界可解释长间隔，但不能解释时钟跳变/漂移。
+                    && boundary_state.is_some_and(|mut state| {
+                        matches!(state.observe(*b), SampleVerdict::Trusted | SampleVerdict::Suspended { .. })
+                    })
             })
         });
         let Some(live) = self
@@ -1207,7 +1209,7 @@ impl Coordinator {
             self.last_verdict = verdict;
             return self.handle_anomaly(db, sample, verdict);
         };
-        let end = self.attribute(boundary.monotonic_ms);
+        let end = self.attribute(boundary);
         let tx = db
             .connection_mut()
             .unchecked_transaction()
@@ -1289,7 +1291,7 @@ impl Coordinator {
         // 与命令路径共用同一套「采样 → 检测 → 异常则先提交恢复事务再隔离」逻辑
         // （`sample_and_detect` 内部已含故障态检查与恢复事务）。
         let sample = self.sample_and_detect(db)?;
-        let attributed_end = self.attribute(sample.monotonic_ms);
+        let attributed_end = self.attribute(sample);
 
         let Some(live) = self.live.clone() else {
             return Ok(StatsSample {
