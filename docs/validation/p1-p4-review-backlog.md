@@ -7,7 +7,7 @@
 
 | 编号 | 优先级 | 问题与证据 | 影响 | 建议与验收要求 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| COMP-01 | P2 | P2 TimerSnapshot 带 data_epoch/revision；P4 catalog 的 ProjectChange、TaskProjectChange、TagChange、TaskTagsChange、TaskChange 及 DailyPlanChange 仅带 revision；list_selectable_projects/list_tags/tags_of_task 返回裸列表。见 src-tauri/src/services/catalog.rs、services/daily_plan.rs | 对外响应不能统一执行旧 epoch/旧 revision 丢弃协议；多窗口和恢复接线存在缺口。当前尚未接 IPC，不声称已经发生缓存错乱 | 写结果的数据与 epoch/revision 在同一写事务取得，提交后返回；业务读结果在同一读事务取得数据和元数据。不得由 IPC 层提交后补读。明确查询请求的 epoch 校验及首次握手方式；覆盖一致快照、旧 epoch 拒绝及 P7 迟到响应丢弃 | 已修复（2026-10-04，提交 27f8a7a；门禁 350 passed / 0 failed），回归验证见下方 |
+| COMP-01 | P2 | P2 TimerSnapshot 带 data_epoch/revision；P4 catalog 的 ProjectChange、TaskProjectChange、TagChange、TaskTagsChange、TaskChange 及 DailyPlanChange 仅带 revision；list_selectable_projects/list_tags/tags_of_task 返回裸列表。见 src-tauri/src/services/catalog.rs、services/daily_plan.rs | 对外响应不能统一执行旧 epoch/旧 revision 丢弃协议；多窗口和恢复接线存在缺口。当前尚未接 IPC，不声称已经发生缓存错乱 | 写结果的数据与 epoch/revision 在同一写事务取得，提交后返回；业务读结果在同一读事务取得数据和元数据。不得由 IPC 层提交后补读。明确查询请求的 epoch 校验及首次握手方式；覆盖一致快照、旧 epoch 拒绝及 P7 迟到响应丢弃 | 已修复（2026-10-04，提交 27f8a7a；门禁 350 passed / 0 failed）。查询请求的 epoch 校验已在服务侧统一（只吃请求带来的期望值）；**首次握手方式已由 00 §5 规则 1（`docs/superpowers/specs/2026-10-02-worktrace-architecture/00-architecture.zh.md:61`）与 P7 计划（`docs/superpowers/plans/2026-10-03-p7-shell-and-ui.md:48`/`:50`）定义**：窗口先监听并暂存通知、再拉含 epoch/revision 的一致快照；可见窗口至多每 30 秒校验 `get_revision`。P7 只负责**实现**它。回归验证见下方 |
 | COMP-02 | P2 | task_repo::create_task 只拒绝 archived，Some(_) 放行 done；set_task_project 拒绝 done；require_active_project 拒绝所有非 active，却都提示“已归档”。见 src-tauri/src/storage/task_repo.rs | 可以创建归属 done 项目但随后无法计时的任务；新建与重新绑定规则不同，拒绝理由不准确。V0.1 无 done 创建入口，但 schema/读模型允许该状态 | 新建任务归属、重新绑定、start/resume 均仅允许 active；archived/done 历史可读。done 使用准确的中文拒绝理由。补新建、绑定、开始/恢复路径测试，拒绝时断言 revision、版本、审计和相关字段零变化 | 已修复（2026-10-04，提交 9e7a89a：**340 passed（当时）**；追加「无法识别 `project.status`」用例后 341，COMP-01/COMP-03 收尾后当前 350 passed / 0 failed），回归验证见下方 |
 | COMP-03 | P2 | project_repo::list_projects 支持完整/按状态查询；catalog 只提供 active 的 list_selectable_projects，注释引导完整列表直接调用仓储。见 src-tauri/src/services/catalog.rs、storage/project_repo.rs | Projects 页查询归档历史缺少符合 commands→services 分层的服务入口 | 补完整项目列表服务及可选状态过滤，保留 active 选择入口，统一 COMP-01 响应信封；验证归档/done 历史可读、选择列表只含 active，命令层不直调仓储 | 已修复（2026-10-04，提交 27f8a7a；门禁 350 passed / 0 failed），回归验证见下方 |
 
@@ -22,6 +22,8 @@
 | FOLLOW-03 | P3 扫描版本与审计规则 | 文档已明确：扫描查询零写；实际修改 session 状态/run_id/区间事实时修改对象版本，并在同一批事务增加一次 revision、记审计。paused 重绑定适用；recovering 保持原恢复归属直至 reconcile。P3 尚未实施，后续按真实扫描测试验证 |
 | FOLLOW-04 | 中文错误提示一致性 | P4 验收记录仍登记 P1/P2 遗留的内部列名、英文提示等；建议 P7 前集中清理。Storage.detail 仅诊断，Domain.detail 会进入用户 message，不能混用 |
 | FOLLOW-05 | 平台验收 | 正式系统事件、锁屏/休眠/改时、多窗口/托盘、备份恢复及跨机器容差验证由 P6/P7/P8 承接；自动测试不能替代实机验收 |
+| FOLLOW-06 | 计时/统计快照的元数据取自**提交之后** | P2 的计时写路径是「先提交、再重建视图」：`src-tauri/src/services/timer/coordinator.rs:501-504` 在 `bump_revision` 之后 `tx.commit()`，再调 `rebuild_from_committed`（定义在 `:518`，另见 `:652`/`:778`/`:809`/`:1263` 的调用点），`TimerSnapshot` 的 `data_epoch`/`revision` 由提交后的 `require_meta(conn)` 读回（`:553` 附近）。严格按「写结果的数据与元数据同一写事务取得」这条口径，**P2 并不满足**（它满足的是「提交后只读一次、不由 IPC 层补读」）。本轮 COMP-01 的 R-E 明确冻结 P2 不动，故如实登记：**P7 接线前评估**——要么接受「P2 提交后重建」作为计时快照的既定形状并写进契约，要么随 P7 的接线一并收口。 |
+| FOLLOW-07 | 分层门禁不查 `commands → storage` | `src-tauri/scripts/check-layers.ps1:76-86` 只查 domain / storage / services 三条反向边（`domain` 禁 `storage::`/`commands::`/`services::`、`storage` 禁 `platform::`/`commands::`/`services::`、`services` 禁 `commands::`），**没有**「`src/commands` 不得出现 `storage::`」这条。当前命令层还是空壳（`src/commands/mod.rs` 只有模块文档，P4 已删掉 `commands::envelope` 转发路径），所以这条规则是**真空满足**；P7 往命令层加 IPC 命令时，绕过服务直连仓储不会被门禁拦住。归属：P7 接线时补规则并做一次反向验证（注入一行 `use crate::storage::…` ⇒ LEAK + exit 1）。 |
 
 ## 三、已核对合理的边界（避免后续误当冲突）
 
@@ -74,12 +76,19 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 
 **覆盖用例（本轮新增 9 条，341 → 350）**：
 
-- 写结果带权威 epoch/revision（含 `Unchanged` 分支）：`projects.rs::write_results_carry_the_request_epoch_and_the_authoritative_revision`（新建项目、任务绑定、捕获、理清、改名幂等）、`tags.rs::tag_write_results_carry_the_request_epoch_and_the_authoritative_revision`（建标签、打标、去标与两种幂等）、`daily_plan.rs::plan_write_results_carry_the_request_epoch_and_the_authoritative_revision`（加入、移除与两种幂等）；每条都断言 DTO 的 `data_epoch` 等于请求带的 epoch 且等于 `app_meta` 现值、`revision` 与 `app_meta.revision` 一致。
-- 四个读服务各一条信封用例：正常读（`items` + `data_epoch`/`revision` 与库里一致，且**读完再写**之后先拿到的那份仍是读时版本，证明不是事后补读）与旧 epoch 拒绝（`DATA_EPOCH_MISMATCH`）且零变化（`revision`、项目/标签/关联/任务行数与字段、审计计数均不动）。
+- 写结果带权威 epoch/revision（含 `Unchanged` 分支）：`projects.rs::write_results_carry_the_request_epoch_and_the_authoritative_revision`（新建项目、任务绑定、捕获、理清、改名幂等）、`tags.rs::tag_write_results_carry_the_request_epoch_and_the_authoritative_revision`（建标签、打标、去标与两种幂等）、`daily_plan.rs::plan_write_results_carry_the_request_epoch_and_the_authoritative_revision`（加入、移除与两种幂等）；每条都断言 DTO 的 `data_epoch` 等于请求带的 epoch 且等于 `app_meta` 现值、`revision` 与 `app_meta.revision` 一致。**口径**：这让「返回值等于写当时库里的权威值」可观察；但 `guard_epoch` 通过之后，「回显请求带来的 epoch」与「同事务读 `app_meta`」原理上不可区分，断言分不出这两者——**「同一写事务」由结构保证**（只经 `services/tx.rs::settle` / 同事务里的 `require_meta`，`commit` 之后没有第二次读）。
+- 四个读服务各一条信封用例：正常读断言 `items` + `data_epoch` + `revision` 与库里一致（每条另核对信封里的 `revision` 等于**读之前**记下的库版本），旧 epoch 拒绝（`DATA_EPOCH_MISMATCH`）且零变化（`revision`、项目/标签/关联/任务行数与字段、审计计数均不动）。**口径**：**「与 `items` 同一次读」也是由结构保证**（服务在一次 `unchecked_transaction` 内同时取数据与 `app_meta`），这批用例**证明不了**「没有在返回前补读一次元数据」——无并发写时两种实现给出同一个 revision；可观察的证伪方式见下方遗留登记。用例注释与断言文案已按此改正（评审 I-1）。
 - COMP-03 语义：`the_full_project_list_covers_every_status_while_the_selection_entry_stays_active_only`——active + archived + done 三种项目都在 `list_projects(epoch, None)` 里（归档/done 历史可读），`Some(Archived)` / `Some(Done)` 只列该状态，`list_selectable_projects` 只含 active。
-- 既有用例跟着改签名（`tests/projects.rs` 4 处、`tests/tags.rs` 的 `tags_of` 助手与 `list_tags` 各 1 处），断言只加强：原先直接调 `project_repo::list_projects(…, None)` 的那处历史可读断言改走服务入口，不再直调仓储。
-- 另补一条小用例 `projects.rs::an_unknown_project_status_fails_by_column_for_binding_without_changes`（独立测试函数，未并入既有用例）：用 `PRAGMA ignore_check_constraints` 写入 CHECK 挡不住的 `project.status='paused'`，验证 `set_task_project` 的 Bind 分支与新建/计时一样按列报 `STORAGE_ERROR`（`detail()` 含列名与脏值）且零变化。
+- 既有用例跟着改签名（`tests/projects.rs` **5 处**（`:383`/`:643`/`:655`/`:662`/`:1165`）、`tests/tags.rs` 的 `tags_of` 助手与 `list_tags` 各 1 处），断言只加强：原先直接调 `project_repo::list_projects(…, None)` 的那处历史可读断言改走服务入口，不再直调仓储。
+- 另补一条小用例 `projects.rs::an_unknown_project_status_fails_by_column_for_binding_without_changes`（独立测试函数，未并入既有用例）：用 `PRAGMA ignore_check_constraints` 写入 CHECK 挡不住的 `project.status='paused'`（写完即关回，并直连 SQL 回读自证脏值确实落库），验证 `set_task_project` 的 Bind 分支与新建/计时一样按列报 `STORAGE_ERROR`（`detail()` 含列名与脏值）且零变化。
 
 **门禁**（Windows，离线，提交 `27f8a7a` 上实跑）：`cargo test --offline` **350 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED。**反向验证**：去掉 `list_projects` 的 `guard_epoch` ⇒ 两条读信封用例变红；把 `Settled::read` 的 `data_epoch` 换成常量 ⇒ 写结果用例变红（`left: "not-the-epoch"`）。
 
-**仍未做**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃）与 UI 不在本轮范围；首次握手方式仍由 P7 在入口处决定（服务侧只承受「请求带来的期望 epoch」这一条规则）。
+**首次握手不是待定项**：00 §5 规则 1 与 P7 计划已经定义好形状——窗口**先监听并暂存通知，再拉**含 epoch/revision 的一致快照；可见窗口至多每 30 秒校验 `get_revision`（`00-architecture.zh.md:61`、`2026-10-03-p7-shell-and-ui.md:48`/`:50`）。本轮已统一服务侧的 epoch 校验口径（所有查询只接受**请求带来的**期望值，`guard_epoch` 在同一个读事务内跑），P7 负责实现上述握手与迟到响应丢弃。
+
+**仍未做**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃、先监听后拉的握手时序）与 UI 不在本轮范围。
+
+**本轮登记的新遗留**：
+
+1. **「同一读/写事务」缺可观察证据**：现有断言只能证明「返回值等于当时的库值」，证伪「返回前补读」需要第二连接并发写 + 快照校验（`unchecked_transaction` 是 DEFERRED，要在另一连接提交后确认旧信封仍持旧 revision），约 1–2 小时，本轮不做；「同事务」目前由结构保证（四个读服务与 `settle` 的代码形状）。
+2. **P2 计时快照是提交后重建**（FOLLOW-06）：严格按「写结果与元数据同一写事务」这条口径 P2 不满足，R-E 冻结范围，P7 接线前评估。

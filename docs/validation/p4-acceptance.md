@@ -107,7 +107,7 @@ P4 **不涉及**这四项（DB 执行边界与单调/墙钟映射已由 P1/P2 �
 | `storage::daily_plan_repo` | `plan_for(conn, &LocalDate, tz_key)`、`add_to_plan`、`remove_from_plan` |
 | `storage::task_repo` | 新增 `set_task_project`、`ProjectFilter/TaskFilter/Page/TaskPage/list_tasks_filtered`；**删除** `list_tasks`（零调用） |
 | `storage` | `WriteOutcome<T>{Changed,Unchanged}`、`require_task` |
-| `services::catalog` | `parse_tag_kind`、`normalize_tag_name`、`normalize_project_name`、`parse_project_status`；`create_project`/`rename_project`/`archive_project`；**`list_projects(db, expected_data_epoch, Option<ProjectStatus>)`**（`None` 不限制状态、`Some(s)` 只列该状态）与 `list_selectable_projects(db, expected_data_epoch)`（仍只含 active）；`set_task_project(env, task_id, ProjectTarget)`；`create_tag`/`tag_task`/`untag_task`；**`list_tags(db, expected_data_epoch, Option<TagKind>)`**、**`tags_of_task(db, expected_data_epoch, task_id)`**；`create_task`（捕获）、`clarify_ready`、`list_tasks_filtered`（只读，返回 `epoch/revision`）。**写结果 DTO**（`ProjectChange`/`TaskProjectChange`/`TagChange`/`TaskTagsChange`/`TaskChange`）均含 `data_epoch: String` + `revision: i64`；**读结果信封** `ProjectList`/`TagList` = `{ items, data_epoch, revision }`（COMP-01，提交 `27f8a7a`）。四个读入口都收**请求带来的** `expected_data_epoch`，在同一个读事务内 `guard_epoch` |
+| `services::catalog` | `parse_tag_kind`、`normalize_tag_name`、`normalize_project_name`、`parse_project_status`；`create_project`/`rename_project`/`archive_project`；**`list_projects(db, expected_data_epoch, Option<ProjectStatus>)`**（`None` 不限制状态、`Some(s)` 只列该状态）与 `list_selectable_projects(db, expected_data_epoch)`（仍只含 active）；`set_task_project(env, task_id, ProjectTarget)`；`create_tag`/`tag_task`/`untag_task`；**`list_tags(db, expected_data_epoch, Option<TagKind>)`**、**`tags_of_task(db, expected_data_epoch, task_id)`**；`create_task`（捕获）、`clarify_ready`、`list_tasks_filtered`（只读，返回 `epoch/revision`）。**写结果 DTO**（`ProjectChange`/`TaskProjectChange`/`TagChange`/`TaskTagsChange`/`TaskChange`）均含 `data_epoch: String` + `revision: i64`；**读结果信封** `ProjectList`/`TagList` = `{ items, data_epoch, revision }`（COMP-01，提交 `27f8a7a`）。四个读入口都收**请求带来的** `expected_data_epoch`，在同一个读事务内 `guard_epoch`。**注意两个枚举入口的用途**：`catalog::parse_project_status` 是**写路径**（额外拒绝 V0.1 不写的 `done`）；P7 若要**按 `done` 过滤项目列表**（读路径）必须用 `domain::project::ProjectStatus::parse`——`list_projects` 的 `status` 参数就是后者那种读语义 |
 | `services::daily_plan` | `parse_local_date`、`normalize_timezone`（返回**存储键**）、`system_timezone_name`、`local_date_at`；`plan_for`（只读，返回 `tasks` + `data_epoch` + `revision`）、`add_to_plan`、`remove_from_plan`（写结果 `DailyPlanChange` 含 `data_epoch` + `revision`） |
 | `services::error_response` | `capture_error_response(db, error, targets: &[AuthorityTarget]) -> ErrorResponse`；`ErrorAuthority{data_epoch, revision, records: Vec<RecordVersion>}`、`RecordVersion{kind: AuthorityKind, id, row_version: Option<i64>}` |
 | `envelope`（crate 根） | `WriteEnvelope::{for_create, for_update}`——IPC 层从 `crate::envelope` 引用 |
@@ -182,7 +182,7 @@ SQL 全参数化（含分页）；FK 的 `ON DELETE RESTRICT` 未被破坏；`se
    `LocalDate::{year,month,day}`、`parse_project_status`、`system_timezone_name` 保留并登记「P4 内无生产消费者」。
    （本轮未新增零调用面：四个读入口都有测试消费者，`ProjectList`/`TagList` 是它们的返回类型。）
 4. **`daily_plan` 的 `(local_date, timezone)` 读索引**（需新迁移）与**容器拆分**
-   （`services/catalog.rs` 已 509 行、四类职责，P7 再加任务命令时拆 `services/tasks.rs`）。
+   （`services/catalog.rs` 当前 665 行、四类职责，P7 再加任务命令时拆 `services/tasks.rs`）。
 5. **`WriteEnvelope::for_create` 的改名**（它在 4 处集合操作上语义错位）——P7 定 IPC 形状时一起做。
 
 ## 文档对齐后的兼容收尾
@@ -207,8 +207,12 @@ P4 核心验收结论保留；完整响应信封、完整项目列表服务以�
 
 **完整项目列表服务（COMP-03）**：新增 `catalog::list_projects(db, expected_data_epoch, Option<ProjectStatus>)`——`None` 不限制状态（归档与 done 历史可读）、`Some(s)` 只列该状态；`list_selectable_projects` 复用同一读路径且仍只含 active；仓储 `project_repo::list_projects` 的签名与实现一字未动；原注释里「要完整列表用 `storage::project_repo::list_projects(conn, None)`」的引导已删。既有用例里那处直调仓储的「历史仍读得到」断言改走服务入口。
 
-**用例（新增 9 条，341 → 350）**：三个写结果权威 epoch 用例（`projects.rs`/`tags.rs`/`daily_plan.rs` 各一条，含 `Unchanged` 分支）；四个读信封用例（正常读断言「读完再写仍保持读时版本」，旧 epoch 断言 `DATA_EPOCH_MISMATCH` 且零变化）；`the_full_project_list_covers_every_status_while_the_selection_entry_stays_active_only`；`an_unknown_project_status_fails_by_column_for_binding_without_changes`（`PRAGMA ignore_check_constraints` 写脏值，绑定路径按列报 `STORAGE_ERROR` 且零变化）。`tests/projects.rs` 4 处与 `tests/tags.rs` 2 处调用点随签名更新，断言只加强。
+**用例（新增 9 条，341 → 350）**：三个写结果权威 epoch 用例（`projects.rs`/`tags.rs`/`daily_plan.rs` 各一条，含 `Unchanged` 分支）；四个读信封用例（正常读断言「返回值等于当时的库里权威值」，旧 epoch 断言 `DATA_EPOCH_MISMATCH` 且零变化）；`the_full_project_list_covers_every_status_while_the_selection_entry_stays_active_only`；`an_unknown_project_status_fails_by_column_for_binding_without_changes`（`PRAGMA ignore_check_constraints` 写脏值、直连 SQL 回读自证，绑定路径按列报 `STORAGE_ERROR` 且零变化）。`tests/projects.rs` **5 处**（`:383`/`:643`/`:655`/`:662`/`:1165`）与 `tests/tags.rs` 2 处调用点随签名更新，断言只加强。
+
+**证据口径**（评审 I-1 订正）：这批用例能证明的是「返回值等于**当时**库里的权威值」；**「数据与元数据同一事务」由结构保证**——服务在一次 `unchecked_transaction`（读）/ 一次写事务（`settle`）内同时取数据与 `app_meta`。用例本身**证伪不了**「返回前补读一次元数据」：无并发写时那种实现给出同一个 revision；要可观察地证伪需要第二连接并发写 + 快照校验，已登记在[待评审清单](p1-p4-review-backlog.md)的本轮遗留里，本轮不做。
+
+**首次握手不是待定项**：00 §5 规则 1（`docs/superpowers/specs/2026-10-02-worktrace-architecture/00-architecture.zh.md:61`）与 P7 计划（`docs/superpowers/plans/2026-10-03-p7-shell-and-ui.md:48`/`:50`）已定义——窗口先监听并暂存通知、再拉含 epoch/revision 的一致快照；可见窗口至多每 30 秒校验 `get_revision`。本轮统一的是**服务侧的 epoch 校验口径**（查询只接受请求带来的期望值，守卫在同一读事务内），P7 负责实现该握手与迟到响应丢弃。
 
 **门禁**（提交 `27f8a7a` 上实跑）：`cargo test --offline` **350 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED。**反向验证**：去掉 `list_projects` 的 `guard_epoch` ⇒ 两条读信封用例红；`Settled::read` 返回常量 epoch ⇒ 写结果用例红（`left: "not-the-epoch"`）。
 
-**仍未完成**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃与首次握手）与 UI 不在本轮范围；`create_task` 的 `Option<&str>` 与 `set_task_project` 的 `ProjectTarget` 两种入参形状仍并存。
+**仍未完成**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃、先监听后拉的握手时序）与 UI 不在本轮范围；`create_task` 的 `Option<&str>` 与 `set_task_project` 的 `ProjectTarget` 两种入参形状仍并存。另：严格按「写结果与元数据同一写事务」这条口径，**P2 的计时快照不满足**（提交后经 `rebuild_from_committed` 重建，`coordinator.rs:501-504`/`:553`）——R-E 冻结 P2，已登记为 FOLLOW-06，P7 接线前评估。
