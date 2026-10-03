@@ -1261,27 +1261,9 @@ impl Coordinator {
     /// 取一次统计采样。检测到异常时**先提交恢复事务**，再以恢复语义返回 Err——
     /// 统计不能基于不可信的事实。
     pub fn stats_sample(&mut self, db: &mut Db) -> Result<StatsSample, AppError> {
-        self.refuse_if_faulted()?;
-        let sample = self.read_sample(db)?;
-        let verdict = self.observe(sample);
-        if verdict.needs_recovery() {
-            let was_running = self
-                .live
-                .as_ref()
-                .is_some_and(|l| l.state == SessionState::Running);
-            let _ = self.handle_anomaly(db, sample, verdict)?;
-            // 本次检测也可能刚刚进入故障态，必须在原命令/统计继续前隔离。
-            self.refuse_if_faulted()?;
-            if was_running
-                || (verdict.is_wall_clock_anomaly()
-                    && self
-                        .live
-                        .as_ref()
-                        .is_some_and(|l| l.state == SessionState::Recovering))
-            {
-                return Err(AppError::RecoveryRequired);
-            }
-        }
+        // 与命令路径共用同一套「采样 → 检测 → 异常则先提交恢复事务再隔离」逻辑
+        // （`sample_and_detect` 内部已含故障态检查与恢复事务）。
+        let sample = self.sample_and_detect(db)?;
         let attributed_end = self.attribute(sample.monotonic_ms);
 
         let Some(live) = self.live.clone() else {
