@@ -144,8 +144,43 @@ monotonic_instant: samples=20000  min_positive_ns=100  max_ns=8400  zero_permill
 
 ## 4. 人工操作（**待做**）
 
-每一段都用同样的命令跑，操作前按回车打标记。填写时把探针输出里带 `# MARKER`
-的那一拍与下面的表格对上。
+### 分两次跑，不要挤在一次里
+
+锁屏那一段本身要 30 分钟，**比其它三段加起来还长得多**。用同一条命令跑会中途结束、
+拿不到数据，所以拆成两次：
+
+**跑法 A —— 锁屏（约 35 分钟）**
+
+```powershell
+cd D:\ProJect\worktrace\src-tauri
+cargo run --example clock_probe -- --seconds 2100 --interval-ms 1000
+```
+
+启动后：输入 `lock` 回车 → 立刻锁屏 → 等 30 分钟 → 解锁 → 再等 5 分钟让探针自然结束。
+（`--seconds 2100` = 35 分钟；**不要用 600**，10 分钟跑不完 30 分钟的锁屏。）
+
+**跑法 B —— 休眠与改时（约 10 分钟）**
+
+```powershell
+cargo run --example clock_probe -- --seconds 600 --interval-ms 1000
+```
+
+启动后依次做三件事，**每件之前都先输入标签回车**：
+
+| 输入 | 然后做 |
+| --- | --- |
+| `sleep` | 休眠，等一两分钟再唤醒 |
+| `fast` | 把系统时间调快 1 小时 |
+| `slow` | 把系统时间调回（或调慢 1 小时） |
+
+> 4.5（关窗静置）**不在这两次里**：探针是前台进程，关不关窗对它没影响，它证明不了
+> 「关窗后仍在采样」——那要等 P7 的周期采样驱动。本表保留该行只作对照。
+
+### 填写方式
+
+把探针输出里带 `# MARKER` 的那一拍与下面的表格对上；每段还要抄汇总里
+`samples / flagged / worst_delta_gap_ms / worst_cum_gap_ms / wall_backwards /
+monotonic_backwards / worst_interval_gap / suspends` 这几项。
 
 | # | 操作 | 期望观察 | 实测 | 结论 |
 | --- | --- | --- | --- | --- |
