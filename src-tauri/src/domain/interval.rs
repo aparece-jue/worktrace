@@ -141,3 +141,19 @@ impl IntervalSet {
         &self.items
     }
 }
+
+/// 协调器**已验证**的闭合事实，交给仓储落库（P1 Task 3 定义、Task 4 消费）。
+///
+/// 仓储**不得**由挂钟自行推算这里任何一项——工时只能来自协调器的单调差。
+/// 这正是「不得用 wall-now 在仓储计算工时」那条约束的载体。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClosedIntervalFacts {
+    /// 归属后的结束时刻（挂钟毫秒）。
+    pub ended_at: i64,
+    /// 可信时长。待确认的余段为 `None`。
+    pub duration_ms: Option<i64>,
+    /// 协调器采样到的结束挂钟值，原样保留供事后核对。
+    pub sampled_end_wall_at: i64,
+    /// 是否为待确认的余段。
+    pub needs_review: bool,
+}

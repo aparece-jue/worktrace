@@ -36,6 +36,11 @@ pub enum DomainError {
     EmptyText { field: &'static str },
     /// 时钟样本不可信（采样失败或数值回退）。
     UntrustedSample { reason: &'static str },
+    /// 携带的运行上下文已过期：给出的 `run_id` 与持久化事实不符。
+    ///
+    /// 典型来源是内存里还留着上一轮 run 的基线（08 §1 明确禁止沿用旧 `Instant`）。
+    /// 它**不是**普通的参数错误——必须触发恢复流程，所以单独命名。
+    StaleRunContext { expected: String, actual: String },
 }
 
 impl std::fmt::Display for DomainError {
@@ -70,6 +75,9 @@ impl std::fmt::Display for DomainError {
             Self::PendingAndVoided => write!(f, "an interval cannot be pending and voided at once"),
             Self::EmptyText { field } => write!(f, "{field} must not be empty"),
             Self::UntrustedSample { reason } => write!(f, "untrusted clock sample: {reason}"),
+            Self::StaleRunContext { expected, actual } => {
+                write!(f, "stale run context: expected {expected}, got {actual}")
+            }
         }
     }
 }

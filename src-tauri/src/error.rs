@@ -66,6 +66,33 @@ impl AppError {
     }
 }
 
+impl From<crate::domain::error::DomainError> for AppError {
+    /// 领域错误 → 契约错误的映射。
+    ///
+    /// 规格只给了四个码（`DATA_EPOCH_MISMATCH`、`VERSION_CONFLICT`、
+    /// `RECOVERY_REQUIRED`，以及 V0.2 的 `POMO_STATE_CONFLICT`），所以
+    /// 「不把所有错误压成一个桶」的准确含义是：
+    /// - **待恢复**独立成码——它要触发前端换流程，不是普通报错；
+    /// - **版本冲突**独立成码——它来自守卫，前端提示「刷新后重试」；
+    /// - 非法状态与占用冲突同属 `DOMAIN_ERROR`，但 `detail` 必须各自可辨，
+    ///   否则诊断日志里分不出是「跃迁不合法」还是「前台已被占用」。
+    ///
+    /// 未知记录同样走 `Domain`，不另设码：规格没有 `NOT_FOUND`，
+    /// 而前端对它的处理与其它领域拒绝一致（提示 + 刷新）。
+    fn from(e: crate::domain::error::DomainError) -> Self {
+        use crate::domain::error::DomainError as D;
+        match e {
+            // 时钟样本不可信、或运行上下文已过期 → 该会话必须进入 recovering，
+            // 等用户确认。这两种都不是「参数写错了」，而是**内存状态与持久化事实
+            // 已经对不上**，继续按普通错误提示会让用户重试一个永远失败的操作。
+            D::UntrustedSample { .. } | D::StaleRunContext { .. } => AppError::RecoveryRequired,
+            other => AppError::Domain {
+                detail: other.to_string(),
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
