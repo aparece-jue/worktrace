@@ -1,7 +1,8 @@
 # Layering gate (P1 执行与完成门槛).
 #
 # Rules (01 section 2 / plan index section 9):
-#   domain   must not touch rusqlite, std::fs, platform:: or storage::
+#   domain   must not touch rusqlite, std::fs, platform::, storage::, commands::
+#            or services::
 #   storage  must not touch platform:: or commands::
 #   services must not touch std::time/SystemTime/Instant::now, nor commands::
 #
@@ -9,6 +10,12 @@
 # the `commands -> services` direction. It slipped through once because nothing
 # checked it -- `WriteEnvelope` used to live in `commands::` and a service imported
 # it. The type now lives at the crate root; this rule keeps it that way.
+#
+# P4 Task 6 added commands:: and services:: to the domain rule. Both are reverse
+# edges for the same reason: domain sits at the bottom of
+# `commands -> services -> {storage, domain, platform}`, so a `use crate::services::..`
+# or `use crate::commands::..` inside src/domain is an upward dependency -- and
+# nothing checked it until now.
 #
 # Why a real script instead of an inline snippet in the plan:
 #   A plain grep also matches the doc comments that *state* the rule, so the
@@ -61,7 +68,7 @@ function Test-LayerLeak {
 }
 
 $ok = $true
-$ok = (Test-LayerLeak 'src/domain'  'rusqlite|std::fs|platform::|storage::' 'domain')  -and $ok
+$ok = (Test-LayerLeak 'src/domain'  'rusqlite|std::fs|platform::|storage::|commands::|services::' 'domain')  -and $ok
 $ok = (Test-LayerLeak 'src/storage' 'platform::|commands::'                 'storage') -and $ok
 
 # services must not read the system clock directly -- time has to come through
