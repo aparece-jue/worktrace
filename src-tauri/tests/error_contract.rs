@@ -69,9 +69,23 @@ fn errors_never_leak_paths_sql_or_payload() {
                 "面向用户的文本不得出现 {banned:?}：{shown}"
             );
         }
-        // 面向用户的 message 不得等于内部 detail —— 两者用途不同。
-        if let Some(d) = e.detail() {
-            assert_ne!(e.message(), d, "message 不应直接复用内部 detail");
+        // 用途不同的两类 detail，守的东西也不同：
+        //
+        // - `Domain` 的 detail **按契约就是面向用户的**——`message()` 是
+        //   `操作不被允许：{detail}`，它会被原样拼进用户看到的句子。所以对它的要求
+        //   不是「别进 message」（它必然进），而是「本身得是用户读得懂的中文」，
+        //   那条由 `domain_error_messages_are_user_facing_chinese` 守。
+        // - `Storage` 的 detail 是**内部诊断**，任何时候都不该出现在用户文案里。
+        //
+        // 原先这里是 `assert_ne!(message(), detail)`：因为 message 带了前缀，
+        // 它对 Domain 恒真、什么都没守住；对 Storage 也拦不住「message 里嵌了 detail」
+        // 这种真正的泄漏。改成按变体分别守。
+        if let AppError::Storage { detail } = e {
+            assert!(
+                !e.message().contains(detail.as_str()),
+                "内部诊断不得进入用户文案：{} ⊃ {detail}",
+                e.message()
+            );
         }
     }
 }
@@ -91,4 +105,84 @@ fn version_conflict_carries_numbers_but_not_in_message() {
     }
     assert!(!e.message().contains('7'));
     assert!(!e.message().contains('9'));
+}
+
+/// **`DomainError` 的文案是给用户看的**，不是日志。
+///
+/// 因为 `AppError::Domain { detail }` 的 `message()` 会把 detail 原样拼进去。
+/// 这一条曾经是坏的：全部 14 个变体都是英文技术串，用户会看到
+/// 「操作不被允许：an interval is already open」。
+#[test]
+fn domain_error_messages_are_user_facing_chinese() {
+    use worktrace_lib::domain::error::DomainError;
+
+    let cases: Vec<DomainError> = vec![
+        DomainError::IllegalTransition {
+            from: "Inbox",
+            to: "Doing",
+        },
+        DomainError::ReopenMustBeExplicit { from: "Done" },
+        DomainError::NotInThisVersion { what: "pomodoro" },
+        DomainError::IntervalAlreadyOpen,
+        DomainError::NoOpenInterval,
+        DomainError::IntervalOpenInWrongState {
+            state: "recovering",
+        },
+        DomainError::NegativeInterval {
+            started_at: 10,
+            ended_at: 5,
+        },
+        DomainError::OverlappingInterval {
+            existing_start: 1,
+            existing_end: 9,
+        },
+        DomainError::TrustedIntervalWithoutDuration,
+        DomainError::PendingAndVoided,
+        DomainError::EmptyText { field: "task" },
+        DomainError::UntrustedSample {
+            reason: "monotonic went backwards",
+        },
+        DomainError::UnknownEnumValue {
+            field: "state",
+            value: "???".into(),
+        },
+        DomainError::StaleRunContext {
+            expected: "run-1".into(),
+            actual: "run-2".into(),
+        },
+    ];
+    assert_eq!(cases.len(), 14, "14 个变体都要覆盖，加了新的记得补进来");
+
+    for e in cases {
+        let shown: AppError = e.into();
+        let message = shown.message();
+
+        // ① 是中文：至少含一个 CJK 字符
+        assert!(
+            message
+                .chars()
+                .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
+            "用户文案必须是中文：{message}"
+        );
+        // ② 不说内部标识：裸枚举名不该出现
+        for banned in [
+            "Inbox",
+            "Clarifying",
+            "Ready",
+            "Doing",
+            "Waiting",
+            "Blocked",
+            "Done",
+        ] {
+            assert!(
+                !message.contains(banned),
+                "不得漏出内部状态名 {banned:?}：{message}"
+            );
+        }
+        // ③ 不承诺可以重试——这些拒绝与输入无关，重试一次还是被拒
+        assert!(
+            !message.contains("重试"),
+            "拒绝类文案不该说「重试」：{message}"
+        );
+    }
 }

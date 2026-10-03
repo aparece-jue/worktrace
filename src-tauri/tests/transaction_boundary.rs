@@ -346,7 +346,20 @@ fn domain_errors_map_to_distinguishable_contract_codes() {
 
     // 同码但 detail 必须可辨，否则诊断日志里分不出是哪种拒绝。
     assert_ne!(illegal.detail(), occupied.detail());
-    assert!(illegal.detail().unwrap().contains("Inbox"));
+
+    // detail 会**原样拼进用户看到的句子**（`AppError::Domain` 的 message() 是
+    // `操作不被允许：{detail}`），所以它必须是用户读得懂的中文，且不得出现内部标识。
+    // 这里钉住两件事：说清是哪次跃迁（用中文状态名），且没有裸枚举名。
+    let detail = illegal.detail().unwrap();
+    assert!(
+        detail.contains("收集箱"),
+        "要说清是从哪个状态出发：{detail}"
+    );
+    assert!(detail.contains("复盘"), "也要说清目标状态：{detail}");
+    assert!(
+        !detail.contains("Inbox") && !detail.contains("Review"),
+        "不得漏出内部标识：{detail}"
+    );
 }
 
 /// 心跳检查点**不加 revision**——这是 00 §5 明写的例外，必须钉住。

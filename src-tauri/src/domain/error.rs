@@ -50,43 +50,74 @@ pub enum DomainError {
     StaleRunContext { expected: String, actual: String },
 }
 
+/// 任务状态的中文名。用户的提示语里不该出现 `Inbox` 这种内部标识。
+fn zh_status(raw: &str) -> &str {
+    match raw {
+        "Inbox" => "收集箱",
+        "Clarifying" => "理清中",
+        "Ready" => "待办",
+        "Doing" => "进行中",
+        "Waiting" => "等待中",
+        "Blocked" => "受阻",
+        "Scheduled" => "已排期",
+        "Review" => "复盘",
+        "Done" => "已完成",
+        "Cancelled" => "已取消",
+        other => other,
+    }
+}
+
+/// **这里的文案是面向用户的**，不是给日志看的。
+///
+/// 原因：`AppError::Domain { detail }` 的 `message()` 是
+/// `format!("操作不被允许：{detail}")`——`detail` 会被**原样拼进用户看到的句子**。
+/// 所以它必须是用户读得懂的一句中文，且不得出现内部标识（枚举名、表名、字段名）。
+/// 诊断信息应通过 `code` 与结构化字段表达，不要塞进这里。
 impl std::fmt::Display for DomainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::IllegalTransition { from, to } => write!(f, "illegal transition {from} -> {to}"),
-            Self::ReopenMustBeExplicit { from } => {
-                write!(f, "reopening from {from} must be an explicit reopen")
+            Self::IllegalTransition { from, to } => {
+                write!(
+                    f,
+                    "任务不能从「{}」变成「{}」。",
+                    zh_status(from),
+                    zh_status(to)
+                )
             }
-            Self::NotInThisVersion { what } => write!(f, "{what} is not part of this version"),
-            Self::IntervalAlreadyOpen => write!(f, "an interval is already open"),
-            Self::NoOpenInterval => write!(f, "no open interval to close"),
+            Self::ReopenMustBeExplicit { from } => {
+                write!(f, "「{}」是终态，要重新开始必须显式重开。", zh_status(from))
+            }
+            Self::NotInThisVersion { what } => write!(f, "当前版本还没有「{what}」这项功能。"),
+            Self::IntervalAlreadyOpen => write!(f, "已经有一段正在计时的区间。"),
+            Self::NoOpenInterval => write!(f, "当前没有正在计时的区间。"),
             Self::IntervalOpenInWrongState { state } => {
-                write!(f, "state {state} must not hold an open interval")
+                write!(
+                    f,
+                    "会话处于「{}」时不该有开放的计时区间。",
+                    zh_status(state)
+                )
             }
             Self::NegativeInterval {
                 started_at,
                 ended_at,
             } => {
-                write!(f, "negative interval: {started_at} -> {ended_at}")
+                write!(f, "计时区间时长是负的（{started_at} → {ended_at}）。")
             }
             Self::OverlappingInterval {
                 existing_start,
                 existing_end,
-            } => write!(
-                f,
-                "overlaps an existing interval [{existing_start}, {existing_end})"
-            ),
-            Self::TrustedIntervalWithoutDuration => {
-                write!(f, "a trusted closed interval must carry duration_ms")
+            } => {
+                write!(f, "与已有区间 [{existing_start}, {existing_end}) 重叠。")
             }
-            Self::PendingAndVoided => write!(f, "an interval cannot be pending and voided at once"),
-            Self::EmptyText { field } => write!(f, "{field} must not be empty"),
-            Self::UntrustedSample { reason } => write!(f, "untrusted clock sample: {reason}"),
+            Self::TrustedIntervalWithoutDuration => write!(f, "已确认的计时区间必须有时长。"),
+            Self::PendingAndVoided => write!(f, "同一段区间不能既待确认又已作废。"),
+            Self::EmptyText { field } => write!(f, "「{field}」不能为空。"),
+            Self::UntrustedSample { reason } => write!(f, "时钟采样不可信：{reason}。"),
             Self::UnknownEnumValue { field, value } => {
-                write!(f, "{field} holds an unknown value {value:?}")
+                write!(f, "「{field}」里是一个无法识别的值 {value:?}。")
             }
             Self::StaleRunContext { expected, actual } => {
-                write!(f, "stale run context: expected {expected}, got {actual}")
+                write!(f, "运行上下文已过期：期望 {expected}，实际 {actual}。")
             }
         }
     }
