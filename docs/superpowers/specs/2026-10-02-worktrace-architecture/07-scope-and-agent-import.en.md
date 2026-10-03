@@ -31,6 +31,8 @@ Same deduplication identity (defined in §6) and identical canonical content has
 
 ![Agent import transaction and failure boundary](images/agent-import-flow.svg)
 
+> Validate the whole file structurally; atomically commit or roll back the user-selected adoption set. Unselected items never become business records.
+
 ## 5. Delivery and acceptance
 
 V0.1 short outcome/problem notes and manual evidence references; V0.3 confirmed AI inputs/suggestions; V0.4 JSON imports and companion skill; V0.5 capability action reviews and KPA. Test no linked-source-body reads (import JSON and user records may be read), unknown/invalid versions, repeated adoption, changed-ID conflicts, selection/rollback, stale-edit conflicts, provenance, unsafe-reference rejection and absence of automatic network/AI calls. Skill/app share protocol fixtures; skill updates never silently change protocol.

@@ -25,9 +25,9 @@
   <h1>番茄钟阶段</h1>
   <p class="sub">休息是一个阶段，不是一个会话状态：它跑在 paused 的 session 里，没有工作区间，也不计人工工时。</p>
 
-<svg viewBox="0 0 1000 680" role="img" aria-labelledby="pom-title pom-desc" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 1000 680" role="img" aria-labelledby="pomo-title pomo-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="pomo-title">Worktrace 番茄钟的阶段与切换规则</title>
-  <desc id="pomo-desc">四个阶段排成两列两行。左列是工作阶段：running 时 session 为 running 且有开放工作区间，走 pause 与 resume 在两个阶段之间往返，与 V0.1 的会话规则一致；右列是休息阶段：running 时 session 保持 paused、没有开放工作区间，只运行独立的阶段计时，暂停、锁屏、休眠或重启后转为冻结。四条跨阶段与同阶段的边：工作 running 经「显式开始休息」闭合工作区间并切到休息；休息经「显式开始下一轮」重新检查前台占用并切回工作，占用冲突则保持休息；休息 running 经暂停或锁屏休眠转为冻结；冻结经显式继续回到休息 running，这一步不等于 resume 工作。工作到点与休息到点都只提示、不自动切换，用一条注记表达而不是从每个状态各画一条边；完成或取消任务会结束所有阶段。</desc>
+  <desc id="pomo-desc">本图仅示常见路径，完整允许条件见 08 §7 命令表。四个阶段排成两列两行。左列是工作阶段：running 时 session 为 running 且有开放工作区间，走 pause 与 resume 在两个阶段之间往返，与 V0.1 的会话规则一致；右列是休息阶段：running 时 session 保持 paused、没有开放工作区间，只运行独立的阶段计时，暂停、锁屏、休眠或重启后转为冻结。四条跨阶段与同阶段的边：工作 running 经「显式开始休息」闭合工作区间并切到休息；休息经「显式开始下一轮」重新检查前台占用并切回工作，占用冲突则保持休息；休息 running 经暂停或锁屏休眠转为冻结；冻结经显式继续回到休息 running，这一步不等于 resume 工作。工作到点与休息到点都只提示、不自动切换，用一条注记表达而不是从每个状态各画一条边；完成或取消任务会结束所有阶段。</desc>
 
   <defs>
     <marker id="pm-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -72,7 +72,7 @@
   <rect x="100" y="140" width="340" height="88" rx="6" fill="#FBF9F6"/>
   <rect x="100" y="140" width="340" height="88" rx="6" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
   <text x="270" y="170" fill="#2A2320" font-size="12" font-weight="600"
-        font-family="'Geist',sans-serif" text-anchor="middle">工作 · 计时中</text>
+        font-family="'Geist',sans-serif" text-anchor="middle">工作 · running（计时中）</text>
   <text x="270" y="190" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">session running，有开放 work_interval</text>
   <text x="270" y="208" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
@@ -81,7 +81,7 @@
   <rect x="100" y="300" width="340" height="88" rx="6" fill="#FBF9F6"/>
   <rect x="100" y="300" width="340" height="88" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
   <text x="270" y="330" fill="#2A2320" font-size="12" font-weight="600"
-        font-family="'Geist',sans-serif" text-anchor="middle">工作 · 已暂停</text>
+        font-family="'Geist',sans-serif" text-anchor="middle">工作 · frozen（已暂停）</text>
   <text x="270" y="350" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">session paused，无开放区间，值冻结</text>
   <text x="270" y="368" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
@@ -90,7 +90,7 @@
   <rect x="560" y="140" width="340" height="88" rx="6" fill="#FBF9F6"/>
   <rect x="560" y="140" width="340" height="88" rx="6" fill="#FBF1DC" stroke="#CBA758" stroke-width="1"/>
   <text x="730" y="170" fill="#2A2320" font-size="12" font-weight="600"
-        font-family="'Geist',sans-serif" text-anchor="middle">休息 · 计时中</text>
+        font-family="'Geist',sans-serif" text-anchor="middle">休息 · running（计时中）</text>
   <text x="730" y="190" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">无开放 work_interval，只跑阶段计时</text>
   <text x="730" y="208" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
@@ -99,7 +99,7 @@
   <rect x="560" y="300" width="340" height="88" rx="6" fill="#FBF9F6"/>
   <rect x="560" y="300" width="340" height="88" rx="6" fill="#FBF1DC" stroke="#CBA758" stroke-width="1" stroke-dasharray="5,4"/>
   <text x="730" y="330" fill="#2A2320" font-size="12" font-weight="600"
-        font-family="'Geist',sans-serif" text-anchor="middle">休息 · 已冻结</text>
+        font-family="'Geist',sans-serif" text-anchor="middle">休息 · frozen（已冻结）</text>
   <text x="730" y="350" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">暂停 / 锁屏 / 休眠 / 重启后</text>
   <text x="730" y="368" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
@@ -109,35 +109,35 @@
   <rect x="100" y="424" width="800" height="40" rx="6" fill="#FBF9F6"/>
   <rect x="100" y="424" width="800" height="40" rx="6" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
   <text x="500" y="449" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif"
-        text-anchor="middle">两个阶段到点都只提示、不自动切换；完成 / 取消任务会结束所有阶段，不停留在任何 phase</text>
+        text-anchor="middle">常见路径示意，完整命令见 08 §7；到点只提示，合法完成 / 取消后清除活动阶段</text>
 
   <!-- ===== 阶段元数据 ===== -->
   <rect x="100" y="488" width="800" height="104" rx="6" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.12)" stroke-width="1"/>
   <text x="120" y="512" fill="#2A2320" font-size="10.5" font-weight="600" font-family="'Geist',sans-serif">阶段元数据（timer_kind = pomodoro 时额外保存）</text>
   <g font-family="'Geist Mono',monospace" font-size="8.5" fill="#6F6357">
-    <text x="120" y="536">phase（work / break）· cycle_index · 状态版本</text>
+    <text x="120" y="536">phase · phase_state（running / frozen）· cycle_index · session_version</text>
     <text x="120" y="556">work_budget_ms · break_budget_ms　（工作段预算与整次 session 工时分别显示）</text>
-    <text x="120" y="576">phase_elapsed_ms 检查点（与 §1 同口径，约每 30 秒）</text>
+    <text x="120" y="576">phase_checkpoint 挂 session，约每 30 秒保存 phase_elapsed_ms</text>
   </g>
 
   <!-- ===== 注记 ===== -->
   <text x="40" y="620" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     休息不能替代 resume：回到工作必须经「显式开始下一轮」，届时重新检查前台占用，冲突则留在休息 / 暂停。</text>
   <text x="40" y="640" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    不能用累计工时减每轮预算来推工作段；锁屏 / 休眠冻结阶段，醒来要显式继续，不把离开时间算进任何一段。</text>
+    完整命令条件见 08 §7；预算按阶段计算，锁屏 / 休眠冻结，醒来显式继续，不补离开时间。</text>
 
   <!-- ===== 图例（底部横条） ===== -->
   <line x1="30" y1="654" x2="970" y2="654" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>
   <text x="30" y="674" fill="#6F6357" font-size="8" font-family="'Geist Mono',monospace"
         letter-spacing="0.14em">LEGEND</text>
   <rect x="120" y="665" width="16" height="10" rx="2" fill="#CFE6E2" stroke="#4E8C85" stroke-width="1"/>
-  <text x="142" y="674" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">工作 · 计时中</text>
+  <text x="142" y="674" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">work / running</text>
   <rect x="270" y="665" width="16" height="10" rx="2" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
-  <text x="292" y="674" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">工作 · 已暂停</text>
+  <text x="292" y="674" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">work / frozen</text>
   <rect x="430" y="665" width="16" height="10" rx="2" fill="#FBF1DC" stroke="#CBA758" stroke-width="1"/>
-  <text x="452" y="674" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">休息 · 计时中</text>
+  <text x="452" y="674" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">break / running</text>
   <rect x="590" y="665" width="16" height="10" rx="2" fill="#FBF1DC" stroke="#CBA758" stroke-width="1" stroke-dasharray="5,4"/>
-  <text x="612" y="674" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">休息 · 已冻结</text>
+  <text x="612" y="674" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">break / frozen</text>
   <rect x="750" y="665" width="16" height="10" rx="2" fill="rgba(42,35,32,0.04)" stroke="#6F6357" stroke-width="1"/>
   <text x="772" y="674" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">到点行为与终止规则</text>
 </svg>

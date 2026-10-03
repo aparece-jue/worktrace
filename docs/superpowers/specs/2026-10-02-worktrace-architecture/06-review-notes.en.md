@@ -82,3 +82,7 @@ See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en
 Add 08 clock attribution/checkpoints, Pomodoro phases, V0.4 outcomes, F-209/F-210 and immutable KPA snapshots. 07 adds schema/fixtures/null dates/deduplication errors. Clarify linked-source-body exclusion. Documents/protocol examples only; no implemented platform behavior.
 
 Static checks: links/fences across 21 Markdown files, 63 acceptance IDs and bilingual SQL parity; five-kind valid import and six invalid structure/date/duplicate-ID fixtures passed a local protocol checker; six SQLite example constraints passed. These do not constitute implemented or accepted import/timing/Pomodoro/AI/report features.
+
+## 9. Latest diagram/contract fixes
+
+08 §7 adds continuous attribution/cumulative divergence, independent phase state/checkpoint and command table; synchronize 00/02/04 fields/acceptance. 07 labels selected-set atomic adoption. Fix Pomodoro aria IDs and common-path scope; re-export recovery/module diagrams from sources.

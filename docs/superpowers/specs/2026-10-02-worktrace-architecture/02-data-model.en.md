@@ -9,7 +9,7 @@ This replaces pause-total storage. The schema is logical, not an executable migr
 | Version | Objects |
 | --- | --- |
 | V0.1 | app_meta, application_run, interval_checkpoint, project, task, work_session, work_interval, time_edit, task_change, daily_plan, tag, task_tag |
-| V0.2 | goal, milestone, task_dependency, time_block, task_knowledge (actual-use metadata) |
+| V0.2 | goal, milestone, task_dependency, time_block, task_knowledge (actual-use metadata), phase_checkpoint (break-phase checkpoint) |
 | V0.3 | ai_suggestion, ai_feedback; per-action input/destination confirmation |
 | V0.4 | context_fact, decision, document (references only), task_document, outcome, outcome_source, agent_import_batch/item |
 | V0.5 | knowledge_stat (rebuildable cache), report_snapshot (confirmed reports) |
@@ -218,3 +218,5 @@ Current scope (2026-10-03): personal work records and task management, including
 See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).
 
 V0.1 adds interval_checkpoint(interval_id/run_id/wall_at/attribution_at/elapsed_ms); recovery uses only the last persisted checkpoint. Trusted closed duration_ms is nonnull and equals ended_at-started_at; uncertain rows may be null. Add CHECK/FKs. V0.2 phases and V0.4/V0.5 outcomes/report migrations follow 08. Core ER is a summary omitting sampling/checkpoint fields; text and 08 are normative.
+
+V0.2 phase/phase_state/cycle_index and independent phase_checkpoint reference session; phase_state distinguishes active/frozen break. V0.1 starts sample the continuous trusted attribution anchor rather than re-anchoring raw wall time; see 08 §7.

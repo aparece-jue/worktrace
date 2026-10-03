@@ -180,3 +180,5 @@ Scope exclusions: in-app OCR/source-body parsing/indexing, directory scanning, e
 See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).
 
 F-007 also tests wall/monotonic divergence, checkpoint failure and day boundaries. F-304 tests V0.4 outcomes/null dates/deleted mapping targets. F-402 tests immutable confirmed snapshots reproducing old values/citations after source edits, regenerated as new versions.
+
+F-007 also checks pause/resume under 500ms wall skew without overlap, cumulative divergence and no trusted write of anomalous samples. F-104 checks phase DTOs, rejected break resume, break from frozen work, next cycle from frozen break, occupancy rollback and phase-checkpoint restart.

@@ -9,7 +9,7 @@
 
 正常运行：开始采样 W0/M0，关闭时用单调差得 duration_ms，统计 ended_at=started_at+duration_ms。关闭的可信区间满足 duration_ms=ended_at-started_at，均为非负整数毫秒；duration_ms 是同一事实的校验值，不能独立编辑。原始墙钟关闭值保留作诊断依据，不拿它直接减开始时间。运行暂计由同一协调器采样单调增量，M06 使用该次快照的归属终点；不能另取 Date.now()。手工修正以用户确认的起止重新计算 duration_ms，并保留前后值审计。
 
-心跳约每 30 秒同事务保存 interval_id、run_id、可信 wall_at、attribution_at、elapsed_ms；单调 Instant 本身不持久化。每次采样检查墙钟增量与单调增量之差；差值绝对值大于 2000ms、倒退、系统休眠/时钟变更事件或采样失效触发异常路径。该阈值是初始策略，平台实验后可版本化调整，不是精度承诺。
+心跳约每 30 秒同事务保存 interval_id、run_id、可信 wall_at、attribution_at、elapsed_ms；单调 Instant 本身不持久化。每次采样同时检查相邻采样增量差，以及墙钟相对当前可信归属基线的累计偏差；差值绝对值大于 2000ms、倒退、系统休眠/时钟变更事件或采样失效触发异常路径。该阈值是初始策略，平台实验后可版本化调整，不是精度承诺。
 
 异常时保留至最后可信检查点的闭合前缀，剩余部分标 needs_review 并记录原始墙钟/候选单调增量；不自动按错误墙钟补时间。没有可信检查点则整个当前区间待确认。可信前缀不因异常被重复计入；恢复/修正一次事务分割并写审计。已知且可信的锁屏/休眠边界走 pause；通知晚到、边界不可信则走 recovering，由用户确认离开前工时。恢复期间不继续人工计时。
 
@@ -17,13 +17,13 @@
 
 > 图：三种时间各管一件事——墙钟负责归属，单调负责时长，两者之差负责发现「这段不可信」。
 
-新开始仍采用当前墙钟；若向后改时导致与可信人工历史重叠，要求显式修正归属后才能开始，不自动移动既有记录。确认可疑工时必须给出合法、不重叠的归属起止；已知单调时长仅作为候选，不强迫用户接受。跨日按查询时区实际日界裁剪，不假设每一天都是 24 小时。检查点写入不增加业务 revision，改变区间或状态才增加；失败写检查点不将内存检查点当作可恢复事实。
+新 run 或显式校正后建立新的可信归属基线，若与可信人工历史重叠则要求显式确认归属。正常连续 run 内按下面的基线规则开始下一段，不每段重新采用墙钟；不自动移动既有记录。确认可疑工时必须给出合法、不重叠的归属起止；已知单调时长仅作为候选，不强迫用户接受。跨日按查询时区实际日界裁剪，不假设每一天都是 24 小时。检查点写入不增加业务 revision，改变区间或状态才增加；失败写检查点不将内存检查点当作可恢复事实。
 
 ## 2. 番茄钟阶段（V0.2）
 
-timer_kind=pomodoro 额外保存 phase(work/break)、cycle_index、work_budget_ms、break_budget_ms、phase_elapsed_ms 检查点和状态版本。工作阶段沿用 running/paused 工作区间；休息阶段 session 保持 paused，无开放 work_interval，只运行独立阶段计时。休息不占前台槽位、不进入人工工时。
+timer_kind=pomodoro 额外保存 phase(work/break)、phase_state(running/frozen)、cycle_index、work_budget_ms、break_budget_ms、phase_elapsed_ms 检查点和状态版本。工作阶段沿用 running/paused 工作区间；休息阶段 session 保持 paused，无开放 work_interval，只运行独立阶段计时。休息不占前台槽位、不进入人工工时。
 
-工作到点只提示，仍记实际工作及超时；用户显式开始休息才闭合工作区间并切 break。休息到点只提示，用户显式开始下一轮才重新检查前台占用并打开区间；占用冲突保持 break/paused。暂停冻结当前阶段，继续休息不等于 resume 工作。锁屏/休眠冻结阶段，醒来显式继续；重启后工作按区间恢复规则，休息按持久检查点恢复为冻结，不补停机时间。完成任务结束所有阶段。工作段预算与整次 session 工时分别显示，不能用累计工时减每轮预算。
+工作到点只提示，仍记实际工作及超时；用户显式开始休息才闭合工作区间并切 break。休息到点只提示，用户显式开始下一轮才重新检查前台占用并打开区间；占用冲突保持原阶段状态（§7 表：失败原状态不变）。暂停冻结当前阶段，继续休息不等于 resume 工作。锁屏/休眠冻结阶段，醒来显式继续；重启后工作按区间恢复规则，休息按持久检查点恢复为冻结，不补停机时间。完成任务结束所有阶段。工作段预算与整次 session 工时分别显示，不能用累计工时减每轮预算。
 
 ![番茄钟阶段](images/pomodoro-phases.svg)
 
@@ -52,3 +52,26 @@ V0.3 补充两个验收条目：F-209 AI 总结、F-210 AI 排期建议。总结
 验证：正反改时、锁屏通知延迟、重启与检查点失败、跨日/时区日界、休息不计工时和冲突、V0.4 outcome 导入及来源、旧输入 AI 结果、排期非法/冲突、KPA 修正后旧版可复现。先完成 V0.1 闭环，后续规格按版本落地；不得以本文示例检查冒充实机验证。
 
 补充边界：start/resume 同事务创建 elapsed_ms=0 的初始检查点；阶段变化同样增加 session_version。原始墙钟采样只作为用户数据保存，不写诊断正文。报告的任务开始取该工作轮次首个确认区间，完成取 task_change 完成事件；重开后分别列出轮次，不把 updated_at 当完成日期。
+
+## 7. 连续归属基线与阶段命令（本轮修正）
+
+一个连续、可信 run 段保存内存基线 anchor_wall_at/anchor_monotonic；归属端点 A(M)=anchor_wall_at+(M-anchor_monotonic)。它包括段间的正常暂停时间，但人工时长仅计算开放工作区间。开始/继续工作的 started_at 取该次协调器采样的 A，不取独立墙钟；结束取 started_at+本区间单调工作增量。阈值内小幅校时不改变基线、不重写历史，因此相邻区间不会因 500ms 墙钟偏差重叠。
+
+每次采样计算 abs(sampled_wall_at-A)，并检查相邻增量；任一超过 2000ms 或收到可信系统异常事件进入暂停/恢复判断。心跳成功不重置 anchor，防止小偏差累计而一直逃过检测。采样、检测、确认可信前缀及写检查点由同一协调器串行处理，异常之后不得先把可疑采样写成可信检查点。新 run、休眠后或显式校正后不能继承 Instant；重新建基线，并验证与历史及待确认记录的归属冲突。已有待确认部分只占候选范围，不自动算成真实重叠事实；后来确认仍须与新记录校验。
+
+休息阶段检查点独立保存为 phase_checkpoint(session_id、run_id、phase、cycle_index、session_version、phase_elapsed_ms、sampled_at)；不挂在旧工作 interval 上。写入须匹配当前阶段/版本；纯进度检查点不增加 revision，phase/phase_state 切换必须增加 session_version 和业务 revision。会话 finished/discarded 时清除活动阶段（phase/phase_state=null），历史保留审计。
+
+| 命令 | 前置状态 | 结果 |
+| --- | --- | --- |
+| pause_work | work/running 且 session running | 闭合工作区间，work/frozen，session paused |
+| resume_work | work/frozen 且 session paused | 检查前台占用，开区间，work/running |
+| start_break | work/running 或 work/frozen，无待确认区间 | 运行时闭合区间；已暂停则不新建；切 break/running，elapsed=0，session paused |
+| pause_break | break/running | break/frozen，无工作区间 |
+| continue_break | break/frozen | break/running，只继续阶段计时 |
+| start_next_cycle | break/running 或 break/frozen | 检查前台占用；成功 cycle_index+1、work/running、开区间，阶段 elapsed=0；失败原状态不变 |
+| finish | 任一合法活动阶段且无待确认记录 | 闭合工作区间（若有），session finished，清活动阶段 |
+| reconcile | session recovering | 按区间恢复规则确认/丢弃，保存 paused 时为 work/frozen，不自动开始下一阶段 |
+
+普通 resume 不可用于 break，返回 POMO_STATE_CONFLICT；休息需要 continue_break 或 start_next_cycle。任务取消同 finish 的阶段清理，但遇到 recovering 仍返回 RECOVERY_REQUIRED。恢复启动后的休息一律 break/frozen，工作一律按区间恢复，不自动补阶段时间。命令均检查 expected_data_epoch/row_version，非法状态不写入；到点只提醒，不触发上述跃迁。图仅展示常见路径，完整允许条件以本表为准。
+
+V0.2 番茄钟 tick/查询/命令结果必带 phase、phase_state、cycle_index、phase_elapsed_ms、phase_remaining_ms、phase_overtime_ms；phase_remaining=max(0,本阶段预算-phase_elapsed)，人工 active_ms 在休息保持冻结。普通计时的阶段字段为 null，现有 remaining_ms 只表示工作计时预算，不能拿它展示休息倒计时。所有字段来自同一协调器快照，仍以 session_version 过滤旧 tick。

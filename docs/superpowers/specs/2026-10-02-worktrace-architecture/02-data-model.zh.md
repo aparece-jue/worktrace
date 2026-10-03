@@ -9,7 +9,7 @@
 | 版本 | 存储对象 |
 | --- | --- |
 | V0.1 | app_meta、application_run、interval_checkpoint、project、task、work_session、work_interval、time_edit、task_change、daily_plan、tag、task_tag |
-| V0.2 | goal、milestone、task_dependency、time_block、task_knowledge（实际使用标记） |
+| V0.2 | goal、milestone、task_dependency、time_block、task_knowledge（实际使用标记）、phase_checkpoint（休息阶段检查点） |
 | V0.3 | ai_suggestion、ai_feedback；本次 AI 输入/目的地确认记录 |
 | V0.4 | context_fact、decision、document（仅引用）、task_document、outcome、outcome_source、agent_import_batch/item |
 | V0.5 | knowledge_stat（可重建派生缓存）、report_snapshot（确认报告） |
@@ -238,3 +238,5 @@ ContextFact 取代保持 superseded_by 模型，可采用以下同事务顺序�
 实施细节补充见 [08：计时、阶段、AI 与报告快照](08-implementation-contracts.zh.md)。
 
 V0.1 增加 interval_checkpoint(interval_id、run_id、wall_at、attribution_at、elapsed_ms)，恢复只用最后成功持久化检查点。duration_ms 在可信闭合时非空并等于 ended_at-started_at；待确认区间可为空，补齐 CHECK 与 FK。V0.2 阶段字段和 V0.4/V0.5 成果/报告完整迁移按 08 实施。核心 ER 为摘要，省略新增采样/检查点字段，完整逻辑定义以本节及 08 为准。
+
+V0.2 阶段字段为 phase/phase_state/cycle_index，独立 phase_checkpoint 引用 session；休息运行/冻结由 phase_state 区分。V0.1 工作区间 started_at 在连续可信 run 采用归属基线采样，不能每段重置为原始墙钟；规则见 08 §7。
