@@ -12,7 +12,9 @@
 
 **断言口径：** 见 [总纲](2026-10-03-v01-plan-index.md) §5 第 8 条。时间用例一律用 `FakeClock` 显式推进两个数值。
 
-状态：计划修订待审核；实施未开始。依赖：[P1](2026-10-03-worktrace-v01-foundation.md) 实现验收后，按真实签名复核本计划。上游：[08 §1/7](../specs/2026-10-02-worktrace-architecture/08-implementation-contracts.zh.md)、[总纲](2026-10-03-v01-plan-index.md)。覆盖 F-006/F-007 核心；不做番茄钟、启动扫描、历史确认或 IPC。
+**开工前必须先做的一件事**：06 §4 把「单调/墙钟映射」列为**实现前**技术验证，结论可能反过来改本计划的阈值与状态机（总纲 §5 第 9 条）。先做实验、记录机器/系统版本与休眠/锁屏/改时的实际行为，再动手写协调器。**不要把这条留到完成门槛**——那时设计已经定了。
+
+状态：计划修订待审核；实施未开始。依赖：[P1](2026-10-03-worktrace-v01-foundation.md) **已实现并验收**（69 个测试全绿），本计划里的 P1 接口是真实签名，不是预设。上游：[08 §1/7](../specs/2026-10-02-worktrace-architecture/08-implementation-contracts.zh.md)、[总纲](2026-10-03-v01-plan-index.md)。覆盖 F-006/F-007 核心；不做番茄钟、启动扫描、历史确认或 IPC。
 
 ## Task 1：串行协调器与快照
 
@@ -43,6 +45,7 @@
 
 - [ ] 串行边界内先检查请求 epoch/version 和目标存在性，再取得样本并检测；正常路径先计划内存变化，同一业务事务再次校验 epoch/version、任务可执行/项目状态、前台占用与历史冲突，再调用 P1 仓储原语。若检测异常，按总纲 §9 独立系统事务提交恢复状态，原用户命令返回 RECOVERY_REQUIRED，不执行原意图；响应携带该事务后的权威版本，不自动重试。
 - [ ] start 同事务理清任务、持久化预算、创建 session/open interval/elapsed=0 初始检查点、审计及 revision；首次估时基准在此冻结。失败不留下半条事实。
+- [ ] **「理清」是两步，不是一步**：02 §5 里 `Inbox → Doing` **不合法**，必须 `Inbox → Ready → Doing`；`Clarifying` 出发同理。F-002 要求 `start` 在同一命令内原子完成它，所以这里是同一事务里的**两次** `task_repo::transition_task`（各自的 `expected_row_version` 要按前一步的结果递进），**不是**把状态直接写成 Doing。直接跳会被跃迁表拒绝——P1 的测试已经把这个陷阱钉住了。
 - [ ] resume 校验 paused 且无待确认，以 A(M) 开新区间，创建 elapsed=0 检查点并更新 run_id/state/version，不清空 session 已用工时。
 - [ ] pause/finish 用已验证单调差关闭区间，保留 sampled_end_wall_at；finish 可从 paused 直接结束。recovering 拒绝普通工作命令，需 P3 reconcile。
 - [ ] 一个业务事务只加一次 revision。提交失败不应用内存；提交后内存应用或响应生成失败不得返回普通可重试失败，进入故障恢复并从已提交事实重建。
@@ -53,6 +56,10 @@
 文件：coordinator.rs、tests/timer_checkpoint.rs、tests/timer_anomaly.rs。
 
 - [ ] 正常样本可更新最后检测样本；另存最后成功持久化检查点，不能将内存可信点当作恢复事实。正常心跳约每 30 秒写检查点，不加 revision；失败不推进持久化标记，后续可重试。
+- [ ] **登记 `checkpoint_repo::write` 已经强制的三条（P1 已实现，违反会被运行期拒绝）**：
+  1. **`attribution_at == interval.started_at + elapsed_ms`**。`elapsed_ms` 是**本区间**的已过时长，**不是**会话累计——`resume` 开新区间时它从 0 重新起算，所以写心跳时用的是区间自己的起点。用会话累计值会被拒。
+  2. **只接受可信的 running 区间**：区间已闭合、已作废、`needs_review=1`，或会话不是 `running`（含 `recovering`、`needs_review=1`），一律拒绝。也就是说异常一发生，心跳就自然停下，不需要额外判断。
+  3. **不得相对上一条倒退**：`run_id` 必须相同，且 `elapsed_ms` / `attribution_at` / `wall_at` 都不得回退。这条与「异常分割后不允许再写可信检查点」是同一个保护的两面。
 - [ ] 首次异常立即一次事务：保留最后成功检查点之前可信前缀、创建/标记不确定余段、保存候选采样与原因审计、session 设 recovering/needs_review 并增加 row_version/revision。没有检查点则整段待确认，零长度初始前缀可省略。
 - [ ] 提交后停止 live 暂计、释放前台占用、清理开放计时内存。余段有候选归属但不是正在运行的区间，不能建立新的单调运行起点。
 - [ ] 已 recovering 的重复事件返回现有恢复结果，不重复分割、审计或增加版本。不可信样本不能写入可信检查点。
