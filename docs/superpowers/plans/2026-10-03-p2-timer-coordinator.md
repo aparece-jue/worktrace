@@ -24,6 +24,7 @@
 - [ ] ClockSample 一次生成事实与 DTO，不再次独立取墙钟。TimerSnapshot 包含 data_epoch、revision、run_id、session_id、session_version、tick_seq、as_of、active_ms、state、timer_kind、remaining_ms/overtime_ms；字段命名与 00 统一。
 - [ ] snapshot/tick 接受同一个已验证采样；查询也需可变协调器入口，不能通过 &self 绕过检测。tick_seq 当前 run 内递增，新会话不清零；新 run 才重置。
 - [ ] active_ms 为有效可信闭合区间和当前可信开放区间暂计之和；recovering 不叠加可疑 live。倒计时预算从数据库取得；正计时剩余/超时为 null。
+- [ ] 取区间用 P1 已有的 `session_repo::intervals_of_session`——**它在 P1 里零调用零测试**（P1 交付时没有消费者），所以本任务要顺带把它测起来。详见 Task 3 的「扩展前先看这三条实测事实」。
 - [ ] 测试：暂停冻结、倒计时超时、同一采样查询/tick 一致、旧会话/版本 tick 被过滤、预算重新载入不丢失。
 
 ## Task 2：统一采样检测与持续归属
@@ -64,6 +65,11 @@
 - [ ] resume 校验 paused 且无待确认、项目可执行及前台占用；任务 Doing 保持，Ready 同事务转 Doing；Inbox/Clarifying/Waiting/Blocked/Review/Done/Cancelled/Scheduled 拒绝，不隐式解除等待或重开任务。请求携带 task 与 session 两份 expected_row_version，采样前及事务内均校验。先更新 session 为 running 及当前 run_id，再以 A(M) 开新区间、写 elapsed=0 检查点；同事务提交，不清空已用工时，返回任务/会话权威版本。
 - [ ] pause/finish 用已验证单调差关闭区间，保留 sampled_end_wall_at；finish 可从 paused 直接结束。recovering 拒绝普通工作命令，需 P3 reconcile。
 - [ ] P2 扩展 P1 仓储：task_repo 读取估时并冻结 baseline_estimate_json；session_repo 更新 run_id/needs_review、分割可信前缀与不确定余段；新增 time_edit_repo 写异常审计。签名实现时登记并供 P3 复用。仅接受调用方 Transaction，不自行提交或加 revision；协调器不嵌 SQL，不改 schema。无估时的首次 start 也以首次会话事实标识已冻结，后续不得因 baseline 为 null 重新冻结。
+- [ ] **扩展前先看这三条实测事实**（已核 P1 代码，2026-10-04）：
+  1. **`session_repo::update_session_state` 在 P1 里零调用、零测试**——它的签名是 `(tx, id, expected_version, target, ended_at)`，**装不下 `run_id` 与 `needs_review`**，而 resume 要更新 run_id、异常分割要设 needs_review。P1 没有调用方，所以**可以直接改签名**，但记住：它现在的「P1 无回归」是**空洞的**（没有测试覆盖它），P2 必须自己补上它的测试。
+  2. **`session_repo::intervals_of_session` 同样零调用零测试**——它正是 Task 1 算 `active_ms` 要用的那个「有效可信闭合区间 + 当前开放区间」入口。同样是 P2 来补测试。
+  3. **`TaskRow` 没有测试用结构体字面量构造**（只在 `task_repo.rs` 内部构造），所以给它加估时字段是安全的，不会连带改 P1 的测试。
+  （另：P1 里零调用的 `pub fn` 还有 `list_tasks`——那是留给 P4 的，本计划不要动它。）
 - [ ] 测试：首次有/无估时冻结及后续不覆盖；resume 各任务状态与两份版本校验；新增仓储字段和审计失败同事务回滚。
 - [ ] 一个业务事务只加一次 revision。提交失败不应用内存；提交后内存应用或响应生成失败不得返回普通可重试失败，进入故障恢复并从已提交事实重建。
 - [ ] 测试：初始检查点与预算持久化、旧 epoch/version 拒绝（同时有异常仍不借此请求写入）、paused 直接 finish、占用冲突、每个写入步骤注入故障整体回滚（比较涉及记录及区间字段，不只计行数）、有效命令遇异常仅提交系统恢复事务、提交后故障不重复创建。
