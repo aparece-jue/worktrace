@@ -3,7 +3,17 @@
 //! 计划要求的四件事：未知记录、非法状态、epoch 冲突、版本冲突都能被区分；
 //! 且错误文本不含数据库路径、SQL 与业务正文。
 
-use worktrace_lib::error::AppError;
+use worktrace_lib::domain::session::{SessionMode, TimerKind};
+use worktrace_lib::domain::tag::TagKind;
+use worktrace_lib::domain::task::{TaskStatus, TransitionCause};
+use worktrace_lib::error::{
+    AppError, AuthorityKind, AuthorityTarget, ErrorAuthority, RecordVersion,
+};
+use worktrace_lib::services::error_response::capture_error_response;
+use worktrace_lib::storage::db::Db;
+use worktrace_lib::storage::meta::init_meta;
+use worktrace_lib::storage::migrations::migrate;
+use worktrace_lib::storage::{project_repo, session_repo, tag_repo, task_repo};
 
 /// 未知记录与非法状态都必须能与「冲突」区分开，不能压成一个 DOMAIN_ERROR 之外的
 /// 兜底码，也不能互相混淆。
@@ -172,12 +182,34 @@ fn domain_error_messages_are_user_facing_chinese() {
         let shown: AppError = e.into();
         let message = shown.message();
 
-        // ① 是中文：至少含一个 CJK 字符
+        // ① 用户读到的那句话是中文：至少含一个 CJK 字符。
+        //
+        // 断言落在 `detail()` 上，**不是** `message()` 上：`Domain` 的 message 模板是
+        // `操作不被允许：{detail}`，模板自带中文 ⇒ 在 message 里找 CJK 对
+        // `DOMAIN_ERROR` 恒真，什么都没守住（上一轮评审的 out-of-scope 观察，T6 订正）。
+        // 真正决定用户读到什么的就是 detail，所以断它。
+        //
+        // 两个计时变体（`UntrustedSample` / `StaleRunContext`）在 `From` 里被映射成
+        // `RECOVERY_REQUIRED`，因此没有 detail：那时用户读到的就是模板本身。
+        let user_text: String = match shown.detail() {
+            Some(detail) => {
+                assert!(!detail.is_empty(), "{:?} 的 detail 为空", shown.code());
+                detail.to_string()
+            }
+            None => {
+                assert!(
+                    matches!(shown, AppError::RecoveryRequired),
+                    "没有 detail 的只应是映射成 RECOVERY_REQUIRED 的那两个：{:?}",
+                    shown.code()
+                );
+                message.clone()
+            }
+        };
         assert!(
-            message
+            user_text
                 .chars()
                 .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
-            "用户文案必须是中文：{message}"
+            "用户文案必须是中文：{user_text}"
         );
         // ② 不说内部标识：裸枚举名不该出现。
         //
@@ -233,4 +265,310 @@ fn tag_name_taken_keeps_the_code_value_and_renders_chinese() {
         e.to_string(),
         "「上下文」这一类里已经有叫「家里」的标签了。"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 错误上下文的载荷形状（P4 Task 6，裁决 R-T6-a..d）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 形状是**逐条请求 → 逐条返回** `{kind, id, row_version}`：
+// - `kind` 是白名单枚举，决定读哪张表，**绝不**由客户端指定表名、绝不拼进 SQL；
+// - `row_version = null` 表示「**已显式确认不存在**」，与「根本没请求」区分开；
+// - 顺序按 kind 白名单顺序、同 kind 内按请求顺序，请求与响应一一对应；
+// - 任何一次读取**报错** ⇒ 整体不返回上下文（`authority = None`、`requires_handshake`）；
+//   行不存在是**数据**，不是失败。
+
+/// 建库样板照 `tests/transaction_boundary.rs::bootstrap`：
+/// 临时文件库 → 迁移 → 一个 run → 四种实体各一条。
+struct Fixture {
+    _dir: tempfile::TempDir,
+    db: Db,
+    /// 建库时定下的库身份。
+    epoch: String,
+}
+
+/// 四种 kind 各一条：`t1`（任务）/ `s1`（会话）/ `p1`（项目）/ `g1`、`g2`（标签）。
+///
+/// **版本值刻意互不相同**（任务 1 / 会话 0 / 项目 2 / 标签 5）：读错表时行不存在
+/// （得到 `None`），读错列时数字也会不一样。任务与项目的版本由真实写路径推出来；
+/// 标签在 V0.1 没有改名入口，只能由夹具摆一个值（见下面的注释）。
+fn bootstrap() -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = Db::open(dir.path().join("w.db")).unwrap();
+    migrate(db.connection()).unwrap();
+
+    let tx = db.connection_mut().unchecked_transaction().unwrap();
+    let meta = init_meta(&tx).unwrap();
+    tx.execute(
+        "INSERT INTO application_run(id, started_at) VALUES('run-1', 1000)",
+        [],
+    )
+    .unwrap();
+
+    // 项目：建（0）→ 改名两次（1、2）。
+    project_repo::create_project(&tx, "p1", "项目一", 1000).unwrap();
+    project_repo::rename_project(&tx, "p1", 0, "项目一改", 1000).unwrap();
+    project_repo::rename_project(&tx, "p1", 1, "项目一改二", 1000).unwrap();
+
+    // 任务：建（0）→ 理清中（1）。
+    task_repo::create_task(&tx, "t1", "任务一", Some("p1"), 1000).unwrap();
+    task_repo::transition_task(
+        &tx,
+        "t1",
+        0,
+        TaskStatus::Clarifying,
+        TransitionCause::User,
+        1000,
+    )
+    .unwrap();
+
+    // 标签：四类里取两条（`g1` 是上下文类，`g2` 是领域类）。
+    tag_repo::create_tag(&tx, "g1", TagKind::Context, "家里", 1000).unwrap();
+    tag_repo::create_tag(&tx, "g2", TagKind::Domain, "写作", 1000).unwrap();
+    // V0.1 没有标签改名入口，版本推不动，所以手工摆一个与别处都不相同的值。
+    tx.execute("UPDATE tag SET row_version = 5 WHERE id = 'g1'", [])
+        .unwrap();
+
+    // 会话：直接建一条运行中的（版本 0）。
+    session_repo::create_session(
+        &tx,
+        "s1",
+        "t1",
+        "run-1",
+        SessionMode::Foreground,
+        TimerKind::Stopwatch,
+        None,
+        1000,
+        "iv1",
+    )
+    .unwrap();
+
+    tx.commit().unwrap();
+    Fixture {
+        _dir: dir,
+        db,
+        epoch: meta.data_epoch,
+    }
+}
+
+/// 四类 kind 各请求一条 ⇒ 逐条返回具体版本（R-T6-a：`kind`/`id`/`row_version` 都要钉住）。
+#[test]
+fn authority_reports_one_version_per_requested_kind() {
+    let f = bootstrap();
+    let response = capture_error_response(
+        &f.db,
+        &AppError::VersionConflict {
+            expected: 1,
+            actual: 2,
+        },
+        &[
+            AuthorityTarget::new(AuthorityKind::Task, "t1"),
+            AuthorityTarget::new(AuthorityKind::Session, "s1"),
+            AuthorityTarget::new(AuthorityKind::Project, "p1"),
+            AuthorityTarget::new(AuthorityKind::Tag, "g1"),
+        ],
+    );
+
+    assert_eq!(response.code, "VERSION_CONFLICT");
+    assert!(!response.requires_handshake);
+    let authority = response.authority.expect("读得到就必须给上下文");
+    assert_eq!(authority.data_epoch, f.epoch);
+    assert_eq!(authority.revision, 0, "只读捕获，不加 revision");
+    assert_eq!(
+        authority.records,
+        vec![
+            RecordVersion {
+                kind: AuthorityKind::Task,
+                id: "t1".into(),
+                row_version: Some(1),
+            },
+            RecordVersion {
+                kind: AuthorityKind::Session,
+                id: "s1".into(),
+                row_version: Some(0),
+            },
+            RecordVersion {
+                kind: AuthorityKind::Project,
+                id: "p1".into(),
+                row_version: Some(2),
+            },
+            RecordVersion {
+                kind: AuthorityKind::Tag,
+                id: "g1".into(),
+                row_version: Some(5),
+            },
+        ]
+    );
+}
+
+/// `row_version = null` 表示「**已显式确认不存在**」，而且那条**必须出现在响应里**——
+/// 它与「根本没请求」是两件事（R-T6-a）。
+#[test]
+fn authority_marks_absent_targets_as_null_instead_of_omitting_them() {
+    let f = bootstrap();
+    let response = capture_error_response(
+        &f.db,
+        &AppError::Domain {
+            detail: "找不到这个项目。".into(),
+        },
+        &[
+            AuthorityTarget::new(AuthorityKind::Project, "gone"),
+            AuthorityTarget::new(AuthorityKind::Task, "t1"),
+        ],
+    );
+
+    let authority = response.authority.expect("行不存在是数据，不是失败");
+    assert_eq!(
+        authority.records,
+        vec![
+            RecordVersion {
+                kind: AuthorityKind::Task,
+                id: "t1".into(),
+                row_version: Some(1),
+            },
+            RecordVersion {
+                kind: AuthorityKind::Project,
+                id: "gone".into(),
+                row_version: None,
+            },
+        ],
+        "请求了两条就返回两条，缺的那条用 null 表示「确认不存在」"
+    );
+    assert!(!response.requires_handshake, "缺行不触发重新握手");
+
+    // 「根本没请求」是另一件事：空请求 ⇒ 空列表，而不是一堆 null。
+    let empty = capture_error_response(&f.db, &AppError::RecoveryRequired, &[]);
+    let empty = empty.authority.expect("空请求也要给 epoch/revision");
+    assert!(empty.records.is_empty());
+}
+
+/// 顺序确定：按 kind 白名单顺序、同 kind 内按请求顺序（R-T6-b）。
+#[test]
+fn authority_orders_by_kind_whitelist_then_request_order() {
+    let f = bootstrap();
+    let response = capture_error_response(
+        &f.db,
+        &AppError::RecoveryRequired,
+        &[
+            AuthorityTarget::new(AuthorityKind::Tag, "g2"),
+            AuthorityTarget::new(AuthorityKind::Project, "p1"),
+            AuthorityTarget::new(AuthorityKind::Tag, "g1"),
+            AuthorityTarget::new(AuthorityKind::Session, "s1"),
+            AuthorityTarget::new(AuthorityKind::Task, "t1"),
+        ],
+    );
+
+    let authority = response.authority.unwrap();
+    let order: Vec<(AuthorityKind, &str)> = authority
+        .records
+        .iter()
+        .map(|r| (r.kind, r.id.as_str()))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            (AuthorityKind::Task, "t1"),
+            (AuthorityKind::Session, "s1"),
+            (AuthorityKind::Project, "p1"),
+            // 同 kind 内保持请求顺序：先请求的 g2 在前。
+            (AuthorityKind::Tag, "g2"),
+            (AuthorityKind::Tag, "g1"),
+        ]
+    );
+}
+
+/// 任何一次读取**报错** ⇒ 整体不返回上下文（R-T6-c）。
+#[test]
+fn authority_is_dropped_entirely_when_any_read_fails() {
+    let f = bootstrap();
+    // 故障注入：把项目的版本列写成 TEXT。SQLite 的普通表（非 STRICT）装得下它，
+    // 于是 `read_row` 在 `get::<i64>` 上失败——这是**读取报错**，不是「行不存在」。
+    f.db.connection()
+        .execute("UPDATE project SET row_version = 'x' WHERE id = 'p1'", [])
+        .unwrap();
+
+    // 任务那一条本来读得到：要证明的正是「读得到一个也不给半个上下文」。
+    let response = capture_error_response(
+        &f.db,
+        &AppError::Storage {
+            detail: "disk".into(),
+        },
+        &[
+            AuthorityTarget::new(AuthorityKind::Task, "t1"),
+            AuthorityTarget::new(AuthorityKind::Project, "p1"),
+        ],
+    );
+    assert!(response.authority.is_none(), "有一次读取失败就整体不返回");
+    assert!(response.requires_handshake);
+
+    // 只请求那条读得到的任务 ⇒ 上下文正常：失败原因确实只是项目那一条。
+    let ok = capture_error_response(
+        &f.db,
+        &AppError::RecoveryRequired,
+        &[AuthorityTarget::new(AuthorityKind::Task, "t1")],
+    );
+    assert_eq!(ok.authority.unwrap().records[0].row_version, Some(1));
+}
+
+/// `requires_handshake` 的第一条分支：库身份不符 ⇒ 要重新握手，但**上下文照给**。
+///
+/// 第二条分支（读取失败 ⇒ 不给上下文）由
+/// [`authority_is_dropped_entirely_when_any_read_fails`] 与
+/// `tests/timer_regressions.rs` 的事务时机用例覆盖。
+#[test]
+fn authority_requires_handshake_on_epoch_mismatch_but_still_returns_records() {
+    let f = bootstrap();
+    let response = capture_error_response(
+        &f.db,
+        &AppError::DataEpochMismatch,
+        &[AuthorityTarget::new(AuthorityKind::Task, "t1")],
+    );
+
+    assert!(response.requires_handshake, "库身份不符必须重新握手");
+    let authority = response.authority.expect("读得到就仍然给上下文");
+    assert_eq!(
+        authority.records,
+        vec![RecordVersion {
+            kind: AuthorityKind::Task,
+            id: "t1".into(),
+            row_version: Some(1),
+        }]
+    );
+}
+
+/// 线上形状（P7 按这份接）：`kind` 是小写白名单取值；缺行序列化成 `"row_version":null`，
+/// **字段不能省**——省了前端就分不出「确认不存在」与「没请求」。
+#[test]
+fn authority_wire_shape_keeps_kind_and_null_row_version() {
+    let authority = ErrorAuthority {
+        data_epoch: "epoch-a".into(),
+        revision: 7,
+        records: vec![
+            RecordVersion {
+                kind: AuthorityKind::Project,
+                id: "p1".into(),
+                row_version: Some(2),
+            },
+            RecordVersion {
+                kind: AuthorityKind::Tag,
+                id: "gone".into(),
+                row_version: None,
+            },
+        ],
+    };
+
+    assert_eq!(
+        serde_json::to_string(&authority).unwrap(),
+        r#"{"data_epoch":"epoch-a","revision":7,"records":[{"kind":"project","id":"p1","row_version":2},{"kind":"tag","id":"gone","row_version":null}]}"#
+    );
+}
+
+/// `kind` 是**白名单枚举**：客户端给不出表名，未知取值在反序列化这一步就被拒（R-T6-a）。
+#[test]
+fn unknown_authority_kind_is_rejected_at_the_contract_boundary() {
+    let bad = serde_json::from_str::<AuthorityTarget>(r#"{"kind":"user_table","id":"x"}"#);
+    assert!(bad.is_err(), "不在白名单里的 kind 必须拒绝：{bad:?}");
+
+    let ok = serde_json::from_str::<AuthorityTarget>(r#"{"kind":"tag","id":"g1"}"#).unwrap();
+    assert_eq!(ok, AuthorityTarget::new(AuthorityKind::Tag, "g1"));
 }

@@ -57,7 +57,15 @@ impl AppError {
         }
     }
 
-    /// Redacted internal detail for the diagnostic log. Not shown to users.
+    /// 脱敏后的内部细节。**两种变体的去向不同**（P4 Task 6 订正）：
+    ///
+    /// - `Domain` 的 detail **就是用户文案**：`message()` 把它内联成
+    ///   `操作不被允许：{detail}`，`services::error_response` 再把 `message()` 送 IPC。
+    ///   所以它必须是面向用户的中文（由 `domain::error::DomainError` 的 `Display` 保证）。
+    /// - `Storage` 的 detail 是**内部诊断**（SQLite 原文、路径等），只进诊断日志，
+    ///   任何时候都不进用户文案——`message()` 对它是固定的一句「存储暂时不可用…」。
+    ///
+    /// 原先这里笼统写着 "Not shown to users"，与同文件 `message()` 的实际行为矛盾。
     pub fn detail(&self) -> Option<&str> {
         match self {
             AppError::Domain { detail } | AppError::Storage { detail } => Some(detail),
@@ -183,16 +191,67 @@ pub struct ErrorResponse {
     pub requires_handshake: bool,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ErrorAuthority {
     pub data_epoch: String,
     pub revision: i64,
-    pub task: Option<RecordVersion>,
-    pub session: Option<RecordVersion>,
+    /// 与请求**一一对应**、顺序确定（kind 白名单序 + 同 kind 内的请求序）。
+    pub records: Vec<RecordVersion>,
 }
 
-#[derive(Debug, serde::Serialize)]
+/// 一个被请求目标的版本（P4 Task 6，裁决 R-T6-a）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RecordVersion {
+    pub kind: AuthorityKind,
+    /// 请求里给的那条 ID **照原样回显**：目标已被删除时，回显是它唯一还能对上的身份。
     pub id: String,
-    pub row_version: i64,
+    /// `None` = **已显式确认不存在**（记录已被删除）。
+    ///
+    /// 它与「根本没请求」是两件事：后者是列表里**没有这一条**，前者是**有这一条但值为
+    /// `null`**。序列化时字段必须留着（`null`），不能省略。
+    pub row_version: Option<i64>,
+}
+
+/// 错误上下文里的**受控实体种类**（白名单，裁决 R-T6-a）。
+///
+/// 它决定读哪张表，所以必须是枚举：客户端给的字符串到这里为止，
+/// **绝不**变成表名、**绝不**拼进 SQL。白名单顺序即输出顺序（R-T6-b）：
+/// `task` → `session` → `project` → `tag`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthorityKind {
+    Task,
+    Session,
+    Project,
+    Tag,
+}
+
+impl AuthorityKind {
+    /// 白名单本身。读表的分支与输出顺序都从它推出来，只有一份。
+    pub const ALL: [AuthorityKind; 4] = [
+        AuthorityKind::Task,
+        AuthorityKind::Session,
+        AuthorityKind::Project,
+        AuthorityKind::Tag,
+    ];
+}
+
+/// 错误上下文里的**一个被请求的目标**：读哪一类实体、读哪一条。
+///
+/// 请求逐条给出、响应逐条返回，一一对应（同一个目标重复请求就重复返回）。
+/// `Deserialize` 是给 P7 的 IPC 用的：没有它，命令层只好再写一份「字符串 → 种类」的
+/// match，而那份 match 正是唯一可能把 `kind` 变成表名的地方。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct AuthorityTarget {
+    pub kind: AuthorityKind,
+    pub id: String,
+}
+
+impl AuthorityTarget {
+    pub fn new(kind: AuthorityKind, id: impl Into<String>) -> Self {
+        Self {
+            kind,
+            id: id.into(),
+        }
+    }
 }

@@ -6,6 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use worktrace_lib::domain::session::{SessionMode, TimerKind};
+use worktrace_lib::error::{AuthorityKind, AuthorityTarget};
 use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::services::timer::coordinator::{Coordinator, StartRequest};
 use worktrace_lib::storage::checkpoint_repo;
@@ -1231,16 +1232,29 @@ fn error_response_reports_committed_recovery_versions_without_sampling() {
     let response = worktrace_lib::services::error_response::capture_error_response(
         &h.db,
         &error,
-        Some("t1"),
-        Some(&sid),
+        &[
+            AuthorityTarget::new(AuthorityKind::Task, "t1"),
+            AuthorityTarget::new(AuthorityKind::Session, sid.as_str()),
+        ],
     );
     assert_eq!(response.code, "RECOVERY_REQUIRED");
     assert!(!response.requires_handshake);
     let authority = response.authority.unwrap();
     assert_eq!(authority.data_epoch, h.epoch);
     assert_eq!(authority.revision, rev + 1);
-    assert_eq!(authority.session.unwrap().row_version, before + 1);
-    assert!(authority.task.is_some());
+    // 请求两条 ⇒ 返回两条，逐条钉住 kind / id / 版本
+    // （R-T6-e：形状变了也不许把断言降成「有个列表」）。
+    assert_eq!(authority.records.len(), 2);
+    assert_eq!(authority.records[0].kind, AuthorityKind::Task);
+    assert_eq!(authority.records[0].id, "t1");
+    assert_eq!(
+        authority.records[0].row_version,
+        Some(2),
+        "start 先冻结基线估计（+1）再把 t1 从 Ready 推到 Doing（+1），版本到 2"
+    );
+    assert_eq!(authority.records[1].kind, AuthorityKind::Session);
+    assert_eq!(authority.records[1].id, sid);
+    assert_eq!(authority.records[1].row_version, Some(before + 1));
     assert_eq!(h.revision(), rev + 1);
 }
 
@@ -1251,7 +1265,7 @@ fn error_response_unavailable_metadata_requires_handshake_and_redacts_detail() {
         detail: "SELECT secret FROM private.db".into(),
     };
     let response =
-        worktrace_lib::services::error_response::capture_error_response(&db, &error, None, None);
+        worktrace_lib::services::error_response::capture_error_response(&db, &error, &[]);
     assert!(response.requires_handshake);
     assert!(response.authority.is_none());
     let json = serde_json::to_string(&response).unwrap();
@@ -1261,11 +1275,21 @@ fn error_response_unavailable_metadata_requires_handshake_and_redacts_detail() {
     let mismatch = worktrace_lib::services::error_response::capture_error_response(
         &h.db,
         &worktrace_lib::AppError::DataEpochMismatch,
-        None,
-        None,
+        &[AuthorityTarget::new(AuthorityKind::Task, "t1")],
     );
     assert!(mismatch.requires_handshake);
-    assert!(mismatch.authority.is_some());
+    let authority = mismatch
+        .authority
+        .expect("库身份不符仍要给出（可读的）上下文");
+    assert_eq!(
+        authority.records,
+        vec![worktrace_lib::error::RecordVersion {
+            kind: AuthorityKind::Task,
+            id: "t1".into(),
+            row_version: Some(0),
+        }],
+        "夹具直接插的任务，版本 0"
+    );
 }
 
 /// **跨 run 的开放区间不得由本 run 以「可信」方式闭合。**
@@ -1340,8 +1364,7 @@ fn error_response_capture_during_open_transaction_degrades_to_handshake() {
     let during = worktrace_lib::services::error_response::capture_error_response(
         &h.db,
         &worktrace_lib::AppError::RecoveryRequired,
-        Some("t1"),
-        None,
+        &[AuthorityTarget::new(AuthorityKind::Task, "t1")],
     );
     assert!(during.authority.is_none(), "嵌套事务不应读到权威版本");
     assert!(during.requires_handshake);
@@ -1351,12 +1374,18 @@ fn error_response_capture_during_open_transaction_degrades_to_handshake() {
     let after = worktrace_lib::services::error_response::capture_error_response(
         &h.db,
         &worktrace_lib::AppError::RecoveryRequired,
-        Some("t1"),
-        None,
+        &[AuthorityTarget::new(AuthorityKind::Task, "t1")],
     );
     let authority = after.authority.expect("事务结束后应能读到权威版本");
     assert_eq!(authority.data_epoch, h.epoch);
-    assert_eq!(authority.task.unwrap().row_version, 0);
+    assert_eq!(
+        authority.records,
+        vec![worktrace_lib::error::RecordVersion {
+            kind: AuthorityKind::Task,
+            id: "t1".into(),
+            row_version: Some(0),
+        }]
+    );
     assert!(!after.requires_handshake);
 }
 
