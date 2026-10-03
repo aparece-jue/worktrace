@@ -127,6 +127,22 @@ jiff = { version = "0.2", default-features = false, features = ["std", "tz-syste
 - [ ] 测试项目关联/解除、同值幂等、未知/归档项目、旧版本/epoch、非法状态或运行占用、失败回滚；验证理清为 Ready 后筛选能找到该任务。
 - [ ] **与 V0.1 边界的区分（写清以免被读成越界）**：规格里「不做 Inbox 转项目及属性迁移」指的是把任务**转成**独立 Project 实体并搬运属性；给任务**指定/解除**项目是 F-002 原文「Inbox 可直接 Ready；**可选项目/标签**」要求的能力——此前计划缺这个入口，等于该条落不了地。实现时守住边界：只改 `task.project_id`（连同审计与版本），**不创建项目、不迁移属性、不改变任务状态**。
 - [ ] P4 返回错误上下文时沿用同一读事务捕获规则，增加明确的 project/tag 版本载荷与消费者；现有 ErrorAuthority 仅有 task/session，不能拿 task 版本代替项目/标签版本。该扩展在 P4 实施中完成，P7 再统一接入 IPC。
-  **形状建议**：与其每加一类实体就再改一次签名（P5 还会要 interval/session），不如把载荷做成按 kind 分列的 `Vec<{kind, id, row_version}>`（或等价的小结构）；`requires_handshake` 与「读取失败不返回部分上下文」两条语义保持不变。
+  **形状（本轮定死，避免实现时各写一套）**：
+  - 载荷是**受控实体种类**的列表，本阶段支持 `task` / `session` / `project` / `tag`；
+    `kind` 必须是**枚举或白名单**，不能由客户端任意指定表名（它决定读哪张表，绝不能拼进 SQL）。
+  - **响应按「被请求的目标」逐条返回**：`{kind, id, row_version: Option<i64>}`，
+    **`row_version = null` 表示"已显式确认不存在"**（例如版本冲突后目标已被删除）。
+    不接受「不在列表里」这种表示——它与「根本没请求」无法区分，前端就只能说"我没拿到"，
+    说不出"确认不存在"。请求侧同样按目标逐条给出，请求与响应一一对应。
+  - **顺序确定**：按 `kind` 白名单顺序、同 kind 内按请求顺序；用例与前端 diff 才稳定。
+  - **缺失 ≠ 读取失败**：目标行不存在是**数据**（照上面的 `null` 表示）；
+    而任何一次读取**报错**则整体不返回上下文（`authority = null`、`requires_handshake = true`）——
+    「读取失败不返回部分上下文」这条语义不变。
+  - **interval 没有独立 `row_version`**：P3 的历史修正返回**所属 session 的版本**，
+    不新增区间版本列（与 P3 计划第 70 条一致）。
+  - **要同步改的既有用例**：3 条错误响应用例直接断言 `authority.task/session`，形状一变就得跟着改——
+    `error_response_reports_committed_recovery_versions_without_sampling`、
+    `error_response_unavailable_metadata_requires_handshake_and_redacts_detail`、
+    `error_response_capture_during_open_transaction_degrades_to_handshake`。
 
 当前结论仅表示可进入 P4 实施准备与开发，不表示 UI/平台验收完成。任务状态、时区校验及新关联入口仍须按本计划逐项实现和测试。
