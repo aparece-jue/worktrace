@@ -173,3 +173,26 @@ mod tests {
         }
     }
 }
+
+/// 面向 IPC 的安全错误响应；内部诊断 detail 不序列化。
+#[derive(Debug, serde::Serialize)]
+pub struct ErrorResponse {
+    pub code: String,
+    pub message: String,
+    pub authority: Option<ErrorAuthority>,
+    pub requires_handshake: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ErrorAuthority {
+    pub data_epoch: String,
+    pub revision: i64,
+    pub task: Option<RecordVersion>,
+    pub session: Option<RecordVersion>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RecordVersion {
+    pub id: String,
+    pub row_version: i64,
+}

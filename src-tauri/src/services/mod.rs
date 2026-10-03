@@ -4,3 +4,5 @@
 //! 「一次业务操作恰好加一次 revision」的责任在这里（总纲 §9）。
 
 pub mod timer;
+
+pub mod error_response;

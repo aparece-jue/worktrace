@@ -15,6 +15,7 @@
 
 use rusqlite::Transaction;
 
+use crate::domain::error::DomainError;
 use crate::domain::interval::ClosedIntervalFacts;
 use crate::domain::session::SessionState;
 use crate::error::AppError;
@@ -25,6 +26,11 @@ use crate::storage::session_repo::{self, SessionRow, SessionStateUpdate};
 #[derive(Debug, Clone)]
 pub struct EndSessionFacts {
     pub session_id: String,
+    /// **本次调用所在的 run**。与持久化会话的 `run_id` 不一致时一律拒绝：
+    /// 上一个 run 留下的开放区间不能由本 run 以「可信」方式闭合——那会把停机
+    /// （崩溃、休眠、关机）的时间写成已确认工时。判据与 `checkpoint_repo::write`
+    /// 的 `StaleRunContext` 完全一致，两条路径不该一条拦、一条放。
+    pub run_id: String,
     /// 调用方期望的会话版本。
     pub expected_row_version: i64,
     /// 归属终点 `A(M)`，由调用方用已验证样本算出。
@@ -63,6 +69,17 @@ pub fn end_session_in_tx(
         session_repo::get_session(tx, &facts.session_id)?.ok_or_else(|| AppError::Domain {
             detail: "会话不存在。".into(),
         })?;
+
+    // **运行上下文校验排在版本校验之前**：跨 run 需要的是恢复流程，不是让客户端
+    // 刷新版本后重试（`StaleRunContext` 映射为 `RECOVERY_REQUIRED`）。
+    if session.run_id != facts.run_id {
+        return Err(DomainError::StaleRunContext {
+            expected: session.run_id.clone(),
+            actual: facts.run_id.clone(),
+        }
+        .into());
+    }
+
     guard_row_version(session.row_version, facts.expected_row_version)?;
 
     if session.state == SessionState::Recovering

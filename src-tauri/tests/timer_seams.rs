@@ -116,6 +116,7 @@ fn the_primitive_rolls_back_with_the_callers_transaction() {
     end_session_in_tx(
         &tx,
         &EndSessionFacts {
+            run_id: "run-1".into(),
             session_id: sid.clone(),
             expected_row_version: version,
             attributed_end,
@@ -149,6 +150,7 @@ fn the_primitive_does_not_bump_revision() {
     end_session_in_tx(
         &tx,
         &EndSessionFacts {
+            run_id: "run-1".into(),
             session_id: sid.clone(),
             expected_row_version: version,
             attributed_end: 1_700_000_007_000,
@@ -196,6 +198,7 @@ fn a_composed_service_can_end_a_session_inside_its_own_transaction() {
     end_session_in_tx(
         &tx,
         &EndSessionFacts {
+            run_id: "run-1".into(),
             session_id: sid.clone(),
             expected_row_version: version,
             attributed_end: 1_700_000_009_000,
@@ -243,6 +246,7 @@ fn the_primitive_reflects_session_state_correctly() {
     end_session_in_tx(
         &tx,
         &EndSessionFacts {
+            run_id: "run-1".into(),
             session_id: sid.clone(),
             expected_row_version: version,
             attributed_end: 1_700_000_003_000,
@@ -274,6 +278,7 @@ fn the_primitive_reflects_session_state_correctly() {
     end_session_in_tx(
         &tx,
         &EndSessionFacts {
+            run_id: "run-1".into(),
             session_id: sid.clone(),
             expected_row_version: row.row_version,
             attributed_end: 1_700_000_005_000,
@@ -303,6 +308,7 @@ fn the_primitive_refuses_recovery_in_both_directions() {
         end_session_in_tx(
             &tx,
             &EndSessionFacts {
+                run_id: "run-1".into(),
                 session_id: sid.clone(),
                 expected_row_version: row.row_version,
                 attributed_end: 1_700_000_001_000,
@@ -331,6 +337,7 @@ fn the_primitive_refuses_recovery_in_both_directions() {
         end_session_in_tx(
             &tx,
             &EndSessionFacts {
+                run_id: "run-1".into(),
                 session_id: sid.clone(),
                 expected_row_version: row.row_version,
                 attributed_end: 1_700_000_001_000,
@@ -355,6 +362,7 @@ fn the_primitive_guards_the_row_version() {
         end_session_in_tx(
             &tx,
             &EndSessionFacts {
+                run_id: "run-1".into(),
                 session_id: sid.clone(),
                 expected_row_version: 99,
                 attributed_end: 1_700_000_001_000,
@@ -387,6 +395,7 @@ fn stats_split_closed_and_live_without_double_counting() {
     end_session_in_tx(
         &tx,
         &EndSessionFacts {
+            run_id: "run-1".into(),
             session_id: sid.clone(),
             expected_row_version: version,
             attributed_end: 1_700_000_020_000,
@@ -453,6 +462,7 @@ fn stats_has_no_live_time_while_paused() {
     end_session_in_tx(
         &tx,
         &EndSessionFacts {
+            run_id: "run-1".into(),
             session_id: sid.clone(),
             expected_row_version: version,
             attributed_end: 1_700_000_012_000,

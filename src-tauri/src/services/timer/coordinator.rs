@@ -164,11 +164,8 @@ impl Coordinator {
         }
     }
 
-    /// 显式重建归属基线（新 run、休眠唤醒后、用户显式校正）。
-    ///
-    /// **调用方必须先关闭/隔离旧的开放事实**：重建会让 `A(M)` 跳变，旧区间若还开着，
-    /// 它的起点就与新归属对不上了。
-    /// 接受一次**已确认的**时钟校正。见 [`AnchorState::accept_clock_correction`]。
+    /// 接受已确认的时钟校正；调用方必须先成功提交校正审计。
+    /// 清除未接受标记并更新长期参照，不等于确认可疑工时。
     pub fn accept_clock_correction(&mut self, sample: ClockSample) {
         self.unaccepted_clock_correction = false;
         if let Some(st) = self.anchor_state.as_mut() {
@@ -176,6 +173,8 @@ impl Coordinator {
         }
     }
 
+    /// 显式重建归属基线；必须先关闭或隔离旧开放事实。
+    /// 重建会改变 A(M)，不更新长期参照或清除未接受校正标记。
     pub fn reestablish_anchor(&mut self, sample: ClockSample) {
         match self.anchor_state.as_mut() {
             Some(st) => st.reestablish(sample),
@@ -633,6 +632,7 @@ impl Coordinator {
         end_session_in_tx(
             &tx,
             &EndSessionFacts {
+                run_id: self.run_id.clone(),
                 session_id: req.session_id.clone(),
                 expected_row_version: req.session_expected_version,
                 attributed_end,
@@ -786,6 +786,7 @@ impl Coordinator {
         end_session_in_tx(
             &tx,
             &EndSessionFacts {
+                run_id: self.run_id.clone(),
                 session_id: req.session_id.clone(),
                 expected_row_version: req.session_expected_version,
                 attributed_end,
@@ -1217,6 +1218,7 @@ impl Coordinator {
         end_session_in_tx(
             &tx,
             &EndSessionFacts {
+                run_id: self.run_id.clone(),
                 session_id: live.id.clone(),
                 expected_row_version: live.row_version,
                 attributed_end: end,
@@ -1291,6 +1293,15 @@ impl Coordinator {
         // 与命令路径共用同一套「采样 → 检测 → 异常则先提交恢复事务再隔离」逻辑
         // （`sample_and_detect` 内部已含故障态检查与恢复事务）。
         let sample = self.sample_and_detect(db)?;
+        // 跨 run 的旧 running 行尚未恢复，不能用墙钟补出开放区间工时。
+        if self.anchor_state.is_none()
+            && self
+                .live
+                .as_ref()
+                .is_some_and(|l| l.state == SessionState::Running)
+        {
+            return Err(AppError::RecoveryRequired);
+        }
         let attributed_end = self.attribute(sample);
 
         let Some(live) = self.live.clone() else {

@@ -431,6 +431,7 @@ fn transaction_primitive_rejects_invalid_targets_without_changes() {
         assert!(end_session_in_tx(
             &tx,
             &EndSessionFacts {
+                run_id: "run-1".into(),
                 session_id: sid.clone(),
                 expected_row_version: v,
                 attributed_end: 1_700_000_000_000,
@@ -1075,4 +1076,248 @@ fn statistics_without_anchor_use_sampled_wall_time_like_snapshot() {
     assert_eq!(stats.session_id, None);
     assert_eq!(stats.total_ms(), 0);
     assert_eq!(h.revision(), revision);
+}
+
+#[test]
+fn no_anchor_running_statistics_require_recovery_not_wall_duration() {
+    let mut h = setup();
+    h.start();
+    h.advance(60_000);
+    let sid = h.coord.live().unwrap().id.clone();
+    h.coord = Coordinator::new(Box::new(Arc::clone(&h.clock)), "run-2");
+    h.coord.load_session(h.db.connection(), &sid).unwrap();
+    let rev = h.revision();
+    assert_eq!(h.coord.snapshot(&mut h.db).unwrap().active_ms, 0);
+    assert_eq!(
+        h.coord.stats_sample(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    assert_eq!(h.revision(), rev);
+}
+
+fn inject_sqlite_full(h: &H, table: &str) {
+    h.db.connection().execute_batch(&format!("CREATE TABLE review_pressure(data BLOB); CREATE TRIGGER review_full BEFORE INSERT ON {table} BEGIN INSERT INTO review_pressure VALUES(zeroblob(1048576)); END;")).unwrap();
+    let pages: i64 =
+        h.db.connection()
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .unwrap();
+    h.db.connection()
+        .execute_batch(&format!("PRAGMA max_page_count={pages}"))
+        .unwrap();
+    let raw =
+        h.db.connection()
+            .execute("INSERT INTO review_pressure VALUES(zeroblob(1048576))", [])
+            .unwrap_err();
+    assert_eq!(raw.sqlite_error_code(), Some(rusqlite::ErrorCode::DiskFull));
+}
+
+fn release_sqlite_full(h: &H) {
+    h.db.connection()
+        .execute_batch("DROP TRIGGER review_full; PRAGMA max_page_count=1073741823;")
+        .unwrap();
+}
+
+#[test]
+fn sqlite_full_start_rolls_back_all_business_facts() {
+    let mut h = setup();
+    inject_sqlite_full(&h, "work_session");
+    let rev = h.revision();
+    let result = h.coord.start(
+        &mut h.db,
+        StartRequest {
+            expected_data_epoch: h.epoch.clone(),
+            task_id: "t1".into(),
+            task_expected_version: 0,
+            mode: SessionMode::Foreground,
+            timer_kind: TimerKind::Stopwatch,
+            target_duration_ms: None,
+            expected_interval_ms: 30_000,
+        },
+    );
+    assert_eq!(result.unwrap_err().code(), "STORAGE_ERROR");
+    assert_eq!(h.revision(), rev);
+    let task = worktrace_lib::storage::task_repo::get_task(h.db.connection(), "t1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(task.row_version, 0);
+    assert_eq!(task.status, worktrace_lib::domain::task::TaskStatus::Ready);
+    let count: i64 =
+        h.db.connection()
+            .query_row("SELECT COUNT(*) FROM work_session", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(count, 0);
+    assert!(h.coord.live().is_none());
+    release_sqlite_full(&h);
+    h.start();
+}
+
+#[test]
+fn sqlite_full_heartbeat_keeps_checkpoint_and_retries() {
+    let mut h = setup();
+    h.start();
+    let id = h
+        .coord
+        .live()
+        .unwrap()
+        .open_interval
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    let before = h.checkpoints(&id).unwrap();
+    let rev = h.revision();
+    inject_sqlite_full(&h, "interval_checkpoint");
+    h.advance(30_000);
+    assert_eq!(
+        h.coord.heartbeat(&mut h.db).unwrap_err().code(),
+        "STORAGE_ERROR"
+    );
+    assert_eq!(h.checkpoints(&id).unwrap(), before);
+    assert_eq!(h.coord.last_checkpoint().unwrap(), &before);
+    assert_eq!(h.revision(), rev);
+    release_sqlite_full(&h);
+    assert!(h.coord.heartbeat(&mut h.db).unwrap());
+    assert_eq!(h.checkpoints(&id).unwrap().elapsed_ms, 30_000);
+}
+
+#[test]
+fn sqlite_full_recovery_rolls_back_and_isolates_until_retry() {
+    let mut h = setup();
+    h.start();
+    h.advance(30_000);
+    h.coord.heartbeat(&mut h.db).unwrap();
+    let sid = h.coord.live().unwrap().id.clone();
+    let version = h.coord.live().unwrap().row_version;
+    let rev = h.revision();
+    inject_sqlite_full(&h, "time_edit");
+    h.advance_wall_only(5_000);
+    assert_eq!(
+        h.coord.snapshot(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    assert!(h.coord.is_faulted());
+    assert_eq!(h.revision(), rev);
+    let row = worktrace_lib::storage::session_repo::get_session(h.db.connection(), &sid)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, SessionState::Running);
+    assert_eq!(row.row_version, version);
+    let ivs = worktrace_lib::storage::session_repo::intervals_of_session(h.db.connection(), &sid)
+        .unwrap();
+    assert_eq!(ivs.len(), 1);
+    assert_eq!(ivs[0].ended_at, None);
+    assert!(!ivs[0].needs_review);
+    release_sqlite_full(&h);
+    assert_eq!(
+        h.coord.retry_recovery(&mut h.db).unwrap().state,
+        Some(SessionState::Recovering)
+    );
+    assert_eq!(h.revision(), rev + 1);
+}
+
+#[test]
+fn error_response_reports_committed_recovery_versions_without_sampling() {
+    let mut h = setup();
+    h.start();
+    let sid = h.coord.live().unwrap().id.clone();
+    let before = h.coord.live().unwrap().row_version;
+    let rev = h.revision();
+    h.advance_wall_only(5_000);
+    let req = session_request(&h);
+    let error = h.coord.pause(&mut h.db, req).unwrap_err();
+    let response = worktrace_lib::services::error_response::capture_error_response(
+        &h.db,
+        &error,
+        Some("t1"),
+        Some(&sid),
+    );
+    assert_eq!(response.code, "RECOVERY_REQUIRED");
+    assert!(!response.requires_handshake);
+    let authority = response.authority.unwrap();
+    assert_eq!(authority.data_epoch, h.epoch);
+    assert_eq!(authority.revision, rev + 1);
+    assert_eq!(authority.session.unwrap().row_version, before + 1);
+    assert!(authority.task.is_some());
+    assert_eq!(h.revision(), rev + 1);
+}
+
+#[test]
+fn error_response_unavailable_metadata_requires_handshake_and_redacts_detail() {
+    let db = Db::open_in_memory().unwrap();
+    let error = worktrace_lib::AppError::Storage {
+        detail: "SELECT secret FROM private.db".into(),
+    };
+    let response =
+        worktrace_lib::services::error_response::capture_error_response(&db, &error, None, None);
+    assert!(response.requires_handshake);
+    assert!(response.authority.is_none());
+    let json = serde_json::to_string(&response).unwrap();
+    assert!(!json.contains("SELECT"));
+    assert!(!json.contains("private.db"));
+    let h = setup();
+    let mismatch = worktrace_lib::services::error_response::capture_error_response(
+        &h.db,
+        &worktrace_lib::AppError::DataEpochMismatch,
+        None,
+        None,
+    );
+    assert!(mismatch.requires_handshake);
+    assert!(mismatch.authority.is_some());
+}
+
+/// **跨 run 的开放区间不得由本 run 以「可信」方式闭合。**
+///
+/// 崩溃/关机后新 run 装载到上一 run 的 `running` 会话时没有基线可用，
+/// `attribute()` 退回同次采样墙钟——若直接闭合，`duration_ms` 就是「开工到现在」
+/// 的整段墙钟，把停机（崩溃、休眠、关机）算成**已确认**工时。
+///
+/// 判据与 `checkpoint_repo::write` 的 `StaleRunContext` 完全一致：写检查点早就拒绝
+/// 跨 run 写入，闭合区间这条更重的路径不能反而放行。修复前实测：真实工作 60 秒 +
+/// 停机一小时 ⇒ `duration_ms = 3_660_000` 且 `needs_review = false`。
+#[test]
+fn cross_run_open_interval_cannot_be_closed_as_trusted_effort() {
+    for kind in ["pause", "finish"] {
+        let mut h = setup();
+        h.start();
+        h.advance(60_000);
+        let sid = h.coord.live().unwrap().id.clone();
+        let version = h.coord.live().unwrap().row_version;
+
+        // 崩溃 + 停机一小时 + 重启进入 run-2（无基线）
+        h.advance(3_600_000);
+        h.db.connection()
+            .execute(
+                "INSERT INTO application_run(id,started_at) VALUES('run-2',0)",
+                [],
+            )
+            .unwrap();
+        h.coord = Coordinator::new(Box::new(Arc::clone(&h.clock)), "run-2");
+        h.coord.load_session(h.db.connection(), &sid).unwrap();
+        let rev = h.revision();
+
+        let req = SessionRequest {
+            expected_data_epoch: h.epoch.clone(),
+            session_id: sid.clone(),
+            session_expected_version: version,
+        };
+        let result = if kind == "pause" {
+            h.coord.pause(&mut h.db, req)
+        } else {
+            h.coord.finish(&mut h.db, req)
+        };
+
+        assert_eq!(
+            result.unwrap_err().code(),
+            "RECOVERY_REQUIRED",
+            "kind={kind}：上一 run 的开放区间必须先走恢复，不能直接闭合"
+        );
+        assert_eq!(h.revision(), rev, "kind={kind}");
+        let ivs =
+            worktrace_lib::storage::session_repo::intervals_of_session(h.db.connection(), &sid)
+                .unwrap();
+        assert_eq!(ivs.len(), 1, "kind={kind}");
+        assert_eq!(ivs[0].ended_at, None, "kind={kind}：开放区间不得被闭合");
+        assert_eq!(ivs[0].duration_ms, None, "kind={kind}");
+        assert!(!ivs[0].needs_review, "kind={kind}");
+    }
 }
