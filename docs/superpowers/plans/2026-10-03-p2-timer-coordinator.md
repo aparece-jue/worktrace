@@ -52,7 +52,7 @@
 - [x] start 同事务理清任务、持久化预算、创建 session/open interval/elapsed=0 初始检查点、审计及 revision；首次估时基准在此冻结。失败不留下半条事实。
 - [x] **「理清」是两步，不是一步**：02 §5 里 `Inbox → Doing` **不合法**，必须 `Inbox → Ready → Doing`；`Clarifying` 出发同理。F-002 要求 `start` 在同一命令内原子完成它，所以这里是同一事务里的**两次** `task_repo::transition_task`（各自的 `expected_row_version` 要按前一步的结果递进），**不是**把状态直接写成 Doing。直接跳会被跃迁表拒绝——P1 的测试已经把这个陷阱钉住了。
 - [x] resume 校验 paused 且无待确认、项目可执行及前台占用；任务 Doing 保持，Ready 同事务转 Doing；Inbox/Clarifying/Waiting/Blocked/Review/Done/Cancelled/Scheduled 拒绝，不隐式解除等待或重开任务。请求携带 task 与 session 两份 expected_row_version，采样前及事务内均校验。先更新 session 为 running 及当前 run_id，再以 A(M) 开新区间、写 elapsed=0 检查点；同事务提交，不清空已用工时，返回任务/会话权威版本。
-- [x] pause/finish 用已验证单调差关闭区间，保留 sampled_end_wall_at；finish 可从 paused 直接结束。recovering 拒绝普通工作命令，需 P3 reconcile。
+- [x] pause/finish 用已验证单调差关闭区间，保留 sampled_end_wall_at；finish 可从 paused 直接结束。recovering 会话**自身**拒绝普通工作命令，需 P3 reconcile。
 - [x] P2 扩展 P1 仓储：task_repo 读取估时并冻结 baseline_estimate_json；session_repo 更新 run_id/needs_review、分割可信前缀与不确定余段；新增 time_edit_repo 写异常审计。签名实现时登记并供 P3 复用。仅接受调用方 Transaction，不自行提交或加 revision；协调器不嵌 SQL，不改 schema。无估时的首次 start 也以首次会话事实标识已冻结，后续不得因 baseline 为 null 重新冻结。
 - [x] **扩展前先看这三条实测事实**（已有 P1 代码核对记录，原标注日期待核实）：
   1. **`session_repo::update_session_state` 在 P1 里零调用、零测试**——它的签名是 `(tx, id, expected_version, target, ended_at)`，**装不下 `run_id` 与 `needs_review`**，而 resume 要更新 run_id、异常分割要设 needs_review。P1 没有调用方，所以**可以直接改签名**，但记住：它现在的「P1 无回归」是**空洞的**（没有测试覆盖它），P2 必须自己补上它的测试。
@@ -129,7 +129,7 @@
 暂停/终结态遇墙钟异常时，先原子写 clock correction 审计并增加 revision，再接受新归属与长期参照；暂停会话版本递增，终结态不修改会话或历史区间。随后 resume 使用新版本，不会成功后立即再次恢复。此处“接受校正”仅表示承认新的时钟映射，不代表确认可疑工时。recovering 记录重复事件保持幂等；未接受的墙钟异常仍存在时拒绝 start/resume，而不是先返回成功。
 
 - [x] 回归：暂停期间前调时钟后，校正只审计一次、版本更新，resume 后持续 running；校正审计失败不移动参照、不增加版本，重试后恢复。
-- [x] 回归：无时钟校正的长间隔保留长期累计偏差，新会话仍能检测它；单调钟倒退不作为墙钟校正；未校正的 recovering 状态拒绝新工作，重复事件保持幂等。
+- [x] 回归：无时钟校正的长间隔保留长期累计偏差，新会话仍能检测它；单调钟倒退不作为墙钟校正；**未接受的墙钟异常**在 recovering 中持续拒绝 start/resume（对别的任务同样拒绝），长间隔或采样失败造成的 recovering **不拦别的任务**，重复事件保持幂等。
 - [ ] 正式平台接线和实机验证仍待完成。先稳定 P1/P2，不推进下一阶段。
 
 
