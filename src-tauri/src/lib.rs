@@ -1,3 +1,20 @@
+//! Worktrace 后端库。
+//!
+//! 分层（01 §2，总纲 §9）：`commands → services → {storage, domain, platform}`。
+//! `commands` 不直连 SQL 也不接受 `Connection`；`storage` 不反向引用
+//! `commands` 也不调用 `platform`；`domain` 不做 IO。
+//!
+//! P1 只交付 `domain`/`platform`/`storage`/`commands` 的基座与 `error`，
+//! 业务服务（`services`）由 P2 起逐份加入。
+
+pub mod commands;
+pub mod domain;
+pub mod error;
+pub mod platform;
+pub mod storage;
+
+pub use error::AppError;
+
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("你好，{}！Worktrace 的 Rust 后端已连接。", name)
