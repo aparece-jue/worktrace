@@ -110,6 +110,8 @@ pub struct Coordinator {
     /// 失败的恢复会让坏事实在下一拍被当成好事实接受。置真后在成功重建之前所有入口一律
     /// 拒绝（计划原文：「明确进入故障处理」）。
     faulted: bool,
+    /// 已检测但未接受的墙钟校正；不能因长期容差增长而自动消失。
+    unaccepted_clock_correction: bool,
     live: Option<LiveSession>,
 }
 
@@ -124,6 +126,7 @@ impl Coordinator {
             last_checkpoint: None,
             last_checkpoint_monotonic: None,
             faulted: false,
+            unaccepted_clock_correction: false,
             live: None,
         }
     }
@@ -167,6 +170,7 @@ impl Coordinator {
     /// 它的起点就与新归属对不上了。
     /// 接受一次**已确认的**时钟校正。见 [`AnchorState::accept_clock_correction`]。
     pub fn accept_clock_correction(&mut self, sample: ClockSample) {
+        self.unaccepted_clock_correction = false;
         if let Some(st) = self.anchor_state.as_mut() {
             st.accept_clock_correction(sample);
         }
@@ -401,7 +405,15 @@ impl Coordinator {
         // ② 采样 + 检测。命令入口**自己**采样，调用方不得预先传入。
         //    异常时先提交恢复事务再拒绝——不执行原意图（总纲 §9）。
         let sample = self.sample_and_detect(db)?;
-        if self.anchor_state.is_none() {
+        // **本 run 还没有过会话**时基线没有连续性要保：没有任何开放事实挂在旧归属上，
+        // 长期参照的「进程生命期」语义也还没有可牵连的工时。用当前样本整体重定。
+        //
+        // 判据必须是 `live.is_none()` 而不是 `anchor_state.is_none()`：run 初始化就会
+        // 建立基线（08 §1 对 lifetime_ref 的要求），此时若发生墙钟跳变，
+        // `try_handle_anomaly` 在没有会话时什么都不做，而 `anchor_state.is_none()` 又为假
+        // ——新会话的 `started_at` 会拿旧基线算，整整偏出跳变量（NTP 步进时是几分钟/
+        // 几小时，之后按日期分桶的统计跟着错）。
+        if self.live.is_none() {
             self.establish_anchor(sample);
         }
 
@@ -665,7 +677,9 @@ impl Coordinator {
             });
         }
         let sample = self.sample_and_detect(db)?;
-        if self.anchor_state.is_none() {
+        // 同上（`start` 的注释）：本 run 还没有装载过会话时（典型是跨 run 恢复一个
+        // 暂停会话），旧基线不属于这个 run，用当前样本整体重定。
+        if self.live.is_none() {
             self.establish_anchor(sample);
         }
         let attributed_start = self.attribute(sample.monotonic_ms);
@@ -838,6 +852,9 @@ impl Coordinator {
                 return Err(AppError::RecoveryRequired);
             }
         }
+        if self.unaccepted_clock_correction {
+            return Err(AppError::RecoveryRequired);
+        }
         Ok(sample)
     }
 }
@@ -949,6 +966,9 @@ impl Coordinator {
 
         // 恢复记录幂等：不重复分割/写审计/增加版本，也不把重复通知当作新校正。
         if live.state == SessionState::Recovering {
+            if verdict.is_wall_clock_anomaly() {
+                self.unaccepted_clock_correction = true;
+            }
             if verdict != SampleVerdict::Unavailable {
                 self.reestablish_anchor(sample);
             }
@@ -1148,6 +1168,8 @@ impl Coordinator {
         self.refuse_if_faulted()?;
         let previous = self.anchor_state.as_ref().and_then(|a| a.last());
         let sample = self.read_sample(db)?;
+        // 只观察当前样本一次；历史 boundary 只作校验，不能推进 last。
+        let verdict = self.observe(sample);
         let trusted = boundary.filter(|b| {
             previous.is_some_and(|p| {
                 b.monotonic_ms >= p.monotonic_ms
@@ -1167,12 +1189,15 @@ impl Coordinator {
             .filter(|l| l.state == SessionState::Running)
         else {
             // 非运行状态也检测本次样本；只有记录后的墙钟异常可移动长期参照。
-            let verdict = self.observe(sample);
             if verdict.needs_recovery() {
                 return self.handle_anomaly(db, sample, verdict);
             }
             return self.build(db.connection(), sample, false);
         };
+        // 可信事件边界可以解释长间隔，不能覆盖硬故障或墙钟异常。
+        if verdict.needs_recovery() && !matches!(verdict, SampleVerdict::Suspended { .. }) {
+            return self.handle_anomaly(db, sample, verdict);
+        }
         let Some(boundary) = trusted else {
             let verdict = SampleVerdict::Suspended {
                 gap_ms: previous

@@ -842,3 +842,146 @@ fn nonrunning_monotonic_failure_cannot_return_statistics() {
         assert!(h.coord.retry_recovery(&mut h.db).is_err());
     }
 }
+
+#[test]
+fn system_pause_does_not_mask_monotonic_failure() {
+    for with_boundary in [false, true] {
+        let mut h = setup();
+        h.start();
+        h.advance(1_000);
+        h.coord.snapshot(&mut h.db).unwrap();
+        let boundary = h.clock.lock().unwrap().sample().unwrap();
+        h.advance_mono_only(-100);
+        let snap = h
+            .coord
+            .system_pause(&mut h.db, with_boundary.then_some(boundary))
+            .unwrap();
+        assert_eq!(snap.state, Some(SessionState::Recovering));
+        assert!(matches!(
+            h.coord.last_verdict(),
+            SampleVerdict::MonotonicBackwards { .. }
+        ));
+        assert!(h.coord.is_faulted());
+        assert!(h.coord.retry_recovery(&mut h.db).is_err());
+    }
+}
+
+#[test]
+fn trusted_departure_boundary_does_not_hide_wall_clock_jump() {
+    let mut h = setup();
+    h.start();
+    h.advance(1_000);
+    let boundary = h.clock.lock().unwrap().sample().unwrap();
+    h.advance(1_000);
+    h.advance_wall_only(5_000);
+    let snap = h.coord.system_pause(&mut h.db, Some(boundary)).unwrap();
+    assert_eq!(snap.state, Some(SessionState::Recovering));
+    assert!(matches!(
+        h.coord.last_verdict(),
+        SampleVerdict::Jumped { .. }
+    ));
+    let audit: String =
+        h.db.connection()
+            .query_row("SELECT after_json FROM time_edit", [], |r| r.get(0))
+            .unwrap();
+    let audit: serde_json::Value = serde_json::from_str(&audit).unwrap();
+    assert_eq!(audit["clock_correction_accepted"], true);
+}
+
+#[test]
+fn unaccepted_clock_correction_cannot_expire_with_lifetime_allowance() {
+    let mut h = setup();
+    h.start();
+    h.advance(129_000);
+    h.coord.snapshot(&mut h.db).unwrap();
+    h.advance_wall_only(5_000);
+    h.coord.snapshot(&mut h.db).unwrap();
+    let rev = h.revision();
+    for _ in 0..210 {
+        h.advance(30_000);
+        h.coord.snapshot(&mut h.db).unwrap();
+    }
+    assert_eq!(h.coord.last_verdict(), SampleVerdict::Trusted);
+    h.db.connection().execute("INSERT INTO task(id,title,status,row_version,created_at,updated_at) VALUES('t2','other','Ready',0,0,0)", []).unwrap();
+    let result = h.coord.start(
+        &mut h.db,
+        StartRequest {
+            expected_data_epoch: h.epoch.clone(),
+            task_id: "t2".into(),
+            task_expected_version: 0,
+            mode: SessionMode::Foreground,
+            timer_kind: TimerKind::Stopwatch,
+            target_duration_ms: None,
+            expected_interval_ms: 30_000,
+        },
+    );
+    assert_eq!(result.unwrap_err().code(), "RECOVERY_REQUIRED");
+    assert_eq!(
+        h.coord.stats_sample(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    assert_eq!(h.revision(), rev);
+    assert!(
+        worktrace_lib::storage::session_repo::running_foreground(h.db.connection())
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// **本 run 尚无会话**时的墙钟跳变：没有工时事实被牵连，也没有可挂校正审计的会话，
+/// 所以下一次 `start` 必须用当前样本**整体重定基线**，而不是拿旧基线算 `started_at`。
+///
+/// 改之前：`try_handle_anomaly` 在 `live == None` 时只处理单调钟硬故障，其余直接返回
+/// ——不写审计、不置未接受标记、也不重定基线；而 `start` 里的判据是
+/// `anchor_state.is_none()`，run 初始化已建立基线故为假，于是放行且归属整整偏出
+/// 跳变量（NTP 步进时是几分钟/几小时，随后按日期分桶的统计会跟着错）。
+#[test]
+fn wall_jump_before_first_session_rebases_instead_of_shifting_attribution() {
+    let mut h = setup();
+
+    // run 初始化：建立基线（08 §1 对 lifetime_ref 的要求），此刻还没有任何会话。
+    let s = h.clock.lock().unwrap().sample().unwrap();
+    h.coord.establish_anchor(s);
+    h.advance(1_000);
+    h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(h.coord.last_verdict(), SampleVerdict::Trusted);
+
+    // 无会话期间墙钟向前跳 5 秒：检测得到，但没有可写的审计、也无处可挂。
+    h.advance_wall_only(5_000);
+    let now_wall = h.clock.lock().unwrap().sample().unwrap().wall_ms;
+    h.coord.snapshot(&mut h.db).unwrap();
+    assert!(matches!(
+        h.coord.last_verdict(),
+        SampleVerdict::Jumped { .. }
+    ));
+
+    // 跳变之后的第一段会话：归属必须落在**当前**墙钟上。
+    let out = h
+        .coord
+        .start(
+            &mut h.db,
+            StartRequest {
+                expected_data_epoch: h.epoch.clone(),
+                task_id: "t1".into(),
+                task_expected_version: 0,
+                mode: SessionMode::Foreground,
+                timer_kind: TimerKind::Stopwatch,
+                target_duration_ms: None,
+                expected_interval_ms: 30_000,
+            },
+        )
+        .unwrap();
+    let sid = out.snapshot.session_id.unwrap();
+    let ivs = worktrace_lib::storage::session_repo::intervals_of_session(h.db.connection(), &sid)
+        .unwrap();
+    assert_eq!(
+        ivs[0].started_at, now_wall,
+        "无会话时的墙钟跳变必须在 start 时重定基线，不能拿旧基线算归属"
+    );
+
+    // 重定之后这一段是干净的：不再被长期界追着判异常。
+    h.advance(1_000);
+    let snap = h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(snap.state, Some(SessionState::Running));
+    assert_eq!(snap.active_ms, 1_000);
+}
