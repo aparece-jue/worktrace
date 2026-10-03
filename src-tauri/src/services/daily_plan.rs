@@ -1,4 +1,5 @@
-//! 今日计划的**输入校验入口**（P4 Task 1，裁决 R6）。
+//! 今日计划的**输入校验入口**（P4 Task 1，裁决 R6）与**今日选择列表服务**
+//! （P4 Task 4，F-010 的「今日选择」半边）。
 //!
 //! T4 的今日计划服务从这里取校验，不得另写一份时区/日期规则。
 //!
@@ -15,15 +16,30 @@
 //! - **日界**：[`local_date_at`] 按**所选时区**算日期（同一时刻在上海与纽约可能差
 //!   一天），永远**不**拿 `updated_at` 或 UTC 日期代替（02 §9）。
 //!
+//! # 今日选择不是排期（P4 Task 4）
+//!
+//! [`add_to_plan`] / [`remove_from_plan`] 只写 `daily_plan` 一行：不设 `Scheduled`、
+//! 不建 `time_block`、不启动计时，也不因为任务状态或日期变化去搬移已有行
+//! （裁决 R-T4-e）。完成项留在当天列表里，由 UI 按任务行自己的状态显示。
+//!
 //! # 为什么在服务层而不是 `domain/`
 //!
 //! 时区解析要读时区库（本机是打包进产物的 tzdb，系统时区还要问操作系统），
 //! 所以它不进 `domain/`——那里只放纯规则。[`crate::domain::localdate::LocalDate`]
 //! 表达的正是被校验之后的那个日期。
 
+use rusqlite::Transaction;
+
 use crate::domain::error::DomainError;
 use crate::domain::localdate::LocalDate;
+use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
+use crate::storage::daily_plan_repo;
+use crate::storage::db::{map_sqlite, Db};
+use crate::storage::guards::guard_epoch;
+use crate::storage::meta::{bump_revision, require_meta};
+use crate::storage::task_repo::TaskRow;
+use crate::storage::WriteOutcome;
 
 /// 本地日期输入的校验入口（`daily_plan.local_date`）。
 pub fn parse_local_date(raw: &str) -> Result<LocalDate, AppError> {
@@ -94,4 +110,154 @@ fn unknown_timezone(raw: &str) -> AppError {
         value: raw.to_string(),
     }
     .into()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 今日选择列表（P4 Task 4：F-010 的「今日选择」半边）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 这一半只做**人工选择**：把任务选进「某一天（某个时区）」，或取消选择。
+// 它**不是排期**（裁决 R-T4-e）——不设 `Scheduled`、不建 `time_block`、不启动计时，
+// 也不因为任务状态或日期的变化去搬移任何一行。完成项留在当天的列表里，
+// 由 UI 按任务行自己的状态显示。
+
+/// 今日计划的**读**请求：哪一天 + 哪个时区 + 请求方手上的库身份。
+///
+/// 日期与时区都是**原始输入**：它们在这里过 [`parse_local_date`] /
+/// [`normalize_timezone`] 两道唯一入口（R-T4-h），调用方不要自己先校验一遍。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyPlanQuery {
+    pub date: String,
+    pub timezone: String,
+    pub expected_data_epoch: String,
+}
+
+/// 读结果：这一天（这个时区）选中的任务 + 这次读看到的库身份与业务版本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyPlanView {
+    /// 按 `task.created_at, task.id` 稳定排序。
+    pub tasks: Vec<TaskRow>,
+    /// 这次读看到的库身份。
+    pub data_epoch: String,
+    /// 这次读看到的业务版本。读**不**改它。
+    pub revision: i64,
+}
+
+/// 加入 / 移除的产物：这一天**当前**的计划 + 提交后的 `revision`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DailyPlanChange {
+    /// 按 `task.created_at, task.id` 稳定排序。
+    pub tasks: Vec<TaskRow>,
+    /// 提交后的权威 `revision`；`Unchanged` 时与调用前相等。
+    pub revision: i64,
+}
+
+/// 读某一天（某个时区）的今日选择列表。**纯读**：不开写事务、不加 `revision`、
+/// 不写审计。
+///
+/// 为什么要带库身份：读完这一页，用户紧接着就会加入 / 移除——那些写命令的信封
+/// 只带 epoch（计划表没有版本列，加入也不改任何实体，裁决 R-T4-f），所以这一次读
+/// 必须先确认自己看的是哪个库，并把当时的 `revision` 一并交回（与
+/// `catalog::list_tasks_filtered` 同一形状）。
+pub fn plan_for(db: &Db, query: DailyPlanQuery) -> Result<DailyPlanView, AppError> {
+    // 纯输入校验放在事务之前：坏日期 / 坏时区不必开事务，也轮不到 epoch 说话
+    // （重新握一次手也不会让它们变合法）。
+    let date = parse_local_date(&query.date)?;
+    let timezone = normalize_timezone(&query.timezone)?;
+
+    let tx = db
+        .connection()
+        .unchecked_transaction()
+        .map_err(map_sqlite)?;
+    guard_epoch(&tx, &query.expected_data_epoch)?;
+
+    let tasks = daily_plan_repo::plan_for(&tx, &date, &timezone)?;
+    let meta = require_meta(&tx)?;
+    // 读事务什么都没写：直接结束它（回滚一个只读事务不改变任何事实），
+    // 免得读代码的人以为这里还欠一个 `commit`。
+    drop(tx);
+
+    Ok(DailyPlanView {
+        tasks,
+        data_epoch: meta.data_epoch,
+        revision: meta.revision,
+    })
+}
+
+/// 把一个任务加入某一天（某个时区）的今日计划。
+///
+/// 信封只带 epoch（`WriteEnvelope::for_create` 的形状）：计划表没有版本列，加入也
+/// 不改任何实体，所以**没有可校验的实体版本**，不拿别的实体的版本假装
+/// （裁决 R-T4-f，与 `catalog::tag_task` 同一口径）。
+///
+/// 重复加入 ⇒ `Unchanged`：不写审计、不加 revision（总纲 §5 第 8 条②）。
+pub fn add_to_plan(
+    db: &mut Db,
+    env: WriteEnvelope,
+    task_id: &str,
+    date: &str,
+    timezone: &str,
+    now: i64,
+) -> Result<WriteOutcome<DailyPlanChange>, AppError> {
+    // 纯输入校验放在开事务之前：坏输入连事务都不必开（不改 revision、不写审计）。
+    let date = parse_local_date(date)?;
+    let timezone = normalize_timezone(timezone)?;
+
+    let tx = write_tx(db, &env)?;
+    let outcome = daily_plan_repo::add_to_plan(&tx, task_id, &date, &timezone, now)?;
+    let settled = settle(&tx, outcome)?;
+    let tasks = daily_plan_repo::plan_for(&tx, &date, &timezone)?;
+    tx.commit().map_err(map_sqlite)?;
+
+    Ok(settled.map(|(_, revision)| DailyPlanChange { tasks, revision }))
+}
+
+/// 把一个任务从某一天（某个时区）的今日计划里移除。口径与 [`add_to_plan`] 完全对称，
+/// 包括「本来就不在集合里 ⇒ `Unchanged`、零写入」。
+pub fn remove_from_plan(
+    db: &mut Db,
+    env: WriteEnvelope,
+    task_id: &str,
+    date: &str,
+    timezone: &str,
+    now: i64,
+) -> Result<WriteOutcome<DailyPlanChange>, AppError> {
+    let date = parse_local_date(date)?;
+    let timezone = normalize_timezone(timezone)?;
+
+    let tx = write_tx(db, &env)?;
+    let outcome = daily_plan_repo::remove_from_plan(&tx, task_id, &date, &timezone, now)?;
+    let settled = settle(&tx, outcome)?;
+    let tasks = daily_plan_repo::plan_for(&tx, &date, &timezone)?;
+    tx.commit().map_err(map_sqlite)?;
+
+    Ok(settled.map(|(_, revision)| DailyPlanChange { tasks, revision }))
+}
+
+/// 开一个写事务并把库身份守卫做掉。
+///
+/// 与 `services::catalog` 里那份同名同形，但**没有**抽成公共模块：
+/// `services/catalog.rs` 已由 T5 收口（本任务不得改它），而这段骨架只有十来行。
+/// 若 P7 再加写服务，应当抽一个 `services/tx.rs`——那时的收益才盖过改动成本。
+/// `guard_epoch` **必须在写事务内**执行（总纲 §9），且只接受请求带来的期望值。
+fn write_tx<'a>(db: &'a mut Db, env: &WriteEnvelope) -> Result<Transaction<'a>, AppError> {
+    let tx = db
+        .connection_mut()
+        .unchecked_transaction()
+        .map_err(map_sqlite)?;
+    guard_epoch(&tx, &env.expected_data_epoch)?;
+    Ok(tx)
+}
+
+/// 收口一次写原语：`Changed` 才加一次 `revision`；`Unchanged` 读回当前值。
+fn settle<T>(
+    tx: &Transaction<'_>,
+    outcome: WriteOutcome<T>,
+) -> Result<WriteOutcome<(T, i64)>, AppError> {
+    match outcome {
+        WriteOutcome::Changed(value) => Ok(WriteOutcome::Changed((value, bump_revision(tx)?))),
+        WriteOutcome::Unchanged(value) => {
+            Ok(WriteOutcome::Unchanged((value, require_meta(tx)?.revision)))
+        }
+    }
 }

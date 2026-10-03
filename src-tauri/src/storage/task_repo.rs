@@ -29,10 +29,13 @@ pub struct TaskRow {
     pub updated_at: i64,
 }
 
-const SELECT: &str =
+/// 任务行的投影。`pub(crate)`：`daily_plan_repo` 要 `JOIN daily_plan` 出同样的行，
+/// 列顺序必须与 [`read_row`] 一起复用，否则两处迟早会漂移。
+pub(crate) const SELECT: &str =
     "SELECT id, project_id, title, status, quality, row_version, created_at, updated_at FROM task";
 
-fn read_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
+/// 把一行读成 [`TaskRow`]。`pub(crate)`：与 [`SELECT`] 成对复用，理由同上。
+pub(crate) fn read_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
     let status: String = r.get(3)?;
     Ok(TaskRow {
         id: r.get(0)?,

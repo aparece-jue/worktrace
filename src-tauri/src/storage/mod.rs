@@ -4,6 +4,7 @@
 //! 写入一律接受调用方的 `&Transaction`，由服务层拥有事务并决定何时加 `revision`。
 
 pub mod checkpoint_repo;
+pub mod daily_plan_repo;
 pub mod db;
 pub mod guards;
 pub mod meta;
