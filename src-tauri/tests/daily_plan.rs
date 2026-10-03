@@ -56,6 +56,11 @@ struct Fixture {
 /// 任务的创建时刻**刻意有重复**，且有一个 id 排在前面、创建却更晚：
 /// `t1` / `t2` 同为 1000（稳定排序的第二关键字 `id` 要靠它们证明），
 /// `t3` = 2000，`a9` = 3000（只按 `id` 排序会把它排到最前面 ⇒ 排序用例会红）。
+///
+/// **并列对按 id 逆序建**（先 `t2` 后 `t1`）：插入顺序（`task` 的 rowid）与 id 顺序
+/// 互为反向，于是无论查询计划以谁为驱动表，「去掉 `, task.id` 决胜」都会改变结果。
+/// 顺着建（先 `t1` 后 `t2`）时两种顺序恰好一致——那样的用例只能证明 `created_at`
+/// 优先，证明不了 `id` 决胜（评审 Minor 2 指出，SQLite 3.37 实测复刻过）。
 fn bootstrap() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let mut db = Db::open(dir.path().join("w.db")).unwrap();
@@ -69,8 +74,9 @@ fn bootstrap() -> Fixture {
     )
     .unwrap();
     // 走仓储建任务：审计行数与后面的断言口径一致（同 `tests/task_filters.rs`）。
-    task_repo::create_task(&tx, "t1", "任务一", None, 1000).unwrap();
+    // t2 先建（见上面的「并列对按 id 逆序建」）。
     task_repo::create_task(&tx, "t2", "任务二", None, 1000).unwrap();
+    task_repo::create_task(&tx, "t1", "任务一", None, 1000).unwrap();
     task_repo::create_task(&tx, "t3", "任务三", None, 2000).unwrap();
     task_repo::create_task(&tx, "a9", "任务四", None, 3000).unwrap();
     tx.commit().unwrap();
@@ -390,6 +396,11 @@ fn the_same_task_on_the_same_day_under_another_timezone_key_is_a_separate_row() 
 /// 稳定排序：`task.created_at, task.id`（F-010 的列表顺序）。
 ///
 /// 加入顺序刻意打乱：顺序由查询决定，不由写入顺序决定。
+///
+/// 两个关键字各自可辨：`a9` 的 id 靠前而创建更晚（证明 `created_at` 优先），
+/// `t1`/`t2` 同创建时刻、**建库时按 id 逆序插入**（证明 `id` 决胜）。
+/// 后一条是定向篡改过的：只把 `, task.id` 从 `ORDER BY` 里去掉（其余不动），
+/// 本用例变红——见报告 §8 的原始输出。
 #[test]
 fn the_plan_is_ordered_by_task_creation_time_then_id() {
     let mut f = bootstrap();
@@ -750,4 +761,32 @@ fn a_rolled_back_callers_transaction_leaves_nothing_behind() {
 
     assert_unchanged(&f, &before);
     assert!(f.plan_snapshot().is_empty(), "回滚之后不许留下半行");
+}
+
+/// 末步骤故障（审计写不进去）⇒ 整个事务回滚：计划行、审计、`revision` 不留半条痕迹。
+///
+/// 与上一条测的不是同一件事：上一条证明「仓储不自行提交」（调用方回滚就没了），
+/// 这一条证明「计划行与审计**同一事务**」——计划行先写、审计后写，审计失败时
+/// 已经写进去的那一行必须跟着回滚。故障注入用触发器，照 `tests/tags.rs` 的先例。
+#[test]
+fn a_failed_audit_write_leaves_no_half_plan_row() {
+    let mut f = bootstrap();
+    // 审计插入必然失败——正是「半个事务」的经典形状。
+    f.db.connection()
+        .execute_batch(
+            "CREATE TRIGGER p4_fail_plan_audit BEFORE INSERT ON task_change
+             BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;",
+        )
+        .unwrap();
+    let before = baseline(&f);
+
+    let err = add(&mut f, "t1", DAY1, UTC).unwrap_err();
+
+    assert_eq!(err.code(), "STORAGE_ERROR", "基础设施失败走存储错误");
+    assert_unchanged(&f, &before);
+    assert!(
+        f.plan_snapshot().is_empty(),
+        "审计失败之后不许留下半个计划行：{:?}",
+        f.plan_snapshot()
+    );
 }

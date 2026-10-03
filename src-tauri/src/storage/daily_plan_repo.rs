@@ -64,6 +64,9 @@ pub fn plan_for(
 ///
 /// 只写 `daily_plan` 一行：**不碰任务行**（不设 `Scheduled`、不动 `updated_at` /
 /// `row_version`）、不建 `time_block`、不启动计时（裁决 R-T4-e）。
+///
+/// `now` **只用作审计行的 `created_at`**：`daily_plan` 没有时间戳列，计划行本身
+/// 不记时间，也不得拿 `task.updated_at` 推断安排（02 §9）。
 pub fn add_to_plan(
     tx: &Transaction<'_>,
     task_id: &str,
@@ -100,6 +103,8 @@ pub fn add_to_plan(
 ///
 /// 只删 `(task_id, local_date, timezone)` 那一行：别的日期、别的时区键下的计划行
 /// 都不动（跨日与换时区都靠这条保持事实）。
+///
+/// `now` 的用途与 [`add_to_plan`] 相同：只写审计行的 `created_at`，计划行不记时间。
 pub fn remove_from_plan(
     tx: &Transaction<'_>,
     task_id: &str,

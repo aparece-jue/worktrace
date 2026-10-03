@@ -191,6 +191,9 @@ pub fn plan_for(db: &Db, query: DailyPlanQuery) -> Result<DailyPlanView, AppErro
 /// （裁决 R-T4-f，与 `catalog::tag_task` 同一口径）。
 ///
 /// 重复加入 ⇒ `Unchanged`：不写审计、不加 revision（总纲 §5 第 8 条②）。
+///
+/// `now` 是调用方给的墙钟毫秒，**只用作审计行的 `created_at`**：`daily_plan` 表没有
+/// 时间戳列，计划行本身不记时间，也不得拿 `task.updated_at` 推断安排（02 §9）。
 pub fn add_to_plan(
     db: &mut Db,
     env: WriteEnvelope,
@@ -214,6 +217,8 @@ pub fn add_to_plan(
 
 /// 把一个任务从某一天（某个时区）的今日计划里移除。口径与 [`add_to_plan`] 完全对称，
 /// 包括「本来就不在集合里 ⇒ `Unchanged`、零写入」。
+///
+/// `now` 的用途与 [`add_to_plan`] 相同：只写审计行的 `created_at`，计划行不记时间。
 pub fn remove_from_plan(
     db: &mut Db,
     env: WriteEnvelope,
