@@ -1087,7 +1087,10 @@ fn no_anchor_running_statistics_require_recovery_not_wall_duration() {
     h.coord = Coordinator::new(Box::new(Arc::clone(&h.clock)), "run-2");
     h.coord.load_session(h.db.connection(), &sid).unwrap();
     let rev = h.revision();
-    assert_eq!(h.coord.snapshot(&mut h.db).unwrap().active_ms, 0);
+    assert_eq!(
+        h.coord.snapshot(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
     assert_eq!(
         h.coord.stats_sample(&mut h.db).unwrap_err().code(),
         "RECOVERY_REQUIRED"
@@ -1355,4 +1358,69 @@ fn error_response_capture_during_open_transaction_degrades_to_handshake() {
     assert_eq!(authority.data_epoch, h.epoch);
     assert_eq!(authority.task.unwrap().row_version, 0);
     assert!(!after.requires_handshake);
+}
+
+#[test]
+fn old_running_session_is_isolated_before_sampling_with_or_without_new_anchor() {
+    for with_anchor in [false, true] {
+        for entry in [
+            "snapshot",
+            "tick",
+            "stats",
+            "heartbeat",
+            "system_pause",
+            "pause",
+            "finish",
+        ] {
+            let mut h = setup();
+            h.start();
+            h.advance(60_000);
+            let sid = h.coord.live().unwrap().id.clone();
+            let before =
+                worktrace_lib::storage::session_repo::intervals_of_session(h.db.connection(), &sid)
+                    .unwrap();
+            h.advance(3_600_000);
+            h.coord = Coordinator::new(Box::new(Arc::clone(&h.clock)), "run-2");
+            if with_anchor {
+                let sample = h.clock.lock().unwrap().sample().unwrap();
+                h.coord.establish_anchor(sample);
+            }
+            h.coord.load_session(h.db.connection(), &sid).unwrap();
+            let rev = h.revision();
+            let version = h.coord.live().unwrap().row_version;
+            let request = SessionRequest {
+                expected_data_epoch: h.epoch.clone(),
+                session_id: sid.clone(),
+                session_expected_version: version,
+            };
+            let result = match entry {
+                "snapshot" => h.coord.snapshot(&mut h.db).map(|_| ()),
+                "tick" => h.coord.tick(&mut h.db).map(|_| ()),
+                "stats" => h.coord.stats_sample(&mut h.db).map(|_| ()),
+                "heartbeat" => h.coord.heartbeat(&mut h.db).map(|_| ()),
+                "system_pause" => h.coord.system_pause(&mut h.db, None).map(|_| ()),
+                "pause" => h.coord.pause(&mut h.db, request).map(|_| ()),
+                _ => h.coord.finish(&mut h.db, request).map(|_| ()),
+            };
+            assert_eq!(
+                result.unwrap_err().code(),
+                "RECOVERY_REQUIRED",
+                "anchor={with_anchor}, entry={entry}"
+            );
+            assert_eq!(h.revision(), rev);
+            assert_eq!(h.coord.live().unwrap().row_version, version);
+            let after =
+                worktrace_lib::storage::session_repo::intervals_of_session(h.db.connection(), &sid)
+                    .unwrap();
+            assert_eq!(after.len(), before.len());
+            assert_eq!(after[0].ended_at, None);
+            assert_eq!(after[0].duration_ms, None);
+            assert!(!after[0].needs_review);
+            let audits: i64 =
+                h.db.connection()
+                    .query_row("SELECT COUNT(*) FROM time_edit", [], |r| r.get(0))
+                    .unwrap();
+            assert_eq!(audits, 0);
+        }
+    }
 }

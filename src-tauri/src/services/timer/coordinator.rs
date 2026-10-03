@@ -79,6 +79,8 @@ pub struct CommandOutcome {
 #[derive(Debug, Clone)]
 pub struct LiveSession {
     pub id: String,
+    /// 持久化会话归属的运行代次；旧 running 行必须先由启动扫描恢复。
+    pub run_id: String,
     pub row_version: i64,
     pub state: SessionState,
     pub budget: TimerBudget,
@@ -225,6 +227,7 @@ impl Coordinator {
         self.last_checkpoint_monotonic = None;
         self.live = Some(LiveSession {
             id: row.id,
+            run_id: row.run_id,
             row_version: row.row_version,
             state: row.state,
             budget,
@@ -817,6 +820,15 @@ impl Coordinator {
 
     fn read_sample(&mut self, db: &mut Db) -> Result<ClockSample, AppError> {
         self.refuse_if_faulted()?;
+        // 新 run 即使已有自己的基线，也不能解释旧 run 的开放工时。
+        // 在采样/异常事务之前隔离，避免快照暂计或分割把停机时间变成事实。
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|l| l.state == SessionState::Running && l.run_id != self.run_id)
+        {
+            return Err(AppError::RecoveryRequired);
+        }
         match self.clock.sample() {
             Ok(sample) => Ok(sample),
             Err(_) => {

@@ -947,6 +947,43 @@ mod commands {
         assert_eq!(c.count("work_session"), 1);
     }
 
+    /// **重复提交同一请求**（04 §9 的「重复提交」）：客户端把同一条 `start` 重放一次，
+    /// 不得开出第二个会话，也不得让 revision 再涨。
+    ///
+    /// 重放请求带的是**第一次调用时**的任务版本；第一次成功后任务已被理清到 `Doing`
+    /// 并递增了版本，所以第二次必须在**版本守卫**处被拒——而不是走到唯一索引
+    /// （那会报成 `STORAGE_ERROR`），更不是悄悄成功。
+    #[test]
+    fn replaying_the_same_start_request_is_refused_without_a_second_session() {
+        let mut c = setup(TaskStatus::Ready, None);
+        let rev = require_meta(c.db.connection()).unwrap().revision;
+
+        let first = {
+            let req = c.start_req();
+            c.coord.start(&mut c.db, req).unwrap()
+        };
+        let after_first = require_meta(c.db.connection()).unwrap().revision;
+        assert_eq!(after_first, rev + 1, "一次业务命令恰好加一次 revision");
+
+        let err = {
+            let replay = c.start_req();
+            c.coord.start(&mut c.db, replay).unwrap_err()
+        };
+        assert_eq!(err.code(), "VERSION_CONFLICT");
+        assert_eq!(c.count("work_session"), 1, "重放不得开出第二个会话");
+        assert_eq!(
+            require_meta(c.db.connection()).unwrap().revision,
+            after_first,
+            "被拒的命令不得改 revision"
+        );
+
+        let sid = first.snapshot.session_id.unwrap();
+        let row = session_repo::get_session(c.db.connection(), &sid)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, SessionState::Running, "第一次的会话必须原样保留");
+    }
+
     /// `recovering` 拒绝普通工作命令，需 P3 的 `reconcile`。
     #[test]
     fn a_recovering_session_refuses_normal_commands() {
