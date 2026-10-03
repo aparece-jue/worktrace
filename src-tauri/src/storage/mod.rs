@@ -11,6 +11,7 @@ pub mod migrations;
 pub mod project_repo;
 pub mod schema_v1;
 pub mod session_repo;
+pub mod tag_repo;
 pub mod task_repo;
 pub mod time_edit_repo;
 

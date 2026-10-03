@@ -179,7 +179,10 @@ pub fn transition_task(
 }
 
 /// 写一条变更审计。与实体更新同事务——「操作失败不得出现半个审计记录」（02 §9）。
-fn record_change(
+///
+/// `pub(crate)`：任务行自己的变更（本模块）与标签关联的变更（`storage::tag_repo`）
+/// 都是**这个任务**的历史，共用同一行形状——审计的写法只留一处。
+pub(crate) fn record_change(
     tx: &Transaction<'_>,
     task_id: &str,
     before_json: &str,

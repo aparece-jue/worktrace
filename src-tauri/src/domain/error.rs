@@ -72,6 +72,18 @@ pub enum DomainError {
     /// 与 [`Self::TaskNotInClarifying`] 分开：那条讲的是任务的生命周期位置，
     /// 这条讲的是「此刻正在计时」——用户的下一步动作不同（停止计时 vs 无从下手）。
     TaskHasRunningSession,
+    // ── P4 Task 3（标签与幂等关联）新增 ────────────────────────────────────
+    /// 目标标签不存在（已被删除，或请求里的 ID 从来不存在）。
+    ///
+    /// 与 [`Self::UnknownTask`] / [`Self::UnknownProject`] 同一形状：「找不到」
+    /// 不是「为空」，前端要能分别提示。
+    UnknownTag,
+    /// 同一个 kind 里已经有同名的根标签了。
+    ///
+    /// 唯一性口径：kind + 规范化后的名字 + **大小写敏感**（02 §2、`uq_tag_root`）。
+    /// 带上 `kind` 与 `name`，用户看到的是「哪一类里的哪个名字」被拒，而不是
+    /// 「数据库里有一条唯一约束」——存储层的唯一索引只是并发下的兜底（裁决 R-T3-f）。
+    TagNameTaken { kind: &'static str, name: String },
 }
 
 /// 任务状态的中文名。用户的提示语里不该出现 `Inbox` 这种内部标识。
@@ -150,6 +162,10 @@ impl std::fmt::Display for DomainError {
                 write!(f, "任务处于「{}」时不能改归属。", zh_status(status))
             }
             Self::TaskHasRunningSession => write!(f, "任务正在计时，先停止后再改归属。"),
+            Self::UnknownTag => write!(f, "找不到这个标签。"),
+            Self::TagNameTaken { kind, name } => {
+                write!(f, "「{kind}」这一类里已经有叫「{name}」的标签了。")
+            }
         }
     }
 }

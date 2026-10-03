@@ -156,8 +156,14 @@ fn domain_error_messages_are_user_facing_chinese() {
         DomainError::ProjectArchived,
         DomainError::TaskNotInClarifying { status: "Doing" },
         DomainError::TaskHasRunningSession,
+        // P4 Task 3（标签与幂等关联）新增的两个变体。
+        DomainError::UnknownTag,
+        DomainError::TagNameTaken {
+            kind: "Domain",
+            name: "写作".into(),
+        },
     ];
-    assert_eq!(cases.len(), 19, "19 个变体都要覆盖，加了新的记得补进来");
+    assert_eq!(cases.len(), 21, "21 个变体都要覆盖，加了新的记得补进来");
 
     for e in cases {
         let shown: AppError = e.into();

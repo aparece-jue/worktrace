@@ -1,12 +1,15 @@
-//! 项目与标签的**输入校验入口**（P4 Task 1，裁决 R6）与**项目服务**（P4 Task 2）。
+//! 项目与标签的**输入校验入口**（P4 Task 1，裁决 R6）、**项目服务**（P4 Task 2）
+//! 与**标签服务**（P4 Task 3）。
 //!
 //! 为什么校验在服务层：`domain/` 只放纯规则并返回 `DomainError`，而命令的入口要按契约
-//! 返回 `AppError`。后续任务（T3 标签服务）一律从这里取校验，
+//! 返回 `AppError`。后续任务一律从这里取校验，
 //! **不得各自再写一份**——「同一条规则只有一处实现」就是这几个函数存在的理由。
 //!
 //! T1 只放了校验入口；T2 在此之上加了项目与任务归属的**写服务**：它们拥有事务
 //! （`db.connection_mut().unchecked_transaction()`）、在事务内做 epoch/版本校验、
-//! 调用仓储原语、并**恰好加一次 `revision`**。仓储仍不提交、不加 revision。
+//! 调用仓储原语、并**恰好加一次 `revision`**。T3 用同一套骨架加标签与打标：
+//! 关系增删是 epoch-only 的集合操作，无变化时不写审计、不加任何版本。
+//! 仓储仍不提交、不加 revision。
 //!
 //! 统一口径：文本输入先去掉首尾空白，全空白视为空输入；取值域匹配**大小写敏感**
 //! （与 schema 的 CHECK 一致）。
@@ -22,6 +25,7 @@ use crate::storage::db::{map_sqlite, Db};
 use crate::storage::guards::guard_epoch;
 use crate::storage::meta::{bump_revision, require_meta};
 use crate::storage::project_repo::{self, ProjectRow};
+use crate::storage::tag_repo::{self, TagRow};
 use crate::storage::task_repo::{self, TaskRow};
 use crate::storage::WriteOutcome;
 
@@ -265,4 +269,107 @@ fn require_version(env: &WriteEnvelope) -> Result<i64, AppError> {
     env.expected_row_version.ok_or_else(|| AppError::Domain {
         detail: "缺少记录版本，无法安全地修改这条记录。".into(),
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 标签与任务打标（P4 Task 3）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 新建标签写命令的产物。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagChange {
+    pub tag: TagRow,
+    /// 提交后的权威 `revision`。
+    pub revision: i64,
+}
+
+/// 打标 / 去标写命令的产物：这个任务**当前**的标签集合。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskTagsChange {
+    pub tags: Vec<TagRow>,
+    /// 提交后的权威 `revision`；`Unchanged` 时与调用前相等。
+    pub revision: i64,
+}
+
+/// 新建标签（F-005）。`WriteEnvelope::for_create`：新建实体只需要 epoch。
+///
+/// 三类输入各走**唯一**的校验入口：kind 走 [`parse_tag_kind`]，名字走
+/// [`normalize_tag_name`]，层级走 `domain::tag::ensure_no_parent`——非空 `parent_id`
+/// 一律拒绝（裁决 R-T3-e：层级属 V0.2），空白按「未提供」。
+/// 同 kind 内重名由仓储在事务内拒绝（裁决 R-T3-f）。一次成功的新建恰好 `revision + 1`。
+pub fn create_tag(
+    db: &mut Db,
+    env: WriteEnvelope,
+    kind: &str,
+    name: &str,
+    parent_id: Option<&str>,
+    now: i64,
+) -> Result<WriteOutcome<TagChange>, AppError> {
+    // 纯输入校验放在开事务之前：坏输入连事务都不必开（不改 revision、不写审计）。
+    let kind = parse_tag_kind(kind)?;
+    let name = normalize_tag_name(name)?;
+    tag::ensure_no_parent(parent_id)?;
+
+    let tx = write_tx(db, &env)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let tag = tag_repo::create_tag(&tx, &id, kind, &name, now)?;
+    let revision = bump_revision(&tx)?;
+    tx.commit().map_err(map_sqlite)?;
+
+    Ok(WriteOutcome::Changed(TagChange { tag, revision }))
+}
+
+/// 标签选择器的数据源：全部标签，可按 kind 过滤（四类各一组）。
+///
+/// 纯读：不开写事务、不加 revision、不要 epoch（数据新鲜度由调用方决定何时重拉）。
+pub fn list_tags(db: &Db, kind: Option<TagKind>) -> Result<Vec<TagRow>, AppError> {
+    tag_repo::list_tags(db.connection(), kind)
+}
+
+/// 某个任务身上的标签。纯读，口径同 [`list_tags`]。
+pub fn tags_of_task(db: &Db, task_id: &str) -> Result<Vec<TagRow>, AppError> {
+    tag_repo::tags_of_task(db.connection(), task_id)
+}
+
+/// 打标（F-005）：把**一个**标签加到**一个**任务上。
+///
+/// 这是显式集合操作，不是「整体替换这个任务的标签集合」——后者需要一套关联集合
+/// 的版本契约，首版明确不做（裁决 R-T3-c）。
+///
+/// 信封只带 epoch：`task_tag` 没有版本列，打标也不改 task/tag 的任何字段，所以
+/// **没有可校验的实体版本**，不拿别的实体的版本假装（裁决 R-T3-i）——`for_create`
+/// 在这里表达的就是「只带库身份」这一形状。
+/// 同一条关联重复提交 ⇒ `Unchanged`：不写审计、不加任何版本、不加 revision（R-T3-b）。
+pub fn tag_task(
+    db: &mut Db,
+    env: WriteEnvelope,
+    task_id: &str,
+    tag_id: &str,
+    now: i64,
+) -> Result<WriteOutcome<TaskTagsChange>, AppError> {
+    let tx = write_tx(db, &env)?;
+    let outcome = tag_repo::tag_task(&tx, task_id, tag_id, now)?;
+    let settled = settle(&tx, outcome)?;
+    let tags = tag_repo::tags_of_task(&tx, task_id)?;
+    tx.commit().map_err(map_sqlite)?;
+
+    Ok(settled.map(|(_, revision)| TaskTagsChange { tags, revision }))
+}
+
+/// 去标：把**一个**标签从**一个**任务上移除。口径与 [`tag_task`] 完全对称，
+/// 包括「本来就不在集合里 ⇒ `Unchanged`、零写入」。
+pub fn untag_task(
+    db: &mut Db,
+    env: WriteEnvelope,
+    task_id: &str,
+    tag_id: &str,
+    now: i64,
+) -> Result<WriteOutcome<TaskTagsChange>, AppError> {
+    let tx = write_tx(db, &env)?;
+    let outcome = tag_repo::untag_task(&tx, task_id, tag_id, now)?;
+    let settled = settle(&tx, outcome)?;
+    let tags = tag_repo::tags_of_task(&tx, task_id)?;
+    tx.commit().map_err(map_sqlite)?;
+
+    Ok(settled.map(|(_, revision)| TaskTagsChange { tags, revision }))
 }
