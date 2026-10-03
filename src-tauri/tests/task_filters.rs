@@ -423,6 +423,11 @@ fn a_status_set_is_ored_within_itself_and_intersected_with_the_other_conditions(
 #[test]
 fn a_status_set_combines_with_a_project_and_a_context_tag() {
     let f = bootstrap();
+    // 夹具里原本**没有**「待办 + 在 p1 + 一个标签都没有」的候选：t5 在 p2、t6 没有项目、
+    // t3 还在等待中——挡掉它们的全是状态与项目子句，把 `EXISTS` 情境子句整段删掉，
+    // 这条用例照样绿（终评 I1：计划点名的用例抓不住目标）。就地补上这个候选，
+    // 让「情境条件真的参与过滤」变成可观测的事实。
+    f.insert_task("t9", TaskStatus::Ready, Some("p1"), 2000);
     let ctx_a = f.tag_id(TagKind::Context, "家里");
     assert_eq!(
         tag_repo::get_tag(f.db.connection(), &ctx_a)
@@ -444,9 +449,25 @@ fn a_status_set_combines_with_a_project_and_a_context_tag() {
     )
     .unwrap();
 
-    // 三个条件各排除掉一个候选：t5 是待办 + 家里但在 p2；t6 是待办但没有项目也没有标签；
-    // t3 挂着「家里」却在等待中。
+    // 三个条件都真的排除掉一个候选：t5 是待办 + 家里但在 p2；t6 是待办但没有项目也没有
+    // 标签；t3 挂着「家里」却在等待中；t9 是待办 + 在 p1 但**没有**「家里」标签——
+    // 只有它是由 `EXISTS` 子句单独排除的。
     assert_page(&result, &["t1"], 1);
+
+    // 同一个请求**只去掉情境条件** ⇒ t9 冒出来。这一对结果（1 条 vs 2 条）就是
+    // 「情境条件真的参与了过滤」的证据：只断言 ["t1"] 时，把整段 `EXISTS` 子句删掉
+    // 这条用例仍然是绿的（终评 I1 的原话：期望值与「无情境条件」用例完全相同）。
+    let without_context = ask(
+        &f,
+        TaskFilter {
+            statuses: vec![TaskStatus::Ready],
+            project: ProjectFilter::Id("p1".into()),
+            context_tag_id: None,
+        },
+        page(100, 0),
+    )
+    .unwrap();
+    assert_page(&without_context, &["t1", "t9"], 2);
 }
 
 /// 项目过滤是**三值**（裁决 R-T5-a）：不限制 / 无项目 / 指定项目，三者互不混同。
@@ -976,13 +997,21 @@ fn clarifying_a_clarifying_task_moves_it_to_ready() {
 ///
 /// 每个状态配上**它自己的中文名**做 needle：把 `TaskNotClarifiable { status }` 写成
 /// 一个写死的状态名，这里就会红（评审 fix round 2 第 3 条）。
-/// `Review` 与 `Cancelled` 在夹具里没有，**就地布置**（其余用例的期望值不受影响）：
-/// 它们都是「已经走远」的一致状态——没有会话、也没有可理清的余地。
+/// `Review` / `Done` / `Cancelled` / `Scheduled` 在夹具里没有，**就地布置**（其余用例的
+/// 期望值不受影响）：它们都是「已经走远」的一致状态——没有会话、也没有可理清的余地。
+/// `Done` 是**可达的**（`Review → Done` 在跃迁表里，P3 的联动会走到它），漏了它这条
+/// 用例只少一行、仍然全绿（终评 M5）。
 #[test]
 fn clarifying_is_refused_for_every_other_status() {
     let mut f = bootstrap();
     f.insert_task("treview", TaskStatus::Review, Some("p1"), 4000);
+    f.insert_task("tdone", TaskStatus::Done, Some("p1"), 4000);
     f.insert_task("tcancelled", TaskStatus::Cancelled, None, 4000);
+    // `Scheduled` 在 V0.1 没有任何写路径能把它落库（`is_writable_in_v01` 为假，服务层的
+    // 跃迁校验一律拒绝），但 schema 的 CHECK **保留**了这个取值：更新版本写入的库会被
+    // 旧版本读到，所以这一行真的可能出现，读路径必须照常处理它。夹具只能靠直连 SQL 摆出来
+    // （与 `treview` / `tcancelled` 同一口径）。
+    f.insert_task("tscheduled", TaskStatus::Scheduled, Some("p1"), 4000);
     let before = baseline(&f);
 
     for (id, status, zh) in [
@@ -991,7 +1020,9 @@ fn clarifying_is_refused_for_every_other_status() {
         ("t3", TaskStatus::Waiting, "等待中"),
         ("t4", TaskStatus::Blocked, "受阻"),
         ("treview", TaskStatus::Review, "复盘"),
+        ("tdone", TaskStatus::Done, "已完成"),
         ("tcancelled", TaskStatus::Cancelled, "已取消"),
+        ("tscheduled", TaskStatus::Scheduled, "已排期"),
     ] {
         assert_eq!(f.task(id).unwrap().status, status, "夹具前置状态");
         let version = f.task(id).unwrap().row_version;

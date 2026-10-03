@@ -104,6 +104,58 @@ impl Fixture {
         task_repo::get_task(self.db.connection(), id).unwrap()
     }
 
+    /// 全部项目行的快照，**直连 SQL**（`created_at, id` 顺序，与仓储的稳定排序同一口径）。
+    fn project_snapshot(&self) -> Vec<ProjectSnapshot> {
+        let mut stmt = self
+            .db
+            .connection()
+            .prepare(
+                "SELECT id, name, description, row_version, status, created_at, updated_at
+                 FROM project ORDER BY created_at, id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ProjectSnapshot {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                    row_version: r.get(3)?,
+                    status: r.get(4)?,
+                    created_at: r.get(5)?,
+                    updated_at: r.get(6)?,
+                })
+            })
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    /// 某个任务行的快照，**直连 SQL**（`None` = 库里没有这一行）。
+    fn task_snapshot(&self, id: &str) -> Option<TaskSnapshot> {
+        use rusqlite::OptionalExtension;
+        self.db
+            .connection()
+            .query_row(
+                "SELECT id, project_id, title, status, quality, row_version, created_at, updated_at
+                 FROM task WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(TaskSnapshot {
+                        id: r.get(0)?,
+                        project_id: r.get(1)?,
+                        title: r.get(2)?,
+                        status: r.get(3)?,
+                        quality: r.get(4)?,
+                        row_version: r.get(5)?,
+                        created_at: r.get(6)?,
+                        updated_at: r.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .unwrap()
+    }
+
     fn tx(&mut self) -> rusqlite::Transaction<'_> {
         self.db.connection_mut().unchecked_transaction().unwrap()
     }
@@ -157,21 +209,67 @@ impl Fixture {
     }
 }
 
+/// `project` 一行的**直连 SQL** 快照。
+///
+/// 刻意不走 `project_repo::list_projects`：那是被测服务的下层，拿它当 oracle，
+/// 「项目行字段值不变」会在它静默返回空集/少行时退化成恒真（终评 I2；写法照
+/// `tests/task_filters.rs::task_snapshot` 与 `tests/daily_plan.rs::plan_snapshot`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectSnapshot {
+    id: String,
+    name: String,
+    description: Option<String>,
+    row_version: i64,
+    status: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+/// `task` 一行的**直连 SQL** 快照（`status` / `quality` 保留库里的原值，不经仓储解析）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskSnapshot {
+    id: String,
+    project_id: Option<String>,
+    title: String,
+    status: String,
+    quality: Option<String>,
+    row_version: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
 /// 被拒 / 幂等命令的「零变化」基线：四件事一次抓齐（总纲 §5 第 8 条）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Baseline {
     revision: i64,
-    projects: Vec<ProjectRow>,
-    task: Option<TaskRow>,
+    projects: Vec<ProjectSnapshot>,
+    /// 独立的行数断言：即使快照本身出了问题，「行数不变」这条也还站着。
+    project_rows: i64,
+    task: Option<TaskSnapshot>,
     task_changes: i64,
 }
 
 fn baseline_of(f: &Fixture, task_id: &str) -> Baseline {
+    // 全部项目（含归档与 done）：行数与字段值一起钉住。
+    let projects = f.project_snapshot();
+    let project_rows = f.count("project");
+    // 快照必须真的读到了行：否则「字段值不变」会退化成「空对空」（终评 I2）。
+    assert_eq!(
+        projects.len() as i64,
+        project_rows,
+        "项目快照条数必须与 project 表行数一致（快照坏了就当场发现，而不是让断言恒真）"
+    );
+    assert!(project_rows > 0, "基线快照不能是空的");
+    let task = f.task_snapshot(task_id);
+    assert!(
+        task.is_some(),
+        "基线里的目标任务 {task_id:?} 必须存在，否则任务行的「字段值不变」是空对空"
+    );
     Baseline {
         revision: f.revision(),
-        // 全部项目（含归档与 done）：行数与字段值一起钉住。
-        projects: project_repo::list_projects(f.db.connection(), None).unwrap(),
-        task: f.task(task_id),
+        projects,
+        project_rows,
+        task,
         task_changes: f.count("task_change"),
     }
 }
@@ -180,7 +278,7 @@ fn baseline(f: &Fixture) -> Baseline {
     baseline_of(f, "t1")
 }
 
-/// ① `revision` 不变 ② 项目行一个不动 ③ 目标任务字段逐字不变 ④ 审计无新增。
+/// ① `revision` 不变 ② 项目行数与字段值一个不动 ③ 目标任务字段逐字不变 ④ 审计无新增。
 fn assert_unchanged(f: &Fixture, task_id: &str, before: &Baseline) {
     assert_eq!(
         f.revision(),
@@ -188,12 +286,17 @@ fn assert_unchanged(f: &Fixture, task_id: &str, before: &Baseline) {
         "被拒/幂等的命令不得改动 revision"
     );
     assert_eq!(
-        project_repo::list_projects(f.db.connection(), None).unwrap(),
-        before.projects,
-        "项目行不得有任何变化（含行数）"
+        f.count("project"),
+        before.project_rows,
+        "项目表行数不得变化"
     );
     assert_eq!(
-        f.task(task_id),
+        f.project_snapshot(),
+        before.projects,
+        "项目行不得有任何变化（含行数、名字、状态、版本、时间）"
+    );
+    assert_eq!(
+        f.task_snapshot(task_id),
         before.task,
         "任务行的字段值必须与调用前逐字相等（状态/版本/归属/时间）"
     );
@@ -381,9 +484,12 @@ fn renaming_to_the_same_name_changes_nothing() {
     }
 
     // 同值 + 过期版本 ⇒ 仍然是版本冲突：不能把过期请求当成幂等成功（它看的那一行已经旧了）。
+    // 被拒的版本冲突同样要满足总纲 §5 第 8 条的零变化口径（终评 M4）。
+    let before = baseline(&f);
     let err = catalog::rename_project(&mut f.db, update_env(&f.epoch, 7), "p1", "项目一", 3000)
         .unwrap_err();
     assert_eq!(err.code(), "VERSION_CONFLICT");
+    assert_unchanged(&f, "t1", &before);
 }
 
 /// 版本过期：`VERSION_CONFLICT`，既有字段一个不动。
@@ -464,7 +570,7 @@ fn archiving_a_project_keeps_its_tasks_and_history() {
     assert_eq!(change.project.updated_at, 4000);
 
     assert_eq!(
-        f.task("t1").unwrap(),
+        f.task_snapshot("t1").unwrap(),
         before.task.clone().unwrap(),
         "归档不删任务、不改归属"
     );
@@ -474,7 +580,7 @@ fn archiving_a_project_keeps_its_tasks_and_history() {
         before.task_changes,
         "归档不写 task_change"
     );
-    assert_eq!(f.count("project"), before.projects.len() as i64);
+    assert_eq!(f.count("project"), before.project_rows);
 }
 
 /// 重复归档：第二次调用 `revision` 不变，返回 `Unchanged`（R-T2-e）。
@@ -669,6 +775,8 @@ fn setting_the_same_project_changes_nothing() {
     assert_unchanged(&f, "t1", &before);
 
     // 同值 + 过期版本 ⇒ 版本冲突：不能把过期请求当成幂等成功。
+    // 被拒的版本冲突同样要满足总纲 §5 第 8 条的零变化口径（终评 M4）。
+    let before = baseline(&f);
     let err = catalog::set_task_project(
         &mut f.db,
         update_env(&f.epoch, 9),
@@ -678,6 +786,7 @@ fn setting_the_same_project_changes_nothing() {
     )
     .unwrap_err();
     assert_eq!(err.code(), "VERSION_CONFLICT");
+    assert_unchanged(&f, "t1", &before);
 }
 
 /// 归档项目不能接收新任务：在事务内拒绝（不只靠 UI 过滤），且零变化。

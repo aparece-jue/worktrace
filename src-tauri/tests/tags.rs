@@ -128,6 +128,57 @@ impl Fixture {
         task_repo::get_task(self.db.connection(), id).unwrap()
     }
 
+    /// 全部标签行的快照，**直连 SQL**（`created_at, id` 顺序，与仓储的稳定排序同一口径）。
+    fn tag_snapshot(&self) -> Vec<TagSnapshot> {
+        let mut stmt = self
+            .db
+            .connection()
+            .prepare(
+                "SELECT id, kind, name, parent_id, row_version, created_at
+                 FROM tag ORDER BY created_at, id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(TagSnapshot {
+                    id: r.get(0)?,
+                    kind: r.get(1)?,
+                    name: r.get(2)?,
+                    parent_id: r.get(3)?,
+                    row_version: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    /// 某个任务行的快照，**直连 SQL**（`None` = 库里没有这一行）。
+    fn task_snapshot(&self, id: &str) -> Option<TaskSnapshot> {
+        use rusqlite::OptionalExtension;
+        self.db
+            .connection()
+            .query_row(
+                "SELECT id, project_id, title, status, quality, row_version, created_at, updated_at
+                 FROM task WHERE id = ?1",
+                [id],
+                |r| {
+                    Ok(TaskSnapshot {
+                        id: r.get(0)?,
+                        project_id: r.get(1)?,
+                        title: r.get(2)?,
+                        status: r.get(3)?,
+                        quality: r.get(4)?,
+                        row_version: r.get(5)?,
+                        created_at: r.get(6)?,
+                        updated_at: r.get(7)?,
+                    })
+                },
+            )
+            .optional()
+            .unwrap()
+    }
+
     /// 最近一条 `task_change` 的 `(before_json, after_json)`，原样返回。
     fn raw_last_change(&self) -> (String, String) {
         self.db
@@ -154,24 +205,72 @@ impl Fixture {
     }
 }
 
+/// `tag` 一行的**直连 SQL** 快照（`kind` 保留库里的原值，不经仓储解析）。
+///
+/// 刻意不走 `tag_repo::list_tags`：那是被测服务的下层，拿它当 oracle，
+/// 「标签行字段值不变」会在它静默返回空集/少行时退化成恒真（终评 I2；写法照
+/// `tests/task_filters.rs::task_snapshot` 与 `tests/daily_plan.rs::plan_snapshot`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TagSnapshot {
+    id: String,
+    kind: String,
+    name: String,
+    parent_id: Option<String>,
+    row_version: i64,
+    created_at: i64,
+}
+
+/// `task` 一行的**直连 SQL** 快照（`status` / `quality` 保留库里的原值）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskSnapshot {
+    id: String,
+    project_id: Option<String>,
+    title: String,
+    status: String,
+    quality: Option<String>,
+    row_version: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
 /// 被拒 / 幂等命令的「零变化」基线（总纲 §5 第 8 条）。
 ///
 /// 不派生 `Eq`：`weight` 是浮点，`Option<f64>` 没有可用的全等定义。
 #[derive(Debug, Clone, PartialEq)]
 struct Baseline {
     revision: i64,
-    tags: Vec<TagRow>,
+    tags: Vec<TagSnapshot>,
+    /// 独立的行数断言：即使快照本身出了问题，「行数不变」这条也还站着。
+    tag_rows: i64,
     links: Vec<(String, String, Option<f64>)>,
-    task: Option<TaskRow>,
+    task: Option<TaskSnapshot>,
     task_changes: i64,
 }
 
 fn baseline_of(f: &Fixture, task_id: &str) -> Baseline {
+    let tags = f.tag_snapshot();
+    let tag_rows = f.count("tag");
+    // 快照必须真的读到了行：否则「字段值不变」会退化成「空对空」（终评 I2）。
+    assert_eq!(
+        tags.len() as i64,
+        tag_rows,
+        "标签快照条数必须与 tag 表行数一致（快照坏了就当场发现，而不是让断言恒真）"
+    );
+    // 这里**不**加无条件的「非空」断言：本文件的夹具起手一个标签都没有，而
+    // `blank_names_and_unknown_kinds_are_refused_at_the_entry` 整条用例都在证明
+    // 「一个都没建成」——空表是那条用例的**期望**。非空那一档由上面那条相等断言兜住：
+    // 表里有行而快照没读到（或反过来）时，条数立刻对不上。
+    let task = f.task_snapshot(task_id);
+    assert!(
+        task.is_some(),
+        "基线里的目标任务 {task_id:?} 必须存在，否则任务行的「字段值不变」是空对空"
+    );
     Baseline {
         revision: f.revision(),
-        tags: f.all_tags(),
+        tags,
+        tag_rows,
         links: f.links(),
-        task: f.task(task_id),
+        task,
         task_changes: f.count("task_change"),
     }
 }
@@ -180,7 +279,7 @@ fn baseline(f: &Fixture) -> Baseline {
     baseline_of(f, "t1")
 }
 
-/// ① `revision` 不变 ② `tag` 行一个不动 ③ `task_tag` 行数与字段值不变
+/// ① `revision` 不变 ② `tag` 行数与字段值一个不动 ③ `task_tag` 行数与字段值不变
 /// ④ 目标任务字段逐字不变 ⑤ 审计无新增。
 fn assert_unchanged(f: &Fixture, task_id: &str, before: &Baseline) {
     assert_eq!(
@@ -188,14 +287,19 @@ fn assert_unchanged(f: &Fixture, task_id: &str, before: &Baseline) {
         before.revision,
         "被拒/幂等的命令不得改动 revision"
     );
-    assert_eq!(f.all_tags(), before.tags, "标签行不得有任何变化（含行数）");
+    assert_eq!(f.count("tag"), before.tag_rows, "标签表行数不得变化");
+    assert_eq!(
+        f.tag_snapshot(),
+        before.tags,
+        "标签行不得有任何变化（含行数、类别、名字、版本、时间）"
+    );
     assert_eq!(
         f.links(),
         before.links,
         "关联行不得有任何变化（含行数、weight）"
     );
     assert_eq!(
-        f.task(task_id),
+        f.task_snapshot(task_id),
         before.task,
         "任务行的字段值必须与调用前逐字相等（状态/版本/归属/时间）"
     );
@@ -500,7 +604,7 @@ fn tagging_appends_exactly_one_link_one_audit_row_and_one_revision() {
         "审计的 after 是打标后的标签集合"
     );
     assert_eq!(
-        f.task("t1"),
+        f.task_snapshot("t1"),
         before.task,
         "打标不改任务行的任何字段（含 row_version）"
     );
