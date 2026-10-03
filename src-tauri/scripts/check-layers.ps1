@@ -3,7 +3,7 @@
 # Rules (01 section 2 / plan index section 9):
 #   domain   must not touch rusqlite, std::fs, platform::, storage::, commands::
 #            or services::
-#   storage  must not touch platform:: or commands::
+#   storage  must not touch platform::, commands:: or services::
 #   services must not touch std::time/SystemTime/Instant::now, nor commands::
 #
 # The services -> commands edge was added in P4 Task 2: the edge is the reverse of
@@ -16,6 +16,11 @@
 # `commands -> services -> {storage, domain, platform}`, so a `use crate::services::..`
 # or `use crate::commands::..` inside src/domain is an upward dependency -- and
 # nothing checked it until now.
+#
+# P4 final fix wave added services:: to the storage rule (M6): storage is a sibling
+# of domain under services, so `use crate::services::..` inside src/storage is an
+# upward edge exactly like services -> commands. It was the one reverse edge left
+# unguarded when the domain rule learned both words.
 #
 # Why a real script instead of an inline snippet in the plan:
 #   A plain grep also matches the doc comments that *state* the rule, so the
@@ -69,7 +74,7 @@ function Test-LayerLeak {
 
 $ok = $true
 $ok = (Test-LayerLeak 'src/domain'  'rusqlite|std::fs|platform::|storage::|commands::|services::' 'domain')  -and $ok
-$ok = (Test-LayerLeak 'src/storage' 'platform::|commands::'                 'storage') -and $ok
+$ok = (Test-LayerLeak 'src/storage' 'platform::|commands::|services::'  'storage') -and $ok
 
 # services must not read the system clock directly -- time has to come through
 # platform::clock::Clock so FakeClock can drive it. Without this check a single

@@ -3,9 +3,10 @@
 //! 计划要求的四件事：未知记录、非法状态、epoch 冲突、版本冲突都能被区分；
 //! 且错误文本不含数据库路径、SQL 与业务正文。
 
+use worktrace_lib::domain::error::DomainError;
 use worktrace_lib::domain::session::{SessionMode, TimerKind};
 use worktrace_lib::domain::tag::TagKind;
-use worktrace_lib::domain::task::{TaskStatus, TransitionCause};
+use worktrace_lib::domain::task::{TaskStatus, TaskTransition, TransitionCause};
 use worktrace_lib::error::{
     AppError, AuthorityKind, AuthorityTarget, ErrorAuthority, RecordVersion,
 };
@@ -117,6 +118,12 @@ fn version_conflict_carries_numbers_but_not_in_message() {
     assert!(!e.message().contains('9'));
 }
 
+/// 从**真实校验入口**造一个领域错误：映射表坏掉时，手写字面量的用例抓不住
+/// （终评 M2：`NotInThisVersion` 曾把 `to.as_str()` 直接印进用户文案）。
+fn transition_error(from: TaskStatus, to: TaskStatus, cause: TransitionCause) -> DomainError {
+    TaskTransition::new(from, to, cause).expect_err("这三个跃迁都必须被拒绝")
+}
+
 /// **`DomainError` 的文案是给用户看的**，不是日志。
 ///
 /// 因为 `AppError::Domain { detail }` 的 `message()` 会把 detail 原样拼进去。
@@ -124,8 +131,6 @@ fn version_conflict_carries_numbers_but_not_in_message() {
 /// 「操作不被允许：an interval is already open」。
 #[test]
 fn domain_error_messages_are_user_facing_chinese() {
-    use worktrace_lib::domain::error::DomainError;
-
     let cases: Vec<DomainError> = vec![
         DomainError::IllegalTransition {
             from: "Inbox",
@@ -175,8 +180,26 @@ fn domain_error_messages_are_user_facing_chinese() {
         // P4 Task 5（任务筛选、捕获与理清为待办）新增的两个变体。
         DomainError::ContextTagRequired { kind: "Domain" },
         DomainError::TaskNotClarifiable { status: "Doing" },
+        // 三条**走真实跃迁校验入口**造出来的错误（不是手写字面量）：
+        // 手写 `what: "Scheduled"` 的用例对 M2 那种「构造时塞了内部枚举名」的毛病
+        // 恒真——只有从入口造出来的错误才带着映射表的结果。
+        transition_error(
+            TaskStatus::Ready,
+            TaskStatus::Scheduled,
+            TransitionCause::User,
+        ),
+        transition_error(
+            TaskStatus::Review,
+            TaskStatus::Waiting,
+            TransitionCause::User,
+        ),
+        transition_error(
+            TaskStatus::Cancelled,
+            TaskStatus::Ready,
+            TransitionCause::User,
+        ),
     ];
-    assert_eq!(cases.len(), 23, "23 个变体都要覆盖，加了新的记得补进来");
+    assert_eq!(cases.len(), 26, "26 个变体都要覆盖，加了新的记得补进来");
 
     for e in cases {
         let shown: AppError = e.into();
@@ -215,15 +238,20 @@ fn domain_error_messages_are_user_facing_chinese() {
         //
         // 覆盖两类：任务状态名（`zh_status` 负责翻译）与四类标签的 kind
         // （`zh_kind` 负责翻译，术语见 99-glossary §5）。两个映射表都**漏一个就红**——
-        // `TagNameTaken` 曾经直接把 `TagKind::as_str()` 印进文案，正是靠这里拦住。
+        // `TagNameTaken` 曾经直接把 `TagKind::as_str()` 印进文案，正是靠这里拦住；
+        // 任务状态这边同样要**十个取值一个不漏**（终评 M2：`Scheduled` / `Review` /
+        // `Cancelled` 三个曾是盲区，`NotInThisVersion` 就从缺口里漏出过 `Scheduled`）。
         for banned in [
             "Inbox",
             "Clarifying",
             "Ready",
+            "Scheduled",
             "Doing",
             "Waiting",
             "Blocked",
+            "Review",
             "Done",
+            "Cancelled",
             "Domain",
             "Activity",
             "Context",
@@ -248,8 +276,6 @@ fn domain_error_messages_are_user_facing_chinese() {
 /// 这条用例守的是「别用把字段改成中文的办法去修泄漏」——那样结构化载荷就废了。
 #[test]
 fn tag_name_taken_keeps_the_code_value_and_renders_chinese() {
-    use worktrace_lib::domain::error::DomainError;
-
     let e = DomainError::TagNameTaken {
         kind: "Context",
         name: "家里".into(),

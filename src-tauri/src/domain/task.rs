@@ -107,6 +107,9 @@ impl TaskTransition {
         cause: TransitionCause,
     ) -> DomainResult<TaskTransition> {
         if !to.is_writable_in_v01() {
+            // 字段留代码里的原值（诊断与结构化载荷要用）；**用户读到的那句话**由
+            // `DomainError` 的 `Display` 经 `zh_status` 翻成中文——终评 M2 之前
+            // 那里直接印 `what`，用户会看到「当前版本还没有「Scheduled」这项功能。」。
             return Err(DomainError::NotInThisVersion { what: to.as_str() });
         }
         if !from.allowed_targets().contains(&to) {

@@ -15,7 +15,8 @@ use crate::storage::{db::Db, meta::require_meta, project_repo, session_repo, tag
 ///   （`authority = None`、`requires_handshake = true`），绝不返回半个上下文（R-T6-c）；
 /// - 版本与 epoch 在**同一个读事务**里取得：总纲 §9 要求拒绝响应携带**提交后的权威**
 ///   `epoch` / `revision` / 目标版本，三个值出自同一次读取才不会互相矛盾
-///   （`services::catalog::list_tasks_filtered` 的「四项同源」是同一做法）。
+///   （[`crate::services::catalog::TaskQueryResult`] 上那句「四项都出自**同一个读事务**
+///   （R-T5-b）」是同一做法，读路径不另开事务）。
 ///
 /// # 「每个请求的目标都有一条记录」由 `debug_assert` 兜住
 ///

@@ -14,6 +14,11 @@ pub enum DomainError {
     /// `Done`/`Cancelled` 只能经**显式 reopen** 回到 `Ready`，普通推进不行。
     ReopenMustBeExplicit { from: &'static str },
     /// V0.1 不接受的目标状态（目前是 `Scheduled`，属 V0.2）。
+    ///
+    /// `what` 保留**代码里的原值**（诊断与结构化载荷用），面向用户的 [`std::fmt::Display`]
+    /// 经 [`zh_status`] 打中文——与 [`Self::TaskNotInClarifying`] 同一条规矩。
+    /// 终评 M2：这里曾经把 `what` 原样印进句子，用户会看到
+    /// 「当前版本还没有「Scheduled」这项功能。」。
     NotInThisVersion { what: &'static str },
     /// 已经有一个开放区间了；一个会话同时只能有一个。
     IntervalAlreadyOpen,
@@ -160,7 +165,11 @@ impl std::fmt::Display for DomainError {
             Self::ReopenMustBeExplicit { from } => {
                 write!(f, "「{}」是终态，要重新开始必须显式重开。", zh_status(from))
             }
-            Self::NotInThisVersion { what } => write!(f, "当前版本还没有「{what}」这项功能。"),
+            // `what` 目前唯一的生产取值是任务状态名（`Scheduled`），所以这里也过一遍
+            // `zh_status`：非状态取值（如 `pomodoro`）不在映射表里，原样返回。
+            Self::NotInThisVersion { what } => {
+                write!(f, "当前版本还没有「{}」这项功能。", zh_status(what))
+            }
             Self::IntervalAlreadyOpen => write!(f, "已经有一段正在计时的区间。"),
             Self::NoOpenInterval => write!(f, "当前没有正在计时的区间。"),
             Self::IntervalOpenInWrongState { state } => {

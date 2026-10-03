@@ -17,22 +17,35 @@
 //! 即可，不需要一层转手。同时 `scripts/check-layers.ps1` 会拦住 `services/` 与
 //! `storage/` 里的 `commands::`，防止反向边再长回来。
 //!
-//! # 谁用它（P4 Task 6 收口时按实际调用方核对出的事实清单）
+//! # 谁用它（P4 Task 6 收口时按实际调用方核对出的事实清单；终评 I3 订正）
 //!
-//! [`crate::services::catalog`]（项目、归属、标签、捕获、理清）：
-//! - `for_create` —— [`create_project`](crate::services::catalog::create_project)、
-//!   [`create_tag`](crate::services::catalog::create_tag)、
-//!   [`create_task`](crate::services::catalog::create_task)，以及 epoch-only 的集合操作
-//!   [`tag_task`](crate::services::catalog::tag_task)、
-//!   [`untag_task`](crate::services::catalog::untag_task)；
-//! - `for_update` —— [`rename_project`](crate::services::catalog::rename_project)、
-//!   [`archive_project`](crate::services::catalog::archive_project)、
-//!   [`set_task_project`](crate::services::catalog::set_task_project)、
-//!   [`clarify_ready`](crate::services::catalog::clarify_ready)。
+//! **服务只接收、不构造**：11 个服务入口取 `env: WriteEnvelope` 参数，然后**读**它
+//! （`expected_data_epoch` 用来开写事务、`expected_row_version` 用来做版本校验）。
+//! 没有一个服务调用下面那两个构造函数。
 //!
-//! [`crate::services::daily_plan`]（今日计划增删）：
-//! - epoch-only 的 [`add_to_plan`](crate::services::daily_plan::add_to_plan)、
+//! - [`crate::services::catalog`]（9 个）：项目三件
+//!   [`create_project`](crate::services::catalog::create_project) /
+//!   [`rename_project`](crate::services::catalog::rename_project) /
+//!   [`archive_project`](crate::services::catalog::archive_project)、任务的捕获与归属
+//!   [`create_task`](crate::services::catalog::create_task) /
+//!   [`set_task_project`](crate::services::catalog::set_task_project)、标签
+//!   [`create_tag`](crate::services::catalog::create_tag) /
+//!   [`tag_task`](crate::services::catalog::tag_task) /
+//!   [`untag_task`](crate::services::catalog::untag_task)、理清
+//!   [`clarify_ready`](crate::services::catalog::clarify_ready)；
+//! - [`crate::services::daily_plan`]（2 个）：
+//!   [`add_to_plan`](crate::services::daily_plan::add_to_plan) /
 //!   [`remove_from_plan`](crate::services::daily_plan::remove_from_plan)。
+//!
+//! **构造函数目前只有测试在用**：`for_create` / `for_update` 在整个 `src/` 的生产代码里
+//! **零调用**——现在那 9 处构造全在 `tests/` 里。**P7 的 IPC 层是第一个生产构造者**：
+//! 命令层按请求类型在这两个里选一个（新建 ⇒ `for_create`，改既有对象 ⇒ `for_update`）。
+//! 之所以留着它们，是因为那正是 IPC 的规范构造点；删掉只会让 P7 到处手搓结构体字面量。
+//!
+//! **集合操作不是「新建」**：`tag_task` / `untag_task` / `add_to_plan` /
+//! `remove_from_plan` 传的是 `expected_row_version: None`，语义是**关系操作没有可校验的
+//! 实体版本**（裁决 R-T3-i、R-T4-e）。**不要**用 `for_create` 这个名字去理解它——
+//! 那里没有创建任何实体，只是恰好落在「没有版本可校验」这一档上。
 //!
 //! **单对象命令用它**：一次请求只动一个可编辑对象时，`expected_row_version`
 //! 放在信封里正合适。P4 的 `create_task` / `clarify_ready` 就是这种形状。
