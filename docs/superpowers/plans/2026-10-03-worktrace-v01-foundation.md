@@ -1,5 +1,17 @@
 # P1 · 领域模型与持久化基座实施计划
 
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 让 `cargo test` 全绿地固定住 V0.1 的数据库形状、领域规则与事务边界，成为后续所有计划的基座。
+
+**Architecture:** `commands → services → {storage, domain, platform}`。**服务拥有事务**：仓储写入函数一律接受 `&Transaction`，不自行 `begin`/`commit`、不自行加 `revision`；一次业务操作由服务提交并**恰好加一次** `revision`。`AppError` 放在共享的 `src/error.rs`，`storage` 不得反向引用 `commands`。时间只经 `platform::clock::Clock` 注入。
+
+**Tech Stack:** Rust 1.98 · rusqlite 0.40（`bundled`，不依赖系统 SQLite）· uuid · thiserror · tempfile（dev）· 无前端改动
+
+**Spec:** `../specs/2026-10-02-worktrace-architecture/02-data-model.zh.md`（§2 表与索引、§3 命令与计时、§5 Task 状态机、§6 约束、§9 明细与恢复）· `00-architecture.zh.md` §4/§5 · `01-module-breakdown.zh.md` §2
+
+**断言口径：** 见 [总纲](2026-10-03-v01-plan-index.md) §5 第 8 条。
+
 状态：计划修订待审核；实施未开始。上游：[总纲](2026-10-03-v01-plan-index.md)、[数据模型](../specs/2026-10-02-worktrace-architecture/02-data-model.zh.md)。本计划交付存储/领域基础，不代表应用验收完成。
 
 覆盖：F-001…F-005、F-008、F-014、F-015、F-017、F-019 的基础部分。不做 IPC、实时计时、HUD 或后续版本实体。
@@ -94,7 +106,7 @@ CREATE TABLE project(
   id          TEXT PRIMARY KEY NOT NULL,
   name        TEXT NOT NULL CHECK (length(trim(name)) > 0),
   description TEXT,
-  row_version INTEGER NOT NULL DEFAULT 0 CHECK (row_version >= 0),
+  row_version INTEGER NOT NULL,
   status      TEXT NOT NULL,
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL
@@ -205,7 +217,7 @@ CREATE TABLE tag(
   kind       TEXT NOT NULL,
   name       TEXT NOT NULL CHECK (length(trim(name)) > 0),
   parent_id  TEXT REFERENCES tag(id),
-  row_version INTEGER NOT NULL DEFAULT 0 CHECK (row_version >= 0),
+  row_version INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
 

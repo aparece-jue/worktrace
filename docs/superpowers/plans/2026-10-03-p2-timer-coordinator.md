@@ -1,5 +1,17 @@
 # P2 · 计时协调器与检查点实施计划
 
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 做出唯一持有计时内存状态的串行协调器：用同一次时钟采样同时产出区间事实与 tick 快照，并让墙钟与单调钟的分歧能被稳定地检测与分割。
+
+**Architecture:** 新增 `services/timer/`。协调器所有改状态的方法取 `&mut self`，因此进程内由借用检查器保证不会交错；跨命令的串行由 P6/P7 的单实例与调度接线提供。`anchor.rs` 是纯函数（只收数字），可穷举边界；`coordinator.rs` 是唯一把基线、仓储与时钟缝在一起的地方。时间一律经 `Clock::sample()` 一次性取得。
+
+**Tech Stack:** Rust 1.98 · rusqlite 0.40（沿用 P1）· 无新依赖
+
+**Spec:** `../specs/2026-10-02-worktrace-architecture/08-implementation-contracts.zh.md` §1/§7/§8 · `00-architecture.zh.md` §5 · `02-data-model.zh.md` §3/§6 · `04-functional-spec.zh.md` F-006/F-007
+
+**断言口径：** 见 [总纲](2026-10-03-v01-plan-index.md) §5 第 8 条。时间用例一律用 `FakeClock` 显式推进两个数值。
+
 状态：计划修订待审核；实施未开始。依赖：[P1](2026-10-03-worktrace-v01-foundation.md) 实现验收后，按真实签名复核本计划。上游：[08 §1/7](../specs/2026-10-02-worktrace-architecture/08-implementation-contracts.zh.md)、[总纲](2026-10-03-v01-plan-index.md)。覆盖 F-006/F-007 核心；不做番茄钟、启动扫描、历史确认或 IPC。
 
 ## Task 1：串行协调器与快照

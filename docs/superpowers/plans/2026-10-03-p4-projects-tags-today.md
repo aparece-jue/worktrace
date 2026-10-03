@@ -1,5 +1,17 @@
 # P4 · 项目、标签与今日计划实施计划
 
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 把 V0.1 的三组辅助实体做成可用服务：项目（建/重命名/归档，归档后从新建任务的选择列表消失）、四类标签与任务打标、按用户时区记录的今日选择列表。
+
+**Architecture:** `domain/` 放纯校验（`ProjectStatus`、`TagKind`、`LocalDate`），`storage/` 放仓储并一律接受 `&Transaction`，`services/catalog.rs` 与 `services/daily_plan.rs` 拥有事务并负责 epoch/版本校验。本计划可在 P1 之后独立实施，不需要等 P2。
+
+**Tech Stack:** Rust 1.98 · rusqlite 0.40（沿用 P1）· 时区库待选型（必须验证 Windows 打包与断网可用后固定 `Cargo.lock`）
+
+**Spec:** `../specs/2026-10-02-worktrace-architecture/02-data-model.zh.md` §2/§9 · `04-functional-spec.zh.md` F-002/F-004/F-005/F-010 · `05-roadmap.zh.md` §1
+
+**断言口径：** 见 [总纲](2026-10-03-v01-plan-index.md) §5 第 8 条。
+
 状态：计划修订待审核；实施未开始。依赖：[P1](2026-10-03-worktrace-v01-foundation.md)。上游：[总纲](2026-10-03-v01-plan-index.md)、02/04/05。覆盖 F-002 项目/标签、F-004/F-005、F-010 今日选择；不做权重、Knowledge/层级、排期、UI。
 
 ## Task 1：领域输入和时区校验

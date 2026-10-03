@@ -31,7 +31,8 @@ application_run(id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, clean_exit_at 
 goal(id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT, status TEXT NOT NULL,
      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
 project(id TEXT PRIMARY KEY, goal_id TEXT REFERENCES goal(id), name TEXT NOT NULL,
-        description TEXT, status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
+        description TEXT, status TEXT NOT NULL, row_version INTEGER NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)
 milestone(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id), title TEXT NOT NULL,
           status TEXT NOT NULL, due_at INTEGER, done_at INTEGER)
 task(id TEXT PRIMARY KEY, project_id TEXT REFERENCES project(id), milestone_id TEXT REFERENCES milestone(id),
@@ -62,7 +63,7 @@ task_change(id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES task(id),
 daily_plan(task_id TEXT NOT NULL REFERENCES task(id), local_date TEXT NOT NULL,
            timezone TEXT NOT NULL, PRIMARY KEY(task_id,local_date,timezone))
 tag(id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
-    parent_id TEXT REFERENCES tag(id), created_at INTEGER NOT NULL)
+    parent_id TEXT REFERENCES tag(id), row_version INTEGER NOT NULL, created_at INTEGER NOT NULL)
 task_tag(task_id TEXT NOT NULL REFERENCES task(id), tag_id TEXT NOT NULL REFERENCES tag(id),
          weight REAL, PRIMARY KEY(task_id,tag_id))
 ```
