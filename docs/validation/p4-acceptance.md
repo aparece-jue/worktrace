@@ -190,10 +190,12 @@ P4 核心验收结论保留；完整响应信封、完整项目列表服务以�
 
 ## 2026-10-04 复审更新
 
-历史记录中的 done 项目检查不一致现已修复并提交：COMP-02，提交 **9e7a89a**，门禁 `cargo test --offline` 340 passed / 0 failed，`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`scripts/check-layers.ps1` 全绿。
+历史记录中的 done 项目检查不一致现已修复并提交：COMP-02，提交 **9e7a89a**（其后追加「无法识别的 `project.status` 按列报错」回归用例，提交 **2fda0e8**），门禁 `cargo test --offline` 341 passed / 0 failed，`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`scripts/check-layers.ps1` 全绿。
 
 事实口径（三处都不再冒充“已归档”，但新建/绑定与计时用的不是同一句话）：新建任务归属、重新绑定、start/resume 都只放行 active；新建/绑定走 `DomainError::NotInThisVersion`，渲染成“当前版本还没有「把任务关联到已完成的项目」这项功能。”；计时（start 与 resume 共用 `require_active_project`）渲染成“项目已完成，不能开始或继续计时。”。项目状态判定统一改走 `project_repo::get_project` 的 `ProjectStatus` 领域枚举，裸字符串加 `_` 兜底已删除：无法识别的 `project.status` 取值由 `project_repo` 按列报错，不再被说成“已完成”或“本版本不支持”。
 
 回归用例 `completed_project_rejects_capture_binding_start_and_resume_without_changes` 覆盖新建、绑定、启动、恢复四条路径，断言 `revision`、`project`/`task` 表行数与字段、`task_change` 计数，外加启动的 `work_session`/`work_interval`/`interval_checkpoint` 三个计数与恢复的 session/interval 全行、`time_edit` 计数。上文 triage 第 1 条点名的 `create_task` 对 done 放行（`Some(_) => {}`）与 `require_active_project` 把 done 说成“已归档”两项，已在本轮处理完毕。
+
+上面那句「无法识别的 `project.status` 取值按列报错」原本没有用例，2026-10-04 已补一条（`src-tauri/tests/projects.rs`，提交 **2fda0e8**）：`an_unknown_project_status_fails_by_column_for_capture_and_start_without_changes`。它用 `PRAGMA ignore_check_constraints` 把 CHECK 挡不住的 `project.status='paused'` 写进库（连接级开关，写完即关回），再验证 `catalog::create_task` 的新建归属与 `Coordinator::start` 计时两处都返回 `STORAGE_ERROR`，`detail()` 同时含列名 `project.status` 与脏值，且两处 `revision`、`project`/`task` 行数字段、`task_change` 计数均不变，启动那次另断三个计时表计数不变。测试总数随之 340 → 341。
 
 错误权威返回顺序注释亦已订正（FOLLOW-02，同一提交 9e7a89a，仅注释、返回顺序未变）。此前“未修”描述保留为当时证据，以本节和兼容待评审清单的最新状态为准。完整响应信封（COMP-01）与完整项目列表服务（COMP-03）仍未实现，不能视为 P7 门禁全部通过。

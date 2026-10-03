@@ -8,7 +8,7 @@
 | 编号 | 优先级 | 问题与证据 | 影响 | 建议与验收要求 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | COMP-01 | P2 | P2 TimerSnapshot 带 data_epoch/revision；P4 catalog 的 ProjectChange、TaskProjectChange、TagChange、TaskTagsChange、TaskChange 及 DailyPlanChange 仅带 revision；list_selectable_projects/list_tags/tags_of_task 返回裸列表。见 src-tauri/src/services/catalog.rs、services/daily_plan.rs | 对外响应不能统一执行旧 epoch/旧 revision 丢弃协议；多窗口和恢复接线存在缺口。当前尚未接 IPC，不声称已经发生缓存错乱 | 写结果的数据与 epoch/revision 在同一写事务取得，提交后返回；业务读结果在同一读事务取得数据和元数据。不得由 IPC 层提交后补读。明确查询请求的 epoch 校验及首次握手方式；覆盖一致快照、旧 epoch 拒绝及 P7 迟到响应丢弃 | 未修复，P7 接线前门禁 |
-| COMP-02 | P2 | task_repo::create_task 只拒绝 archived，Some(_) 放行 done；set_task_project 拒绝 done；require_active_project 拒绝所有非 active，却都提示“已归档”。见 src-tauri/src/storage/task_repo.rs | 可以创建归属 done 项目但随后无法计时的任务；新建与重新绑定规则不同，拒绝理由不准确。V0.1 无 done 创建入口，但 schema/读模型允许该状态 | 新建任务归属、重新绑定、start/resume 均仅允许 active；archived/done 历史可读。done 使用准确的中文拒绝理由。补新建、绑定、开始/恢复路径测试，拒绝时断言 revision、版本、审计和相关字段零变化 | 已修复（2026-10-04，提交 9e7a89a；门禁 340 passed / 0 failed），回归验证见下方 |
+| COMP-02 | P2 | task_repo::create_task 只拒绝 archived，Some(_) 放行 done；set_task_project 拒绝 done；require_active_project 拒绝所有非 active，却都提示“已归档”。见 src-tauri/src/storage/task_repo.rs | 可以创建归属 done 项目但随后无法计时的任务；新建与重新绑定规则不同，拒绝理由不准确。V0.1 无 done 创建入口，但 schema/读模型允许该状态 | 新建任务归属、重新绑定、start/resume 均仅允许 active；archived/done 历史可读。done 使用准确的中文拒绝理由。补新建、绑定、开始/恢复路径测试，拒绝时断言 revision、版本、审计和相关字段零变化 | 已修复（2026-10-04，提交 9e7a89a；追加「无法识别 `project.status`」用例后门禁 341 passed / 0 failed），回归验证见下方 |
 | COMP-03 | P2 | project_repo::list_projects 支持完整/按状态查询；catalog 只提供 active 的 list_selectable_projects，注释引导完整列表直接调用仓储。见 src-tauri/src/services/catalog.rs、storage/project_repo.rs | Projects 页查询归档历史缺少符合 commands→services 分层的服务入口 | 补完整项目列表服务及可选状态过滤，保留 active 选择入口，统一 COMP-01 响应信封；验证归档/done 历史可读、选择列表只含 active，命令层不直调仓储 | 未修复，P7 接线前门禁 |
 
 优先级 P2 表示需在依赖功能接入前完成，不表示当前已出现数据损坏。三个问题属于既有交付的兼容收尾，不新增产品功能或实体。
@@ -56,8 +56,10 @@ COMP-02 已修复。**三处都不再冒充「已归档」，但新建/绑定与
 - 启动被拒额外断言 `work_session` / `work_interval` / `interval_checkpoint` 三个计数不变，不留半条记录；
 - 恢复被拒额外逐字段比对 `session` 行与 `intervals_of_session` 全量结果，并断言 `time_edit` 审计计数不变。
 
+本轮再补一条同主题用例 `an_unknown_project_status_fails_by_column_for_capture_and_start_without_changes`（`src-tauri/tests/projects.rs`，提交 **2fda0e8**），把上面第 49 行那句「按列报错」也钉住：用 `PRAGMA ignore_check_constraints` 把 CHECK 挡不住的 `project.status='paused'` 写进库（连接级开关，写完即关回 `OFF`），验证两个入口都走 `project_repo::get_project` 的同一分支——`catalog::create_task` 新建任务归属该项目、该项目下任务的 `Coordinator::start` 都返回 `STORAGE_ERROR`，`detail()` 同时含列名 `project.status` 与脏值；两处都调用 `assert_unchanged`（`revision`、`project`/`task` 表行数与字段、`task_change` 无新增），start 那次另断 `work_session` / `work_interval` / `interval_checkpoint` 三个计数不变。
+
 FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a89a），返回顺序未改变。
 
-门禁（在 9e7a89a 上重跑）：`cargo test --offline` **340 passed / 0 failed**（本次补强只加强断言；相对上一提交 `a3f9f80` 还含新增的那条回归用例，故 339 → 340）；`cargo fmt --check`、`cargo clippy --all-targets --offline -- -D warnings`、`scripts/check-layers.ps1` 全绿。
+门禁（在 **2fda0e8** 上重跑）：`cargo test --offline` **341 passed / 0 failed**（相对 `a3f9f80` 共含两条新增回归用例——done 项目三处拒绝口径、无法识别的 `project.status` 按列报错——故 339 → 341）；`cargo fmt --check`、`cargo clippy --all-targets --offline -- -D warnings`、`scripts/check-layers.ps1` 全绿。
 
 COMP-01（统一响应信封）与 COMP-03（完整项目列表服务）仍未修，本轮未改动公开读取签名。
