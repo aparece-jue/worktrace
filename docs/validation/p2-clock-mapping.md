@@ -175,3 +175,7 @@ wall_backwards / monotonic_backwards / worst_interval_gap / suspends / markers
 长期边界使用独立参照 L(M)=lifetime_wall_at+(M-lifetime_monotonic_at)，abs(sampled_wall_at-L(M)) > 2000ms + floor((M-lifetime_monotonic_at)×500/1_000_000)。A(M) 仅用于工时归属，不作为长期偏差参照。三个参照分别为：归属 anchor（旧开放事实闭合/隔离后才可重建）、短期 drift_ref（成功心跳或归属重建时移动）、长期 lifetime_ref（新 run 初始化，或已检测墙钟偏移/漂移的审计提交后移动）。普通 pause/resume、可信系统离开边界、无可靠边界的长间隔、采样失败均不得移动长期参照；单调钟倒退不是墙钟校正，须隔离并由新 run 安全重建。
 
 暂停/终结态遇墙钟异常时，先原子写 clock correction 审计并增加 revision，再接受新归属与长期参照；暂停会话版本递增，终结态不修改会话或历史区间。随后 resume 使用新版本，不会成功后立即再次恢复。此处“接受校正”仅表示承认新的时钟映射，不代表确认可疑工时。recovering 记录重复事件保持幂等；未接受的墙钟异常仍存在时拒绝 start/resume，而不是先返回成功。
+
+## 后续兼容更新（2026-10-03）
+
+本记录保留 P1/P2 当时的检查证据。P4 核心现已验收，全仓自动测试为 339 个；WriteEnvelope 已迁至 crate::envelope，原 list_tasks 已由 list_tasks_filtered 替代，错误权威载荷已扩展为 task/session/project/tag 的 records 列表。当前阶段状态和 P7 前补全门禁见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。P3 恢复服务和 P7 生产接线尚未完成；本记录中的“未推进 P4”等范围描述仅指当时验收轮次。

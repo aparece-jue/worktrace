@@ -252,3 +252,9 @@ V0.2 阶段字段为 phase/phase_state/cycle_index，独立 phase_checkpoint 引
 公开 pause/resume 在普通计时与番茄钟 work 阶段共用；break 使用专属阶段命令。V0.2 轮次表与 interval.cycle_index 在同次迁移引入，工作 phase_elapsed 从该轮区间派生；区间恢复时保留轮次。target_duration_ms/remaining_ms/overtime_ms 在 stopwatch/pomodoro 为 null，完整字段表与重启预算规则见 08 §8。
 
 recovering 的区间编辑与确认统一走 reconcile，不通过 correct；丢弃不确定区间是 reconcile(action=discard_uncertain)，作废整次记录是 discard_session。恢复分支若不变量损坏须先诊断，不允许命令自动猜测修复。
+
+## 启动扫描的版本与审计补充
+
+扫描查询不改变 revision。扫描事务若实际改变 session 状态、run_id 或区间事实，每个改变的 session.row_version 增加一次，同一批事务 revision 增加一次并记录 time_edit；无变化不增版本、不写审计。paused 重绑定当前 run 适用该规则；recovering 保持原恢复归属，直到 reconcile 更新 run_id 并审计。损坏记录仅隔离诊断，不推断修复。P7 建立启动入口，P3 完成后接入真实扫描，P6 硬化同一入口。
+
+**为什么记 `time_edit` 而不是新表**：它是会话级的 before/after 审计（02 §3 的 `reconcile`、以及恢复后显式 `resume` 切换 `run_id` 时写的都是它，见 §10），扫描对 `run_id`/状态的改动属于同一类事实——复用同一张表，才能让「这次归属是被谁、从什么改成什么」只有一个查询入口，不必为启动扫描再造一份审计面。

@@ -14,7 +14,7 @@
 
 **时钟探针已取得自然漂移与一次休眠的实测记录**，见 [实测记录](../../validation/p2-clock-mapping.md)。锁屏、正反改时、正式系统事件可靠性仍待实测，不以推理或 FakeClock 替代。
 
-状态：P1/P2 核心实现已落地，评审问题已修正，本轮完整自动检查已通过，待用户复核；平台验收尚未完成。依赖 P1 已实现。覆盖 F-006/F-007 的协调器核心，不做番茄钟、启动扫描、历史确认或 IPC。**按用户要求，先稳定 P1/P2，不推进其它阶段。**
+状态：P1/P2 核心实现已落地，评审问题已修正，本轮完整自动检查已通过，待用户复核；平台验收尚未完成。依赖 P1 已实现。覆盖 F-006/F-007 的协调器核心，不做番茄钟、启动扫描、历史确认或 IPC。P1/P2 稳定门禁已通过，P4 核心也已验收；当前接口与后续门禁以总纲 §10 为准。
 
 ## Task 1：串行协调器与快照
 
@@ -46,7 +46,7 @@
 文件：coordinator.rs、storage/task_repo.rs、storage/session_repo.rs、storage/time_edit_repo.rs、storage/mod.rs、tests/timer_commands.rs。
 
 公开入口：start(request)、pause(request)、resume(request)、finish(request)。先校验请求，再由协调器调用 Clock::sample()；调用方不得预先传入采样。内部事务原语才接收已验证样本；采样失败走异常路径，不伪造 ClockSample。request 包含 expected_data_epoch、task/session ID、修改对象的 expected_row_version；start 还带 timer_kind/target_duration_ms。具体 Rust 签名在 P1 真实接口基础上定稿并登记，不能用内部 read_meta 得到的 epoch 代替请求。
-- [x] **与 P1 已实现的 `commands::envelope::WriteEnvelope` 的关系**：它只有**一个** `expected_row_version: Option<i64>`（P1 已落地，但目前除自身单测外**没有任何消费者**）。本计划的 `resume` 要同时校验任务与会话两份版本，**装不进这个信封**。定稿时二选一并在总纲登记：① 多对象命令的 request 直接带各自版本字段，`WriteEnvelope` 只服务**单对象更新**（P4 的项目/标签改动、P7 的简单修改）——此时 P4 必须真的用它，否则它就是死代码；② 把信封扩展成可承载多对象版本。**倾向前者**：信封的语义是「一次写一个对象」，硬塞两份版本会让「幂等关系增删不伪造实体版本」这条规则更难表达。
+- [x] **共享信封选择已定**：`crate::envelope::WriteEnvelope`（P4 已迁移）用于单实体编辑及 epoch-only 新建/集合操作；多对象计时请求直接带 task/session 各自版本字段，resume 校验两份版本。P4 已有 11 个写服务消费者；P7 是构造信封的首个生产 IPC 调用方，不恢复旧 commands 转发路径。
 
 - [x] 串行边界内先检查请求 epoch/version 和目标存在性，再取得样本并检测；正常路径先计划内存变化，同一业务事务再次校验 epoch/version、任务可执行/项目状态、前台占用与历史冲突，再调用 P1 仓储原语。若检测异常，按总纲 §9 独立系统事务提交恢复状态，原用户命令返回 RECOVERY_REQUIRED，不执行原意图；响应携带该事务后的权威版本，不自动重试。
 - [x] start 同事务理清任务、持久化预算、创建 session/open interval/elapsed=0 初始检查点、审计及 revision；首次估时基准在此冻结。失败不留下半条事实。
@@ -58,7 +58,7 @@
   1. **`session_repo::update_session_state` 在 P1 里零调用、零测试**——它的签名是 `(tx, id, expected_version, target, ended_at)`，**装不下 `run_id` 与 `needs_review`**，而 resume 要更新 run_id、异常分割要设 needs_review。P1 没有调用方，所以**可以直接改签名**，但记住：它现在的「P1 无回归」是**空洞的**（没有测试覆盖它），P2 必须自己补上它的测试。
   2. **`session_repo::intervals_of_session` 同样零调用零测试**——它正是 Task 1 算 `active_ms` 要用的那个「有效可信闭合区间 + 当前开放区间」入口。同样是 P2 来补测试。
   3. **`TaskRow` 没有测试用结构体字面量构造**（只在 `task_repo.rs` 内部构造），所以给它加估时字段是安全的，不会连带改 P1 的测试。
-  （另：P1 里零调用的 `pub fn` 还有 `list_tasks`——那是留给 P4 的，本计划不要动它。）
+  （历史交接：原 list_tasks 已在 P4 删除，由 list_tasks_filtered 的空筛选语义替代。）
 - [x] 测试：首次有/无估时冻结及后续不覆盖；resume 各任务状态与两份版本校验；新增仓储字段和审计失败同事务回滚。
 - [x] **错误映射的坑（P1 已实现，写代码时会踩）**：`AppError::Domain { detail }` 的
   `message()` 是 `format!("操作不被允许：{detail}")`——**它会把 `detail` 原样拼进用户文案**。
@@ -162,7 +162,7 @@
 - [x] 装载旧 running 会话但无基线时统计返回 RECOVERY_REQUIRED，不按墙钟差补时；idle/paused 的展示墙钟回退不意味着工时可信。
 - [x] 临时文件库实际 SQLITE_FULL 验证 start 回滚、检查点保留/重试、异常恢复回滚/隔离；OS 磁盘耗尽及 WAL 写失败仍属平台验收。
 - [x] ErrorResponse 与服务层只读版本捕获已提供，覆盖恢复事务提交后的权威版本、元数据不可读、epoch 握手及脱敏。
-- [x] P7 将所有失败响应接入 capture_error_response，捕获位于原事务结束后及同一串行边界；不得以 timer.snapshot 补版本。
+- [ ] P7 将所有失败响应接入 capture_error_response，捕获位于原事务结束后及同一串行边界；不得以 timer.snapshot 补版本。
 - [x] **跨 run 的开放区间不得以「可信」方式闭合**：`EndSessionFacts` 增加 `run_id`，`end_session_in_tx` 在版本校验**之前**用 `StaleRunContext` 校验（映射 `RECOVERY_REQUIRED`），与 `checkpoint_repo::write` 同一判据——写检查点早就拒绝跨 run 写入，闭合区间这条更重的路径不能反而放行。修复前实测：真实工作 60 秒 + 停机一小时 ⇒ `duration_ms = 3_660_000` 且 `needs_review = false`。回归 `cross_run_open_interval_cannot_be_closed_as_trusted_effort` 覆盖 `pause` 与 `finish` 两条路径。
 
 
@@ -197,3 +197,7 @@
   与真实采样节奏不符。用例里按 30 秒切片推进（`advance_in_ticks`）。
 
 本轮跨午夜回归同时保留恰好 00:00 暂停的原场景；新增的 23:55 暂停场景才严格覆盖“暂停期间跨过午夜”，二者均不计暂停时间。
+
+## 当前兼容状态
+
+跨阶段接口、错误载荷、启动归属及 P7 前待办统一见[总纲 §10](2026-10-03-v01-plan-index.md)。P1/P2/P4 核心已验收，P3 尚未实施；历史签名、测试数量和开工记录保留为当时证据，消费接口以当前源码及总纲为准。文档对齐不表示待办代码、IPC 或平台验证已经完成。

@@ -34,16 +34,16 @@
 
 文件：services/recovery.rs、storage/session_repo.rs（补扫描查询）、tests/recovery_scan.rs。
 
-- [ ] 扫描时机与顺序由 **P6** 调用：单实例检查 → 打开库/迁移 → 新建 `application_run` → **扫描旧 run 未结束会话** → 协调器 → 窗口。本任务只提供扫描入口，不接管启动顺序。
+- [ ] 扫描时机与顺序由 **P7 建立启动入口，P3 完成后接入，P6 硬化同一入口**：单实例检查 → 打开库/迁移 → 新建 `application_run` → **扫描旧 run 未结束会话** → 协调器 → 窗口。本任务只提供扫描入口，不接管启动顺序。
 - [ ] 按 02 §4 的四类判定分流，**判定顺序不可颠倒**（先看不变量是否可信，再看有无开放/待确认区间）：
   1. 状态/区间不变量损坏 → 隔离该记录 + 诊断，**禁止自动修复事实**；可疑区间暂不计入任何统计。
   2. `running` 且有开放区间 → session 设 `recovering`，**只把该开放区间标 `needs_review=1`**，既有闭合区间不动。
   3. `recovering` → 保持待确认，不增加已知工时。
   4. `paused` 且无开放/待确认区间 → 保持 `paused`，只把 `run_id` 更新到当前 run，**不自动继续计时**。
 - [ ] 两类事实要分开记录：**不变量损坏**（需诊断、禁止推断）与**普通待确认**（用户确认即可）。前者不能用 `reconcile` 混过去。
-- [ ] 扫描本身**不加 `revision`**（它不是业务变化）；只有实际发生状态跃迁（第 2 类）才按系统状态事务记一次，并按总纲 §9 提交。第 3、4 类若无状态变化则只更新 `run_id`，是否计入 revision 由 P1 的 `Meta` 规则决定——**不得为了"有个事务"而凭空加 revision**。
+- [ ] 扫描查询本身不加 revision。实际修改 session 状态、run_id 或区间事实属于系统业务变更：每个被修改 session.row_version 恰好 +1，同一批扫描事务 revision 恰好 +1，记录 time_edit；没有字段变化则不写审计、不加任何版本。paused 重绑定当前 run 也适用；recovering 保持原恢复归属，直到 reconcile 更新 run_id 并审计，重复扫描无变化。损坏记录仅隔离并诊断，不推断修复业务事实。
 - [ ] 复用 P2 的区间分割原语；本计划**不另写**"找一个可信前缀"的逻辑。
-- [ ] 测试：四类各一例（含 `paused` 保持不自动继续、`recovering` 不重复计入）；损坏记录被隔离且不写事实；扫描幂等（跑两次不产生两倍状态）；扫描不加多余 revision。
+- [ ] 测试：四类各一例（含 `paused` 保持不自动继续、`recovering` 不重复计入）；损坏记录被隔离且不写事实；扫描幂等（跑两次不产生两倍状态）；**重复扫描无字段变化时不加 revision，有实际变化时恰好 +1**（与上一条规则同一口径，不额外多加）。
 
 ## Task 2：`reconcile`——确认或丢弃不确定区间
 
@@ -51,13 +51,13 @@
 
 接口：`reconcile(request)`。`request` 含 `expected_data_epoch`、`session_id`、`session.expected_row_version`、`action`（`confirm` / `discard_uncertain`）、`target_state`（`paused` / `finished`），`confirm` 时另带**用户确认后的归属起止**。
 
-- [ ] 前置：仅 `recovering`。非 `recovering` 返回明确错误码（不要压成 `DOMAIN_ERROR`）；`running`/`paused` 想改可信历史必须先 `finish`，再走 `correct`。
+- [ ] 前置：仅 `recovering`。非 `recovering` 返回 `DOMAIN_ERROR` 并给出明确中文规则说明；只有未解决的恢复事实使用 `RECOVERY_REQUIRED`，不新增错误码；`running`/`paused` 想改可信历史必须先 `finish`，再走 `correct`。
 - [ ] **一次事务处理该会话的全部待确认区间**，不做"一次一条"的多次往返——否则用户确认到一半崩溃会留下半确认状态。
 - [ ] 用户给出的起止必须**合法且不与既有人工时间重叠**（半开区间：端点相接不算重叠）。已知单调时长**只作候选**，用户不接受时不强迫。
 - [ ] `discard_uncertain` 只把目标区间置 `voided_at` 并清 `needs_review`，**保留此前有效闭合区间**；它**不能**用来作废整次会话（那是 `discard_session`）。
 - [ ] 写 `time_edit`（`before_json`/`after_json` 记清每个被处理区间的前后值）；更新 `run_id` 到当前 run，原始恢复归属保留在 `time_edit` 里（02 §10）。
 - [ ] `target_state=finished` 时设 `session.finished`/`ended_at`；`=paused` 时**不自动计时**。V0.1 无番茄钟阶段，`phase_state` 相关分支不写。
-- [ ] 测试：全部待确认区间一次处理完；确认的起止重叠被拒（含与"后来已记录的人工时间"重叠）；丢弃单个区间不动作废整次；非 `recovering` 被拒；`time_edit` 前后值完整；失败整体回滚。
+- [ ] 测试：全部待确认区间一次处理完；确认的起止重叠被拒（含与"后来已记录的人工时间"重叠）；丢弃该会话全部待确认区间不动作废整次；非 `recovering` 被拒；`time_edit` 前后值完整；失败整体回滚。
 
 ## Task 3：`correct`——仅 `finished` 的可信历史修正
 
@@ -66,12 +66,12 @@
 接口：`correct(request)`。`request` 含 `expected_data_epoch`、`session_id`、`interval_id`、`session.expected_row_version`、新的起止或删除意图、`reason`。
 
 - [ ] 前置：会话必须是 `finished`。`recovering` 返回 `RECOVERY_REQUIRED` 并把用户指向 `reconcile`；`running`/`paused` 返回明确错误（先 `finish`）。
-- [ ] 修正后的区间必须满足：非负、`ended_at >= started_at`、**与同会话其他有效区间不重叠**（半开区间）。负区间与人工重叠一律拒绝。
+- [ ] 修正后的区间必须满足：非负、`ended_at >= started_at`、**与全部既有有效人工区间不重叠**（含其他会话，半开区间；机器时间按独立口径，不互斥）。负区间与人工重叠一律拒绝。
 - [ ] 历史修正用所属 session.row_version 做并发保护，不新增 interval.row_version。所有改变该 session 区间事实的命令在同事务增加 session.row_version；修改不同区间的旧版本请求也拒绝，刷新后重新确认。
 - [ ] 重算该区间的 `duration_ms`（用户确认的起止之差），**保留修正前后的值到 `time_edit`**；不得留下"改了起止但 `duration_ms` 没跟着变"的行。
 - [ ] 已完成任务的"完成时刻"**不因修正区间而移动**：报告按 `task_change` 里完成事件的时刻选完成项，不用 `updated_at`、也不用 session 结束时间代替（02 §10）。本任务不得新增或改写完成事件。
 - [ ] 删除误记 = 置 `voided_at`（保留审计），不是 `DELETE`。
-- [ ] 测试：负区间被拒；与同会话其他区间重叠被拒（含端点相接**不算**重叠的边界）；删除是软删除且审计留存；`recovering` 被指向 `reconcile`；修正后 `duration_ms` 与起止一致；被拒时逐字段比对（状态、版本、起止、时长、`needs_review`、`voided_at`）。
+- [ ] 测试：负区间被拒；与同会话及其他会话的有效人工区间重叠被拒（含端点相接**不算**重叠的边界）；删除是软删除且审计留存；`recovering` 被指向 `reconcile`；修正后 `duration_ms` 与起止一致；被拒时逐字段比对（状态、版本、起止、时长、`needs_review`、`voided_at`）。
 
 ## Task 4：`backfill` 与 `discard_session`
 
@@ -124,7 +124,7 @@
 - `reconcile` / `correct` / `backfill` / `discard_session` 的服务入口与 DTO：实施后登记真实 Rust 签名。
 - transition_task 服务及其 DTO：P7 任务入口与托盘完成动作共用，不能直调仓储。
 - 区间规则（半开相交、按日界裁剪）：P5 直接调用，不复制。
-- 恢复扫描入口：P6 在启动顺序里调用；P7 负责把四类判定的结果呈现给用户。
+- 恢复扫描入口：P7 建立启动调用点，P3 完成后接入真实扫描，P6 硬化同一入口；恢复确认界面与最终实机验收归 P8。
 
 
 ## 评审补充：恢复提示与时钟校正
@@ -132,3 +132,7 @@
 - [ ] 提供全局待确认会话列表/数量（含终点未知的片段），与当前计时会话分离；开始别的任务后旧记录仍可发现。
 - [ ] 显式接受时钟校正先原子写审计并增加 revision，提交后更新映射/清除 run 内未接受标记；不自动确认旧可疑工时。失败保留标记；重启按安全启动恢复规则处理。
 - [ ] 结束原语 `end_session_in_tx` 现在要求 `EndSessionFacts.run_id`，跨 run 直接 `StaleRunContext`：本计划的会话联动必须传**当前 run**；跨 run 会话先由启动扫描归一（02 §4 第 4 类把 `run_id` 更新到当前 run）再走联动，不能靠放宽该判据绕过。
+
+## 当前兼容状态
+
+跨阶段接口、错误载荷、启动归属及 P7 前待办统一见[总纲 §10](2026-10-03-v01-plan-index.md)。P1/P2/P4 核心已验收，P3 尚未实施；历史签名、测试数量和开工记录保留为当时证据，消费接口以当前源码及总纲为准。文档对齐不表示待办代码、IPC 或平台验证已经完成。

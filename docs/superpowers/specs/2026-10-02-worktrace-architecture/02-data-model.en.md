@@ -232,3 +232,9 @@ V0.2 phase/phase_state/cycle_index and independent phase_checkpoint reference se
 Public pause/resume serve ordinary timing and Pomodoro work; break uses explicit phase commands. V0.2 migrates pomodoro_cycle and interval.cycle_index together, deriving work phase elapsed from that cycle and preserving ownership during recovery. Ordinary budget fields are null for stopwatch/pomodoro; see 08 §8.
 
 Recovering edits/confirmation use reconcile, never correct; uncertain discard is reconcile(action=discard_uncertain), whole-session void is discard_session. Broken invariants require diagnosis, never guessed auto-repair.
+
+## Startup scan versions and audit
+
+Read-only scanning does not increment revision. If a scan transaction changes session state, run_id or interval facts, increment each changed session.row_version once, increment revision once for that transaction, and record time_edit. No-op scans add neither versions nor audit. This includes rebinding paused sessions to the current run. Recovering sessions retain their original recovery attribution until reconcile updates run_id with audit. Isolate corrupt records for diagnosis without guessing repairs. P7 establishes the startup entry point, P3 connects the actual scan after implementation, and P6 hardens that same entry point.
+
+**Why time_edit rather than a new table:** it is the session-scoped before/after audit already written by `reconcile` (02 §3) and by an explicit `resume` that moves `run_id` to the current run (§10). A scan changing `run_id` or state is the same kind of fact, so reusing the table keeps "who changed this attribution, and from what" answerable through a single query instead of a second audit surface built just for the startup scan.

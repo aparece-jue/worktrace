@@ -12,7 +12,7 @@
 
 **断言口径：** 见 [总纲](2026-10-03-v01-plan-index.md) §5 第 8 条。
 
-状态：计划修订待审核；实施未开始。上游：[总纲](2026-10-03-v01-plan-index.md)、[数据模型](../specs/2026-10-02-worktrace-architecture/02-data-model.zh.md)。本计划交付存储/领域基础，不代表应用验收完成。
+状态：核心已实施并验收；P1/P2 原验收基线为 209 个测试，P4 后全仓基线为 339 个测试。当前兼容契约与待办见[总纲 §10](2026-10-03-v01-plan-index.md)。上游：[总纲](2026-10-03-v01-plan-index.md)、[数据模型](../specs/2026-10-02-worktrace-architecture/02-data-model.zh.md)。本计划交付存储/领域基础，不代表应用验收完成。
 
 覆盖：F-001…F-005、F-008、F-014、F-015、F-017、F-019 的基础部分。不做 IPC、实时计时、HUD 或后续版本实体。
 
@@ -21,7 +21,7 @@
 - [x] 在 src-tauri 下记录实际 Rust/Cargo 版本，验证 SQLite bundled、UUID、错误派生、临时文件测试依赖，选定可编译版本并更新 Cargo.toml/Cargo.lock；不依据文档中的预设版本推断已经可用。
 - [x] 新建 domain/mod.rs、storage/mod.rs、platform/mod.rs、commands/mod.rs、error.rs；在 lib.rs 导出，保留 greet。
 - [x] error::AppError 提供稳定 code/message/脱敏 detail；storage 不依赖 commands。领域错误分别映射非法状态、占用冲突、待恢复、版本冲突，不把所有错误压成 DOMAIN_ERROR。
-- [x] commands::envelope::WriteEnvelope 保存 expected_data_epoch 与 expected_row_version；新建只需 epoch，修改既有对象必须版本。关系增删的幂等操作单列，不伪造实体版本。
+- [x] crate::envelope::WriteEnvelope（P4 已迁移到 src/envelope.rs） 保存 expected_data_epoch 与 expected_row_version；新建只需 epoch，修改既有对象必须版本。关系增删的幂等操作单列，不伪造实体版本。
 - [x] tests/error_contract.rs：未知记录、非法状态、epoch/version 冲突均可区分；错误不包含数据库路径、SQL、业务正文。
 
 ## Task 2：数据库执行边界与迁移
@@ -51,7 +51,7 @@
 - [x] Meta/read_meta/init_meta/bump_revision；epoch 初始化 UUID，业务服务成功提交时 bump_revision 恰一次，无操作/拒绝/心跳不增加。
 - [x] guard_epoch(tx, expected)/guard_row_version(actual, expected) 在调用方写事务内检查；禁止将读到的 epoch 当请求 expected 值比较自身。
 - [x] 写入接口统一接受 &Transaction；仓储不得 begin/commit 或自行 bump_revision。单独服务包装拥有事务；组合服务可复用同一事务。
-- [x] task_repo 提供 create_task(tx, title, project_id, now)、get_task/list_tasks、transition_task(tx, id, expected_version, target, cause, now)，任务变化与 task_change 同事务；已归档项目禁止新归属。
+- [x] task_repo 提供 create_task(tx, title, project_id, now)、get_task/list_tasks_filtered（P4 替代并删除原 list_tasks）、transition_task(tx, id, expected_version, target, cause, now)，任务变化与 task_change 同事务；已归档项目禁止新归属。
 - [x] session_repo::create_session(tx, task_id, run_id, mode, timer_kind, target_duration_ms, attributed_start) 持久化模式、预算与初始区间；调用方同事务保存 elapsed=0 检查点。mode 必填（DDL 是 NOT NULL；V0.1 只写 FOREGROUND，其余取值由服务拒绝）。倒计时预算必须正数，正计时必须 null。
 - [x] close_interval(tx, id, ClosedIntervalFacts)/open_interval(tx, session_id, attributed_start)/update_session_state(tx, id, expected_version, target) 接收协调器已验证事实；不得用 wall-now 在仓储计算工时。
 - [x] checkpoint_repo::write(tx, Checkpoint)/latest(conn, interval_id)；检查 run/interval 对应、归属和 elapsed 一致。心跳服务拥有独立短事务，不加 revision。
@@ -79,7 +79,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-layers.ps1
 
 ## 附录：V0.1 DDL 起点
 
-下面是待 Task 2 补全并验证的迁移起点，不是已发布迁移。所有发布后的迁移不可原地改写。跨表状态和历史重叠还需服务事务校验。
+下面保留开工时的历史 DDL 起点，不是当前可执行迁移；当前权威定义为 src-tauri/src/storage/schema_v1.rs，不能据此附录重建或改写已发布迁移。所有发布后的迁移不可原地改写。跨表状态和历史重叠还需服务事务校验。
 
 ```sql
 CREATE TABLE app_meta(
@@ -233,3 +233,7 @@ CREATE INDEX idx_task_project ON task(project_id);
 CREATE INDEX idx_task_status ON task(status);
 CREATE INDEX idx_session_task ON work_session(task_id);
 ```
+
+## 当前兼容状态
+
+跨阶段接口、错误载荷、启动归属及 P7 前待办统一见[总纲 §10](2026-10-03-v01-plan-index.md)。P1/P2/P4 核心已验收，P3 尚未实施；历史签名、测试数量和开工记录保留为当时证据，消费接口以当前源码及总纲为准。文档对齐不表示待办代码、IPC 或平台验证已经完成。

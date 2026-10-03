@@ -31,7 +31,7 @@
 文件：storage/project_repo.rs、services/catalog.rs、tests/projects.rs。
 
 - [x] 仓储提供 get_project/list_projects、create_project(tx, input)、rename_project(tx, id, expected_version, name, now)、archive_project(tx, id, expected_version, now)；&Transaction 写入不自行提交或增加 revision。
-- [x] 服务入口带 expected_data_epoch，编辑带 project.row_version；同事务校验、写入、版本/revision 变化并返回提交信封。实际值没有变化则不增加版本/revision。
+- [x] 服务入口带 expected_data_epoch，编辑带 project.row_version；同事务校验、写入、版本/revision 变化并返回提交结果（当前仅 revision，完整 epoch 信封待总纲 §10 收尾）。实际值没有变化则不增加版本/revision。
 - [x] 新建任务选择列表只列 active；归档保留既有任务/历史。新关联归档项目及在归档项目启动计时均拒绝，检查在事务中执行，不只依赖 UI 过滤。
 - [x] 测试：重命名、归档保留历史、归档选择过滤、旧 epoch/version、归档与创建/启动竞态、故障回滚。
 
@@ -60,8 +60,12 @@
 - [x] src-tauri 下 cargo fmt --check、cargo test、cargo clippy --all-targets 通过，执行 P1 分层检查。
 - [x] P1/P2 测试无回归；P4 可在 P1 后独立实施，不需要等 P2。
 - [x] 登记服务输入/输出及真实 Rust 签名供 P5/P7 消费；项目/标签版本字段与迁移一致。实际 UI 选择和发布应用离线验收由 P7 完成，不能将仓储测试标为 UI 已验收。
+- [ ] **P7 接线前补齐接口兼容（总纲 §10）**：① 写结果 DTO 补 `data_epoch`（现在只有 `revision`）；
+  ② 项目/标签/任务标签读服务补同一读事务的 epoch/revision；③ 补完整项目列表服务（含 archived/done，供 Projects 页，
+  命令层不得直调 `project_repo`）。这三项是既有交付的**兼容收尾**，未完成前本计划「返回 epoch/revision」一条不算兑现；
+  跟踪编号见 [P1～P4 结果兼容性待评审清单](../../validation/p1-p4-review-backlog.md) 的 COMP-01 / COMP-03。
 
-服务拥有事务并返回 epoch/revision；仓储只依赖 domain/shared error，不依赖 commands/platform。版本拒绝和任一步失败不得写审计、增加 revision 或留下部分变更。
+目标对外响应必须包含 epoch/revision；当前 P4 写 DTO 仅有 revision，部分单语句读尚无元数据，此兼容补全尚未完成，见总纲 §10 的 P7 接线前门禁。服务拥有事务；仓储只依赖 domain/shared error，不依赖 commands/platform。版本拒绝和任一步失败不得写审计、增加 revision 或留下部分变更。
 
 ## Task 5：任务筛选查询（轻量 GTD 列表）
 
@@ -92,7 +96,7 @@
 既有符号均存在：`task_repo::{get_task, list_tasks, transition_task, require_active_project}`、
 `session_repo::running_foreground`、`guards::guard_epoch`、`meta::{require_meta, bump_revision}`、
 `task_change` 表、`TransitionCause::{User, Reopen}`。计划要新建的 8 个文件（`domain/{project,tag,localdate}.rs`、
-`services/{catalog,daily_plan}.rs`、`storage/{project,tag,daily_plan}_repo.rs`）**确实都还不存在**，无重名冲突。
+`services/{catalog,daily_plan}.rs`、`storage/{project,tag,daily_plan}_repo.rs`）**当时都不存在**，无重名冲突；现已完成实现。本节为开工历史证据，不是当前符号清单。
 
 **二、时区库已选定并实测（原本是「待选型」，会挡住 Task 1）。** 本机 cargo 注册表缓存 324 个
 crate，其中 `jiff-0.2.37`、`jiff-core`、`jiff-tzdb`、`jiff-tzdb-platform`、`windows-link` 都在，
@@ -126,7 +130,7 @@ jiff = { version = "0.2", default-features = false, features = ["std", "tz-syste
 - [x] F-002 理清界面通过上述项目关联与既有标签服务完成可选分类，然后调用 clarify_ready；不要求全部操作合为一次事务，不引入强制表单。已捕获 Inbox/Clarifying 任务不必重新创建才能归项目。此最小关联入口仅用于无运行会话的 Inbox/Clarifying/Ready；其它任务属性编辑和状态联动继续归 P3，不能绕过其规则。
 - [x] 测试项目关联/解除、同值幂等、未知/归档项目、旧版本/epoch、非法状态或运行占用、失败回滚；验证理清为 Ready 后筛选能找到该任务。
 - [x] **与 V0.1 边界的区分（写清以免被读成越界）**：规格里「不做 Inbox 转项目及属性迁移」指的是把任务**转成**独立 Project 实体并搬运属性；给任务**指定/解除**项目是 F-002 原文「Inbox 可直接 Ready；**可选项目/标签**」要求的能力——此前计划缺这个入口，等于该条落不了地。实现时守住边界：只改 `task.project_id`（连同审计与版本），**不创建项目、不迁移属性、不改变任务状态**。
-- [x] P4 返回错误上下文时沿用同一读事务捕获规则，增加明确的 project/tag 版本载荷与消费者；现有 ErrorAuthority 仅有 task/session，不能拿 task 版本代替项目/标签版本。该扩展在 P4 实施中完成，P7 再统一接入 IPC。
+- [x] P4 返回错误上下文时沿用同一读事务捕获规则，增加明确的 project/tag 版本载荷与消费者；开工时 ErrorAuthority 仅有 task/session，当前已完成 records 扩展，不能拿 task 版本代替项目/标签版本。该扩展在 P4 实施中完成，P7 再统一接入 IPC。
   **形状（本轮定死，避免实现时各写一套）**：
   - 载荷是**受控实体种类**的列表，本阶段支持 `task` / `session` / `project` / `tag`；
     `kind` 必须是**枚举或白名单**，不能由客户端任意指定表名（它决定读哪张表，绝不能拼进 SQL）。
@@ -140,7 +144,7 @@ jiff = { version = "0.2", default-features = false, features = ["std", "tz-syste
     「读取失败不返回部分上下文」这条语义不变。
   - **interval 没有独立 `row_version`**：P3 的历史修正返回**所属 session 的版本**，
     不新增区间版本列（与 P3 计划第 70 条一致）。
-  - **要同步改的既有用例**：3 条错误响应用例直接断言 `authority.task/session`，形状一变就得跟着改——
+  - **已同步改的历史用例**：3 条原先直接断言 `authority.task/session` 的错误用例已改为 records 形状——
     `error_response_reports_committed_recovery_versions_without_sampling`、
     `error_response_unavailable_metadata_requires_handshake_and_redacts_detail`、
     `error_response_capture_during_open_transaction_degrades_to_handshake`。
@@ -167,3 +171,7 @@ jiff = { version = "0.2", default-features = false, features = ["std", "tz-syste
   标签权重与层级、`time_block`、Goal/Milestone（V0.2）。
 - **待用户裁定**：术语「上下文 vs 情境」；九条 P1/P2 遗留文案缺陷（P4 只修了其中由新入口暴露的两处）；
   是否推送本地提交（工作区另有一处用户自己的 `README.md` 改动未被任何提交 stage）。
+
+## 当前兼容状态
+
+跨阶段接口、错误载荷、启动归属及 P7 前待办统一见[总纲 §10](2026-10-03-v01-plan-index.md)。P1/P2/P4 核心已验收，P3 尚未实施；历史签名、测试数量和开工记录保留为当时证据，消费接口以当前源码及总纲为准。文档对齐不表示待办代码、IPC 或平台验证已经完成。

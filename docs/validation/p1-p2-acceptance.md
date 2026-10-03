@@ -142,3 +142,7 @@ CHECK 边界 —— `the_boundary_at_2000ms_is_exact`；错误码一律断言 `c
 跨 run 的故障恢复守卫、前台占用错误码及跨午夜两场景均保留。本轮独立运行 209 个测试（43 单元 + 166 集成），严格 Clippy、格式、分层检查通过，未发现新的核心阻断问题。P4 就绪；补正错误上下文计划，interval 无独立行版本，仍使用所属 session 版本，并限定 kind 为枚举/白名单。
 
 **复审补一条并已定死**：「未知目标显式表示不存在」若只用 `Vec<{kind,id,row_version}>` 无法落地——目标不存在时不在列表里，而「根本没请求」也不在列表里，两者合一（**现有实现同样有此歧义**：`task_id = None` 与 `Some(不存在的 id)` 都产出 `task: None`）。已写进 P4 计划：**响应按被请求目标逐条返回 `{kind, id, row_version: Option<i64>}`，`row_version = null` 表示已确认不存在**；顺序按 kind 白名单序、同 kind 内按请求序；**缺失是数据、读取失败才整体不返回上下文**；并点明 3 条既有错误响应用例要同步改。本轮文档补正随本次提交落地，尚未开始 P4 实现。
+
+## 后续兼容更新（2026-10-03）
+
+本记录保留 P1/P2 当时的检查证据。P4 核心现已验收，全仓自动测试为 339 个；WriteEnvelope 已迁至 crate::envelope，原 list_tasks 已由 list_tasks_filtered 替代，错误权威载荷已扩展为 task/session/project/tag 的 records 列表。当前阶段状态和 P7 前补全门禁见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。P3 恢复服务和 P7 生产接线尚未完成；本记录中的“未推进 P4”等范围描述仅指当时验收轮次。

@@ -147,8 +147,8 @@ P4 **不涉及**这四项（DB 执行边界与单调/墙钟映射已由 P1/P2 �
    而 04 F-005 与 P4 计划的筛选条款写「情境」。若最终选「情境」，`domain/error.rs` 的 `zh_kind`
    与 `tests/error_contract.rs` 的逐字断言/禁用词表、`tests/tags.rs` 的两条 needle 共 **5 处**一起改。
 2. **第九节的 5 条 P1/P2 遗留缺陷**：是否现在收掉（各约 1–3 行）还是并入 V0.2 前的清理任务。
-3. **是否推送**：P4 的全部提交目前只在本地 `dev` 分支（未 push）；工作区还有一处**用户自己的**
-   `README.md` 未提交改动（删除一句「参考同级 tauri-project」），P4 的提交从未 stage 它。
+3. **推送状态（已核实，不再是待办）**：P4 的全部提交与 README 那处修订都已推送到 `origin/dev`；
+   推送后 `git fetch` 复核过 `local == remote == c981590`，工作树干净。
 
 
 ## 十一、最终整体评审（whole-branch review）与 triage
@@ -175,7 +175,7 @@ SQL 全参数化（含分页）；FK 的 `ON DELETE RESTRICT` 未被破坏；`se
    `"session"`/`"interval"`）、`guards.rs` 的 `no such {table}`、`coordinator.rs` 的 `"no such session"`；
    同批处理 `create_task` 对 `done` 项目放行（`task_repo.rs` 的 `Some(_) => {}`）与
    `require_active_project` 把 `done` 说成「已归档」。
-2. **口径统一（P7 前定）**：写结果 DTO 是否回 `data_epoch`（P2 回、P4 只回 `revision`）；
+2. **口径已定、代码待补全（P7 前门禁）**：所有对外写结果必须回 `data_epoch`/`revision`（P2 已回、P4 只回 `revision`，尚待补全）；
    同模块读路径两种 epoch 契约（一致性读带、单语句读不带）；同一列两种入参形状
    （`create_task` 的 `Option<&str>` vs `set_task_project` 的 `ProjectTarget`）。
 3. **零调用公开面**：`guard_row_version_of`（建议直接删，而不是翻译它的英文）；`AuthorityTarget::new`、
@@ -183,3 +183,7 @@ SQL 全参数化（含分页）；FK 的 `ON DELETE RESTRICT` 未被破坏；`se
 4. **`daily_plan` 的 `(local_date, timezone)` 读索引**（需新迁移）与**容器拆分**
    （`services/catalog.rs` 已 509 行、四类职责，P7 再加任务命令时拆 `services/tasks.rs`）。
 5. **`WriteEnvelope::for_create` 的改名**（它在 4 处集合操作上语义错位）——P7 定 IPC 形状时一起做。
+
+## 文档对齐后的兼容收尾
+
+P4 核心验收结论保留；完整响应信封、完整项目列表服务以及 done 项目检查一致性是 P7 接线前待完成的接口收尾，不标为已实现。统一契约、验收要求及其它阶段归属见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。

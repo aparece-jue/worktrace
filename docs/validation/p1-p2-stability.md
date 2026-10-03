@@ -201,3 +201,7 @@ revision），并断言仍留在故障态等真正的恢复路径。
 
 **反向验证**：去掉 `retry_recovery` 里那一行调用 ⇒ 回归失败（`unwrap_err` 撞上 `Ok`）。
 回归因此为 44 个，全库为 **209** 个。
+
+## 后续兼容更新（2026-10-03）
+
+本记录保留 P1/P2 当时的检查证据。P4 核心现已验收，全仓自动测试为 339 个；WriteEnvelope 已迁至 crate::envelope，原 list_tasks 已由 list_tasks_filtered 替代，错误权威载荷已扩展为 task/session/project/tag 的 records 列表。当前阶段状态和 P7 前补全门禁见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。P3 恢复服务和 P7 生产接线尚未完成；本记录中的“未推进 P4”等范围描述仅指当时验收轮次。

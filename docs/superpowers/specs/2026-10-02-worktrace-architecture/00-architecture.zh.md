@@ -48,7 +48,7 @@ SQLite 的同步访问放入受控阻塞执行边界；连接不跨 await 持锁
 
 Command 按意图命名，一次完成业务事务；Today 等聚合视图一次返回，列表避免 N+1。DTO 类型从 Rust 生成，选型在实现阶段验证。更新命令带 expected_row_version，冲突返回 VERSION_CONFLICT；长耗时 AI 请求另带输入版本，结果不覆盖已变更任务。
 
-预期失败使用 Result<T,AppError>：code、message、脱敏 detail。panic 是缺陷；当前 release panic=abort 会终止进程，不能承诺 catch 后转 AppError。必须依靠诊断和恢复，并避免 unwrap 用于可预期用户/IO 错误。
+预期失败使用 Result<T,AppError>；IPC 错误 DTO 为 code、message、authority、requires_handshake。Domain.detail 仅用于生成可直接显示的中文 message，Storage.detail 只进诊断日志，不把原始 detail 发送到 IPC。authority 在原事务结束后的同一串行边界，以一次读事务取得 epoch/revision/records；目标仅 task/session/project/tag，缺行返回 null 版本，读取失败整体要求重新握手。panic 是缺陷；当前 release panic=abort 会终止进程，不能承诺 catch 后转 AppError。必须依靠诊断和恢复，并避免 unwrap 用于可预期用户/IO 错误。
 
 已提交后广播失败只记诊断，不返回“事务失败”让用户重复操作。非幂等命令须避免重复提交；需要自动重试时加 request_id 并在同事务保存可重放结果，否则客户端不得盲目重试。
 

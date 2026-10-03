@@ -48,7 +48,7 @@ Run synchronous DB work inside a controlled blocking boundary; never hold connec
 
 Commands follow intent and return aggregate views without N+1. Generate TS DTO types from Rust after validating tooling. Mutations carry expected_row_version; conflicts return VERSION_CONFLICT. AI requests retain input versions and do not apply to changed tasks.
 
-Expected failures use Result<T,AppError> with code/message/redacted detail. Panic is a defect; current release panic=abort terminates the process and cannot be promised convertible to AppError. Diagnostics/recovery remain necessary; avoid unwrap on normal user/IO failures.
+Expected failures use Result<T,AppError>. The IPC error DTO contains code, message, authority and requires_handshake. Domain.detail produces the user-facing message; Storage.detail is diagnostic only. Do not expose raw detail through IPC. After the original transaction ends, capture epoch/revision/records in one read transaction within the same serialized boundary. Targets are restricted to task/session/project/tag; missing rows have null versions, while read failure requires a fresh handshake for the entire response. Panic is a defect; current release panic=abort terminates the process and cannot be promised convertible to AppError. Diagnostics/recovery remain necessary; avoid unwrap on normal user/IO failures.
 
 Post-commit broadcast failure is diagnostic, not transaction failure. Prevent duplicate submissions. Automatic retries of non-idempotent commands require request_id plus a replay result stored in the same transaction; otherwise do not retry blindly.
 
