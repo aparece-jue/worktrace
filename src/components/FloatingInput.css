@@ -1,0 +1,19 @@
+.floating-input { width: 100%; font-family: var(--float-family); }
+.floating-input-control { position: relative; border-radius: var(--float-radius); background: var(--float-bg); }
+.floating-input-control > .ant-input,
+.floating-input-control > .ant-input-affix-wrapper { height: var(--float-height); padding: 4px 12px; font-size: var(--float-font); background: transparent; }
+.floating-input-control > label { position: absolute; top: 50%; left: 12px; transform: translateY(-50%); color: var(--float-label); font-size: var(--float-font); line-height: 20px; pointer-events: none; transition: top .16s, font-size .16s, color .16s; }
+.floating-input-outline { position: absolute; inset: 0; box-sizing: border-box; border: 1px solid var(--float-border); border-radius: inherit; pointer-events: none; }
+.floating-input[data-floating="true"] label { top: 0; left: 8px; z-index: 1; padding: 0 4px; font-size: 12px; background: var(--float-bg); }
+.floating-input[data-focused="true"] .floating-input-outline { border-color: var(--float-accent); }
+.floating-input[data-focused="true"] label, .floating-input[data-error="true"] label { color: var(--float-accent); }
+.floating-input[data-disabled="true"] .floating-input-control { background: var(--float-disabled); }
+.floating-input[data-disabled="true"] label { opacity: .55; }
+.floating-input-help { margin: 5px 14px 0; font-size: 12px; color: var(--float-label); }
+.floating-input[data-error="true"] .floating-input-help { color: var(--float-accent); }
+@media (prefers-reduced-motion: reduce) { .floating-input label { transition: none; } }
+
+
+
+.floating-input:not([data-disabled="true"]):not([data-focused="true"]):not([data-error="true"]) .floating-input-control:hover > .floating-input-outline { border-color: var(--float-hover); }
+

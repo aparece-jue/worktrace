@@ -1,0 +1,11 @@
+.floating-select { position: relative; border-radius: var(--select-radius); font-family: var(--select-family); background: var(--select-bg); }
+.floating-select > label { position: absolute; top: 50%; left: 12px; transform: translateY(-50%); line-height: 20px; font-size: var(--select-font); color: var(--select-label); pointer-events: none; transition: top .16s, font-size .16s; }
+.floating-select-outline { position: absolute; inset: 0; border: 1px solid var(--select-border); border-radius: inherit; pointer-events: none; }
+.floating-select[data-floating="true"] > label { top: 0; left: 8px; padding: 0 4px; font-size: 12px; background: var(--select-bg); z-index: 1; }
+.floating-select[data-focused="true"] > label { color: var(--select-primary); }
+.floating-select[data-focused="true"] > .floating-select-outline { border-color: var(--select-primary); }
+.floating-select[data-disabled="true"] { background: var(--select-disabled); }
+.floating-select[data-disabled="true"] > label { color: var(--select-text-disabled); }
+@media (prefers-reduced-motion: reduce) { .floating-select > label { transition: none; } }
+
+.floating-select:not([data-disabled="true"]):not([data-focused="true"]):hover > .floating-select-outline { border-color: var(--select-hover); }

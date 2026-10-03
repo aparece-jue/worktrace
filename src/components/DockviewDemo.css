@@ -1,0 +1,6 @@
+.dock-toolbar { margin: 8px 0 18px; }
+.dock-workspace { height: 560px; min-height: 360px; border: 1px solid #d9d9d9; border-radius: 6px; overflow: hidden; }
+.dock-panel { box-sizing: border-box; height: 100%; overflow: auto; padding: 20px; background: #fff; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 14px; }
+.dock-panel p, .dock-panel li { line-height: 1.8; }
+.dock-panel h3 { margin-top: 0; }
+@media (max-width: 620px) { .dock-workspace { height: 650px; } .dock-panel { padding: 12px; } }
