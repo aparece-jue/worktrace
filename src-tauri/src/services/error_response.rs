@@ -12,8 +12,19 @@ use crate::storage::{db::Db, meta::require_meta, project_repo, session_repo, tag
 /// - **行不存在是数据**：那一条返回 `row_version = None`（已显式确认不存在），
 ///   与「根本没请求」区分开——后者是列表里没有这一条；
 /// - **读取报错是失败**：任何一次读取报错 ⇒ 整体不返回上下文
-///   （`authority = None`、`requires_handshake = true`），绝不返回半个上下文；
-/// - 版本与 epoch 在**同一个读事务**里取得（R-T6-c）。
+///   （`authority = None`、`requires_handshake = true`），绝不返回半个上下文（R-T6-c）；
+/// - 版本与 epoch 在**同一个读事务**里取得：总纲 §9 要求拒绝响应携带**提交后的权威**
+///   `epoch` / `revision` / 目标版本，三个值出自同一次读取才不会互相矛盾
+///   （`services::catalog::list_tasks_filtered` 的「四项同源」是同一做法）。
+///
+/// # 「每个请求的目标都有一条记录」由 `debug_assert` 兜住
+///
+/// 输出顺序与覆盖面都从 [`AuthorityKind::ALL`] 推出来。将来给枚举加第 5 个 kind 时，
+/// 下面那个 `match` 不补分支**编译不过**，但 `ALL` 漏加只会静默少输出一条、
+/// 破坏「请求与响应一一对应」。返回前那条 `debug_assert_eq!` 就盯这个：
+/// 它的期望值来自**实际请求**（不是另一份手写清单），所以漏一个 kind 立刻在
+/// 测试/调试构建里炸出来，而不是让前端拿到一个短了列表的权威上下文。
+/// （release 构建里它被编掉——这是有意的：错误上报路径不该 panic，宁可降级。）
 pub fn capture_error_response(
     db: &Db,
     error: &AppError,
@@ -53,6 +64,14 @@ pub fn capture_error_response(
                 });
             }
         }
+        // 「请求与响应一一对应」是形状契约：将来给枚举加第 5 个 kind 时，
+        // 上面的 `match` 漏分支**编译不过**，但 `ALL` 漏加只会静默少一条记录。
+        // 期望值取自**实际请求**（不是另一份手写清单），所以漏一个 kind 在这里立刻暴露。
+        debug_assert_eq!(
+            records.len(),
+            targets.len(),
+            "每个被请求的目标都必须有一条记录（AuthorityKind::ALL 漏了某个 kind？）"
+        );
 
         Ok(ErrorAuthority {
             data_epoch: meta.data_epoch,

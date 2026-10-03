@@ -442,6 +442,54 @@ fn authority_marks_absent_targets_as_null_instead_of_omitting_them() {
     assert!(empty.records.is_empty());
 }
 
+/// **四类 kind 各请求一个不存在的 ID** ⇒ 四条都是 `row_version = None`。
+///
+/// 上一条用例只覆盖了 `Project` 的缺失路径（四个读取分支逐字同形，但
+/// 「缺失当成读取失败」这类错误只会打在其中一条上——上一轮的定向篡改就曾打空过一次）。
+/// 这一条把四个分支的「缺失 = 数据」逐条钉住，并确认 `null` 真的进了线上 JSON。
+#[test]
+fn every_kind_reports_a_missing_target_as_null() {
+    let f = bootstrap();
+    let response = capture_error_response(
+        &f.db,
+        &AppError::Domain {
+            detail: "找不到这个任务。".into(),
+        },
+        &[
+            AuthorityTarget::new(AuthorityKind::Task, "ghost-task"),
+            AuthorityTarget::new(AuthorityKind::Session, "ghost-session"),
+            AuthorityTarget::new(AuthorityKind::Project, "ghost-project"),
+            AuthorityTarget::new(AuthorityKind::Tag, "ghost-tag"),
+        ],
+    );
+
+    assert!(!response.requires_handshake, "行不存在是数据，不是读取失败");
+    let authority = response.authority.expect("四条都读得到（都是「不存在」）");
+    let pairs: Vec<(AuthorityKind, &str, Option<i64>)> = authority
+        .records
+        .iter()
+        .map(|r| (r.kind, r.id.as_str(), r.row_version))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            (AuthorityKind::Task, "ghost-task", None),
+            (AuthorityKind::Session, "ghost-session", None),
+            (AuthorityKind::Project, "ghost-project", None),
+            (AuthorityKind::Tag, "ghost-tag", None),
+        ],
+        "四条一一对应，且版本全为 null"
+    );
+
+    // `null` 必须真的出现在序列化结果里（省掉字段就退化成「我没拿到」）。
+    let json = serde_json::to_string(&authority).unwrap();
+    assert_eq!(
+        json.matches("\"row_version\":null").count(),
+        4,
+        "四条都要带显式的 null：{json}"
+    );
+}
+
 /// 顺序确定：按 kind 白名单顺序、同 kind 内按请求顺序（R-T6-b）。
 #[test]
 fn authority_orders_by_kind_whitelist_then_request_order() {

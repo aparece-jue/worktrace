@@ -62,8 +62,12 @@ struct Fixture {
 /// 改变结果。顺着建（先 `t1` 后 `t2`）时两种顺序恰好一致——那样的用例只能证明
 /// `created_at` 优先，证明不了 `id` 决胜（评审 Minor 2 指出，SQLite 3.37 实测复刻过）。
 ///
-/// 边界要说清：这个夹具只覆盖 rowid 序的计划。实测另有两种**按 id 索引序**扫描的
-/// 计划，此时插入顺序与 id 顺序无关，去掉决胜键也**静默通过**（报告附录 A §A2）。
+/// 边界要说清：这个夹具只保证**两种按 rowid 扫描顺序**下决胜键是必需的。
+/// 复核（独立用 sqlite3 复刻）另发现两种**按 id 索引序**扫描的计划：那时插入顺序与
+/// id 顺序无关，去掉决胜键会**静默通过**——出处是 SDD ledger
+/// `2026-10-03-p4-projects-tags-today/progress.md` 的「Task 4: fix round 1/5」行，
+/// **不是** `task-4-report.md` 附录 A §A2（那里记的是另外两种探针写法，结论相反：
+/// 两种都变红）。
 fn bootstrap() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let mut db = Db::open(dir.path().join("w.db")).unwrap();
@@ -403,8 +407,11 @@ fn the_same_task_on_the_same_day_under_another_timezone_key_is_a_separate_row() 
 /// 两个关键字各自可辨：`a9` 的 id 靠前而创建更晚（证明 `created_at` 优先），
 /// `t1`/`t2` 同创建时刻、**建库时按 id 逆序插入**（证明 `id` 决胜）。
 /// 后一条是定向篡改过的：只把 `, task.id` 从 `ORDER BY` 里去掉（其余不动），
-/// 本用例变红——见报告**附录 A §A2** 的原始输出（该附录还给出了两种按 id 索引序
-/// 扫描的计划：那两种下这一条篡改会静默通过，所以本用例的覆盖有边界）。
+/// 本用例变红——原始输出见 `task-4-report.md` 附录 A §A2 的 ⓐ。
+///
+/// 覆盖有边界：本用例只在**两种按 rowid 扫描顺序**下证明决胜键必需；
+/// 复核另发现两种**按 id 索引序**扫描的计划会静默通过，出处见 [`bootstrap`] 的注释
+/// （SDD ledger `progress.md` 的「Task 4: fix round 1/5」行）。
 #[test]
 fn the_plan_is_ordered_by_task_creation_time_then_id() {
     let mut f = bootstrap();
