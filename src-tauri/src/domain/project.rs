@@ -11,6 +11,8 @@
 //! 两件事分开写，是因为把它们压成一条规则总要牺牲一头：要么读不了 `done`，
 //! 要么悄悄接受了一个规格里没有的状态写入。
 
+use super::error::{DomainError, DomainResult};
+
 /// 项目状态。取值与 `project.status` 的 CHECK 逐字一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProjectStatus {
@@ -44,4 +46,18 @@ impl ProjectStatus {
     pub fn is_writable_in_v01(self) -> bool {
         matches!(self, Self::Active | Self::Archived)
     }
+}
+
+/// 项目名的规范化：只去首尾空白，全空白视为空输入。
+///
+/// 与 `domain::tag::normalize_name` 同一口径：写入与比较都用**这个函数**的产出，
+/// 预检与存储层（`project.name` 的 `length(trim(name)) > 0` 约束）才给出一致答案。
+/// 项目名**不要求唯一**——schema 没有唯一索引，02 §2 与 F-004 都没要求，
+/// 重名是两条独立的项目。
+pub fn normalize_name(raw: &str) -> DomainResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(DomainError::EmptyText { field: "项目名" });
+    }
+    Ok(trimmed.to_string())
 }

@@ -7,11 +7,13 @@
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::domain::error::DomainError;
+use crate::domain::project::ProjectStatus;
 use crate::domain::task::{TaskStatus, TaskTransition, TransitionCause};
 use crate::error::AppError;
 
 use super::db::map_sqlite;
 use super::guards::guard_row_version;
+use super::WriteOutcome;
 
 /// `task` 的一行。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,4 +364,113 @@ pub fn require_active_project(conn: &Connection, task_id: &str) -> Result<(), Ap
         }
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 任务归属（P4 Task 2：F-002 的「可选项目」）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 给任务指定项目，或解除关联。`project_id` 为 `None` 就是解除。
+///
+/// # V0.1 的边界（写清以免被读成越界）
+///
+/// **只改 `task.project_id`**（连同 `updated_at`、`row_version` 与一条 `task_change`）。
+/// 不创建项目、不迁移任何属性、**不改变任务状态**——规格里「不做 Inbox 转项目及属性
+/// 迁移」指的是把任务转成独立 Project 实体并搬运属性，那是另一件事。
+///
+/// # 为什么只接受理清阶段
+///
+/// 只允许**没有运行会话**的 `Inbox`/`Clarifying`/`Ready`。任务一旦开始，归属就是
+/// 正在被记录的事实的一部分，改它要经 P3 的状态联动，不能从这个最小入口绕过去。
+///
+/// # 幂等
+///
+/// 目标归属与现状相同 ⇒ [`WriteOutcome::Unchanged`]，**不写审计、不加版本**。
+/// 版本守卫排在幂等判断之前：请求方手上的版本旧了就得刷新，不能报「没有变化」。
+pub fn set_task_project(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    expected_version: i64,
+    project_id: Option<&str>,
+    now: i64,
+) -> Result<WriteOutcome<TaskRow>, AppError> {
+    let before = get_task(tx, task_id)?.ok_or(DomainError::EmptyText { field: "任务" })?;
+    guard_row_version(before.row_version, expected_version)?;
+
+    if !matches!(
+        before.status,
+        TaskStatus::Inbox | TaskStatus::Clarifying | TaskStatus::Ready
+    ) {
+        return Err(DomainError::TaskNotInClarifying {
+            status: before.status.as_str(),
+        }
+        .into());
+    }
+    if has_running_session(tx, task_id)? {
+        return Err(DomainError::TaskHasRunningSession.into());
+    }
+
+    if let Some(pid) = project_id {
+        // 与 `create_task` 的归档检查同一口径：**在事务内**判定，不只依赖 UI 过滤。
+        // 这里用领域变体而不是手写文案，前端/测试能按 detail 分辨「不存在」与「已归档」。
+        let project = crate::storage::project_repo::get_project(tx, pid)?
+            .ok_or(DomainError::UnknownProject)?;
+        match project.status {
+            ProjectStatus::Active => {}
+            ProjectStatus::Archived => return Err(DomainError::ProjectArchived.into()),
+            // `done` 在 V0.1 写不出来；读到它说明库来自更新的版本，不去动它。
+            ProjectStatus::Done => {
+                return Err(DomainError::NotInThisVersion {
+                    what: "把任务关联到已完成的项目",
+                }
+                .into())
+            }
+        }
+    }
+
+    if before.project_id.as_deref() == project_id {
+        return Ok(WriteOutcome::Unchanged(before));
+    }
+
+    let n = tx
+        .execute(
+            "UPDATE task SET project_id = ?1, row_version = row_version + 1, updated_at = ?2
+             WHERE id = ?3 AND row_version = ?4",
+            rusqlite::params![project_id, now, task_id, expected_version],
+        )
+        .map_err(map_sqlite)?;
+    if n == 0 {
+        return Err(AppError::VersionConflict {
+            expected: expected_version,
+            actual: -1,
+        });
+    }
+
+    record_change(
+        tx,
+        task_id,
+        &serde_json::json!({ "project_id": before.project_id }).to_string(),
+        &serde_json::json!({ "project_id": project_id }).to_string(),
+        now,
+    )?;
+
+    get_task(tx, task_id)?
+        .ok_or_else(|| AppError::Storage {
+            detail: "task vanished after update".into(),
+        })
+        .map(WriteOutcome::Changed)
+}
+
+/// 这个任务有没有正在运行的会话。
+///
+/// 只看 `state='running'`：暂停/已结束的会话属于历史，不阻止后续的归属整理。
+/// （paused/finished 的任务本来也不在允许的状态集合里，这道守卫守的是
+/// 「状态与事实对不上」的数据。）
+fn has_running_session(conn: &Connection, task_id: &str) -> Result<bool, AppError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM work_session WHERE task_id = ?1 AND state = 'running')",
+        [task_id],
+        |r| r.get(0),
+    )
+    .map_err(map_sqlite)
 }

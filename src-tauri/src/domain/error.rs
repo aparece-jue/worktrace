@@ -48,6 +48,26 @@ pub enum DomainError {
     /// 典型来源是内存里还留着上一轮 run 的基线（08 §1 明确禁止沿用旧 `Instant`）。
     /// 它**不是**普通的参数错误——必须触发恢复流程，所以单独命名。
     StaleRunContext { expected: String, actual: String },
+    // ── P4 Task 2（项目服务与任务归属）新增 ──────────────────────────────────
+    /// 目标项目不存在（已被删除，或请求里的 ID 从来不存在）。
+    ///
+    /// 与版本冲突分开：前者是「这条记录不在」，后者是「你手上的版本旧了」，
+    /// 前端对它们的处理不同（重新拉列表 vs 重新拉这一行）。
+    UnknownProject,
+    /// 项目已归档：不能再接收新任务（02 §2 末、F-004）。
+    ///
+    /// 归档项目的**历史仍可修正**，被拒的只是「新的归属」。
+    ProjectArchived,
+    /// 这个任务已经离开理清阶段（`Inbox`/`Clarifying`/`Ready`），归属不能再改。
+    ///
+    /// V0.1 只提供「理清阶段的可选归类」（F-002）：任务一旦开始，
+    /// 归属与状态联动的修改都归 P3，不能从这个最小入口绕过去。
+    TaskNotInClarifying { status: &'static str },
+    /// 任务正有会话在运行，改归属之前必须先停下来。
+    ///
+    /// 与 [`Self::TaskNotInClarifying`] 分开：那条讲的是任务的生命周期位置，
+    /// 这条讲的是「此刻正在计时」——用户的下一步动作不同（停止计时 vs 无从下手）。
+    TaskHasRunningSession,
 }
 
 /// 任务状态的中文名。用户的提示语里不该出现 `Inbox` 这种内部标识。
@@ -119,6 +139,12 @@ impl std::fmt::Display for DomainError {
             Self::StaleRunContext { expected, actual } => {
                 write!(f, "运行上下文已过期：期望 {expected}，实际 {actual}。")
             }
+            Self::UnknownProject => write!(f, "找不到这个项目。"),
+            Self::ProjectArchived => write!(f, "项目已归档，不能把任务关联到它。"),
+            Self::TaskNotInClarifying { status } => {
+                write!(f, "任务处于「{}」时不能改归属。", zh_status(status))
+            }
+            Self::TaskHasRunningSession => write!(f, "任务正在计时，先停止后再改归属。"),
         }
     }
 }
