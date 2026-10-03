@@ -453,13 +453,18 @@ fn a_faulted_coordinator_refuses_everything_until_rebuilt() {
         "RECOVERY_REQUIRED"
     );
 
-    // 成功重建后脱离故障态
+    // 装载 running 行不能接受失败恢复之后的事实。
     let sample = h.clock.lock().unwrap().sample().unwrap();
-    h.coord
+    assert!(h
+        .coord
         .rebuild_from_committed(h.db.connection(), &sid, sample)
-        .unwrap();
-    assert!(!h.coord.is_faulted(), "重建成功应当脱离故障态");
-    assert!(h.coord.snapshot(&mut h.db).is_ok(), "恢复之后查询应当可用");
+        .is_err());
+    // 排除造成失败的版本失配，再显式重试系统恢复事务。
+    h.coord.load_session(h.db.connection(), &sid).unwrap();
+    let snap = h.coord.retry_recovery(&mut h.db).unwrap();
+    assert_eq!(snap.state, Some(SessionState::Recovering));
+    assert!(!h.coord.is_faulted());
+    assert!(h.coord.snapshot(&mut h.db).is_ok());
 }
 
 /// **异常事务失败不得输出新的可信暂计**：失败就是失败，不给半截快照。

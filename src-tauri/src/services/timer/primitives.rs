@@ -65,13 +65,24 @@ pub fn end_session_in_tx(
         })?;
     guard_row_version(session.row_version, facts.expected_row_version)?;
 
-    if session.state == SessionState::Recovering {
+    if session.state == SessionState::Recovering
+        || session.needs_review
+        || session_repo::intervals_of_session(tx, &facts.session_id)?
+            .iter()
+            .any(|i| i.needs_review && i.voided_at.is_none())
+    {
         return Err(AppError::RecoveryRequired);
     }
-    if facts.target_state == SessionState::Recovering {
-        // 「结束」不该把会话推进恢复态；恢复有它自己的入口。
+    let legal = match facts.target_state {
+        SessionState::Paused => session.state == SessionState::Running,
+        SessionState::Finished => {
+            matches!(session.state, SessionState::Running | SessionState::Paused)
+        }
+        _ => false,
+    };
+    if !legal {
         return Err(AppError::Domain {
-            detail: "结束会话不能进入恢复状态。".into(),
+            detail: "当前会话状态不允许此操作。".into(),
         });
     }
 
@@ -95,7 +106,8 @@ pub fn end_session_in_tx(
         session.row_version,
         facts.target_state,
         SessionStateUpdate {
-            ended_at: Some(facts.attributed_end),
+            ended_at: (facts.target_state == SessionState::Finished)
+                .then_some(facts.attributed_end),
             ..Default::default()
         },
     )

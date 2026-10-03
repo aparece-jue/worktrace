@@ -27,7 +27,7 @@
 
 <svg viewBox="0 0 1000 810" role="img" aria-labelledby="ita-title ita-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="ita-title">Worktrace 工作区间的三种时间与异常分割</title>
-  <desc id="ita-desc">上半是正常关闭：开始采样墙钟 W0 与单调 M0，期间约每 30 秒同事务写一个检查点，关闭时用单调差得 duration_ms，统计的 ended_at 等于 started_at 加 duration_ms，可信闭合区间满足 duration_ms 等于 ended_at 减 started_at；原始墙钟关闭值只作诊断，不拿来直接减开始时间。下半是异常：每次采样比较相邻增量差与墙钟相对可信归属基线的累计偏差，差值绝对值超过 2000 毫秒、倒退、休眠或时钟变更、采样失效都走异常路径。异常时只保留到最后一个可信检查点的闭合前缀并照常计入，其后余段标 needs_review 且不计入，记录原始墙钟与候选单调增量，不按错误墙钟补时间；没有可信检查点则整个当前区间待确认。底部两块说明三种时间的分工与检查点持久化的字段。</desc><defs></defs>
+  <desc id="ita-desc">上半是正常关闭：开始采样墙钟 W0 与单调 M0，期间约每 30 秒同事务写一个检查点，关闭时用单调差得 duration_ms，统计的 ended_at 等于 started_at 加 duration_ms，可信闭合区间满足 duration_ms 等于 ended_at 减 started_at；原始墙钟关闭值只作诊断，不拿来直接减开始时间。下半是异常：每次采样比较短期偏差与长期归属偏差，短期超过 2000 毫秒或长期超过带 500ppm 容差的边界、倒退、休眠或时钟变更、采样失效都走异常路径。异常时只保留到最后一个可信检查点的闭合前缀并照常计入，其后余段标 needs_review 且不计入，记录原始墙钟与候选单调增量，不按错误墙钟补时间；没有可信检查点则整个当前区间待确认。底部两块说明三种时间的分工与检查点持久化的字段。</desc><defs></defs>
 
   <rect width="100%" height="100%" fill="#FBF9F6"/>
 
@@ -56,7 +56,7 @@
 
   <!-- ================= 下半：异常 ================= -->
   <text x="40" y="270" fill="#2A2320" font-size="11" font-weight="600" font-family="'Geist',sans-serif">异常</text>
-  <text x="78" y="270" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">相邻增量差或累计偏差 &gt; 2000ms，或倒退、休眠、时钟变更、采样失效</text>
+  <text x="78" y="270" fill="#6F6357" font-size="9" font-family="'Geist',sans-serif">短期偏差 &gt; 2000ms / 长期偏差超容差，或边界未知、倒退、采样失效</text>
 
   <line x1="120" y1="330" x2="900" y2="330" stroke="rgba(42,35,32,0.18)" stroke-width="1"/>
   <circle cx="170" cy="330" r="5" fill="#2A2320"/>

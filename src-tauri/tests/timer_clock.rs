@@ -245,9 +245,9 @@ fn heartbeat_reanchoring_keeps_a_long_run_trusted() {
     assert!(hit, "不前移参照点，按实测速率早晚会误报");
 }
 
-/// 休眠：判为长间隔，**不需要恢复**。用实测数据（129 秒、Δgap −36ms）。
+/// 无可信边界的休眠：判为长间隔并进入待确认。用实测数据（129 秒、Δgap −36ms）。
 #[test]
-fn a_suspend_does_not_require_recovery() {
+fn a_suspend_without_a_boundary_requires_recovery() {
     let mut h = setup();
     h.advance_both(1_000);
     let _ = h.snapshot();
@@ -264,10 +264,11 @@ fn a_suspend_does_not_require_recovery() {
         h.coord.last_verdict()
     );
     assert!(
-        !h.coord.last_verdict().needs_recovery(),
-        "休眠不得推入 recovering"
+        h.coord.last_verdict().needs_recovery(),
+        "未知离开边界必须待确认"
     );
-    assert!(snap.active_ms > 0, "休眠后的快照仍可用");
+    assert_eq!(snap.active_ms, 0, "未知边界不能把休眠计为可信工作");
+    assert!(snap.needs_attention());
 }
 
 /// 系统事件与命令、查询走**同一条**检测路径——不能因为来源不同就跳过检测。

@@ -327,6 +327,7 @@ pub fn split_for_anomaly(
     session_id: &str,
     trusted_until: Option<i64>,
     candidate_end: i64,
+    sampled_wall_at: Option<i64>,
 ) -> Result<AnomalySplit, AppError> {
     let open = tx
         .query_row(
@@ -352,7 +353,7 @@ pub fn split_for_anomaly(
     if let Some(end) = trusted_until.filter(|t| *t > started_at) {
         // 原区间在检查点处闭合，成为可信前缀
         tx.execute(
-            "UPDATE work_interval SET ended_at = ?1, duration_ms = ?2, sampled_end_wall_at = ?1
+            "UPDATE work_interval SET ended_at = ?1, duration_ms = ?2, sampled_end_wall_at = (SELECT wall_at FROM interval_checkpoint WHERE interval_id=?3)
               WHERE id = ?3",
             rusqlite::params![end, end - started_at, open_id],
         )
@@ -361,12 +362,18 @@ pub fn split_for_anomaly(
         // 余段：从检查点到候选结束，待确认、无 duration
         let pending_id = uuid::Uuid::new_v4().to_string();
         let remainder_end = candidate_end.max(end);
-        if remainder_end > end {
+        if remainder_end > end || sampled_wall_at.is_none() {
             tx.execute(
                 "INSERT INTO work_interval(id, session_id, started_at, ended_at, duration_ms,
                                            sampled_end_wall_at, needs_review)
-                 VALUES(?1, ?2, ?3, ?4, NULL, ?4, 1)",
-                rusqlite::params![pending_id, session_id, end, remainder_end],
+                 VALUES(?1, ?2, ?3, ?4, NULL, ?5, 1)",
+                rusqlite::params![
+                    pending_id,
+                    session_id,
+                    end,
+                    sampled_wall_at.map(|_| remainder_end),
+                    sampled_wall_at
+                ],
             )
             .map_err(map_sqlite)?;
             return Ok(AnomalySplit {
@@ -387,10 +394,10 @@ pub fn split_for_anomaly(
     // 没有可信前缀：整段待确认
     let end = candidate_end.max(started_at);
     tx.execute(
-        "UPDATE work_interval SET ended_at = ?1, duration_ms = NULL, sampled_end_wall_at = ?1,
+        "UPDATE work_interval SET ended_at = ?1, duration_ms = NULL, sampled_end_wall_at = ?3,
                                   needs_review = 1
           WHERE id = ?2",
-        rusqlite::params![end, open_id],
+        rusqlite::params![sampled_wall_at.map(|_| end), open_id, sampled_wall_at],
     )
     .map_err(map_sqlite)?;
     Ok(AnomalySplit {
@@ -399,4 +406,25 @@ pub fn split_for_anomaly(
         pending_interval_id: Some(open_id),
         candidate_end: end,
     })
+}
+
+/// 当前唯一运行的前台会话；结束其它暂停会话不能替换它的内存镜像。
+pub fn running_foreground(conn: &Connection) -> Result<Option<SessionRow>, AppError> {
+    conn.query_row(
+        &format!("{SESSION_SELECT} WHERE state='running' AND mode='FOREGROUND'"),
+        [],
+        read_session,
+    )
+    .optional()
+    .map_err(map_sqlite)
+}
+/// 新归属不能落入既有可信人工时间，或越过未来已有记录。
+pub fn require_available_human_start(conn: &Connection, start: i64) -> Result<(), AppError> {
+    let conflict: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM work_interval i JOIN work_session s ON s.id=i.session_id WHERE s.mode='FOREGROUND' AND i.voided_at IS NULL AND i.needs_review=0 AND i.ended_at>?1)", [start], |r|r.get(0)).map_err(map_sqlite)?;
+    if conflict {
+        return Err(AppError::Domain {
+            detail: "新的计时归属与已有人工记录冲突，请先确认时间归属。".into(),
+        });
+    }
+    Ok(())
 }

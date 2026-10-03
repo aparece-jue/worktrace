@@ -192,9 +192,12 @@ fn a_failed_heartbeat_does_not_advance_the_persisted_marker() {
         "失败的心跳不得推进库里那条检查点"
     );
 
-    // 恢复后立刻就能重试成功
+    // 采样失败已经隔离开放事实，恢复时钟不自动继续工作。
     h.clock.lock().unwrap().recover();
-    assert!(h.coord.heartbeat(&mut h.db).unwrap(), "恢复后应当重试成功");
+    assert!(
+        !h.coord.heartbeat(&mut h.db).unwrap(),
+        "待确认期间不能继续心跳"
+    );
     assert!(h.checkpoints(&interval_id).is_some());
 }
 

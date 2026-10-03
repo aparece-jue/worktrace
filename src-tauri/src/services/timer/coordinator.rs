@@ -12,7 +12,7 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::domain::interval::{ClosedIntervalFacts, IntervalFacts};
+use crate::domain::interval::IntervalFacts;
 use crate::domain::session::{SessionMode, SessionState, TimerBudget, TimerKind};
 use crate::domain::task::{TaskStatus, TransitionCause};
 use crate::error::AppError;
@@ -26,6 +26,7 @@ use crate::storage::task_repo;
 use crate::storage::time_edit_repo::{self, TimeEdit};
 
 use super::anchor::{AnchorState, SampleVerdict};
+use super::primitives::{end_session_in_tx, EndSessionFacts};
 use super::snapshot::TimerSnapshot;
 
 /// 一次 `start` 请求。
@@ -69,6 +70,8 @@ pub struct CommandOutcome {
     pub snapshot: TimerSnapshot,
     /// 本次事务后的权威 `revision`。前端据此丢弃过期响应。
     pub revision: i64,
+    /// 请求目标任务的提交后版本（快照可能指向另一条仍在运行的会话）。
+    pub task_version: i64,
 }
 
 /// 协调器在内存里持有的会话事实。**每一条都能在库里找到对应行**——
@@ -205,6 +208,11 @@ impl Coordinator {
             target_duration_ms: row.target_duration_ms,
         };
 
+        self.last_checkpoint = match open.as_ref() {
+            Some((id, _)) => checkpoint_repo::latest(conn, id)?,
+            None => None,
+        };
+        self.last_checkpoint_monotonic = None;
         self.live = Some(LiveSession {
             id: row.id,
             row_version: row.row_version,
@@ -245,10 +253,8 @@ impl Coordinator {
     /// 检测到异常时**先提交独立系统恢复事务**，再返回该事务之后的权威快照——
     /// 所以这次查询确实写了库，调用方不能宣称「查询全程只读」（计划原文）。
     pub fn snapshot(&mut self, db: &mut Db) -> Result<TimerSnapshot, AppError> {
-        let sample = self
-            .clock
-            .sample()
-            .map_err(|_| AppError::RecoveryRequired)?;
+        self.refuse_if_faulted()?;
+        let sample = self.read_sample(db)?;
         let verdict = self.observe(sample);
         if verdict.needs_recovery() {
             return self.handle_anomaly(db, sample, verdict);
@@ -259,10 +265,8 @@ impl Coordinator {
     /// 推进一步。与 [`Coordinator::snapshot`] 的唯一区别是 `tick_seq` 前进一格。
     /// 推进一步。与 [`Coordinator::snapshot`] 的唯一区别是 `tick_seq` 前进一格。
     pub fn tick(&mut self, db: &mut Db) -> Result<TimerSnapshot, AppError> {
-        let sample = self
-            .clock
-            .sample()
-            .map_err(|_| AppError::RecoveryRequired)?;
+        self.refuse_if_faulted()?;
+        let sample = self.read_sample(db)?;
         let verdict = self.observe(sample);
         if verdict.needs_recovery() {
             return self.handle_anomaly(db, sample, verdict);
@@ -315,8 +319,7 @@ impl Coordinator {
 
         // 暂计只加**当前可信开放区间**：非 running、没有基线、或没有开放区间都不加。
         let live_ms = match (&self.anchor_state, &live.open_interval, live.state) {
-            (_, Some((_, started_at)), SessionState::Running) => {
-                let a = self.anchor_state.as_ref().expect("matched above");
+            (Some(a), Some((_, started_at)), SessionState::Running) => {
                 // 基线倒退时暂计会是负数——截到 0，异常由 Task 2 检测后分割，
                 // 不在这里把负数当成工时。
                 a.attribute(sample.monotonic_ms)
@@ -376,6 +379,11 @@ impl Coordinator {
         // 故障态优先于一切：连请求校验都不做，避免给出「版本冲突」这种会让人重试的码。
         self.refuse_if_faulted()?;
 
+        if req.mode != SessionMode::Foreground {
+            return Err(AppError::Domain {
+                detail: "当前版本仅支持前台工作会话。".into(),
+            });
+        }
         // ① 校验请求——此阶段绝不采样
         {
             let conn = db.connection();
@@ -402,6 +410,8 @@ impl Coordinator {
             .map_err(map_sqlite)?;
         guard_epoch(&tx, &req.expected_data_epoch)?;
 
+        require_active_project(&tx, &req.task_id)?;
+        session_repo::require_available_human_start(&tx, attributed_start)?;
         // 首次 start 冻结估时基准（判据是「还没有任何会话」，见 task_repo）
         let frozen = task_repo::freeze_baseline_estimate(
             &tx,
@@ -488,21 +498,57 @@ impl Coordinator {
         session_id: &str,
         sample: ClockSample,
     ) -> Result<CommandOutcome, AppError> {
+        if self.faulted
+            && session_repo::get_session(conn, session_id)
+                .map_err(|_| AppError::RecoveryRequired)?
+                .is_some_and(|s| s.state == SessionState::Running)
+        {
+            return Err(AppError::RecoveryRequired);
+        }
         if self.load_session(conn, session_id).is_err() {
+            self.faulted = true;
             self.live = None;
             return Err(AppError::RecoveryRequired);
         }
-        // 重建成功才算脱离故障态。
-        self.faulted = false;
+        if let Some(active) = session_repo::running_foreground(conn).map_err(|_| {
+            self.faulted = true;
+            AppError::RecoveryRequired
+        })? {
+            if active.id != session_id && self.load_session(conn, &active.id).is_err() {
+                self.faulted = true;
+                return Err(AppError::RecoveryRequired);
+            }
+        }
+        // 所有重建和响应校验成功之后才解除故障态。
         let snapshot = match self.build(conn, sample, false) {
             Ok(s) => s,
-            Err(_) => return Err(AppError::RecoveryRequired),
+            Err(_) => {
+                self.faulted = true;
+                return Err(AppError::RecoveryRequired);
+            }
         };
         let revision = match require_meta(conn) {
             Ok(m) => m.revision,
-            Err(_) => return Err(AppError::RecoveryRequired),
+            Err(_) => {
+                self.faulted = true;
+                return Err(AppError::RecoveryRequired);
+            }
         };
-        Ok(CommandOutcome { snapshot, revision })
+        let task_version = session_repo::get_session(conn, session_id)
+            .and_then(|session| session.ok_or(AppError::RecoveryRequired))
+            .and_then(|session| task_repo::get_task(conn, &session.task_id))
+            .and_then(|task| task.ok_or(AppError::RecoveryRequired))
+            .map_err(|_| {
+                self.faulted = true;
+                AppError::RecoveryRequired
+            })?
+            .row_version;
+        self.faulted = false;
+        Ok(CommandOutcome {
+            snapshot,
+            revision,
+            task_version,
+        })
     }
 }
 
@@ -565,31 +611,14 @@ impl Coordinator {
             .map_err(map_sqlite)?;
         guard_epoch(&tx, &req.expected_data_epoch)?;
 
-        let session =
-            session_repo::get_session(&tx, &req.session_id)?.ok_or_else(|| AppError::Domain {
-                detail: "会话不存在。".into(),
-            })?;
-        guard_row_version(session.row_version, req.session_expected_version)?;
-        if session.state == SessionState::Recovering {
-            return Err(AppError::RecoveryRequired);
-        }
-        let (interval_id, started_at) = self.require_open_interval(&tx, &req.session_id)?;
-
-        close_with(
+        end_session_in_tx(
             &tx,
-            &interval_id,
-            attributed_end,
-            started_at,
-            sample.wall_ms,
-        )?;
-        session_repo::update_session_state(
-            &tx,
-            &req.session_id,
-            session.row_version,
-            SessionState::Paused,
-            SessionStateUpdate {
-                ended_at: Some(attributed_end),
-                ..Default::default()
+            &EndSessionFacts {
+                session_id: req.session_id.clone(),
+                expected_row_version: req.session_expected_version,
+                attributed_end,
+                sampled_end_wall_at: sample.wall_ms,
+                target_state: SessionState::Paused,
             },
         )?;
 
@@ -617,7 +646,21 @@ impl Coordinator {
                 req.session_expected_version,
             )?;
         }
+        let session =
+            session_repo::get_session(db.connection(), &req.session_id)?.ok_or_else(|| {
+                AppError::Domain {
+                    detail: "会话不存在。".into(),
+                }
+            })?;
+        if session.task_id != req.task_id {
+            return Err(AppError::Domain {
+                detail: "任务与会话不匹配。".into(),
+            });
+        }
         let sample = self.sample_and_detect(db)?;
+        if self.anchor_state.is_none() {
+            self.establish_anchor(sample);
+        }
         let attributed_start = self.attribute(sample.monotonic_ms);
         let interval_id = uuid::Uuid::new_v4().to_string();
 
@@ -637,6 +680,16 @@ impl Coordinator {
                 detail: "只有已暂停的会话可以继续。".into(),
             });
         }
+        if session.task_id != req.task_id {
+            return Err(AppError::Domain {
+                detail: "任务与会话不匹配。".into(),
+            });
+        }
+        if session.needs_review {
+            return Err(AppError::RecoveryRequired);
+        }
+        require_active_project(&tx, &req.task_id)?;
+        session_repo::require_available_human_start(&tx, attributed_start)?;
         // paused 且无待确认
         for iv in session_repo::intervals_of_session(&tx, &req.session_id)? {
             if iv.needs_review && iv.voided_at.is_none() {
@@ -708,34 +761,14 @@ impl Coordinator {
             .map_err(map_sqlite)?;
         guard_epoch(&tx, &req.expected_data_epoch)?;
 
-        let session =
-            session_repo::get_session(&tx, &req.session_id)?.ok_or_else(|| AppError::Domain {
-                detail: "会话不存在。".into(),
-            })?;
-        guard_row_version(session.row_version, req.session_expected_version)?;
-        if session.state == SessionState::Recovering {
-            return Err(AppError::RecoveryRequired);
-        }
-        // running 才有关闭区间的动作；paused 直接设终态
-        if session.state == SessionState::Running {
-            let (interval_id, started_at) = self.require_open_interval(&tx, &req.session_id)?;
-            close_with(
-                &tx,
-                &interval_id,
-                attributed_end,
-                started_at,
-                sample.wall_ms,
-            )?;
-        }
-
-        session_repo::update_session_state(
+        end_session_in_tx(
             &tx,
-            &req.session_id,
-            session.row_version,
-            SessionState::Finished,
-            SessionStateUpdate {
-                ended_at: Some(attributed_end),
-                ..Default::default()
+            &EndSessionFacts {
+                session_id: req.session_id.clone(),
+                expected_row_version: req.session_expected_version,
+                attributed_end,
+                sampled_end_wall_at: sample.wall_ms,
+                target_state: SessionState::Finished,
             },
         )?;
 
@@ -759,57 +792,39 @@ impl Coordinator {
         )
     }
 
+    fn read_sample(&mut self, db: &mut Db) -> Result<ClockSample, AppError> {
+        self.refuse_if_faulted()?;
+        match self.clock.sample() {
+            Ok(sample) => Ok(sample),
+            Err(_) => {
+                if let Some(previous) = self.anchor_state.as_ref().and_then(|a| a.last()) {
+                    self.last_verdict = SampleVerdict::Unavailable;
+                    self.handle_anomaly(db, previous, SampleVerdict::Unavailable)?;
+                } else {
+                    self.faulted = true;
+                }
+                Err(AppError::RecoveryRequired)
+            }
+        }
+    }
+
     /// 采样并检测。异常时**先提交独立系统恢复事务**，再返回 `RECOVERY_REQUIRED`
     /// ——原用户命令不执行，但恢复状态已经被落库（总纲 §9）。
     fn sample_and_detect(&mut self, db: &mut Db) -> Result<ClockSample, AppError> {
-        let sample = self
-            .clock
-            .sample()
-            .map_err(|_| AppError::RecoveryRequired)?;
+        let sample = self.read_sample(db)?;
         let verdict = self.observe(sample);
         if verdict.needs_recovery() {
+            let was_running = self
+                .live
+                .as_ref()
+                .is_some_and(|l| l.state == SessionState::Running);
             let _ = self.handle_anomaly(db, sample, verdict)?;
-            return Err(AppError::RecoveryRequired);
+            if was_running {
+                return Err(AppError::RecoveryRequired);
+            }
         }
         Ok(sample)
     }
-
-    /// 取出当前开放区间；没有就报错。
-    fn require_open_interval(
-        &self,
-        tx: &rusqlite::Transaction<'_>,
-        session_id: &str,
-    ) -> Result<(String, i64), AppError> {
-        for iv in session_repo::intervals_of_session(tx, session_id)? {
-            if iv.ended_at.is_none() && iv.voided_at.is_none() {
-                return Ok((iv.id, iv.started_at));
-            }
-        }
-        Err(AppError::Domain {
-            detail: "当前没有正在计时的区间。".into(),
-        })
-    }
-}
-
-/// 用协调器已验证的单调差闭合区间。**仓储不推算工时**。
-fn close_with(
-    tx: &rusqlite::Transaction<'_>,
-    interval_id: &str,
-    attributed_end: i64,
-    started_at: i64,
-    sampled_end_wall_at: i64,
-) -> Result<(), AppError> {
-    session_repo::close_interval(
-        tx,
-        interval_id,
-        ClosedIntervalFacts {
-            ended_at: attributed_end,
-            duration_ms: Some((attributed_end - started_at).max(0)),
-            sampled_end_wall_at,
-            needs_review: false,
-        },
-    )?;
-    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -827,6 +842,7 @@ impl Coordinator {
     /// 返回是否真的写了。失败**不推进持久化标记**，所以下一次还会重试；
     /// 也**不会**把内存里的可信点当成已持久化的事实。
     pub fn heartbeat(&mut self, db: &mut Db) -> Result<bool, AppError> {
+        self.refuse_if_faulted()?;
         let Some(live) = self.live.clone() else {
             return Ok(false);
         };
@@ -836,15 +852,7 @@ impl Coordinator {
         let Some((interval_id, started_at)) = live.open_interval.clone() else {
             return Ok(false);
         };
-        // 不可信就不写——否则会把可疑样本固化成恢复事实。
-        if self.last_verdict.needs_recovery() {
-            return Ok(false);
-        }
-
-        let sample = self
-            .clock
-            .sample()
-            .map_err(|_| AppError::RecoveryRequired)?;
+        let sample = self.sample_and_detect(db)?;
         let due = match self.last_checkpoint_monotonic {
             None => true,
             Some(prev) => sample.monotonic_ms - prev >= HEARTBEAT_INTERVAL_MS,
@@ -922,7 +930,10 @@ impl Coordinator {
         };
 
         // 幂等出口：重复事件不重复分割。
-        if live.state == SessionState::Recovering {
+        if live.state != SessionState::Running {
+            if verdict != SampleVerdict::Unavailable {
+                self.reestablish_anchor(sample);
+            }
             return self.build(db.connection(), sample, false);
         }
 
@@ -933,29 +944,43 @@ impl Coordinator {
             SampleVerdict::WallBackwards { .. } => "wall clock went backwards",
             SampleVerdict::Jumped { .. } => "clock jumped",
             SampleVerdict::Drifted { .. } => "cumulative clock drift",
-            SampleVerdict::Trusted | SampleVerdict::Suspended { .. } => "not an anomaly",
+            SampleVerdict::Suspended { .. } => "untrusted observation gap",
+            SampleVerdict::Unavailable => "clock sample unavailable",
+            SampleVerdict::Trusted => "not an anomaly",
         };
 
         let tx = db
             .connection_mut()
             .unchecked_transaction()
             .map_err(map_sqlite)?;
-        let split = session_repo::split_for_anomaly(&tx, &live.id, trusted_until, candidate_end)?;
+        let raw_wall = (verdict != SampleVerdict::Unavailable).then_some(sample.wall_ms);
+        let before = session_repo::intervals_of_session(&tx, &live.id)?;
+        let split =
+            session_repo::split_for_anomaly(&tx, &live.id, trusted_until, candidate_end, raw_wall)?;
 
         time_edit_repo::write(
             &tx,
             &TimeEdit {
                 id: uuid::Uuid::new_v4().to_string(),
                 session_id: live.id.clone(),
-                before_json: format!(
-                    "{{\"open_interval\":{:?},\"trusted_until\":{:?}}}",
-                    live.open_interval.as_ref().map(|(id, _)| id.clone()),
-                    trusted_until
-                ),
-                after_json: format!(
-                    "{{\"trusted_interval\":{:?},\"pending_interval\":{:?},\"candidate_end\":{}}}",
-                    split.trusted_interval_id, split.pending_interval_id, split.candidate_end
-                ),
+                before_json: serde_json::json!({
+                    "open_interval": live.open_interval.as_ref().map(|(id, _)| id),
+                    "trusted_until": trusted_until,
+                    "intervals": before.iter().map(|i| serde_json::json!({
+                        "id": i.id, "started_at": i.started_at, "ended_at": i.ended_at,
+                        "duration_ms": i.duration_ms, "needs_review": i.needs_review,
+                        "sampled_end_wall_at": i.sampled_end_wall_at,
+                    })).collect::<Vec<_>>()
+                })
+                .to_string(),
+                after_json: serde_json::json!({
+                    "trusted_interval": split.trusted_interval_id,
+                    "pending_interval": split.pending_interval_id,
+                    "candidate_end": raw_wall.map(|_| split.candidate_end),
+                    "sampled_wall_at": raw_wall,
+                    "sampled_monotonic_ms": raw_wall.map(|_| sample.monotonic_ms),
+                })
+                .to_string(),
                 reason: Some(reason.to_string()),
                 created_at: sample.wall_ms,
             },
@@ -986,9 +1011,98 @@ impl Coordinator {
         // 留在参照点里，导致此后每一次观察都判成累计漂移——那样恢复之后就再也开不了
         // 新会话了。旧开放事实已在上面分割完毕（前缀闭合、余段待确认），所以重建不会让
         // 任何未闭合区间与归属对不上。
-        self.reestablish_anchor(sample);
-
+        if verdict != SampleVerdict::Unavailable {
+            self.reestablish_anchor(sample);
+        }
         self.build(db.connection(), sample, false)
+    }
+
+    /// 故障后重试原系统恢复事务，不能只装载 running 行就解除隔离。
+    pub fn retry_recovery(&mut self, db: &mut Db) -> Result<TimerSnapshot, AppError> {
+        if !self.faulted {
+            return self.snapshot(db);
+        }
+        if self.live.is_none() && session_repo::running_foreground(db.connection())?.is_some() {
+            return Err(AppError::RecoveryRequired);
+        }
+        let sample = self
+            .clock
+            .sample()
+            .map_err(|_| AppError::RecoveryRequired)?;
+        let verdict = if self.last_verdict.needs_recovery() {
+            self.last_verdict
+        } else {
+            SampleVerdict::Unavailable
+        };
+        let snapshot = self.handle_anomaly(db, sample, verdict)?;
+        self.faulted = false;
+        Ok(snapshot)
+    }
+
+    /// 平台已验证的离开边界；None 表示晚到或边界未知。唤醒后不自动继续。
+    pub fn system_pause(
+        &mut self,
+        db: &mut Db,
+        boundary: Option<ClockSample>,
+    ) -> Result<TimerSnapshot, AppError> {
+        self.refuse_if_faulted()?;
+        let previous = self.anchor_state.as_ref().and_then(|a| a.last());
+        let sample = self.read_sample(db)?;
+        let trusted = boundary.filter(|b| {
+            previous.is_some_and(|p| {
+                b.monotonic_ms >= p.monotonic_ms
+                    && b.monotonic_ms <= sample.monotonic_ms
+                    && b.wall_ms >= p.wall_ms
+                    && (b.wall_ms - self.attribute(b.monotonic_ms)).abs()
+                        <= super::anchor::threshold()
+                            + (b.monotonic_ms - p.monotonic_ms).max(0) / 2000
+            })
+        });
+        let Some(live) = self
+            .live
+            .clone()
+            .filter(|l| l.state == SessionState::Running)
+        else {
+            self.reestablish_anchor(sample);
+            return self.build(db.connection(), sample, false);
+        };
+        let Some(boundary) = trusted else {
+            self.last_verdict = SampleVerdict::Suspended {
+                gap_ms: previous
+                    .map(|p| sample.monotonic_ms - p.monotonic_ms)
+                    .unwrap_or(0),
+            };
+            return self.handle_anomaly(
+                db,
+                sample,
+                SampleVerdict::Suspended {
+                    gap_ms: previous
+                        .map(|p| sample.monotonic_ms - p.monotonic_ms)
+                        .unwrap_or(0),
+                },
+            );
+        };
+        let end = self.attribute(boundary.monotonic_ms);
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        end_session_in_tx(
+            &tx,
+            &EndSessionFacts {
+                session_id: live.id.clone(),
+                expected_row_version: live.row_version,
+                attributed_end: end,
+                sampled_end_wall_at: boundary.wall_ms,
+                target_state: SessionState::Paused,
+            },
+        )?;
+        bump_revision(&tx)?;
+        tx.commit().map_err(map_sqlite)?;
+        // 旧开放事实已闭合，才允许建立唤醒后的映射。
+        self.reestablish_anchor(sample);
+        self.rebuild_from_committed(db.connection(), &live.id, sample)
+            .map(|o| o.snapshot)
     }
 
     /// 待确认时长：所有 `needs_review=1` 且未作废的区间跨度之和。
@@ -1048,14 +1162,17 @@ impl Coordinator {
     /// 统计不能基于不可信的事实。
     pub fn stats_sample(&mut self, db: &mut Db) -> Result<StatsSample, AppError> {
         self.refuse_if_faulted()?;
-        let sample = self
-            .clock
-            .sample()
-            .map_err(|_| AppError::RecoveryRequired)?;
+        let sample = self.read_sample(db)?;
         let verdict = self.observe(sample);
         if verdict.needs_recovery() {
+            let was_running = self
+                .live
+                .as_ref()
+                .is_some_and(|l| l.state == SessionState::Running);
             let _ = self.handle_anomaly(db, sample, verdict)?;
-            return Err(AppError::RecoveryRequired);
+            if was_running {
+                return Err(AppError::RecoveryRequired);
+            }
         }
         let attributed_end = self.attribute(sample.monotonic_ms);
 
@@ -1102,4 +1219,8 @@ impl Coordinator {
             state: Some(live.state),
         })
     }
+}
+
+fn require_active_project(conn: &Connection, task_id: &str) -> Result<(), AppError> {
+    task_repo::require_active_project(conn, task_id)
 }

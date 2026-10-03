@@ -341,3 +341,25 @@ pub fn freeze_baseline_estimate(
 fn json_or_null(v: Option<&str>) -> String {
     v.unwrap_or("null").to_string()
 }
+
+/// 开始/继续计时必须在调用方事务内检查归属项目。
+pub fn require_active_project(conn: &Connection, task_id: &str) -> Result<(), AppError> {
+    let task = get_task(conn, task_id)?.ok_or_else(|| AppError::Domain {
+        detail: "任务不存在。".into(),
+    })?;
+    if let Some(project_id) = task.project_id {
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM project WHERE id=?1",
+                [project_id],
+                |r| r.get(0),
+            )
+            .map_err(map_sqlite)?;
+        if status != "active" {
+            return Err(AppError::Domain {
+                detail: "项目已归档，不能开始或继续计时。".into(),
+            });
+        }
+    }
+    Ok(())
+}

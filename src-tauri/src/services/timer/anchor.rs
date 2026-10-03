@@ -90,6 +90,8 @@ mod tests {
 pub enum SampleVerdict {
     /// 可信：两个时钟同步推进，没有越界。
     Trusted,
+    /// 本次没有取得样本；候选终点未知。
+    Unavailable,
     /// 单调钟倒退——**硬故障**，正常平台永不出现。
     MonotonicBackwards { d_mono_ms: i64 },
     /// 挂钟倒退——用户把系统时间往回调。事实仍可用，但该走异常判断。
@@ -102,17 +104,14 @@ pub enum SampleVerdict {
     ///
     /// 实测（`docs/validation/p2-clock-mapping.md` §4.2）：休眠 129 秒时
     /// `d_mono = 129121ms`，QPC 照常推进、两钟不错位（Δgap 仅 −36ms）。
-    /// 所以它是「一段长间隔」，**不是事实不可信**——按策略 pause，不推 recovering。
+    /// 仅凭长间隔不能确定离开开始边界，等待可信平台事件或用户确认。
     Suspended { gap_ms: i64 },
 }
 
 impl SampleVerdict {
-    /// 事实是否还可信（可信与挂起都算可信；挂起只是「这段没在计时」）。
+    /// 仅普通样本可信；长间隔无法自行确定离开边界。
     pub fn facts_are_trustworthy(self) -> bool {
-        matches!(
-            self,
-            SampleVerdict::Trusted | SampleVerdict::Suspended { .. }
-        )
+        matches!(self, SampleVerdict::Trusted)
     }
 
     /// 是否需要走异常/恢复路径。
@@ -200,6 +199,16 @@ impl AnchorState {
                 cumulative_gap_ms: cum_gap,
             };
         }
+        // 长期边界不随心跳清零。500 ppm 是初始自然漂移容差，并非精度保证。
+        let elapsed = (sample.monotonic_ms - self.anchor.monotonic_at).max(0);
+        let lifetime_gap = sample.wall_ms - self.anchor.attribute(sample.monotonic_ms);
+        if lifetime_gap.abs()
+            > threshold().saturating_add(elapsed.saturating_mul(NATURAL_DRIFT_PPM) / 1_000_000)
+        {
+            return SampleVerdict::Drifted {
+                cumulative_gap_ms: lifetime_gap,
+            };
+        }
         // ⑤ 长间隔但两钟同步 → 挂起（休眠），不是异常。
         if self.expected_interval_ms > 0 && d_mono > self.expected_interval_ms * 3 {
             return SampleVerdict::Suspended { gap_ms: d_mono };
@@ -231,6 +240,8 @@ impl AnchorState {
 ///
 /// 实测依据：单拍相邻增量差在自然状态下恒为 0 或 ±1ms，余量三个数量级；
 /// 真实异常（改时、休眠）是千毫秒级跳跃。
+pub const NATURAL_DRIFT_PPM: i64 = 500;
+
 pub fn threshold() -> i64 {
     crate::platform::clock::THRESHOLD_MS
 }
@@ -344,21 +355,15 @@ mod detector_tests {
         assert!(hit, "不前移参照点，早晚会误报（实测 10–14ms/分钟）");
     }
 
-    /// **休眠不是异常**：这一拍特别长，但两个时钟同步推进。
+    /// 两钟同步的长间隔仍需可靠的离开边界。
     #[test]
-    fn a_suspend_is_a_long_gap_not_an_anomaly() {
+    fn a_long_gap_requires_a_trusted_departure_boundary() {
         let mut st = AnchorState::establish(s(0, 0), 1_000);
         // 实测数据：休眠 129 秒，Δgap 仅 −36ms
         let v = st.observe(s(129_085, 129_121));
         assert_eq!(v, SampleVerdict::Suspended { gap_ms: 129_121 });
-        assert!(
-            v.facts_are_trustworthy(),
-            "休眠期间两钟不错位，事实仍然可信"
-        );
-        assert!(
-            !v.needs_recovery(),
-            "不得推入 recovering——否则每次合盖都要确认"
-        );
+        assert!(!v.facts_are_trustworthy(), "时钟同步不证明离开边界可信");
+        assert!(v.needs_recovery(), "只有长间隔、没有事件边界时必须确认");
     }
 
     /// 采样失败由调用方转成不可信；检测器本身不需要采样即可保持状态。
