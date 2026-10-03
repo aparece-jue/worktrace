@@ -1066,7 +1066,10 @@ impl Coordinator {
                     && b.wall_ms >= p.wall_ms
                     && (b.wall_ms - self.attribute(b.monotonic_ms)).abs()
                         <= super::anchor::threshold()
-                            + (b.monotonic_ms - p.monotonic_ms).max(0) / 2000
+                            + (b.monotonic_ms - p.monotonic_ms)
+                                .max(0)
+                                .saturating_mul(super::anchor::NATURAL_DRIFT_PPM)
+                                / 1_000_000
             })
         });
         let Some(live) = self
@@ -1083,20 +1086,13 @@ impl Coordinator {
             return self.build(db.connection(), sample, false);
         };
         let Some(boundary) = trusted else {
-            self.last_verdict = SampleVerdict::Suspended {
+            let verdict = SampleVerdict::Suspended {
                 gap_ms: previous
                     .map(|p| sample.monotonic_ms - p.monotonic_ms)
                     .unwrap_or(0),
             };
-            return self.handle_anomaly(
-                db,
-                sample,
-                SampleVerdict::Suspended {
-                    gap_ms: previous
-                        .map(|p| sample.monotonic_ms - p.monotonic_ms)
-                        .unwrap_or(0),
-                },
-            );
+            self.last_verdict = verdict;
+            return self.handle_anomaly(db, sample, verdict);
         };
         let end = self.attribute(boundary.monotonic_ms);
         let tx = db

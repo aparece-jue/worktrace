@@ -219,7 +219,10 @@ impl AnchorState {
                 cumulative_gap_ms: lifetime_gap,
             };
         }
-        // ⑤ 长间隔但两钟同步 → 挂起（休眠），不是异常。
+        // ⑤ 长间隔——两钟同不同步都一样。**它证明不了离开开始于何时**：
+        //    实测休眠 129 秒时 Δgap 只有 −36ms，两钟同步只说明「这段时间真实流逝了」，
+        //    不说明「这段时间都在工作」。所以它不是可信样本，须等可信平台边界或用户确认。
+        //    （改这条时别退回「两钟同步即可信」——那会把整个休眠时长算成工时。）
         if self.expected_interval_ms > 0 && d_mono > self.expected_interval_ms * 3 {
             return SampleVerdict::Suspended { gap_ms: d_mono };
         }
