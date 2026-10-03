@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1000 810" role="img" aria-labelledby="ita-title ita-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="ita-title">Worktrace 工作区间的三种时间与异常分割</title>
-  <desc id="ita-desc">上半是正常关闭：开始采样墙钟 W0 与单调 M0，期间约每 30 秒同事务写一个检查点，关闭时用单调差得 duration_ms，统计的 ended_at 等于 started_at 加 duration_ms，可信闭合区间满足 duration_ms 等于 ended_at 减 started_at；原始墙钟关闭值只作诊断，不拿来直接减开始时间。下半是异常：每次采样比较短期偏差与长期归属偏差，短期超过 2000 毫秒或长期超过带 500ppm 容差的边界、倒退、休眠或时钟变更、采样失效都走异常路径。异常时只保留到最后一个可信检查点的闭合前缀并照常计入，其后余段标 needs_review 且不计入，记录原始墙钟与候选单调增量，不按错误墙钟补时间；没有可信检查点则整个当前区间待确认。底部两块说明三种时间的分工与检查点持久化的字段。</desc><defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style></defs>
+  <desc id="ita-desc">上半是正常关闭：开始采样墙钟 W0 与单调 M0，期间约每 30 秒同事务写一个检查点，关闭时用单调差得 duration_ms，统计的 ended_at 等于 started_at 加 duration_ms，可信闭合区间满足 duration_ms 等于 ended_at 减 started_at；原始墙钟关闭值只作诊断，不拿来直接减开始时间。下半是异常：每次采样比较短期偏差与独立长期参照偏差，短期超过 2000 毫秒或长期超过带 500ppm 容差的边界、倒退、休眠或时钟变更、采样失效都走异常路径。异常时只保留到最后一个可信检查点的闭合前缀并照常计入，其后余段标 needs_review 且不计入，记录原始墙钟与候选单调增量，不按错误墙钟补时间；没有可信检查点则整个当前区间待确认。底部两块说明三种时间的分工与检查点持久化的字段。</desc><defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style></defs>
 
   <rect width="100%" height="100%" fill="#FBF9F6"/>
 

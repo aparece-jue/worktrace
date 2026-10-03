@@ -114,6 +114,15 @@ impl SampleVerdict {
         matches!(self, SampleVerdict::Trusted)
     }
 
+    /// 只有已经检测到的墙钟偏移/漂移可以在审计提交后接受新长期参照。
+    /// 长间隔、采样失败与单调钟硬故障不是墙钟校正。
+    pub fn is_wall_clock_anomaly(self) -> bool {
+        matches!(
+            self,
+            Self::WallBackwards { .. } | Self::Jumped { .. } | Self::Drifted { .. }
+        )
+    }
+
     /// 是否需要走异常/恢复路径。
     pub fn needs_recovery(self) -> bool {
         !self.facts_are_trustworthy()
@@ -122,12 +131,13 @@ impl SampleVerdict {
 
 /// 检测 + 归属的状态机。
 ///
-/// **为什么有两个参照点**（这一条是实测逼出来的）：
+/// **三个独立参照点**（这一条是实测逼出来的）：
 /// - `anchor` 是**归属基线**，用来算 `A(M)`。它在一次连续可信的 run 内保持不变——
 ///   否则 `started_at` 会随时间漂移，区间会重叠。**成功心跳不得重置它**（Task 2 原文）。
 /// - `drift_ref` 是**累计偏差的参照点**，每次成功心跳前移。
 ///   实测挂钟与单调钟以 10–14 ms/分钟单向分叉，若累计偏差永远对着 run 起点算，
-///   两三小时后健康会话就会越界——那检测的不是异常，是时间流逝本身。
+///   两三小时后健康会话就会越界——短期检测不能因此误报。
+/// - `lifetime_ref` 是长期检测参照，独立于归属与心跳；仅审计提交后的墙钟异常可移动。
 #[derive(Debug, Clone, Copy)]
 pub struct AnchorState {
     /// **归属基线**：算 `A(M)` 用。只在已提交的变更之后重建。

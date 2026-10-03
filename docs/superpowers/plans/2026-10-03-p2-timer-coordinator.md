@@ -32,7 +32,7 @@
 文件：anchor.rs、coordinator.rs、tests/timer_clock.rs。
 
 - [x] 固定归属基线 Anchor { wall_at, monotonic_at }，A(M)=wall_at+(M-monotonic_at)，成功心跳不重置它。
-- [x] 三项检测：相邻增量差、最近成功心跳参照点的累计偏差均严格 >2000ms 才越界；此外保留不随心跳清零的长期边界 abs(wall-A(M)) > 2000ms + floor(elapsed_ms × 500 / 1_000_000)。500 ppm 为版本化初始容差，不是平台通用结论或精度承诺。约 233 ppm 自然漂移可长期运行，超容差偏移不能靠心跳隐藏。
+- [x] 三项检测：相邻增量差、最近成功心跳参照点的累计偏差均严格 >2000ms 才越界；此外保留不随心跳清零的长期边界 abs(wall-L(M)) > 2000ms + floor((M-lifetime_monotonic_at) × 500 / 1_000_000)。500 ppm 为版本化初始容差，不是平台通用结论或精度承诺。约 233 ppm 自然漂移可长期运行，超容差偏移不能靠心跳隐藏。
 - [x] 单调/墙钟倒退、采样失效、不可信长间隔触发恢复判断；三项判据分别测试，1999/2000/2001ms 是短期边界。
 - [x] 每个通过请求校验的命令、tick、查询和系统事件先检测，再决定是否持久化；用户命令先拒绝旧 epoch/旧版本请求，不借无效请求触发系统写入。30 秒只控制检查点频率，不能用于提前跳过异常检测。
 - [x] 连续可信 run 中暂停、继续、结束后开始另一会话均沿用基线；start/resume 的 started_at 取 A(M)。没有可信基线才建立，成功心跳不得重置。
@@ -54,7 +54,7 @@
 - [x] resume 校验 paused 且无待确认、项目可执行及前台占用；任务 Doing 保持，Ready 同事务转 Doing；Inbox/Clarifying/Waiting/Blocked/Review/Done/Cancelled/Scheduled 拒绝，不隐式解除等待或重开任务。请求携带 task 与 session 两份 expected_row_version，采样前及事务内均校验。先更新 session 为 running 及当前 run_id，再以 A(M) 开新区间、写 elapsed=0 检查点；同事务提交，不清空已用工时，返回任务/会话权威版本。
 - [x] pause/finish 用已验证单调差关闭区间，保留 sampled_end_wall_at；finish 可从 paused 直接结束。recovering 拒绝普通工作命令，需 P3 reconcile。
 - [x] P2 扩展 P1 仓储：task_repo 读取估时并冻结 baseline_estimate_json；session_repo 更新 run_id/needs_review、分割可信前缀与不确定余段；新增 time_edit_repo 写异常审计。签名实现时登记并供 P3 复用。仅接受调用方 Transaction，不自行提交或加 revision；协调器不嵌 SQL，不改 schema。无估时的首次 start 也以首次会话事实标识已冻结，后续不得因 baseline 为 null 重新冻结。
-- [x] **扩展前先看这三条实测事实**（已核 P1 代码，2026-10-04）：
+- [x] **扩展前先看这三条实测事实**（已有 P1 代码核对记录，原标注日期待核实）：
   1. **`session_repo::update_session_state` 在 P1 里零调用、零测试**——它的签名是 `(tx, id, expected_version, target, ended_at)`，**装不下 `run_id` 与 `needs_review`**，而 resume 要更新 run_id、异常分割要设 needs_review。P1 没有调用方，所以**可以直接改签名**，但记住：它现在的「P1 无回归」是**空洞的**（没有测试覆盖它），P2 必须自己补上它的测试。
   2. **`session_repo::intervals_of_session` 同样零调用零测试**——它正是 Task 1 算 `active_ms` 要用的那个「有效可信闭合区间 + 当前开放区间」入口。同样是 P2 来补测试。
   3. **`TaskRow` 没有测试用结构体字面量构造**（只在 `task_repo.rs` 内部构造），所以给它加估时字段是安全的，不会连带改 P1 的测试。
@@ -121,3 +121,20 @@
 - [ ] P7/P8 正式平台接线和实机验收；不计入本轮 P1/P2 核心完成声明。
 
 验证结果与保留项见 [P1/P2 稳定化记录](../../validation/p1-p2-stability.md)。下一阶段须在本轮核心检查通过、用户审核后再安排。
+
+## 三参照点与非运行态校正补全
+
+长期边界使用独立参照 L(M)=lifetime_wall_at+(M-lifetime_monotonic_at)，abs(sampled_wall_at-L(M)) > 2000ms + floor((M-lifetime_monotonic_at)×500/1_000_000)。A(M) 仅用于工时归属，不作为长期偏差参照。三个参照分别为：归属 anchor（旧开放事实闭合/隔离后才可重建）、短期 drift_ref（成功心跳或归属重建时移动）、长期 lifetime_ref（新 run 初始化，或已检测墙钟偏移/漂移的审计提交后移动）。普通 pause/resume、可信系统离开边界、无可靠边界的长间隔、采样失败均不得移动长期参照；单调钟倒退不是墙钟校正，须隔离并由新 run 安全重建。
+
+暂停/终结态遇墙钟异常时，先原子写 clock correction 审计并增加 revision，再接受新归属与长期参照；暂停会话版本递增，终结态不修改会话或历史区间。随后 resume 使用新版本，不会成功后立即再次恢复。此处“接受校正”仅表示承认新的时钟映射，不代表确认可疑工时。recovering 记录重复事件保持幂等；未接受的墙钟异常仍存在时拒绝 start/resume，而不是先返回成功。
+
+- [x] 回归：暂停期间前调时钟后，校正只审计一次、版本更新，resume 后持续 running；校正审计失败不移动参照、不增加版本，重试后恢复。
+- [x] 回归：无时钟校正的长间隔保留长期累计偏差，新会话仍能检测它；单调钟倒退不作为墙钟校正；未校正的 recovering 状态拒绝新工作，重复事件保持幂等。
+- [ ] 正式平台接线和实机验证仍待完成。先稳定 P1/P2，不推进下一阶段。
+
+
+## 非运行态硬故障补全
+
+- [x] 本次采样新触发故障态后，命令和统计入口立即返回 RECOVERY_REQUIRED，不继续执行用户事务或返回统计结果。
+- [x] 无会话、暂停、终结态均隔离单调钟倒退；暂停时 resume 不改状态、版本或 revision，新 start 不创建会话。已有 running/recovering 的恢复事实处理保持原规则。
+- [x] 回归覆盖暂停 resume，以及无会话/暂停/终结态的 start 与 stats_sample；硬故障不能通过 retry_recovery 解除，须新 run 安全重建。

@@ -397,8 +397,10 @@ fn rebased_clock_cannot_start_inside_confirmed_history() {
         wall_ms: 1_700_000_005_000,
         monotonic_ms: 10_000,
     });
-    // 同步假时钟到新基线，检测通过但归属仍与历史冲突。
+    // 同步并显式接受校正，检测通过但新归属仍须校验历史冲突。
     h.advance_wall_only(-5_000);
+    h.coord
+        .accept_clock_correction(h.clock.lock().unwrap().sample().unwrap());
     let rev = h.revision();
     let req = StartRequest {
         expected_data_epoch: h.epoch.clone(),
@@ -533,5 +535,310 @@ fn system_events_do_not_forgive_the_lifetime_drift_bound() {
             );
         }
         other => panic!("系统事件不该勾销长期界，实际判定 {other:?}"),
+    }
+}
+
+#[test]
+fn paused_clock_correction_is_audited_once_and_resume_stays_running() {
+    let mut h = setup();
+    h.start();
+    h.advance(10_000);
+    let req = session_request(&h);
+    h.coord.pause(&mut h.db, req).unwrap();
+    let rev = h.revision();
+    let before_version = h.coord.live().unwrap().row_version;
+    h.advance_wall_only(5_000);
+    let corrected = h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(corrected.state, Some(SessionState::Paused));
+    assert_eq!(corrected.active_ms, 10_000);
+    assert_eq!(h.revision(), rev + 1);
+    assert_eq!(corrected.session_version, Some(before_version + 1));
+    let audit: String =
+        h.db.connection()
+            .query_row("SELECT after_json FROM time_edit", [], |r| r.get(0))
+            .unwrap();
+    let audit: serde_json::Value = serde_json::from_str(&audit).unwrap();
+    assert_eq!(audit["clock_correction_accepted"], true);
+    assert_eq!(audit["intervals_changed"], false);
+    h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(h.revision(), rev + 1);
+    let task = worktrace_lib::storage::task_repo::get_task(h.db.connection(), "t1")
+        .unwrap()
+        .unwrap();
+    let req = ResumeRequest {
+        expected_data_epoch: h.epoch.clone(),
+        task_id: "t1".into(),
+        task_expected_version: task.row_version,
+        session_id: corrected.session_id.unwrap(),
+        session_expected_version: corrected.session_version.unwrap(),
+    };
+    assert_eq!(
+        h.coord.resume(&mut h.db, req).unwrap().snapshot.state,
+        Some(SessionState::Running)
+    );
+    h.advance(1_000);
+    let snap = h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(snap.state, Some(SessionState::Running));
+    assert_eq!(snap.active_ms, 11_000);
+}
+#[test]
+fn long_gap_is_not_clock_correction_and_lifetime_drift_remains_visible() {
+    let mut h = setup();
+    h.start();
+    for _ in 0..15 {
+        h.advance(1_000);
+        h.advance_wall_only(100);
+        h.coord.snapshot(&mut h.db).unwrap();
+        let sample = h.clock.lock().unwrap().sample().unwrap();
+        h.coord.reanchor_drift_on_heartbeat(sample);
+    }
+    h.advance(100_000);
+    assert_eq!(
+        h.coord.snapshot(&mut h.db).unwrap().state,
+        Some(SessionState::Recovering)
+    );
+    let audit: String =
+        h.db.connection()
+            .query_row("SELECT after_json FROM time_edit", [], |r| r.get(0))
+            .unwrap();
+    let audit: serde_json::Value = serde_json::from_str(&audit).unwrap();
+    assert_eq!(audit["clock_correction_accepted"], false);
+    h.db.connection().execute("INSERT INTO task(id,title,status,row_version,created_at,updated_at) VALUES('t2','other','Ready',0,0,0)", []).unwrap();
+    h.coord
+        .start(
+            &mut h.db,
+            StartRequest {
+                expected_data_epoch: h.epoch.clone(),
+                task_id: "t2".into(),
+                task_expected_version: 0,
+                mode: SessionMode::Foreground,
+                timer_kind: TimerKind::Stopwatch,
+                target_duration_ms: None,
+                expected_interval_ms: 30_000,
+            },
+        )
+        .unwrap();
+    let mut caught = false;
+    for _ in 0..15 {
+        h.advance(1_000);
+        h.advance_wall_only(100);
+        let snap = h.coord.snapshot(&mut h.db).unwrap();
+        if snap.state == Some(SessionState::Recovering) {
+            assert!(matches!(
+                h.coord.last_verdict(),
+                SampleVerdict::Drifted { .. }
+            ));
+            caught = true;
+            break;
+        }
+        let sample = h.clock.lock().unwrap().sample().unwrap();
+        h.coord.reanchor_drift_on_heartbeat(sample);
+    }
+    assert!(caught, "长间隔不能使进程累计偏差逃过长期检测");
+}
+#[test]
+fn failed_paused_correction_does_not_move_references_or_versions() {
+    let mut h = setup();
+    h.start();
+    let req = session_request(&h);
+    h.coord.pause(&mut h.db, req).unwrap();
+    let rev = h.revision();
+    let version = h.coord.live().unwrap().row_version;
+    h.db.connection().execute_batch("CREATE TRIGGER fail_clock_audit BEFORE INSERT ON time_edit BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
+    h.advance_wall_only(5_000);
+    assert!(h.coord.snapshot(&mut h.db).is_err());
+    assert_eq!(h.revision(), rev);
+    assert_eq!(h.coord.live().unwrap().row_version, version);
+    assert!(h.coord.is_faulted());
+    h.db.connection()
+        .execute_batch("DROP TRIGGER fail_clock_audit;")
+        .unwrap();
+    let corrected = h.coord.retry_recovery(&mut h.db).unwrap();
+    assert_eq!(corrected.state, Some(SessionState::Paused));
+    assert_eq!(h.revision(), rev + 1);
+    assert!(!h.coord.is_faulted());
+    h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(h.revision(), rev + 1);
+}
+#[test]
+fn monotonic_failure_is_not_accepted_as_wall_clock_correction() {
+    let mut h = setup();
+    h.start();
+    h.advance(1_000);
+    h.coord.snapshot(&mut h.db).unwrap();
+    h.advance_mono_only(-100);
+    let snap = h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(snap.state, Some(SessionState::Recovering));
+    assert!(h.coord.is_faulted());
+    assert!(h.coord.retry_recovery(&mut h.db).is_err());
+    let audit: String =
+        h.db.connection()
+            .query_row("SELECT after_json FROM time_edit", [], |r| r.get(0))
+            .unwrap();
+    let audit: serde_json::Value = serde_json::from_str(&audit).unwrap();
+    assert_eq!(audit["clock_correction_accepted"], false);
+}
+
+#[test]
+fn unresolved_clock_change_while_recovering_cannot_start_new_work() {
+    let mut h = setup();
+    h.start();
+    h.advance(129_000);
+    assert_eq!(
+        h.coord.snapshot(&mut h.db).unwrap().state,
+        Some(SessionState::Recovering)
+    );
+    h.advance_wall_only(5_000);
+    h.coord.snapshot(&mut h.db).unwrap();
+    h.db.connection().execute("INSERT INTO task(id,title,status,row_version,created_at,updated_at) VALUES('t2','other','Ready',0,0,0)", []).unwrap();
+    let rev = h.revision();
+    let req = StartRequest {
+        expected_data_epoch: h.epoch.clone(),
+        task_id: "t2".into(),
+        task_expected_version: 0,
+        mode: SessionMode::Foreground,
+        timer_kind: TimerKind::Stopwatch,
+        target_duration_ms: None,
+        expected_interval_ms: 30_000,
+    };
+    assert_eq!(
+        h.coord.start(&mut h.db, req).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    assert_eq!(h.revision(), rev);
+    let n: i64 =
+        h.db.connection()
+            .query_row("SELECT COUNT(*) FROM work_session", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn paused_monotonic_failure_cannot_commit_resume() {
+    let mut h = setup();
+    h.start();
+    h.advance(1_000);
+    let req = session_request(&h);
+    h.coord.pause(&mut h.db, req).unwrap();
+    let live = h.coord.live().unwrap().clone();
+    let task = worktrace_lib::storage::task_repo::get_task(h.db.connection(), "t1")
+        .unwrap()
+        .unwrap();
+    let rev = h.revision();
+    h.advance_mono_only(-100);
+    let result = h.coord.resume(
+        &mut h.db,
+        ResumeRequest {
+            expected_data_epoch: h.epoch.clone(),
+            task_id: "t1".into(),
+            task_expected_version: task.row_version,
+            session_id: live.id.clone(),
+            session_expected_version: live.row_version,
+        },
+    );
+    assert_eq!(result.unwrap_err().code(), "RECOVERY_REQUIRED");
+    let persisted = worktrace_lib::storage::session_repo::get_session(h.db.connection(), &live.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.state, SessionState::Paused);
+    assert_eq!(persisted.row_version, live.row_version);
+    assert_eq!(h.revision(), rev);
+    assert!(h.coord.is_faulted());
+    assert!(h.coord.retry_recovery(&mut h.db).is_err());
+    assert_eq!(
+        h.coord.snapshot(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+}
+
+fn nonrunning_monotonic_fixture(state: Option<SessionState>) -> H {
+    let mut h = setup();
+    if let Some(state) = state {
+        h.start();
+        h.advance(1_000);
+        let req = session_request(&h);
+        if state == SessionState::Paused {
+            h.coord.pause(&mut h.db, req).unwrap();
+        } else {
+            h.coord.finish(&mut h.db, req).unwrap();
+        }
+    } else {
+        let sample = h.clock.lock().unwrap().sample().unwrap();
+        h.coord.establish_anchor(sample);
+        h.advance(1_000);
+        h.coord.snapshot(&mut h.db).unwrap();
+    }
+    h.advance_mono_only(-100);
+    h
+}
+
+#[test]
+fn nonrunning_monotonic_failure_cannot_start_new_work() {
+    for state in [
+        None,
+        Some(SessionState::Paused),
+        Some(SessionState::Finished),
+    ] {
+        let mut h = nonrunning_monotonic_fixture(state);
+        h.db.connection().execute("INSERT INTO task(id,title,status,row_version,created_at,updated_at) VALUES('t2','other','Ready',0,0,0)", []).unwrap();
+        let rev = h.revision();
+        let result = h.coord.start(
+            &mut h.db,
+            StartRequest {
+                expected_data_epoch: h.epoch.clone(),
+                task_id: "t2".into(),
+                task_expected_version: 0,
+                mode: SessionMode::Foreground,
+                timer_kind: TimerKind::Stopwatch,
+                target_duration_ms: None,
+                expected_interval_ms: 30_000,
+            },
+        );
+        assert_eq!(
+            result.unwrap_err().code(),
+            "RECOVERY_REQUIRED",
+            "state={state:?}"
+        );
+        assert!(h.coord.is_faulted());
+        assert_eq!(h.revision(), rev);
+        assert!(
+            worktrace_lib::storage::session_repo::running_foreground(h.db.connection())
+                .unwrap()
+                .is_none()
+        );
+        let count: i64 =
+            h.db.connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM work_session WHERE task_id='t2'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(count, 0);
+        let task = worktrace_lib::storage::task_repo::get_task(h.db.connection(), "t2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.row_version, 0);
+        assert!(h.coord.retry_recovery(&mut h.db).is_err());
+    }
+}
+
+#[test]
+fn nonrunning_monotonic_failure_cannot_return_statistics() {
+    for state in [
+        None,
+        Some(SessionState::Paused),
+        Some(SessionState::Finished),
+    ] {
+        let mut h = nonrunning_monotonic_fixture(state);
+        let rev = h.revision();
+        assert_eq!(
+            h.coord.stats_sample(&mut h.db).unwrap_err().code(),
+            "RECOVERY_REQUIRED",
+            "state={state:?}"
+        );
+        assert!(h.coord.is_faulted());
+        assert_eq!(h.revision(), rev);
+        assert!(h.coord.retry_recovery(&mut h.db).is_err());
     }
 }

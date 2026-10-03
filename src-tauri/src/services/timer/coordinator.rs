@@ -826,7 +826,15 @@ impl Coordinator {
                 .as_ref()
                 .is_some_and(|l| l.state == SessionState::Running);
             let _ = self.handle_anomaly(db, sample, verdict)?;
-            if was_running {
+            // 本次检测也可能刚刚进入故障态，必须在原命令/统计继续前隔离。
+            self.refuse_if_faulted()?;
+            if was_running
+                || (verdict.is_wall_clock_anomaly()
+                    && self
+                        .live
+                        .as_ref()
+                        .is_some_and(|l| l.state == SessionState::Recovering))
+            {
                 return Err(AppError::RecoveryRequired);
             }
         }
@@ -932,14 +940,70 @@ impl Coordinator {
         verdict: SampleVerdict,
     ) -> Result<TimerSnapshot, AppError> {
         let Some(live) = self.live.clone() else {
-            // 没有会话：没有可恢复的事实，直接返回快照。
+            // 没有会话也不能忽略进程级的单调钟硬故障。
+            if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
+                self.faulted = true;
+            }
             return self.build(db.connection(), sample, false);
         };
 
-        // 幂等出口：重复事件不重复分割。
-        if live.state != SessionState::Running {
+        // 恢复记录幂等：不重复分割/写审计/增加版本，也不把重复通知当作新校正。
+        if live.state == SessionState::Recovering {
             if verdict != SampleVerdict::Unavailable {
                 self.reestablish_anchor(sample);
+            }
+            if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
+                self.faulted = true;
+            }
+            return self.build(db.connection(), sample, false);
+        }
+
+        // 没有开放工时需要分割，但墙钟异常仍须先记录，不能允许 resume
+        // 使用新归属却保留旧长期偏差，导致恢复成功后下一拍立即失败。
+        if live.state != SessionState::Running {
+            if verdict.is_wall_clock_anomaly() {
+                let tx = db
+                    .connection_mut()
+                    .unchecked_transaction()
+                    .map_err(map_sqlite)?;
+                time_edit_repo::write(
+                    &tx,
+                    &TimeEdit {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        session_id: live.id.clone(),
+                        before_json: self.clock_references_json(),
+                        after_json: serde_json::json!({
+                            "sampled_wall_at": sample.wall_ms,
+                            "sampled_monotonic_ms": sample.monotonic_ms,
+                            "clock_correction_accepted": true,
+                            "verdict": format!("{verdict:?}"),
+                            "intervals_changed": false,
+                        })
+                        .to_string(),
+                        reason: Some("wall clock anomaly without running work".into()),
+                        created_at: sample.wall_ms,
+                    },
+                )?;
+                // 暂停/恢复态的后续修改请求必须重新取得版本。终结态保持不变。
+                if !live.state.is_terminal() {
+                    session_repo::update_session_state(
+                        &tx,
+                        &live.id,
+                        live.row_version,
+                        live.state,
+                        SessionStateUpdate::default(),
+                    )?;
+                }
+                bump_revision(&tx)?;
+                tx.commit().map_err(map_sqlite)?;
+                self.load_session(db.connection(), &live.id)?;
+                self.reestablish_anchor(sample);
+                self.accept_clock_correction(sample);
+            } else if verdict != SampleVerdict::Unavailable {
+                self.reestablish_anchor(sample);
+            }
+            if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
+                self.faulted = true;
             }
             return self.build(db.connection(), sample, false);
         }
@@ -973,6 +1037,7 @@ impl Coordinator {
                 before_json: serde_json::json!({
                     "open_interval": live.open_interval.as_ref().map(|(id, _)| id),
                     "trusted_until": trusted_until,
+                    "clock_references": serde_json::from_str::<serde_json::Value>(&self.clock_references_json()).expect("serialized JSON"),
                     "intervals": before.iter().map(|i| serde_json::json!({
                         "id": i.id, "started_at": i.started_at, "ended_at": i.ended_at,
                         "duration_ms": i.duration_ms, "needs_review": i.needs_review,
@@ -986,6 +1051,7 @@ impl Coordinator {
                     "candidate_end": raw_wall.map(|_| split.candidate_end),
                     "sampled_wall_at": raw_wall,
                     "sampled_monotonic_ms": raw_wall.map(|_| sample.monotonic_ms),
+                    "clock_correction_accepted": verdict.is_wall_clock_anomaly(),
                 })
                 .to_string(),
                 reason: Some(reason.to_string()),
@@ -1020,18 +1086,41 @@ impl Coordinator {
         // 任何未闭合区间与归属对不上。
         if verdict != SampleVerdict::Unavailable {
             self.reestablish_anchor(sample);
-            // 偏差已经检测到、写进审计、恢复事务也提交了，此处才接受校正。
-            // 不在这里接受的话，同一份偏差会让此后每一拍都判成异常——
-            // 恢复之后就再也开不了新会话。
-            self.accept_clock_correction(sample);
+            // 仅墙钟异常的已提交审计允许接受校正；长间隔不得清除长期证据。
+            if verdict.is_wall_clock_anomaly() {
+                self.accept_clock_correction(sample);
+            }
+        }
+        if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
+            self.faulted = true;
         }
         self.build(db.connection(), sample, false)
+    }
+
+    fn clock_references_json(&self) -> String {
+        let anchor = self.anchor_state.as_ref().map(|s| s.anchor());
+        let short = self.anchor_state.as_ref().map(|s| s.drift_ref());
+        let lifetime = self.anchor_state.as_ref().map(|s| s.lifetime_ref());
+        let encode = |a: Option<super::anchor::Anchor>| {
+            a.map(|a| {
+                serde_json::json!({
+                    "wall_at": a.wall_at, "monotonic_at": a.monotonic_at,
+                })
+            })
+        };
+        serde_json::json!({"attribution": encode(anchor), "short_term": encode(short),
+            "lifetime": encode(lifetime)})
+        .to_string()
     }
 
     /// 故障后重试原系统恢复事务，不能只装载 running 行就解除隔离。
     pub fn retry_recovery(&mut self, db: &mut Db) -> Result<TimerSnapshot, AppError> {
         if !self.faulted {
             return self.snapshot(db);
+        }
+        // 单调钟读数已失去同一 run 的意义，只能通过新 run 的安全启动恢复。
+        if matches!(self.last_verdict, SampleVerdict::MonotonicBackwards { .. }) {
+            return Err(AppError::RecoveryRequired);
         }
         if self.live.is_none() && session_repo::running_foreground(db.connection())?.is_some() {
             return Err(AppError::RecoveryRequired);
@@ -1077,12 +1166,11 @@ impl Coordinator {
             .clone()
             .filter(|l| l.state == SessionState::Running)
         else {
-            // 没有正在运行的会话：**什么都不重建**。
-            // 这里原先调了 `reestablish_anchor`，于是每次系统事件都把归属基线、
-            // 短期参照和长期参照一并重置——一台空闲时反复收到休眠/唤醒事件的机器
-            // 会一直把长期偏差勾销，长期界永远不会触发。而且此处本来就没有开放区间，
-            // 重建归属基线也没有任何东西依赖它。（`read_sample` 已经更新过
-            // 检测器的「上一拍」。）
+            // 非运行状态也检测本次样本；只有记录后的墙钟异常可移动长期参照。
+            let verdict = self.observe(sample);
+            if verdict.needs_recovery() {
+                return self.handle_anomaly(db, sample, verdict);
+            }
             return self.build(db.connection(), sample, false);
         };
         let Some(boundary) = trusted else {
@@ -1182,7 +1270,15 @@ impl Coordinator {
                 .as_ref()
                 .is_some_and(|l| l.state == SessionState::Running);
             let _ = self.handle_anomaly(db, sample, verdict)?;
-            if was_running {
+            // 本次检测也可能刚刚进入故障态，必须在原命令/统计继续前隔离。
+            self.refuse_if_faulted()?;
+            if was_running
+                || (verdict.is_wall_clock_anomaly()
+                    && self
+                        .live
+                        .as_ref()
+                        .is_some_and(|l| l.state == SessionState::Recovering))
+            {
                 return Err(AppError::RecoveryRequired);
             }
         }
