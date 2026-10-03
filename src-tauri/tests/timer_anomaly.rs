@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use worktrace_lib::domain::session::{SessionMode, SessionState, TimerKind};
-use worktrace_lib::platform::clock::FakeClock;
+use worktrace_lib::platform::clock::{Clock, FakeClock};
 use worktrace_lib::services::timer::coordinator::{Coordinator, StartRequest};
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::{init_meta, require_meta};
@@ -324,4 +324,163 @@ fn the_recovery_transaction_releases_the_foreground_slot() {
             e.detail()
         ),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 异常事务失败：字段级回滚 + 故障态
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl H {
+    /// 让异常事务在 `update_session_state` 那一步失败：把库里的版本推高，
+    /// 于是协调器内存里的 `live.row_version` 与库里对不上。
+    fn desync_session_version(&self) {
+        self.db
+            .connection()
+            .execute("UPDATE work_session SET row_version = row_version + 5", [])
+            .unwrap();
+    }
+}
+
+/// **异常事务失败要字段级回滚**。
+///
+/// `Transaction` 在 drop 时回滚，所以「没提交」是自动的；这条测试要证的是
+/// **每一步的中间产物都没留下**——分割改过的区间、写的审计、会话状态、revision。
+#[test]
+fn a_failed_anomaly_transaction_rolls_back_field_by_field() {
+    let mut h = setup();
+    h.start();
+    h.advance(40_000);
+    h.coord.heartbeat(&mut h.db).unwrap();
+    let interval_id = h
+        .coord
+        .live()
+        .unwrap()
+        .open_interval
+        .as_ref()
+        .unwrap()
+        .0
+        .clone();
+    let cp_elapsed =
+        worktrace_lib::storage::checkpoint_repo::latest(h.db.connection(), &interval_id)
+            .unwrap()
+            .unwrap()
+            .elapsed_ms;
+
+    let rev_before = h.revision();
+    let intervals_before = h.intervals();
+
+    h.desync_session_version(); // 让事务里的版本校验失败
+    h.make_anomaly();
+    let err = h.coord.snapshot(&mut h.db).unwrap_err();
+
+    // 错误码：恢复语义，不是可重试的版本冲突
+    assert_eq!(err.code(), "RECOVERY_REQUIRED", "事务失败也要走恢复语义");
+
+    // 字段级核对：一步都没留下
+    let intervals_after = h.intervals();
+    assert_eq!(
+        intervals_after.len(),
+        intervals_before.len(),
+        "分割不得留下新区间"
+    );
+    for (a, b) in intervals_after.iter().zip(intervals_before.iter()) {
+        assert_eq!(a.ended_at, b.ended_at, "区间结束时刻不得被改");
+        assert_eq!(a.duration_ms, b.duration_ms, "区间时长不得被改");
+        assert_eq!(a.needs_review, b.needs_review, "待确认标记不得被改");
+    }
+    assert!(h.edits().is_empty(), "不得留下审计");
+    assert!(h.edits().is_empty(), "02 §9：操作失败不得出现半个审计记录");
+    assert_eq!(h.revision(), rev_before, "revision 不得前进");
+    assert_eq!(
+        h.coord.live().unwrap().state,
+        SessionState::Running,
+        "会话状态不得被改（内存不应用未提交状态）"
+    );
+    assert_eq!(
+        worktrace_lib::storage::checkpoint_repo::latest(h.db.connection(), &interval_id)
+            .unwrap()
+            .unwrap()
+            .elapsed_ms,
+        cp_elapsed,
+        "已持久化的检查点不得被动"
+    );
+    // 库里也必须是 running
+    let db_state: String =
+        h.db.connection()
+            .query_row("SELECT state FROM work_session", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(db_state, "running", "库里状态不得被改");
+}
+
+/// 失败之后**明确进入故障处理**：所有入口在重建成功之前一律拒绝。
+///
+/// 这一条防的是一个很隐蔽的错：检测器已经消费掉了异常那一拍采样，下一拍的增量
+/// 从异常那一拍起算，**再判就正常了**——不锁住的话，一次失败的恢复会让坏事实在
+/// 下一拍被当成好事实接受。
+#[test]
+fn a_faulted_coordinator_refuses_everything_until_rebuilt() {
+    let mut h = setup();
+    h.start();
+    h.advance(40_000);
+    h.coord.heartbeat(&mut h.db).unwrap();
+
+    h.desync_session_version();
+    h.make_anomaly();
+    assert_eq!(
+        h.coord.snapshot(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    assert!(h.coord.is_faulted(), "必须进入故障态");
+
+    // 故障态下：查询、tick、命令全部拒绝
+    assert_eq!(
+        h.coord.snapshot(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    assert_eq!(
+        h.coord.tick(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    let sid = h.session_id();
+    let sv = h.coord.live().unwrap().row_version;
+    let req = worktrace_lib::services::timer::coordinator::SessionRequest {
+        expected_data_epoch: h.epoch.clone(),
+        session_id: sid.clone(),
+        session_expected_version: sv,
+    };
+    assert_eq!(
+        h.coord.pause(&mut h.db, req).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+
+    // 成功重建后脱离故障态
+    let sample = h.clock.lock().unwrap().sample().unwrap();
+    h.coord
+        .rebuild_from_committed(h.db.connection(), &sid, sample)
+        .unwrap();
+    assert!(!h.coord.is_faulted(), "重建成功应当脱离故障态");
+    assert!(h.coord.snapshot(&mut h.db).is_ok(), "恢复之后查询应当可用");
+}
+
+/// **异常事务失败不得输出新的可信暂计**：失败就是失败，不给半截快照。
+#[test]
+fn a_failed_anomaly_transaction_emits_no_new_trusted_accrual() {
+    let mut h = setup();
+    h.start();
+    h.advance(40_000);
+    h.coord.heartbeat(&mut h.db).unwrap();
+    let trusted_before = h.coord.snapshot(&mut h.db).unwrap().active_ms;
+    assert_eq!(trusted_before, 40_000);
+
+    h.desync_session_version();
+    h.make_anomaly();
+    // 失败时返回的是 Err，**没有**任何快照被输出——也就不会有「新的可信暂计」
+    let out = h.coord.snapshot(&mut h.db);
+    assert!(out.is_err(), "事务失败不得输出快照");
+
+    // 内存里的 live 也没被改（仍是 running、仍指向同一个开放区间）
+    let live = h.coord.live().unwrap();
+    assert_eq!(live.state, SessionState::Running);
+    assert!(live.open_interval.is_some(), "开放区间不得被内存单方面清掉");
+    assert_eq!(live.closed_trusted_ms, 0, "已确认工时不得被内存改写");
 }

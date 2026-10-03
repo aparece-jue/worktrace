@@ -100,6 +100,13 @@ pub struct Coordinator {
     last_checkpoint: Option<Checkpoint>,
     /// 上次写检查点时的单调读数，用于判断是否到了 30 秒。
     last_checkpoint_monotonic: Option<i64>,
+    /// **故障态**：异常事务失败后置真。
+    ///
+    /// 为什么需要它：异常事务失败时事务已回滚、内存也没动，但检测器**已经消费掉了那一拍
+    /// 采样**——下一拍的增量会从「异常那一拍」起算，于是再判就正常了。若不锁住，一次
+    /// 失败的恢复会让坏事实在下一拍被当成好事实接受。置真后在成功重建之前所有入口一律
+    /// 拒绝（计划原文：「明确进入故障处理」）。
+    faulted: bool,
     live: Option<LiveSession>,
 }
 
@@ -113,6 +120,7 @@ impl Coordinator {
             last_verdict: SampleVerdict::Trusted,
             last_checkpoint: None,
             last_checkpoint_monotonic: None,
+            faulted: false,
             live: None,
         }
     }
@@ -206,6 +214,18 @@ impl Coordinator {
             open_interval: open,
         });
         Ok(())
+    }
+
+    /// 故障态下拒绝一切入口。成功重建（[`Coordinator::rebuild_from_committed`]）才解锁。
+    pub fn refuse_if_faulted(&self) -> Result<(), AppError> {
+        if self.faulted {
+            return Err(AppError::RecoveryRequired);
+        }
+        Ok(())
+    }
+
+    pub fn is_faulted(&self) -> bool {
+        self.faulted
     }
 
     /// 观察一次采样并记录判定。**每个入口只调一次**——同一个采样看两次，
@@ -353,6 +373,9 @@ impl Coordinator {
     /// 「理清」在这里是**两步**：02 §5 里 `Inbox → Doing` 不合法，必须
     /// `Inbox → Ready → Doing`。两次跃迁各自的 `expected_row_version` 按前一步的结果递进。
     pub fn start(&mut self, db: &mut Db, req: StartRequest) -> Result<CommandOutcome, AppError> {
+        // 故障态优先于一切：连请求校验都不做，避免给出「版本冲突」这种会让人重试的码。
+        self.refuse_if_faulted()?;
+
         // ① 校验请求——此阶段绝不采样
         {
             let conn = db.connection();
@@ -469,6 +492,8 @@ impl Coordinator {
             self.live = None;
             return Err(AppError::RecoveryRequired);
         }
+        // 重建成功才算脱离故障态。
+        self.faulted = false;
         let snapshot = match self.build(conn, sample, false) {
             Ok(s) => s,
             Err(_) => return Err(AppError::RecoveryRequired),
@@ -529,6 +554,7 @@ impl Coordinator {
 impl Coordinator {
     /// 暂停。用已验证的单调差闭合当前区间。
     pub fn pause(&mut self, db: &mut Db, req: SessionRequest) -> Result<CommandOutcome, AppError> {
+        self.refuse_if_faulted()?;
         self.validate_session_request(db, &req)?;
         let sample = self.sample_and_detect(db)?;
         let attributed_end = self.attribute(sample.monotonic_ms);
@@ -579,6 +605,7 @@ impl Coordinator {
     /// **不隐式解除等待、也不重开已结束的任务**。发现目标不行就报错让用户去改，
     /// 而不是替他做决定。
     pub fn resume(&mut self, db: &mut Db, req: ResumeRequest) -> Result<CommandOutcome, AppError> {
+        self.refuse_if_faulted()?;
         {
             let conn = db.connection();
             guard_epoch_ro(conn, &req.expected_data_epoch)?;
@@ -670,6 +697,7 @@ impl Coordinator {
 
     /// 结束。**可以从 `paused` 直接结束**（02 §3）。
     pub fn finish(&mut self, db: &mut Db, req: SessionRequest) -> Result<CommandOutcome, AppError> {
+        self.refuse_if_faulted()?;
         self.validate_session_request(db, &req)?;
         let sample = self.sample_and_detect(db)?;
         let attributed_end = self.attribute(sample.monotonic_ms);
@@ -857,6 +885,32 @@ impl Coordinator {
     ///
     /// 幂等：已经 `recovering` 就返回现有结果，不重复分割、不重复写审计、不加版本。
     pub fn handle_anomaly(
+        &mut self,
+        db: &mut Db,
+        sample: ClockSample,
+        verdict: SampleVerdict,
+    ) -> Result<TimerSnapshot, AppError> {
+        match self.try_handle_anomaly(db, sample, verdict) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(_) => {
+                // 事务已在 drop 时回滚，内存也没应用任何未提交状态。
+                // 但检测器已经吃掉了那一拍采样，所以必须**锁住**：
+                // 在成功重建之前所有入口都回恢复语义，不让坏事实在下一拍被当成好事实。
+                self.faulted = true;
+                Err(AppError::RecoveryRequired)
+            }
+        }
+    }
+
+    /// 异常事务本体。失败由 [`Coordinator::handle_anomaly`] 统一兜底。
+    /// 异常跃迁：**一次独立系统事务**保住可信前缀、把余段标成待确认、写审计、
+    /// 会话置 `recovering`，`revision + 1`。随后返回提交后的**权威快照**。
+    ///
+    /// 这是总纲 §9 里那个「独立系统状态事务」：它**不是**用户命令的执行结果，
+    /// 所以既不执行用户意图，也不因用户命令被拒而回滚。
+    ///
+    /// 幂等：已经 `recovering` 就返回现有结果，不重复分割、不重复写审计、不加版本。
+    fn try_handle_anomaly(
         &mut self,
         db: &mut Db,
         sample: ClockSample,
