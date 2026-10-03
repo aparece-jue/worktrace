@@ -434,3 +434,138 @@ fn read_meta_is_none_before_initialisation() {
     migrate(db.connection()).unwrap();
     assert!(read_meta(db.connection()).unwrap().is_none());
 }
+#[test]
+fn invalid_checkpoints_preserve_the_last_trusted_fact() {
+    let (_dir, mut db, epoch) = bootstrap();
+    start_session(&mut db, &epoch, "t1", 1, "s1", "i1", 1000).unwrap();
+    let initial = checkpoint_repo::latest(db.connection(), "i1")
+        .unwrap()
+        .unwrap();
+    for (wall, attribution, elapsed) in [(1100, 1200, 100), (999, 1000, 0), (1100, 999, 0)] {
+        let tx = db.connection_mut().transaction().unwrap();
+        assert!(checkpoint_repo::write(
+            &tx,
+            &Checkpoint {
+                interval_id: "i1".into(),
+                run_id: "run-1".into(),
+                wall_at: wall,
+                attribution_at: attribution,
+                elapsed_ms: elapsed,
+            }
+        )
+        .is_err());
+        tx.commit().unwrap();
+        assert_eq!(
+            checkpoint_repo::latest(db.connection(), "i1").unwrap(),
+            Some(initial.clone())
+        );
+    }
+    for sql in [
+        "UPDATE work_interval SET needs_review=1 WHERE id='i1'",
+        "UPDATE work_interval SET voided_at=1000 WHERE id='i1'",
+        "UPDATE work_session SET state='recovering', needs_review=1 WHERE id='s1'",
+    ] {
+        let tx = db.connection_mut().transaction().unwrap();
+        tx.execute(sql, []).unwrap();
+        assert!(checkpoint_repo::write(&tx, &initial).is_err());
+        tx.rollback().unwrap();
+    }
+    assert!(db
+        .connection()
+        .execute(
+            "INSERT INTO interval_checkpoint VALUES(NULL,'run-1',1000,1000,0)",
+            []
+        )
+        .is_err());
+}
+
+#[test]
+fn review_to_ready_clears_quality_and_audits_actual_values() {
+    let (_dir, mut db, _) = bootstrap();
+    let tx = db.connection_mut().transaction().unwrap();
+    tx.execute(
+        "UPDATE task SET status='Review', quality='good' WHERE id='t1'",
+        [],
+    )
+    .unwrap();
+    let row =
+        task_repo::transition_task(&tx, "t1", 1, TaskStatus::Ready, TransitionCause::User, 2000)
+            .unwrap();
+    assert_eq!(row.quality, None);
+    let (before, after): (String, String) = tx.query_row(
+        "SELECT before_json, after_json FROM task_change WHERE task_id='t1' AND created_at=2000", [],
+        |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&before).unwrap()["quality"],
+        "good"
+    );
+    assert!(serde_json::from_str::<serde_json::Value>(&after).unwrap()["quality"].is_null());
+    let row = task_repo::create_task(&tx, "trimmed", "  padded  ", None, 3000).unwrap();
+    let json: String = tx
+        .query_row(
+            "SELECT after_json FROM task_change WHERE task_id='trimmed'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["title"],
+        row.title
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn invalid_persisted_enums_are_rejected_instead_of_guessed() {
+    let (_dir, mut db, epoch) = bootstrap();
+    start_session(&mut db, &epoch, "t1", 1, "s1", "i1", 1000).unwrap();
+    db.connection().execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE task SET status='broken' WHERE id='t1'; UPDATE work_session SET state='broken' WHERE id='s1';").unwrap();
+    assert!(task_repo::get_task(db.connection(), "t1").is_err());
+    assert!(session_repo::get_session(db.connection(), "s1").is_err());
+}
+
+/// 库里的枚举值非法时必须**失败且说清是哪一列**，不许回落到默认值。
+///
+/// 这条守两件事：
+/// 1. 回落（`unwrap_or(Inbox)`）会把读不懂的数据伪装成合法状态——比报错危险得多；
+/// 2. 诊断文本必须指向那一列。`rusqlite::Error::InvalidQuery` 的文案是
+///    "Query is not read-only"，会把人引到完全错误的方向。
+///
+/// 场景用 `PRAGMA ignore_check_constraints` 构造：它模拟的正是「CHECK 被绕过」
+/// 或「更新版本写入的新取值被旧版本读到」。
+#[test]
+fn an_unknown_enum_value_fails_loudly_and_names_the_column() {
+    let (_dir, db, _epoch) = bootstrap();
+
+    db.connection()
+        .execute_batch("PRAGMA ignore_check_constraints=ON")
+        .unwrap();
+    db.connection()
+        .execute("UPDATE task SET status='GARBAGE' WHERE id='t1'", [])
+        .expect("绕过 CHECK 后应能写入非法状态");
+    db.connection()
+        .execute_batch("PRAGMA ignore_check_constraints=OFF")
+        .unwrap();
+
+    let err = task_repo::get_task(db.connection(), "t1").unwrap_err();
+    assert_eq!(err.code(), "STORAGE_ERROR", "读坏数据是存储层失败");
+
+    let detail = err.detail().unwrap_or_default();
+    assert!(
+        detail.contains("task.status"),
+        "诊断必须点名是哪一列，实际：{detail}"
+    );
+    assert!(
+        detail.contains("GARBAGE"),
+        "诊断应带上读到的值，实际：{detail}"
+    );
+    assert!(
+        !detail.contains("read-only"),
+        "不得出现 rusqlite InvalidQuery 的误导文案，实际：{detail}"
+    );
+    assert!(
+        !err.message().contains("GARBAGE"),
+        "库内容不得进入面向用户的文案：{}",
+        err.message()
+    );
+}

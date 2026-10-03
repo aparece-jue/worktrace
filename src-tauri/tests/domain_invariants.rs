@@ -311,7 +311,8 @@ fn timer_budget_matches_the_schema_constraint() {
     assert_eq!(c.remaining_ms(500), Some(1000));
     assert_eq!(c.remaining_ms(1500), Some(0), "到点剩余为 0");
     assert_eq!(c.remaining_ms(2000), Some(0), "超时不出现负数");
-    assert_eq!(c.overtime_ms(1500), None, "恰好到点不算超时");
+    assert_eq!(c.overtime_ms(500), Some(0));
+    assert_eq!(c.overtime_ms(1500), Some(0), "恰好到点不算超时");
     assert_eq!(c.overtime_ms(1700), Some(200));
 
     let s = TimerBudget::stopwatch();

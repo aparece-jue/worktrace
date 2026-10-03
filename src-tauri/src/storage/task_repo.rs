@@ -35,8 +35,10 @@ fn read_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow> {
         id: r.get(0)?,
         project_id: r.get(1)?,
         title: r.get(2)?,
-        // schema 的 CHECK 保证了取值合法；这里若解析失败说明有人绕过 CHECK 写坏了库。
-        status: TaskStatus::parse(&status).unwrap_or(TaskStatus::Inbox),
+        // schema 的 CHECK 保证了取值合法，所以解析失败只有两种可能：库被绕过 CHECK
+        // 写坏过，或更新版本写入的取值被旧版本读到。两种都要**说清是哪一列**——
+        // `InvalidQuery` 的文案是 "Query is not read-only"，会把人指向完全错误的方向。
+        status: TaskStatus::parse(&status).ok_or_else(|| enum_error(3, "task.status", &status))?,
         quality: r.get(4)?,
         row_version: r.get(5)?,
         created_at: r.get(6)?,
@@ -90,7 +92,10 @@ pub fn create_task(
         tx,
         id,
         "{}",
-        &format!("{{\"status\":\"Inbox\",\"title\":{}}}", json_str(title)),
+        &format!(
+            "{{\"status\":\"Inbox\",\"title\":{}}}",
+            serde_json::to_string(title.trim()).expect("serializing a string cannot fail")
+        ),
         now,
     )?;
 
@@ -131,7 +136,11 @@ pub fn transition_task(
     let transition = TaskTransition::new(before.status, to, cause)?;
 
     // 重开要清当前质量（02 §5 末）。
-    let quality = if transition.clears_quality() {
+    let quality = if transition.clears_quality()
+        || !matches!(
+            to,
+            TaskStatus::Review | TaskStatus::Done | TaskStatus::Cancelled
+        ) {
         None
     } else {
         before.quality.clone()
@@ -156,8 +165,9 @@ pub fn transition_task(
     record_change(
         tx,
         id,
-        &format!("{{\"status\":\"{}\"}}", before.status.as_str()),
-        &format!("{{\"status\":\"{}\"}}", to.as_str()),
+        &serde_json::json!({"status": before.status.as_str(), "quality": before.quality})
+            .to_string(),
+        &serde_json::json!({"status": to.as_str(), "quality": quality}).to_string(),
         now,
     )?;
 
@@ -189,21 +199,18 @@ fn record_change(
     Ok(())
 }
 
-/// 最小的 JSON 字符串转义，避免为了两处审计文本引入 serde 往返。
-fn json_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+/// 把「列里的值不在取值域内」包成带列名的 SQLite 转换错误。
+///
+/// 用 `FromSqlConversionFailure` 而不是 `InvalidQuery`：后者的文案是
+/// "Query is not read-only"，对「库里的枚举值非法」这种情况会把人指向
+/// 完全错误的方向，而诊断恰恰是库损坏时最需要的东西。
+pub(crate) fn enum_error(column: usize, field: &'static str, value: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Text,
+        Box::new(crate::domain::error::DomainError::UnknownEnumValue {
+            field,
+            value: value.to_string(),
+        }),
+    )
 }

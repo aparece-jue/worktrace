@@ -38,31 +38,69 @@ pub fn write(tx: &Transaction<'_>, cp: &Checkpoint) -> Result<(), AppError> {
         .into());
     }
 
-    let (session_run, ended_at): (String, Option<i64>) = tx
+    let (session_run, ended_at, started_at, voided_at, interval_review, state, session_review): (
+        String,
+        Option<i64>,
+        i64,
+        Option<i64>,
+        bool,
+        String,
+        bool,
+    ) = tx
         .query_row(
-            "SELECT s.run_id, i.ended_at
+            "SELECT s.run_id, i.ended_at, i.started_at, i.voided_at,
+                    i.needs_review, s.state, s.needs_review
                FROM work_interval i JOIN work_session s ON s.id = i.session_id
               WHERE i.id = ?1",
             [&cp.interval_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
         )
         .optional()
         .map_err(map_sqlite)?
         .ok_or(DomainError::EmptyText { field: "interval" })?;
 
-    if ended_at.is_some() {
-        return Err(DomainError::IllegalTransition {
-            from: "closed",
-            to: "checkpoint",
-        }
-        .into());
-    }
     if session_run != cp.run_id {
         return Err(DomainError::StaleRunContext {
             expected: session_run,
             actual: cp.run_id.clone(),
         }
         .into());
+    }
+    if ended_at.is_some()
+        || voided_at.is_some()
+        || interval_review
+        || session_review
+        || state != "running"
+    {
+        return Err(AppError::Domain {
+            detail: "checkpoint requires a trusted running interval".into(),
+        });
+    }
+    if started_at.checked_add(cp.elapsed_ms) != Some(cp.attribution_at) {
+        return Err(AppError::Domain {
+            detail: "checkpoint attribution and elapsed disagree".into(),
+        });
+    }
+    if let Some(previous) = latest(tx, &cp.interval_id)? {
+        if previous.run_id != cp.run_id
+            || cp.elapsed_ms < previous.elapsed_ms
+            || cp.attribution_at < previous.attribution_at
+            || cp.wall_at < previous.wall_at
+        {
+            return Err(AppError::Domain {
+                detail: "checkpoint must not move backwards".into(),
+            });
+        }
     }
 
     tx.execute(

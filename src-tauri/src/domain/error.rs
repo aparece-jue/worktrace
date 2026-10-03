@@ -36,6 +36,13 @@ pub enum DomainError {
     EmptyText { field: &'static str },
     /// 时钟样本不可信（采样失败或数值回退）。
     UntrustedSample { reason: &'static str },
+    /// 库里的枚举值不在取值域内。
+    ///
+    /// 正常路径上 schema 的 CHECK 挡得住，所以出现它只有两种可能：
+    /// 库里被绕过 CHECK 写坏过，或**更新版本写入的新取值被旧版本读到**。
+    /// 两种都必须**失败并说清是哪一列**，而不是回落到一个默认值——
+    /// 回落会把「读不懂的数据」伪装成合法状态，比报错危险得多。
+    UnknownEnumValue { field: &'static str, value: String },
     /// 携带的运行上下文已过期：给出的 `run_id` 与持久化事实不符。
     ///
     /// 典型来源是内存里还留着上一轮 run 的基线（08 §1 明确禁止沿用旧 `Instant`）。
@@ -75,6 +82,9 @@ impl std::fmt::Display for DomainError {
             Self::PendingAndVoided => write!(f, "an interval cannot be pending and voided at once"),
             Self::EmptyText { field } => write!(f, "{field} must not be empty"),
             Self::UntrustedSample { reason } => write!(f, "untrusted clock sample: {reason}"),
+            Self::UnknownEnumValue { field, value } => {
+                write!(f, "{field} holds an unknown value {value:?}")
+            }
             Self::StaleRunContext { expected, actual } => {
                 write!(f, "stale run context: expected {expected}, got {actual}")
             }

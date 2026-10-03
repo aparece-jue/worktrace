@@ -57,9 +57,12 @@ fn read_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
         id: r.get(0)?,
         task_id: r.get(1)?,
         run_id: r.get(2)?,
-        mode: SessionMode::parse(&mode).unwrap_or(SessionMode::Foreground),
-        state: SessionState::parse(&state).unwrap_or(SessionState::Running),
-        timer_kind: TimerKind::parse(&kind).unwrap_or(TimerKind::Stopwatch),
+        mode: SessionMode::parse(&mode)
+            .ok_or_else(|| super::task_repo::enum_error(3, "work_session.mode", &mode))?,
+        state: SessionState::parse(&state)
+            .ok_or_else(|| super::task_repo::enum_error(4, "work_session.state", &state))?,
+        timer_kind: TimerKind::parse(&kind)
+            .ok_or_else(|| super::task_repo::enum_error(5, "work_session.timer_kind", &kind))?,
         target_duration_ms: r.get(6)?,
         started_at: r.get(7)?,
         ended_at: r.get(8)?,

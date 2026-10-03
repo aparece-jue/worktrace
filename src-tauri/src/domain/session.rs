@@ -149,10 +149,10 @@ impl TimerBudget {
         self.target_duration_ms.map(|t| (t - elapsed_ms).max(0))
     }
 
-    /// 超时毫秒；未到点或正计时返回 `None`。到点**只提示，不自动完成**。
+    /// 超时毫秒；倒计时未超时返回 `Some(0)`，正计时返回 `None`。到点**只提示，不自动完成**。
     pub fn overtime_ms(self, elapsed_ms: i64) -> Option<i64> {
         self.target_duration_ms
-            .and_then(|t| (elapsed_ms - t).checked_sub(0).filter(|d| *d > 0))
+            .map(|t| elapsed_ms.saturating_sub(t).max(0))
     }
 }
 

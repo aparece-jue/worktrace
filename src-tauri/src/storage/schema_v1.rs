@@ -127,7 +127,7 @@ CREATE TABLE work_interval(
 );
 
 CREATE TABLE interval_checkpoint(
-  interval_id    TEXT PRIMARY KEY REFERENCES work_interval(id)    ON DELETE RESTRICT,
+  interval_id    TEXT PRIMARY KEY NOT NULL REFERENCES work_interval(id)    ON DELETE RESTRICT,
   run_id         TEXT NOT NULL    REFERENCES application_run(id)  ON DELETE RESTRICT,
   wall_at        INTEGER NOT NULL,
   attribution_at INTEGER NOT NULL,
