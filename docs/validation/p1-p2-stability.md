@@ -22,7 +22,7 @@
 
 ## 自动验证
 
-- 全库 cargo test --offline -q：208 个测试通过，包括原有 P1/P2 套件与累计 43 个行为回归。
+- 全库 cargo test --offline -q：209 个测试通过，包括原有 P1/P2 套件与累计 44 个行为回归。
   （验收核对的逐条结论见同目录 `p1-p2-acceptance.md`。）
 - cargo fmt --check：通过。
 - cargo clippy --offline --all-targets -- -D warnings：通过。
@@ -172,3 +172,32 @@ LiveSession 增加持久化 run_id，统一 read_sample 在采样/异常事务�
   返回 `DOMAIN_ERROR` 而不是落到唯一索引报 `STORAGE_ERROR`；唯一索引保留为兜底。
   反向验证：去掉 `start` 里那行检查 ⇒ 回归失败并报 `left: "STORAGE_ERROR" / right: "DOMAIN_ERROR"`。
   回归因此为 43 个，全库为 **208** 个。
+
+
+## P4 开工前独立审查
+
+基线 57c483f，初始工作区干净。前台占用领域守卫与跨 run 隔离保留。补强跨午夜事实测试：原午夜恰好暂停场景保留，并新增午夜前五分钟暂停、次日恢复的参数化场景；两者工作均为 40 分钟，暂停两小时不计入，测试总数保持 208。
+
+修正验收记录旧测试名、遗漏的 timer_checkpoint 4 条及总纲中过时的长期阈值拦截说法。P4 计划补明确的现有捕获任务项目关联/解除入口（版本、归档检查、幂等、审计与回滚），以及项目/标签错误版本上下文；不实现 P4 服务或推进 UI。本轮 208 测试、严格 Clippy、格式、分层检查通过，P1/P2 核心无新增阻断项，P4 可进入实施；正式平台验收仍待完成。本轮未提交。
+
+
+## 跨 run 守卫的完整性：故障恢复路径（本轮审查发现并修复）
+
+`read_sample` 里的跨 run 守卫**漏了一个取样点**：`retry_recovery` 的故障分支必须绕开
+`refuse_if_faulted` 才能重试恢复事务，所以它自己调 `clock.sample()`。全仓只有这两个取样点，
+而守卫只在其中一个——08 §1 那句「**所有**采样入口在采样与异常事务之前拒绝旧 running 行」
+因此不成立。
+
+**探针实测**（故障态 + `load_session` 装载一个别的 run 的 running 会话）：`retry_recovery`
+返回 `Ok`，并以本 run 的身份把 run-0 的开放区间分割、置 `recovering`、写 `time_edit` 审计、
+把 revision 从 1 加到 2。这与 02 §4（先由启动扫描做四类判定）和 P7「发现旧 run 的开放区间要
+拒绝、不自动修复或忽略历史」直接冲突。
+
+**改法**：守卫提成共用私有方法 `refuse_stale_run_session()`，`read_sample` 与
+`retry_recovery` 的故障分支各调一次。回归
+`retry_recovery_refuses_a_cross_run_running_session` 断言被拒（`RECOVERY_REQUIRED`）且
+旧 run 事实一行未动（状态、`needs_review`、行版本、区间 `ended_at`/`duration_ms`、审计行数、
+revision），并断言仍留在故障态等真正的恢复路径。
+
+**反向验证**：去掉 `retry_recovery` 里那一行调用 ⇒ 回归失败（`unwrap_err` 撞上 `Ok`）。
+回归因此为 44 个，全库为 **209** 个。

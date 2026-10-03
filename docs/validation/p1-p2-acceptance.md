@@ -1,7 +1,7 @@
 # P1 / P2 验收核对记录
 
 日期：2026-10-03。核对对象：`9db5898` 之后 P1/P2 的全部改动（含用户手改的跨 run 采样隔离，
-以及本次核对中补的重复提交用例）。校验基线：**208 个测试**。
+以及本次核对中补的重复提交用例）。校验基线：**209 个测试**。
 
 **依据**：总纲 §5 第 9 条点名的三份权威清单（02 §8 / 04 §9 / 06 §4），加上 §5 第 1–8 条横切约定
 与两份计划自身的勾选项。
@@ -10,7 +10,7 @@
 
 ## 一、结论
 
-- **核心验收（库与服务层）：可以验收。** 208 个测试（43 单元 + 165 集成）全绿；
+- **核心验收（库与服务层）：可以验收。** 209 个测试（43 单元 + 166 集成）全绿；
   `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`scripts/check-layers.ps1`
   （domain/storage/services）、`git diff --check` 全过；权威清单中属于 P1/P2 的条目**逐条有指名用例**。
 - **平台验收：不在 P1/P2 的完成门槛内，尚未完成。** 分工见第七节。
@@ -26,9 +26,9 @@
 | --- | --- | --- | --- |
 | 1 | 暂停后重启 | 域与仓储已钉；启动扫描归 P3 | 跨 run 装载 paused 可正常继续：`loaded_paused_session_without_anchor_can_resume_in_new_run`；跨 run running 一律隔离：`old_running_session_is_isolated_before_sampling_with_or_without_new_anchor`（7 入口 × 有/无基线 = 14 组）；四类扫描 → P3 Task 1 |
 | 2 | 暂停直接结束 | **已覆盖** | `a_paused_session_can_finish_directly` |
-| 3 | 恢复前台冲突 | **已覆盖**（错误码见四-3） | `a_second_foreground_start_is_refused_by_the_index`、`a_second_concurrent_foreground_start_is_refused_by_the_index`、`finishing_another_paused_session_preserves_active_timer` |
-| 4 | 并发 start | **已覆盖** | 同上两条索引用例 + `a_stale_epoch_request_writes_nothing` + `freezing_with_a_stale_version_is_refused` |
-| 5 | 跨午夜含暂停 | **已覆盖**（P2 事实 + P5 分桶） | P2：`pausing_across_midnight_keeps_pause_out_of_effort`（23:50 工作到 00:00 → 暂停两小时 → 次日 02:00 再工作 30 分钟 → 结束；暂停不计入、两段各自不跨午夜）；域层公式：`a_session_crossing_midnight_splits_evenly`、`clipping_follows_the_spec_formula`；分桶归 P5（见 P5 计划「跨午夜与日界分桶」） |
+| 3 | 恢复前台冲突 | **已覆盖**（错误码见四-3） | `a_second_foreground_start_is_refused_as_a_domain_conflict`、`resuming_while_another_foreground_runs_is_a_domain_conflict`、`a_second_concurrent_foreground_start_is_refused_by_the_index`、`finishing_another_paused_session_preserves_active_timer` |
+| 4 | 并发 start | **已覆盖** | 服务占用领域冲突用例与并发唯一索引兜底用例 + `a_stale_epoch_request_writes_nothing` + `freezing_with_a_stale_version_is_refused` |
+| 5 | 跨午夜含暂停 | **已覆盖**（P2 事实 + P5 分桶） | P2：`pausing_across_midnight_keeps_pause_out_of_effort`（23:45 工作到 23:55 → 暂停跨午夜两小时 → 次日 01:55 再工作 30 分钟 → 结束；暂停不计入、两段各自不跨午夜）；域层公式：`a_session_crossing_midnight_splits_evenly`、`clipping_follows_the_spec_formula`；分桶归 P5（见 P5 计划「跨午夜与日界分桶」） |
 | 6 | 空范围 | 域层已覆盖；查询归 P5 | 零长度区间合法：`zero_length_intervals_are_valid_but_negative_ones_are_not`；裁剪公式同上；空查询范围属统计 → P5 |
 | 7 | 同名根标签 | P1 已建机制，行为归 P4 | `uq_tag_root ON tag(kind,name) WHERE parent_id IS NULL`（`schema_v1.rs:187`）；**无测试踩过** → P4 Task 3 |
 | 8 | 历史工时重叠 | **已覆盖** | `rebased_clock_cannot_start_inside_confirmed_history` + `require_available_human_start`（在 start/resume 事务内） |
@@ -53,8 +53,8 @@
 ## 四、核对中发现的三处（均已在本次补齐）
 
 1. **跨午夜含暂停（02 §8 与 04 §9 同时列了它）——按「P2 验证事实、P5 验证分桶」切开承接。**
-   - **P2（事实）**：`pausing_across_midnight_keeps_pause_out_of_effort`——23:50 工作到 00:00 →
-     暂停两小时跨过午夜 → 次日 02:00 继续 30 分钟 → 结束；断言暂停一毫秒不计入
+   - **P2（事实）**：`pausing_across_midnight_keeps_pause_out_of_effort`——23:45 工作到 23:55 →
+     暂停两小时跨过午夜 → 次日 01:55 继续 30 分钟 → 结束；断言暂停一毫秒不计入
      （`active_ms = 40 分钟`）、两段区间各自的起止与 `duration_ms`、两段都可信，
      且**没有任何一段跨越午夜**（日界恰好落在两段之间）。
    - **P5（分桶）**：已写进 P5 计划 Task 1「跨午夜与日界分桶」——按查询时区实际日界拆分可信区间，
@@ -118,11 +118,20 @@ CHECK 边界 —— `the_boundary_at_2000ms_is_exact`；错误码一律断言 `c
 
 ## 八、证据与数字
 
-- **208 个测试** = 43 个库内单元测试（`src/`）+ 165 个集成测试（12 个套件）：
+- **209 个测试** = 43 个库内单元测试（`src/`）+ 166 个集成测试（12 个套件）：
   `domain_invariants` 18、`transaction_boundary` 14、`timer_clock` 12、`timer_anomaly` 11、
-  `timer_commands` 30、`timer_regressions` 40、`timer_seams` 10、`timer_snapshot` 9、
-  `error_contract` 6、`migrations` 6、`db_execution_boundary` 5。
-- 最近一次全量运行在本记录对应的合并状态上：`cargo test --offline` 208 passed / 0 failed；
+  `timer_commands` 30、`timer_regressions` 41、`timer_seams` 10、`timer_snapshot` 9、
+  `error_contract` 6、`migrations` 6、`db_execution_boundary` 5、`timer_checkpoint` 4。
+- 最近一次全量运行在本记录对应的合并状态上：`cargo test --offline` 209 passed / 0 failed；
   `cargo fmt --check`、`cargo clippy --offline --all-targets -- -D warnings`、
   `scripts/check-layers.ps1`、`git diff --check` 均通过。
-- 本记录**不改变任何产品行为**，只补了一条清单缺口的测试（重复提交）。
+- 本记录汇总核心测试与后续归属；相关产品行为变更包含前台占用错误码修复，不宣称已经完成后续报表或平台验收。
+
+
+## 本轮 P4 开工审查补正
+
+跨午夜 P2 事实测试保留 00:00 暂停场景，并追加 23:45 开始工作、23:55 暂停、01:55 恢复、02:25 结束的场景。暂停区间严格跨过日界，工作仍为 10+30=40 分钟；P5 负责实际查询时区分桶。测试总数不增加，因两场景在同一行为测试内参数化。
+
+修正旧前台占用测试名及遗漏的 timer_checkpoint 4 条，使十二套件之和与 165 个集成测试一致。总纲拦截机制统一为独立标记。P4 补上已捕获任务的项目关联服务，避免 F-002 “理清时可选项目”只有创建任务时能做到；这些为实施前计划补全，尚未实现 P4 服务。
+
+本轮独立验证：208 个测试全部通过，严格 Clippy、格式检查、分层检查通过。P1/P2 核心无新增阻断项，P4 计划就绪；本轮未实施 P4，平台与后续验收仍按第七节归属。

@@ -118,3 +118,15 @@ jiff = { version = "0.2", default-features = false, features = ["std", "tz-syste
 **四、两个零调用 `pub fn` 的归属。** `task_repo::list_tasks` 是 P2 计划明确留给 P4 的
 （已在 Task 5 加条要求收掉）；`session_repo::get_interval(conn, id)` 目前没有任何计划点名，
 而 P3 的 `correct(request)` 收 `interval_id`，正是它的消费者——不阻断，执行 P3 时登记真实签名即可。
+
+
+## 本轮开工审查补全
+
+- [ ] 为已有捕获任务提供 set_task_project(request)：project 参数显式表示绑定某项目或解除关联；请求带 expected_data_epoch/task_expected_version。仓储接受调用方事务，服务在同一事务检查任务版本、目标项目存在且 active，更新 project_id/updated_at/task.row_version，写 task_change 并恰好增加一次 revision。相同关联不写审计、不增加版本/revision；拒绝非法状态或版本时零变化。
+- [ ] F-002 理清界面通过上述项目关联与既有标签服务完成可选分类，然后调用 clarify_ready；不要求全部操作合为一次事务，不引入强制表单。已捕获 Inbox/Clarifying 任务不必重新创建才能归项目。此最小关联入口仅用于无运行会话的 Inbox/Clarifying/Ready；其它任务属性编辑和状态联动继续归 P3，不能绕过其规则。
+- [ ] 测试项目关联/解除、同值幂等、未知/归档项目、旧版本/epoch、非法状态或运行占用、失败回滚；验证理清为 Ready 后筛选能找到该任务。
+- [ ] **与 V0.1 边界的区分（写清以免被读成越界）**：规格里「不做 Inbox 转项目及属性迁移」指的是把任务**转成**独立 Project 实体并搬运属性；给任务**指定/解除**项目是 F-002 原文「Inbox 可直接 Ready；**可选项目/标签**」要求的能力——此前计划缺这个入口，等于该条落不了地。实现时守住边界：只改 `task.project_id`（连同审计与版本），**不创建项目、不迁移属性、不改变任务状态**。
+- [ ] P4 返回错误上下文时沿用同一读事务捕获规则，增加明确的 project/tag 版本载荷与消费者；现有 ErrorAuthority 仅有 task/session，不能拿 task 版本代替项目/标签版本。该扩展在 P4 实施中完成，P7 再统一接入 IPC。
+  **形状建议**：与其每加一类实体就再改一次签名（P5 还会要 interval/session），不如把载荷做成按 kind 分列的 `Vec<{kind, id, row_version}>`（或等价的小结构）；`requires_handshake` 与「读取失败不返回部分上下文」两条语义保持不变。
+
+当前结论仅表示可进入 P4 实施准备与开发，不表示 UI/平台验收完成。任务状态、时区校验及新关联入口仍须按本计划逐项实现和测试。

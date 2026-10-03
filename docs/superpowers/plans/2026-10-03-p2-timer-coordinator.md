@@ -170,6 +170,9 @@
 
 - [x] LiveSession 保留持久化 run_id。read_sample 在采样或异常事务之前拒绝旧 run 的 running 会话，不能依赖有无基线或只在闭合原语兜底。
 - [x] 回归覆盖有/无新 run 基线下 snapshot、tick、stats、heartbeat、system_pause、pause、finish 共 14 组路径；不增加 revision、不分割/闭合旧区间、不写恢复审计。
+- [x] **故障恢复路径也走同一判据**：把守卫提成共用私有方法 `refuse_stale_run_session()`，`read_sample` 与 `retry_recovery` 的故障分支各调一次。为什么不能只放在 `read_sample`：`retry_recovery` 必须绕开 `refuse_if_faulted` 才能重试恢复事务，所以它**自己取样本**——只在 `read_sample` 里放守卫，08 §1 那句「**所有**采样入口在采样与异常事务之前拒绝旧 running 行」就不成立。
+  修复前探针实测：`retry_recovery` 以本 run 身份分割了上一个 run 的开放区间（`ended_at` 被写成候选终点、`needs_review = true`、审计 0 → 1、revision 1 → 2），与 02 §4 的启动扫描分工、P7「发现旧 run 的开放区间要拒绝、**不自动修复**」都冲突。
+  回归 `retry_recovery_refuses_a_cross_run_running_session`；**反向验证**：去掉那一行调用 ⇒ 回归失败（`retry_recovery` 返回 `Ok`）。
 - [ ] 旧 running 会话须先由 P3/P7 启动扫描恢复；paused 的 run_id 归一仍按既有 P3 规则，不改变为自动继续。
 
 
@@ -186,9 +189,11 @@
   `resuming_while_another_foreground_runs_is_a_domain_conflict`——都断言 `DOMAIN_ERROR`，且
   会话/区间/行版本/revision 一律不变。
 - [x] **跨午夜含暂停（02 §8 的 P2 半边：验证事实）**：`pausing_across_midnight_keeps_pause_out_of_effort`
-  —— 23:50 工作到 00:00 → 暂停两小时 → 次日 02:00 继续 30 分钟 → 结束；断言暂停一毫秒不计入
+  —— 23:45 工作到 23:55 → 暂停跨午夜两小时 → 次日 01:55 继续 30 分钟 → 结束；断言暂停一毫秒不计入
   （`active_ms = 40 分钟`）、两段区间各自的起止与 `duration_ms`、两段都不 `needs_review`，
   且**没有任何一段跨越午夜**。按查询时区**分桶到每一天**由 P5 承接（见 P5 计划
   「跨午夜与日界分桶」）。
 - 注意（写测试时踩过）：`advance` 一次跳好几分钟会被判成**「疑似挂起」**（`expected_interval_ms = 30s`），
   与真实采样节奏不符。用例里按 30 秒切片推进（`advance_in_ticks`）。
+
+本轮跨午夜回归同时保留恰好 00:00 暂停的原场景；新增的 23:55 暂停场景才严格覆盖“暂停期间跨过午夜”，二者均不计暂停时间。
