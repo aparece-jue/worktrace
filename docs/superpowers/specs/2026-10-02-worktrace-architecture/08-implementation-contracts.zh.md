@@ -21,7 +21,7 @@
 
 ## 2. 番茄钟阶段（V0.2）
 
-timer_kind=pomodoro 额外保存 phase(work/break)、phase_state(running/frozen)、cycle_index、work_budget_ms、break_budget_ms、phase_elapsed_ms 检查点和状态版本。工作阶段沿用 running/paused 工作区间；休息阶段 session 保持 paused，无开放 work_interval，只运行独立阶段计时。休息不占前台槽位、不进入人工工时。
+timer_kind=pomodoro 额外增加阶段状态：session 上是 phase(work/break)、phase_state(running/frozen)、cycle_index；work_budget_ms/break_budget_ms 在轮次表 pomodoro_cycle 上按轮取值，不在 session 上；进度存于 phase_checkpoint（休息）或由该轮区间派生（工作）。字段矩阵与状态版本见 §8。工作阶段沿用 running/paused 工作区间；休息阶段 session 保持 paused，无开放 work_interval，只运行独立阶段计时。休息不占前台槽位、不进入人工工时。
 
 工作到点只提示，仍记实际工作及超时；用户显式开始休息才闭合工作区间并切 break。休息到点只提示，用户显式开始下一轮才重新检查前台占用并打开区间；占用冲突保持原阶段状态（§7 表：失败原状态不变）。暂停冻结当前阶段，继续休息不等于 resume 工作。锁屏/休眠冻结阶段，醒来显式继续；重启后工作按区间恢复规则，休息按持久检查点恢复为冻结，不补停机时间。完成任务结束所有阶段。工作段预算与整次 session 工时分别显示，不能用累计工时减每轮预算。
 
@@ -61,17 +61,41 @@ V0.3 补充两个验收条目：F-209 AI 总结、F-210 AI 排期建议。总结
 
 休息阶段检查点独立保存为 phase_checkpoint(session_id、run_id、phase、cycle_index、session_version、phase_elapsed_ms、sampled_at)；不挂在旧工作 interval 上。写入须匹配当前阶段/版本；纯进度检查点不增加 revision，phase/phase_state 切换必须增加 session_version 和业务 revision。会话 finished/discarded 时清除活动阶段（phase/phase_state=null），历史保留审计。
 
+本表引用 02 §3 的命令登记；同名命令是同一个入口，这里只列番茄钟附加条件。
+
 | 命令 | 前置状态 | 结果 |
 | --- | --- | --- |
-| pause_work | work/running 且 session running | 闭合工作区间，work/frozen，session paused |
-| resume_work | work/frozen 且 session paused | 检查前台占用，开区间，work/running |
+| pause | work/running 且 session running | 闭合工作区间，work/frozen，session paused |
+| resume | work/frozen 且 session paused | 检查前台占用，开区间，work/running |
 | start_break | work/running 或 work/frozen，无待确认区间 | 运行时闭合区间；已暂停则不新建；切 break/running，elapsed=0，session paused |
 | pause_break | break/running | break/frozen，无工作区间 |
 | continue_break | break/frozen | break/running，只继续阶段计时 |
 | start_next_cycle | break/running 或 break/frozen | 检查前台占用；成功 cycle_index+1、work/running、开区间，阶段 elapsed=0；失败原状态不变 |
-| finish | 任一合法活动阶段且无待确认记录 | 闭合工作区间（若有），session finished，清活动阶段 |
-| reconcile | session recovering | 按区间恢复规则确认/丢弃，保存 paused 时为 work/frozen，不自动开始下一阶段 |
+| finish（同 02 §3） | session running/paused 且无待确认记录 | 执行统一 finish；番茄钟附加清活动阶段，recovering 返回 RECOVERY_REQUIRED |
+| reconcile（同 02 §3，V0.1 已有） | session recovering | 统一恢复确认/丢弃不确定区间；保存 paused 时附加 work/frozen，不自动开始下一阶段 |
 
-普通 resume 不可用于 break，返回 POMO_STATE_CONFLICT；休息需要 continue_break 或 start_next_cycle。任务取消同 finish 的阶段清理，但遇到 recovering 仍返回 RECOVERY_REQUIRED。恢复启动后的休息一律 break/frozen，工作一律按区间恢复，不自动补阶段时间。命令均检查 expected_data_epoch/row_version，非法状态不写入；到点只提醒，不触发上述跃迁。图仅展示常见路径，完整允许条件以本表为准。
+公开 pause/resume 统一用于普通计时及番茄钟 work 阶段；resume 不可用于 break，返回 POMO_STATE_CONFLICT；休息需要 continue_break 或 start_next_cycle。任务取消同 finish 的阶段清理，但遇到 recovering 仍返回 RECOVERY_REQUIRED。恢复启动后的休息一律 break/frozen，工作一律按区间恢复，不自动补阶段时间。命令均检查 expected_data_epoch/row_version，非法状态不写入；到点只提醒，不触发上述跃迁。图仅展示常见路径，完整允许条件以本表为准。
 
-V0.2 番茄钟 tick/查询/命令结果必带 phase、phase_state、cycle_index、phase_elapsed_ms、phase_remaining_ms、phase_overtime_ms；phase_remaining=max(0,本阶段预算-phase_elapsed)，人工 active_ms 在休息保持冻结。普通计时的阶段字段为 null，现有 remaining_ms 只表示工作计时预算，不能拿它展示休息倒计时。所有字段来自同一协调器快照，仍以 session_version 过滤旧 tick。
+V0.2 番茄钟 tick/查询/命令结果必带 phase、phase_state、cycle_index、phase_elapsed_ms、phase_remaining_ms、phase_overtime_ms；phase_remaining=max(0,本阶段预算-phase_elapsed)，人工 active_ms 在休息保持冻结。普通计时的阶段字段为 null；remaining_ms/overtime_ms 仅 countdown 非空，pomodoro 使用阶段字段，不能用普通剩余值展示工作轮次或休息倒计时。所有字段来自同一协调器快照，仍以 session_version 过滤旧 tick。
+
+## 8. 统一命令、轮次进度与字段口径（本轮确认）
+
+采用方案 (b)：只有公开 pause/resume，没有另一组公开工作阶段命令。02 §3 的 pause/resume 是基础操作，08 §7 是其番茄钟前置条件及阶段元数据扩展。普通计时沿用现有规则；pomodoro work/running 的 pause 闭合区间并设 work/frozen，work/frozen 的 resume 校验占用并开区间、设 work/running。break 调用这两个工作命令返回 POMO_STATE_CONFLICT，不写库；使用 pause_break/continue_break 或 start_next_cycle。前端、托盘及平台事件均调用同一协调器；界面“暂停/继续”按 phase 选择命令，而不是维护命令别名。
+
+V0.2 增加 pomodoro_cycle(session_id、cycle_index、started_at、work_budget_ms、break_budget_ms)，主键为 session_id/cycle_index，预算保存该轮值。番茄钟 work_interval 增加 cycle_index，并校验其归属是同 session 的有效轮次；普通工作区间为 null。首次 start 建立第 1 轮；start_next_cycle 同事务建下一轮、更新当前轮号并开工作区间，失败整体回滚。每段工作在打开时绑定轮次，历史修正/异常区间分割必须保留轮次，不得把旧轮次区间改归当前轮次。
+
+工作阶段 phase_elapsed_ms 是当前轮次可信有效区间时长之和，加当前开放区间的可信单调暂计；不保存成另一份工时真相。休息阶段 phase_elapsed_ms 由独立 phase_checkpoint 及运行基线取得。pause/resume 只关闭/新开工作区间，阶段累计不清零；新区间初始 elapsed_ms=0 是区间检查点值，与阶段进度不同。start_break 建立休息阶段且休息进度为 0；start_next_cycle 创建新轮且工作进度为 0。continue_break 保留休息已消耗时间。
+
+重启时先按区间恢复规则处理，再按当前 cycle_index 汇总可信工时：10 分钟工作、暂停后强杀，重启仍显示该轮已用 10 分钟，而不是从零开始。若当前区间有待确认部分，显示确认进度与待确认分列，不使用猜测值推进预算；确认/丢弃后按原轮次重算，并保存 work/frozen。休息从最后成功 phase_checkpoint 恢复为 frozen，不计停机时间。修正同轮历史必须重算当前进度并增加 session_version，使旧 tick 失效。
+
+| timer_kind | 普通预算字段 | 阶段字段与剩余时间 |
+| --- | --- | --- |
+| stopwatch | target_duration_ms/remaining_ms/overtime_ms 均 null | 全部 phase 字段 null，active_ms 正计时 |
+| countdown | target_duration_ms 必填；remaining=max(0,target-active)，overtime=max(0,active-target) | phase 字段均 null，暂停冻结工作累计 |
+| pomodoro | target_duration_ms/remaining_ms/overtime_ms 均 null | work_budget_ms/break_budget_ms 来自当前轮；phase_remaining=max(0,本阶段预算-phase_elapsed)，phase_overtime=max(0,phase_elapsed-本阶段预算) |
+
+会话终态仍返回确认 active_ms；番茄钟 phase/phase_state/phase_elapsed_ms/phase_remaining_ms/phase_overtime_ms 为 null，轮次历史从明细查询获取。pause/resume/reconcile 的规则和 UI 不能从 session=paused 推断休息是否冻结，必须读 phase_state。
+
+验收示例：25 分钟工作阶段做 10 分钟，pause/resume 后剩 15 分钟；下一轮剩 25 分钟而累计人工保留前轮。休息 5 分钟做了 2 分钟，pause_break/continue_break 后剩 3 分钟。暂停工作重启保留本轮进度；异常区间确认后按原轮重算；旧轮不混入新轮；普通计时与番茄钟返回的 null 字段符合上表。
+
+命令关系补充：finish 是跨计时类型的同一命令，08 只扩展阶段清理；reconcile 从 V0.1 起就是恢复命令，不能误读为 V0.2 新增。correct 仅修正 finished 历史；reconcile 可在同事务内部复用区间修正/结束原语，但不能别名为 correct 或 finish。完整入口、版本及恢复参数以 02 §3 为准。

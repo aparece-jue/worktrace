@@ -9,7 +9,7 @@ This replaces pause-total storage. The schema is logical, not an executable migr
 | Version | Objects |
 | --- | --- |
 | V0.1 | app_meta, application_run, interval_checkpoint, project, task, work_session, work_interval, time_edit, task_change, daily_plan, tag, task_tag |
-| V0.2 | goal, milestone, task_dependency, time_block, task_knowledge (actual-use metadata), phase_checkpoint (break-phase checkpoint) |
+| V0.2 | goal, milestone, task_dependency, time_block, task_knowledge (actual-use metadata), phase_checkpoint (break-phase checkpoint), pomodoro_cycle (cycle budgets/interval ownership) |
 | V0.3 | ai_suggestion, ai_feedback; per-action input/destination confirmation |
 | V0.4 | context_fact, decision, document (references only), task_document, outcome, outcome_source, agent_import_batch/item |
 | V0.5 | knowledge_stat (rebuildable cache), report_snapshot (confirmed reports) |
@@ -94,20 +94,27 @@ M01 supplies executable DDL, CHECKs, NOT NULLs, deletion policies and migrations
 
 ## 3. Sessions and timers
 
-| Intent | Atomic changes |
+02 §3 is the sole public session-command registry; 08 §7 adds Pomodoro preconditions to the same commands, never duplicate endpoints. These business-intent names use the serial coordinator/DB transaction; edits include expected_data_epoch/row_version and never partially commit.
+
+| Command | Preconditions and atomic changes |
 | --- | --- |
-| start | Check executability/foreground occupancy; create running session and open interval |
-| pause | Close open interval; set paused |
-| resume | Check occupancy; create open interval; set running |
-| finish | Close interval if running; set finished and ended_at |
-| switch/interrupt (V0.2) | Pause old session; start new session with interruption_of; roll back both on failure |
-| correct | Check row_version, ranges and overlaps; edit intervals; append time_edit; increase version |
+| start | Executable task/occupancy checks; create running session/open interval/initial checkpoint; Pomodoro also creates cycle 1, work/running |
+| pause | Running without pending intervals; close interval, paused; Pomodoro work/running only, additionally work/frozen |
+| resume | Paused without pending intervals; check occupancy/open interval/running; Pomodoro work/frozen only, additionally work/running while retaining cycle progress |
+| finish | Running/paused without pending records; close interval if running, finished/ended_at; clear active Pomodoro phase, including break/running or break/frozen. Recovering yields RECOVERY_REQUIRED |
+| switch (V0.2) | Validate old work/target; atomically pause old and start new; reason=user_switch/interrupt, interrupt reason retains interruption_of. No separate public interrupt alias; not for Pomodoro break |
+| correct | Finished only; check version/ranges/overlap, edit trusted history/audit/recompute cycles. Recovering uses reconcile; running/paused must finish first |
+| reconcile | Recovering only; action=confirm/discard_uncertain, target_state=paused/finished; atomically resolve all pending intervals, validate ranges/overlap, audit, clear review flags/update run_id. Paused never auto-times; Pomodoro work/frozen. Never void the entire session |
+| discard_session | Explicit user intent to void entire session; close open interval if any, void all/clear review flags, discarded/ended_at, clear phase and audit; never delete audit or implicitly change task state |
+| backfill | Manual history: validate task/ranges/overlap, create finished session/trusted intervals/audit; never start timing or fabricate task completion |
+
+start_break/pause_break/continue_break/start_next_cycle are V0.2-only phase commands under 08 §7. finish ends a session, not a task. Task completion/cancellation uses the same finish primitive in its task transaction, rejecting the whole action on recovering. reconcile may share internal finish logic but is one transaction, never client-side correct then finish.
 
 ![Session and interval lifecycle](images/session-interval-lifecycle.svg)
 
 Pause/resume keeps the session; starting again after finish creates a new one. A paused session may finish directly. Completing/cancelling a task finishes its running/paused sessions. Unresolved recovering records return RECOVERY_REQUIRED rather than silently confirming history.
 
-active_ms sums trusted closed interval.duration_ms plus coordinator monotonic live elapsed; duration equals accounting endpoint difference; anomalies and manual correction follow 08. Paused values freeze because there is no open interval. Countdown remaining_ms=max(0,target_duration_ms-active_ms); overtime is shown separately. Expiry alerts but does not complete the task. Pauses consume no countdown budget.
+active_ms sums trusted closed interval.duration_ms plus coordinator monotonic live elapsed; duration equals accounting endpoint difference; anomalies and manual correction follow 08. Paused values freeze because there is no open interval. Only countdown uses remaining_ms=max(0,target_duration_ms-active_ms); overtime is shown separately. Expiry alerts but does not complete the task. Pauses consume no countdown budget.
 
 Use a monotonic clock for live durations and wall time for persisted attribution. Wall-clock changes, suspend and discontinuities cannot be hidden with now-started_at: stop the uncertain interval at the last trusted checkpoint and require reconciliation. Monotonic clock state is not reused across restarts.
 
@@ -128,7 +135,7 @@ After single-instance ownership, create application_run and scan unfinished prev
 
 Keep session.needs_review and interval flags consistent in transactions; never independently modify them. Running has no pending interval; recovering has a pending interval or explicit invariant-fault marker. About every 30 seconds persist a trusted checkpoint with interval_id/trusted wall time/live baseline. It is a candidate cutoff, never automatic effort backfill. M04/M05 specify checkpoint persistence; last_heartbeat_at alone is not a complete clock mapping.
 
-Recovering does not occupy running foreground. Show confirmed effort and pending interval separately; unknown endpoints are unknown ranges, not precise fabricated duration. Confirm/edit the uncertain interval and finish, or close it, save paused and explicitly resume.
+Recovering does not occupy running foreground. Show confirmed effort and pending interval separately; unknown endpoints are unknown ranges, not precise fabricated duration. Use reconcile(action=confirm,target_state=finished/paused) to confirm/edit uncertain intervals atomically; retained pause requires explicit resume.
 
 Discard uncertain interval only sets its voided_at and clears pending status, preserving earlier valid intervals; session becomes finished or paused. Voiding the whole session is a separate explicit intent, voids every interval and sets discarded. Audit/version/revision updates are atomic; do not share an ambiguous Discard button. Confirmation cannot overlap subsequently recorded human work.
 
@@ -191,7 +198,7 @@ Pause/restart, finish while paused, conflicting resume, concurrent starts, pause
 
 V0.1 task_change records state/quality/assignment edits in the same transaction, supporting reopen history and completion by date. daily_plan records selected local date/timezone; updated_at does not mean planned today. First start freezes the estimate envelope to baseline_estimate_json; later estimates do not overwrite it. Explicit rebasing is audited; estimates after work began are labelled non-pre-start. Default error compares confirmed human duration; incomplete tasks do not enter completed samples.
 
-M01 full DDL maps every invariant to CHECK/index or transactional service validation. Interval edits target finished/recovering sessions only; finish/confirm running or paused records first. Failed edits never leave partial audit records.
+M01 full DDL maps every invariant to CHECK/index or transactional service validation. Interval edits target finished sessions only; finish/confirm running or paused records first. Failed edits never leave partial audit records.
 
 Restore: stop timers/pause writes/close connections, consistently back up current DB, validate candidate in a temporary path (integrity/FKs/schema; reject future versions, back up and migrate old versions), switch recoverably in the same directory, reopen/validate. Roll back paths and reopen the original on failure. Never overwrite an open WAL database. Backups contain all required data; export/schema/application versions are distinct.
 
@@ -220,3 +227,7 @@ See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en
 V0.1 adds interval_checkpoint(interval_id/run_id/wall_at/attribution_at/elapsed_ms); recovery uses only the last persisted checkpoint. Trusted closed duration_ms is nonnull and equals ended_at-started_at; uncertain rows may be null. Add CHECK/FKs. V0.2 phases and V0.4/V0.5 outcomes/report migrations follow 08. Core ER is a summary omitting sampling/checkpoint fields; text and 08 are normative.
 
 V0.2 phase/phase_state/cycle_index and independent phase_checkpoint reference session; phase_state distinguishes active/frozen break. V0.1 starts sample the continuous trusted attribution anchor rather than re-anchoring raw wall time; see 08 §7.
+
+Public pause/resume serve ordinary timing and Pomodoro work; break uses explicit phase commands. V0.2 migrates pomodoro_cycle and interval.cycle_index together, deriving work phase elapsed from that cycle and preserving ownership during recovery. Ordinary budget fields are null for stopwatch/pomodoro; see 08 §8.
+
+Recovering edits/confirmation use reconcile, never correct; uncertain discard is reconcile(action=discard_uncertain), whole-session void is discard_session. Broken invariants require diagnosis, never guessed auto-repair.

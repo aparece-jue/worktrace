@@ -179,3 +179,5 @@
 duration_ms：可信区间时长校验值，与统计起止差一致；归属终点 Attribution Endpoint：开始墙钟＋可信单调增量；检查点 Checkpoint：成功持久化的可信时钟映射；phase：番茄钟 work/break 阶段；report_snapshot：用户确认后不可变的报告内容和事实快照。
 
 归属基线 Attribution Baseline：一个连续可信 run 段的内存锚点，记 anchor_wall_at 与 anchor_monotonic；归属终点由它推出（见 08 §7）。phase_state：番茄钟阶段自身的 running/frozen，与 session 的 running/paused 不是一回事——休息时 session 是 paused，阶段仍在计时。phase_checkpoint：休息阶段的检查点，挂在 session 上而不是工作区间上，因为休息期没有开放的 work_interval。
+
+pomodoro_cycle：同一 session 的一轮工作/休息及预算历史；work_interval.cycle_index 标记工作归属。phase_elapsed_ms：工作时为当前轮区间累计，休息时为阶段检查点加可信运行增量；不是 session.active_ms，也不是新区间 elapsed_ms。

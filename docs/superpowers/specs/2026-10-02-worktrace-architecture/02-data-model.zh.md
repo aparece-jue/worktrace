@@ -9,7 +9,7 @@
 | 版本 | 存储对象 |
 | --- | --- |
 | V0.1 | app_meta、application_run、interval_checkpoint、project、task、work_session、work_interval、time_edit、task_change、daily_plan、tag、task_tag |
-| V0.2 | goal、milestone、task_dependency、time_block、task_knowledge（实际使用标记）、phase_checkpoint（休息阶段检查点） |
+| V0.2 | goal、milestone、task_dependency、time_block、task_knowledge（实际使用标记）、phase_checkpoint（休息阶段检查点）、pomodoro_cycle（轮次预算与区间归属） |
 | V0.3 | ai_suggestion、ai_feedback；本次 AI 输入/目的地确认记录 |
 | V0.4 | context_fact、decision、document（仅引用）、task_document、outcome、outcome_source、agent_import_batch/item |
 | V0.5 | knowledge_stat（可重建派生缓存）、report_snapshot（确认报告） |
@@ -98,14 +98,21 @@ CREATE INDEX idx_session_task ON work_session(task_id);
 
 ## 3. 工作会话与计时
 
-| 意图 | 同一个事务中的变更 |
+02 §3 是唯一公开会话命令登记表；08 §7 仅补同一命令的番茄钟状态条件，不另定义同名入口。以下是业务意图名称，所有变更都经串行协调器及数据库事务；修改已有实体带 expected_data_epoch/row_version，失败不部分提交。
+
+| 命令 | 允许状态与同事务变更 |
 | --- | --- |
-| start | 校验任务可执行、前台占用 → 新建 running session 和 open interval |
-| pause | 关闭 open interval → session 设为 paused |
-| resume | 校验占用 → 新建 open interval → session 设为 running |
-| finish | 若运行则关闭 interval → session 设为 finished，记录 ended_at |
-| switch/interrupt（V0.2） | 暂停旧 session → 启动新 session，记录 interruption_of；任一步失败全部回滚 |
-| correct | 检查 row_version、范围与重叠 → 编辑有效区间、写 time_edit、增加版本 |
+| start | 校验任务可执行及占用，创建 running session/open interval/初始检查点；番茄钟同时创建第 1 轮，work/running |
+| pause | running 且无待确认区间；闭合工作区间并设 paused；番茄钟仅 work/running，扩展为 work/frozen |
+| resume | paused 且无待确认区间；校验占用并开区间、设 running；番茄钟仅 work/frozen，扩展为 work/running，保留本轮进度 |
+| finish | running/paused 且无待确认记录；运行时关闭区间，设 finished/ended_at；番茄钟清活动阶段，允许从 break/running 或 break/frozen 结束。recovering 返回 RECOVERY_REQUIRED |
+| switch（V0.2） | 校验旧工作会话及目标；原子 pause 旧会话并 start 新会话，reason=user_switch/interrupt；interrupt 理由记录 interruption_of。不存在另一个公开 interrupt 别名；番茄钟 break 不用此命令 |
+| correct | 仅 finished；检查版本、区间与重叠，修正可信历史并写 time_edit，重算相关轮次。recovering 必须使用 reconcile；运行/暂停须先 finish |
+| reconcile | 仅 recovering；action=confirm/discard_uncertain，target_state=paused/finished；一次事务处理全部待确认区间、校验范围/重叠、写 time_edit、清待确认标记及更新 run_id。paused 不自动计时，番茄钟为 work/frozen；不能用来作废整次会话 |
+| discard_session | 用户明确作废整次会话；关闭运行区间（若有），全部区间置 voided_at/清 needs_review，设 discarded/ended_at，清活动阶段并写 time_edit；不删除审计，不隐式改变任务状态 |
+| backfill | 手工补录历史；校验任务/范围/重叠，创建 finished session、可信闭合区间与 time_edit；不启动计时、不伪造 task 完成事件 |
+
+start_break/pause_break/continue_break/start_next_cycle 是 V0.2 特有阶段命令，其状态表见 08 §7。finish 结束会话，不等于完成任务；任务完成/取消服务调用相同结束原语并同事务更新任务，发现 recovering 先整体拒绝。reconcile 内部可调用共同的结束原语，但确认请求是一次事务，不要求客户端先 correct 再 finish。
 
 ![Session / interval 生命周期](images/session-interval-lifecycle.svg)
 
@@ -114,7 +121,7 @@ CREATE INDEX idx_session_task ON work_session(task_id);
 暂停后恢复仍是同一 session；结束后再次开始是新 session。paused 也可直接 finish。完成/取消任务会结束其所有运行或暂停 session；若存在 recovering 记录，先返回 RECOVERY_REQUIRED，不悄悄确认历史。
 
 显示 active_ms = SUM(可信闭合 interval.duration_ms) + 协调器当前单调增量；duration_ms 与归属终点差一致，异常和人工修正规则见 08。
-paused 无 open interval，因此值冻结。倒计时 remaining_ms = max(0, target_duration_ms - active_ms)，超时另显示 overtime_ms；到点只提示，不自动完成任务。恢复不会消耗暂停期间的预算。
+paused 无 open interval，因此值冻结。仅 countdown 的 remaining_ms = max(0, target_duration_ms - active_ms)，超时另显示 overtime_ms；到点只提示，不自动完成任务。恢复不会消耗暂停期间的预算。
 
 运行中用单调时钟测量时长，墙钟用于持久化时间归属。系统改时、休眠或时钟不连续不能靠 now-started_at 掩盖；在最后可信检查点停止可疑区间并进入 recovering，由用户校正。跨重启不复用单调时钟。
 
@@ -137,7 +144,7 @@ paused 无 open interval，因此值冻结。倒计时 remaining_ms = max(0, tar
 
 session.needs_review 在事务内与区间标记保持一致，不能单独修改；running 必须无待确认区间，recovering 必须有待确认区间或显式不变量故障标记。心跳约每 30 秒记录最后可信检查点（对应 interval_id、可信墙钟/运行态基线），仅提供默认候选截止时间，不能自动补工时。检查点的完整持久化形态由 M04/M05 规格确定，不把单一 last_heartbeat_at 当成充分的时钟映射。
 
-恢复会话不占运行前台槽位；UI 显示已确认工时与待确认区间，后者没有确定终点时显示未知范围，不伪造精确时长。用户可确认/修改不确定区间并 finish，或关闭该区间后保存 paused 并显式 resume。
+恢复会话不占运行前台槽位；UI 显示已确认工时与待确认区间，后者没有确定终点时显示未知范围，不伪造精确时长。用户调用 reconcile(action=confirm,target_state=finished/paused) 一次确认/修改不确定区间；保留 paused 后再显式 resume。
 
 “丢弃不确定区间”仅将目标 interval 置 voided_at 并清 needs_review，保留此前有效闭合区间，session 随之 finished 或 paused；如用户要删除全部会话工时，须使用单独明确的“作废整次记录”意图，将全部区间作废并置 discarded。两种操作都写 time_edit、校验版本、更新 revision，不能含糊共用一个“丢弃”按钮。恢复确认不允许与后来已记录人工时间重叠。
 
@@ -209,7 +216,7 @@ knowledge_stat 是可重建结果，保留 algorithm_version、sample_count、co
 
 V0.1 task_change 记录任务状态/质量/归属变更，与实体更新同事务，用于重开历史和按日期统计完成。daily_plan 存今日选择日期及时区，不用任务 updated_at 推断今天安排。第一次 start 时将当前估时信封冻结到 baseline_estimate_json；后续改估时不改基准，显式重新定基准须保留 task_change，已有工作任务需标“非开工前估计”。估时误差默认对比确认人工时长，未完成记录不混入完成样本。
 
-所有依赖/范围约束在 M01 完整 DDL 中有对应 CHECK/索引或服务事务校验。work_interval 修正只对 finished/recovering 会话进行；运行/暂停记录须先结束/确认再编辑。操作失败不得出现半个审计记录。
+所有依赖/范围约束在 M01 完整 DDL 中有对应 CHECK/索引或服务事务校验。work_interval 修正只对 finished 会话进行；运行/暂停记录须先结束/确认再编辑。操作失败不得出现半个审计记录。
 
 恢复数据库：停计时、暂停写入、关闭连接 → 当前库一致备份 → 在临时路径验证待恢复库完整性/外键/schema（未来版本拒绝，旧版本先备份再迁移）→ 同目录可回滚切换 → 重开校验；失败还原原路径并重新打开原库。不能覆盖仍打开的 WAL 数据库；备份包含恢复所需的全部数据。格式版号、数据库版号和应用版本分别记录。
 
@@ -240,3 +247,7 @@ ContextFact 取代保持 superseded_by 模型，可采用以下同事务顺序�
 V0.1 增加 interval_checkpoint(interval_id、run_id、wall_at、attribution_at、elapsed_ms)，恢复只用最后成功持久化检查点。duration_ms 在可信闭合时非空并等于 ended_at-started_at；待确认区间可为空，补齐 CHECK 与 FK。V0.2 阶段字段和 V0.4/V0.5 成果/报告完整迁移按 08 实施。核心 ER 为摘要，省略新增采样/检查点字段，完整逻辑定义以本节及 08 为准。
 
 V0.2 阶段字段为 phase/phase_state/cycle_index，独立 phase_checkpoint 引用 session；休息运行/冻结由 phase_state 区分。V0.1 工作区间 started_at 在连续可信 run 采用归属基线采样，不能每段重置为原始墙钟；规则见 08 §7。
+
+公开 pause/resume 在普通计时与番茄钟 work 阶段共用；break 使用专属阶段命令。V0.2 轮次表与 interval.cycle_index 在同次迁移引入，工作 phase_elapsed 从该轮区间派生；区间恢复时保留轮次。target_duration_ms/remaining_ms/overtime_ms 在 stopwatch/pomodoro 为 null，完整字段表与重启预算规则见 08 §8。
+
+recovering 的区间编辑与确认统一走 reconcile，不通过 correct；丢弃不确定区间是 reconcile(action=discard_uncertain)，作废整次记录是 discard_session。恢复分支若不变量损坏须先诊断，不允许命令自动猜测修复。

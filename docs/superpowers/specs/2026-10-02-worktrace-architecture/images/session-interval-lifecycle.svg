@@ -56,10 +56,10 @@
     <text x="500" y="138">崩溃 / 强杀</text>
     <rect x="568" y="97" width="64" height="12" rx="2" fill="#FBF9F6"/>
     <text x="600" y="106">区间异常</text>
-    <rect x="594" y="509" width="72" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="630" y="518" fill="#D9603A">确认 / 丢弃区间</text>
-    <rect x="574" y="229" width="72" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="610" y="238" fill="#D9603A">保存为暂停</text>
+    <rect x="577" y="509" width="106" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="630" y="518" fill="#D9603A">reconcile：确认 / 丢弃</text>
+    <rect x="564" y="229" width="92" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="610" y="238" fill="#D9603A">reconcile：保存暂停</text>
     <rect x="806" y="394" width="44" height="12" rx="2" fill="#FBF9F6"/>
     <text x="823" y="403">整次作废</text>
   </g>
@@ -112,7 +112,7 @@
   <text x="40" y="678" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
     待确认不自动运行、不占 running 前台槽位，仅不确定区间不计入确认统计；可信闭合工时保留。</text>
   <text x="40" y="698" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    修正（correct）只对 finished / recovering 进行；运行或暂停中的记录必须先结束或确认再编辑。完成或取消任务会结束它所有 running / paused 的 session。</text>
+    correct 仅修正 finished；recovering 使用 reconcile。任务完成/取消复用 finish；存在 recovering 时先确认恢复。</text>
 
   <!-- ===== 图例（底部横条） ===== -->
   <line x1="30" y1="726" x2="970" y2="726" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>

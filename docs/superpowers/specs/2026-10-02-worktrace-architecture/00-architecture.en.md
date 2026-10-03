@@ -99,3 +99,7 @@ No four-level file classification, file-permission inheritance or extraction cac
 See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).
 
 V0.2 Pomodoro envelopes add phase/phase_state/cycle_index/phase_elapsed_ms/phase_remaining_ms/phase_overtime_ms under 08 §7; session paused during break does not imply frozen phase timing.
+
+Public work commands are pause/resume; remaining_ms/overtime_ms are countdown-only, Pomodoro uses phase_remaining_ms/phase_overtime_ms. Dispatch/null fields/cycle recovery follow 08 §8.
+
+02 §3 is the sole public session registry; 08 §7 only extends Pomodoro conditions. interrupt is switch reason, not a public alias. Recovery uses reconcile, trusted history correct, whole-session void discard_session, manual history backfill.

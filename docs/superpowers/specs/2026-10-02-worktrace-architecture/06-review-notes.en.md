@@ -86,3 +86,11 @@ Static checks: links/fences across 21 Markdown files, 63 acceptance IDs and bili
 ## 9. Latest diagram/contract fixes
 
 08 §7 adds continuous attribution/cumulative divergence, independent phase state/checkpoint and command table; synchronize 00/02/04 fields/acceptance. 07 labels selected-set atomic adoption. Fix Pomodoro aria IDs and common-path scope; re-export recovery/module diagrams from sources.
+
+## 10. Unified work commands and cycle budgets
+
+User chose (b): public pause/resume for ordinary timers and Pomodoro work; explicit break commands. 08 §8 adds cycle ownership, preserved progress, restart/reconciliation and timer-kind null fields. Synchronize 00/02/04/05, glossary and Pomodoro diagram.
+
+## 11. Session registry and command relationships
+
+02 §3 is the sole registry, 08 §7 references it with Pomodoro extensions only. Shared finish, V0.1 reconcile for recovering, correct for finished. switch owns interrupt reason; explicit backfill/discard_session cover manual history and whole-session void. Retain confirmed pause/resume and cycle rules.

@@ -182,3 +182,5 @@ See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en
 duration_ms: trusted interval duration validated against accounting endpoints; Attribution Endpoint: start wall plus trusted monotonic elapsed; Checkpoint: successfully persisted trusted clock mapping; phase: Pomodoro work/break; report_snapshot: immutable confirmed report content/facts.
 
 Attribution Baseline: the in-memory anchor (anchor_wall_at, anchor_monotonic) of one continuous trusted run segment; the attribution endpoint is derived from it (see 08 §7). phase_state: the Pomodoro phase's own running/frozen, distinct from the session's running/paused — during break the session is paused while the phase keeps counting. phase_checkpoint: the break-phase checkpoint, hung off the session rather than a work interval, because no work_interval is open during break.
+
+pomodoro_cycle: work/break cycle budget history per session; interval.cycle_index owns work. phase_elapsed_ms: current-cycle interval work or checkpoint/live break elapsed, distinct from session.active_ms and new interval elapsed_ms.

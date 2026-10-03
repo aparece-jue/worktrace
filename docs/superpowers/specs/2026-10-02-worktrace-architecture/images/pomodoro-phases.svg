@@ -1,6 +1,6 @@
 <svg viewBox="0 0 1000 680" role="img" aria-labelledby="pomo-title pomo-desc" xmlns="http://www.w3.org/2000/svg">
   <title id="pomo-title">Worktrace 番茄钟的阶段与切换规则</title>
-  <desc id="pomo-desc">本图仅示常见路径，完整允许条件见 08 §7 命令表。四个阶段排成两列两行。左列是工作阶段：running 时 session 为 running 且有开放工作区间，走 pause 与 resume 在两个阶段之间往返，与 V0.1 的会话规则一致；右列是休息阶段：running 时 session 保持 paused、没有开放工作区间，只运行独立的阶段计时，暂停、锁屏、休眠或重启后转为冻结。四条跨阶段与同阶段的边：工作 running 经「显式开始休息」闭合工作区间并切到休息；休息经「显式开始下一轮」重新检查前台占用并切回工作，占用冲突则保持休息；休息 running 经暂停或锁屏休眠转为冻结；冻结经显式继续回到休息 running，这一步不等于 resume 工作。工作到点与休息到点都只提示、不自动切换，用一条注记表达而不是从每个状态各画一条边；完成或取消任务会结束所有阶段。</desc>
+  <desc id="pomo-desc">本图仅示常见路径，完整允许条件见 08 §7 命令表。四个阶段排成两列两行。左列是工作阶段：running 时 session 为 running 且有开放工作区间，走 pause 与 resume 在两个阶段之间往返，与 V0.1 的会话规则一致；右列是休息阶段：running 时 session 保持 paused、没有开放工作区间，只运行独立的阶段计时，暂停、锁屏、休眠或重启后转为冻结。四条跨阶段与同阶段的边：工作 running 经「显式开始休息」闭合工作区间并切到休息；休息经「显式开始下一轮」重新检查前台占用并切回工作，占用冲突则保持休息；休息 running 经暂停或锁屏休眠转为冻结；冻结经显式继续回到休息 running；工作进度按当前轮区间汇总，pause/resume 不清零，这一步不等于 resume 工作。工作到点与休息到点都只提示、不自动切换，用一条注记表达而不是从每个状态各画一条边；完成或取消任务会结束所有阶段。</desc>
 
   <defs><style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;display=swap');</style>
     <marker id="pm-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
@@ -31,14 +31,14 @@
     <text x="295" y="267">pause</text>
     <rect x="52" y="258" width="42" height="12" rx="2" fill="#FBF9F6"/>
     <text x="73" y="267">resume</text>
-    <rect x="474" y="163" width="52" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="500" y="172">显式开始休息</text>
-    <rect x="470" y="69" width="60" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="500" y="78">显式开始下一轮</text>
-    <rect x="738" y="258" width="84" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="780" y="267">暂停 / 锁屏 / 休眠</text>
-    <rect x="908" y="258" width="42" height="12" rx="2" fill="#FBF9F6"/>
-    <text x="929" y="267">显式继续</text>
+    <rect x="468" y="163" width="64" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="500" y="172">start_break</text>
+    <rect x="455" y="69" width="90" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="500" y="78">start_next_cycle</text>
+    <rect x="738" y="258" width="64" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="770" y="267">pause_break</text>
+    <rect x="872" y="258" width="80" height="12" rx="2" fill="#FBF9F6"/>
+    <text x="912" y="267">continue_break</text>
   </g>
 
   <!-- ===== 四个阶段 ===== -->
@@ -58,7 +58,7 @@
   <text x="270" y="350" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
         text-anchor="middle">session paused，无开放区间，值冻结</text>
   <text x="270" y="368" fill="#6F6357" font-size="8.5" font-family="'Geist Mono',monospace"
-        text-anchor="middle">暂停冻结的是当前阶段</text>
+        text-anchor="middle">pause / resume 保留本轮已用时间</text>
 
   <rect x="560" y="140" width="340" height="88" rx="6" fill="#FBF9F6"/>
   <rect x="560" y="140" width="340" height="88" rx="6" fill="#FBF1DC" stroke="#CBA758" stroke-width="1"/>
@@ -86,18 +86,18 @@
 
   <!-- ===== 阶段元数据 ===== -->
   <rect x="100" y="488" width="800" height="104" rx="6" fill="rgba(42,35,32,0.03)" stroke="rgba(42,35,32,0.12)" stroke-width="1"/>
-  <text x="120" y="512" fill="#2A2320" font-size="10.5" font-weight="600" font-family="'Geist',sans-serif">阶段元数据（timer_kind = pomodoro 时额外保存）</text>
+  <text x="120" y="512" fill="#2A2320" font-size="10.5" font-weight="600" font-family="'Geist',sans-serif">阶段字段归属（timer_kind = pomodoro；矩阵见 08 §8）</text>
   <g font-family="'Geist Mono',monospace" font-size="8.5" fill="#6F6357">
-    <text x="120" y="536">phase · phase_state（running / frozen）· cycle_index · session_version</text>
-    <text x="120" y="556">work_budget_ms · break_budget_ms　（工作段预算与整次 session 工时分别显示）</text>
-    <text x="120" y="576">phase_checkpoint 挂 session，约每 30 秒保存 phase_elapsed_ms</text>
+    <text x="120" y="536">session：phase · phase_state（running / frozen）· cycle_index · session_version</text>
+    <text x="120" y="556">pomodoro_cycle：每轮 work_budget_ms · break_budget_ms（按轮取值，不在 session 上）</text>
+    <text x="120" y="576">进度：工作按本轮区间派生，休息取自 phase_checkpoint</text>
   </g>
 
   <!-- ===== 注记 ===== -->
   <text x="40" y="620" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    休息不能替代 resume：回到工作必须经「显式开始下一轮」，届时重新检查前台占用，冲突则留在休息 / 暂停。</text>
+    休息不能替代 resume：回到工作必须经 start_next_cycle，届时重新检查前台占用，冲突则留在休息 / 暂停；暂停与锁屏休眠都走 pause_break。</text>
   <text x="40" y="640" fill="#6F6357" font-size="9.5" font-family="'Geist',sans-serif">
-    完整命令条件见 08 §7；预算按阶段计算，锁屏 / 休眠冻结，醒来显式继续，不补离开时间。</text>
+    命令与预算见 08 §7 / §8；工作只用 pause / resume，锁屏 / 休眠冻结，醒来显式继续，不补离开时间。</text>
 
   <!-- ===== 图例（底部横条） ===== -->
   <line x1="30" y1="654" x2="970" y2="654" stroke="rgba(42,35,32,0.14)" stroke-width="0.8"/>

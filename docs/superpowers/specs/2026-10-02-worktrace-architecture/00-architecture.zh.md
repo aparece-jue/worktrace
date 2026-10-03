@@ -101,3 +101,7 @@ AI Gateway 只接收 M09 按本次用户选择构造的 Context Bundle。AI 默�
 实施细节补充见 [08：计时、阶段、AI 与报告快照](08-implementation-contracts.zh.md)。
 
 V0.2 番茄钟在同一信封增加 phase、phase_state、cycle_index、phase_elapsed_ms、phase_remaining_ms、phase_overtime_ms，定义及命令状态表见 08 §7；休息时 session paused 不代表阶段计时冻结。
+
+公开工作命令统一 pause/resume；计时 DTO 的 remaining_ms/overtime_ms 仅 countdown 非空，番茄钟使用 phase_remaining_ms/phase_overtime_ms。命令分派、null 字段及轮次恢复以 08 §8 为准。
+
+公开会话命令唯一登记在 02 §3；08 §7 只扩展番茄钟条件。switch 的 interrupt 是 reason 值而非另一条公开命令；恢复走 reconcile、可信历史修正走 correct、整次作废走 discard_session，手工补录走 backfill。

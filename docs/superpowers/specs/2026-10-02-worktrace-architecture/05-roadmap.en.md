@@ -69,3 +69,5 @@ Capability loop: evidence → user-confirmed gap → learning/practice task → 
 See [08: timing, phases, AI and report snapshots](08-implementation-contracts.en.md).
 
 V0.1 probes 08 clock mapping/checkpoints; V0.2 break never counts effort; V0.3 adds F-209/F-210; V0.4 minimal outcome storage precedes import; V0.5 confirmed report snapshots and capability action reviews.
+
+V0.2 delivers pomodoro_cycle and work_interval.cycle_index together; verify unified pause/resume and current-cycle recovery before phase UI, no duplicate public work commands.

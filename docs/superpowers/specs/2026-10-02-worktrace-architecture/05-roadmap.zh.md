@@ -68,3 +68,5 @@ V0.1 的 Today 是今日任务选择，不是日历/时间块；不要求 Goal/M
 实施细节补充见 [08：计时、阶段、AI 与报告快照](08-implementation-contracts.zh.md)。
 
 V0.1 的 M04/M05 先验证 08 的时间映射与检查点；V0.2 番茄钟阶段以休息不计工时为门槛；V0.3 纳入 F-209/F-210；V0.4 outcome 最小存储早于导入；V0.5 确认报告快照和能力行动复盘。
+
+V0.2 pomodoro_cycle 与 work_interval.cycle_index 一起落地，先验统一 pause/resume 和本轮预算恢复，再接阶段 UI；不新增重复 IPC 工作命令。
