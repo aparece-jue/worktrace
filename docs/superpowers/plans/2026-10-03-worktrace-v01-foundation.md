@@ -59,33 +59,23 @@
 
 ## 执行与完成门槛
 
-
 - [ ] 对照 [总纲](2026-10-03-v01-plan-index.md) §5 第 9 条的权威清单（02 §8 必测案例、04 §9 集成用例、06 §4 实验）逐条确认与本计划相关的条目，并在验收记录里写明「已核对 / 不适用」。
+
 在 src-tauri 运行 cargo fmt --check、cargo test、cargo clippy --all-targets。P1 通过只表示基础库正确，F-ID 的应用/UI 验收仍归后续计划。提交文件范围以上述文件及 Cargo 配置为准，不提交无关改动。
 
-PowerShell 分层检查（违规明确失败）：
+分层检查（违规明确失败）：
 
 ```powershell
-# 必须显式判断扫描器是否存在：命令缺失时 $hits 为 $null、$LASTEXITCODE 保留上一次的值，
-# 两个 if 都不会触发——检查会静默通过，比没有检查更危险。优先用 rg，没有就退回
-# PowerShell 自带的 Select-String，两条路径都真的扫一遍。
-function Test-LayerLeak {
-    param([string]$Dir, [string]$Pattern, [string]$Label)
-    if (-not (Test-Path $Dir)) { throw "扫描目录不存在：$Dir" }
-    if (Get-Command rg -ErrorAction SilentlyContinue) {
-        $hits = & rg -n --no-heading $Pattern $Dir
-        if ($LASTEXITCODE -gt 1) { throw "搜索失败：rg 退出码 $LASTEXITCODE" }
-    } else {
-        Write-Host "  （未安装 rg，回退 Select-String）"
-        $hits = Get-ChildItem -Recurse -File $Dir | Select-String -Pattern $Pattern
-    }
-    if ($hits) { throw "$Label 越层：$hits" }
-    Write-Host "$Label 越层检查通过"
-}
-
-Test-LayerLeak 'src/domain'  'rusqlite|std::fs|platform::|storage::' 'domain'
-Test-LayerLeak 'src/storage' 'platform::|commands::'                 'storage'
+# 在 src-tauri/ 下运行
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check-layers.ps1
 ```
+
+脚本在 `src-tauri/scripts/check-layers.ps1`，**不要在计划或对话里手抄这段检查**。
+
+> 为什么必须是脚本而不是内联 grep：朴素 grep 会把**声明这条规则的文档注释本身**当成
+> 违规——`src/domain/mod.rs` 的 `//!` 里写着「不得引用 `rusqlite` / `platform::`」，
+> 于是每次检查都报 LEAK。一个永远失败的检查会被忽略，比没有更糟。脚本在匹配前剔除
+> 注释行，并做过反向验证（故意塞一行越层 `use` 必须让检查以退出码 1 失败）。
 
 ## 附录：V0.1 DDL 起点
 
