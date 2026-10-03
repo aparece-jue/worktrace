@@ -22,7 +22,7 @@
 
 ## 自动验证
 
-- 全库 cargo test --offline -q：192 个测试通过，包括原有 P1/P2 套件与累计 27 个行为回归。
+- 全库 cargo test --offline -q：196 个测试通过，包括原有 P1/P2 套件与累计 31 个行为回归。
 - cargo fmt --check：通过。
 - cargo clippy --offline --all-targets -- -D warnings：通过。
 - scripts/check-layers.ps1：通过。
@@ -84,3 +84,12 @@ recovering 中新增墙钟异常的未接受校正标记不会随长期容差增
 反向验证：把判据改回 `anchor_state.is_none()`，新增回归失败并报 `left: 1700000001000 / right: 1700000006000`——正是那 5 秒偏移。回归 `wall_jump_before_first_session_rebases_instead_of_shifting_attribution` 同时断言重定之后这一段不被长期界追着判异常。
 
 本次完整验证：192 个测试、严格 Clippy、cargo fmt --check、分层检查与 git diff --check 均通过。工作区侧的 `diagram-src/` 与同步脚本已核对：发现并修复一处图源镜像分叉（`interval-time-attribution.html` 落后于仓库，不先反向同步会被退回旧文案）；`diagram-src/` 的同步防呆守卫仍未加，不计为已完成。
+
+
+## 本轮复查：装载后基线、边界自然漂移与统计归属
+
+基线条件补回 anchor_state.is_none()，并保留 live.is_none() 的首次会话重定。跨 run 先装载暂停会话再 resume 不再把单调读数当归属并误报历史冲突。
+
+system_pause 的 boundary 在范围校验后使用观察当前样本前的检测器副本，沿用相邻、短期与长期偏差判据；不推进真实 last。正反约 233 ppm 自然漂移四小时后的可信离开可暂停，离开后两分钟不计入工时；瞬时异常边界即使当前采样已正常也不接受。
+
+继续检查发现并修复无基线 stats_sample 将单调读数当归属终点的问题，改为同次采样墙钟，与 snapshot 一致。新增四个回归，回归套件合计 31 个，全库合计 196 个。本轮尚未提交，未推进后续阶段。正式平台验收、跨机器容差校准与外部图源同步守卫仍不计为完成。
