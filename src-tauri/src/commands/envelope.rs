@@ -15,7 +15,10 @@ pub struct WriteEnvelope {
 impl WriteEnvelope {
     /// 新建实体：只需 epoch。
     pub fn for_create(expected_data_epoch: impl Into<String>) -> Self {
-        Self { expected_data_epoch: expected_data_epoch.into(), expected_row_version: None }
+        Self {
+            expected_data_epoch: expected_data_epoch.into(),
+            expected_row_version: None,
+        }
     }
 
     /// 修改既有对象：epoch + 版本。
