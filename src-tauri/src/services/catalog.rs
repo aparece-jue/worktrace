@@ -16,8 +16,6 @@
 //! 统一口径：文本输入先去掉首尾空白，全空白视为空输入；取值域匹配**大小写敏感**
 //! （与 schema 的 CHECK 一致）。
 
-use rusqlite::Transaction;
-
 use crate::domain::error::DomainError;
 use crate::domain::project::{self, ProjectStatus};
 use crate::domain::tag::{self, TagKind};
@@ -31,6 +29,8 @@ use crate::storage::project_repo::{self, ProjectRow};
 use crate::storage::tag_repo::{self, TagRow};
 use crate::storage::task_repo::{self, Page, TaskFilter, TaskRow};
 use crate::storage::WriteOutcome;
+
+use super::tx::{settle, write_tx};
 
 /// 标签类型输入的校验入口。
 ///
@@ -234,33 +234,6 @@ pub fn set_task_project(
         settle(&tx, outcome)?.map(|(task, revision)| TaskProjectChange { task, revision });
     tx.commit().map_err(map_sqlite)?;
     Ok(settled)
-}
-
-/// 开一个写事务并把库身份守卫做掉。
-///
-/// 事务的所有权从这一行起到 `commit` 为止都归服务：仓储不 `begin`、不 `commit`。
-/// `guard_epoch` **必须在写事务内**执行（总纲 §9），且只接受请求带来的期望值——
-/// 「读出当前 epoch 再跟自己比」等于没有校验。
-fn write_tx<'a>(db: &'a mut Db, env: &WriteEnvelope) -> Result<Transaction<'a>, AppError> {
-    let tx = db
-        .connection_mut()
-        .unchecked_transaction()
-        .map_err(map_sqlite)?;
-    guard_epoch(&tx, &env.expected_data_epoch)?;
-    Ok(tx)
-}
-
-/// 收口一次写原语：`Changed` 才加一次 `revision`；`Unchanged` 读回当前值（R-T2-e）。
-fn settle<T>(
-    tx: &Transaction<'_>,
-    outcome: WriteOutcome<T>,
-) -> Result<WriteOutcome<(T, i64)>, AppError> {
-    match outcome {
-        WriteOutcome::Changed(value) => Ok(WriteOutcome::Changed((value, bump_revision(tx)?))),
-        WriteOutcome::Unchanged(value) => {
-            Ok(WriteOutcome::Unchanged((value, require_meta(tx)?.revision)))
-        }
-    }
 }
 
 /// 更新类命令必须带记录版本（`WriteEnvelope::for_update`）。

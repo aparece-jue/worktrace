@@ -18,7 +18,7 @@ use crate::domain::tag::TagKind;
 use crate::error::AppError;
 
 use super::db::map_sqlite;
-use super::task_repo::{enum_error, record_change};
+use super::task_repo::{enum_error, record_change, require_task};
 use super::WriteOutcome;
 
 /// `tag` 的一行。
@@ -226,19 +226,10 @@ fn tags_json(ids: &[String]) -> String {
     serde_json::json!({ "tags": ids }).to_string()
 }
 
-/// 任务必须存在。不存在即 [`DomainError::UnknownTask`]（与 `task_repo` 同一口径）。
-fn require_task(conn: &Connection, id: &str) -> Result<(), AppError> {
-    let found: Option<i64> = conn
-        .query_row("SELECT 1 FROM task WHERE id = ?1", [id], |r| r.get(0))
-        .optional()
-        .map_err(map_sqlite)?;
-    match found {
-        Some(_) => Ok(()),
-        None => Err(DomainError::UnknownTask.into()),
-    }
-}
-
 /// 标签必须存在。不存在即 [`DomainError::UnknownTag`]。
+///
+/// 任务存在性走 [`crate::storage::task_repo::require_task`]：判据只留一处，
+/// 本模块不再写第二份。
 fn require_tag(conn: &Connection, id: &str) -> Result<(), AppError> {
     let found: Option<i64> = conn
         .query_row("SELECT 1 FROM tag WHERE id = ?1", [id], |r| r.get(0))

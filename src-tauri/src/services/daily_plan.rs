@@ -28,8 +28,6 @@
 //! 所以它不进 `domain/`——那里只放纯规则。[`crate::domain::localdate::LocalDate`]
 //! 表达的正是被校验之后的那个日期。
 
-use rusqlite::Transaction;
-
 use crate::domain::error::DomainError;
 use crate::domain::localdate::LocalDate;
 use crate::envelope::WriteEnvelope;
@@ -37,9 +35,11 @@ use crate::error::AppError;
 use crate::storage::daily_plan_repo;
 use crate::storage::db::{map_sqlite, Db};
 use crate::storage::guards::guard_epoch;
-use crate::storage::meta::{bump_revision, require_meta};
+use crate::storage::meta::require_meta;
 use crate::storage::task_repo::TaskRow;
 use crate::storage::WriteOutcome;
+
+use super::tx::{settle, write_tx};
 
 /// 本地日期输入的校验入口（`daily_plan.local_date`）。
 pub fn parse_local_date(raw: &str) -> Result<LocalDate, AppError> {
@@ -237,32 +237,4 @@ pub fn remove_from_plan(
     tx.commit().map_err(map_sqlite)?;
 
     Ok(settled.map(|(_, revision)| DailyPlanChange { tasks, revision }))
-}
-
-/// 开一个写事务并把库身份守卫做掉。
-///
-/// 与 `services::catalog` 里那份同名同形，但**没有**抽成公共模块：
-/// `services/catalog.rs` 已由 T5 收口（本任务不得改它），而这段骨架只有十来行。
-/// 若 P7 再加写服务，应当抽一个 `services/tx.rs`——那时的收益才盖过改动成本。
-/// `guard_epoch` **必须在写事务内**执行（总纲 §9），且只接受请求带来的期望值。
-fn write_tx<'a>(db: &'a mut Db, env: &WriteEnvelope) -> Result<Transaction<'a>, AppError> {
-    let tx = db
-        .connection_mut()
-        .unchecked_transaction()
-        .map_err(map_sqlite)?;
-    guard_epoch(&tx, &env.expected_data_epoch)?;
-    Ok(tx)
-}
-
-/// 收口一次写原语：`Changed` 才加一次 `revision`；`Unchanged` 读回当前值。
-fn settle<T>(
-    tx: &Transaction<'_>,
-    outcome: WriteOutcome<T>,
-) -> Result<WriteOutcome<(T, i64)>, AppError> {
-    match outcome {
-        WriteOutcome::Changed(value) => Ok(WriteOutcome::Changed((value, bump_revision(tx)?))),
-        WriteOutcome::Unchanged(value) => {
-            Ok(WriteOutcome::Unchanged((value, require_meta(tx)?.revision)))
-        }
-    }
 }

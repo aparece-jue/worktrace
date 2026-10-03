@@ -2,6 +2,29 @@
 //!
 //! 不得调用 `platform::`，也不得反向引用 `commands::`。
 //! 写入一律接受调用方的 `&Transaction`，由服务层拥有事务并决定何时加 `revision`。
+//!
+//! # `task_change` 的三种 JSON 形状（P4 Task 6 集中登记，取数据前必读）
+//!
+//! `task_change` 是 V0.1 **唯一**的任务级审计表，写入口只有一个
+//! （[`task_repo::record_change`]），但 P4 期间它被扩成了**三种形状**。
+//! 三种都进同一张表，所以「这个任务有没有 `task_change` 行」**回答不了任何业务问题**：
+//! 取数据前必须按 `before_json` / `after_json` 的**形状**过滤。
+//!
+//! 1. **任务字段形状**（[`task_repo`]）：键就是被改掉的列，值是该列的新旧值。
+//!    - `create_task`：`before = {}`，`after = {"status":"Inbox","title":"…"}`
+//!    - `transition_task`：`{"status":"Doing","quality":null}`
+//!    - `set_task_project`：`{"project_id":"<id>"}` / `{"project_id":null}`
+//!    - `freeze_baseline_estimate`：`{"baseline_estimate_json":"…"}`
+//! 2. **标签集合形状**（[`tag_repo::tag_task`] / [`tag_repo::untag_task`]）：
+//!    `{"tags":["<tag id>", …]}`——键固定是 `tags`，值是**变化前后的完整集合**。
+//! 3. **今日计划集合形状**（[`daily_plan_repo::add_to_plan`] /
+//!    [`daily_plan_repo::remove_from_plan`]）：
+//!    `{"daily_plan":[{"local_date":"2026-10-03","timezone":"Asia/Shanghai"}, …]}`。
+//!
+//! ⚠️ **P5 统计「完成项」时必须按 JSON 形状过滤**，例如
+//! `json_extract(after_json, '$.status') = 'Done'`，**不能只看有没有 `task_change`**：
+//! 打一个标签、加一次今日计划同样会写一条 `task_change`，按「有审计行」筛出来的
+//! 「完成项」会把它们全部算进去。
 
 pub mod checkpoint_repo;
 pub mod daily_plan_repo;

@@ -16,14 +16,13 @@
 //! - **审计**：一次真的变化写一条 `task_change`，记的是**这个任务计划集合**的变化
 //!   前后（与 `tag_repo::tag_task` 记标签集合同一形状）。
 
-use rusqlite::{Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, Transaction};
 
-use crate::domain::error::DomainError;
 use crate::domain::localdate::LocalDate;
 use crate::error::AppError;
 
 use super::db::map_sqlite;
-use super::task_repo::{self, record_change, TaskRow};
+use super::task_repo::{self, record_change, require_task, TaskRow};
 use super::WriteOutcome;
 
 /// 一条计划行的键 `(local_date 落库字符串, timezone 存储键)`。
@@ -160,16 +159,4 @@ fn plan_json(keys: &[PlanKey]) -> String {
         .map(|(date, timezone)| serde_json::json!({ "local_date": date, "timezone": timezone }))
         .collect();
     serde_json::json!({ "daily_plan": entries }).to_string()
-}
-
-/// 任务必须存在，否则 [`DomainError::UnknownTask`]。
-fn require_task(conn: &Connection, id: &str) -> Result<(), AppError> {
-    let found: Option<i64> = conn
-        .query_row("SELECT 1 FROM task WHERE id = ?1", [id], |r| r.get(0))
-        .optional()
-        .map_err(map_sqlite)?;
-    match found {
-        Some(_) => Ok(()),
-        None => Err(DomainError::UnknownTask.into()),
-    }
 }

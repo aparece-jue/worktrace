@@ -10,3 +10,6 @@ pub mod error_response;
 // P4：项目/标签/今日计划的输入校验入口（Task 1 建，T2/T3/T4 复用）。
 pub mod catalog;
 pub mod daily_plan;
+
+// 写事务骨架（write_tx / settle）只有本层用，所以不对 crate 外公开（R-T6-l）。
+mod tx;

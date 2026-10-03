@@ -117,6 +117,22 @@ pub fn get_task(conn: &Connection, id: &str) -> Result<Option<TaskRow>, AppError
         .map_err(map_sqlite)
 }
 
+/// 任务必须存在，否则 [`DomainError::UnknownTask`]。
+///
+/// `pub(crate)`：`tag_repo` 与 `daily_plan_repo` 的写入口问的是同一个问题
+/// （「这个任务在不在」），拒绝理由必须**只有一处**——两处各写一份逐字同形的副本
+/// 是 Task 4 付的代价，Task 6 收口（T4 Minor 4）。
+pub(crate) fn require_task(conn: &Connection, id: &str) -> Result<(), AppError> {
+    let found: Option<i64> = conn
+        .query_row("SELECT 1 FROM task WHERE id = ?1", [id], |r| r.get(0))
+        .optional()
+        .map_err(map_sqlite)?;
+    match found {
+        Some(_) => Ok(()),
+        None => Err(DomainError::UnknownTask.into()),
+    }
+}
+
 /// 项目筛选的**三值**表达（裁决 R-T5-a）。
 ///
 /// 不用 `Option<Option<String>>`：那样「不限制项目」与「只要没有项目的」在类型上
