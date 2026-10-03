@@ -15,9 +15,9 @@
 - `.../04-functional-spec.zh.md` F-010（Today 与最小统计）、F-018（最小导出与周回顾）
 
 **依赖的前置计划：**
-- **P1**：`storage::{meta, task_repo, session_repo}`、`error::AppError`、`domain::localdate::LocalDate`
+- **P1**：`storage::{meta, task_repo, session_repo, checkpoint_repo}`、`error::AppError`
 - **P3**：区间规则（半开相交、按日界裁剪）、`reconcile`/`correct` 产出的非重叠区间集合
-- **P4**：`services/catalog.rs`（标签、项目）、`services/daily_plan.rs`（今日选择列表）
+- **P4**：`domain::localdate::LocalDate` 与 Rust 时区校验能力（周界与日界按同一套时区策略，不另选第二套）、`services/catalog.rs`（标签、项目）、`services/daily_plan.rs`（今日选择列表）
 - **P2**：协调器的**同一次快照**——运行区间的终点只能取它，不能另采墙钟
 
 **边界（不要越界）：**
@@ -36,10 +36,13 @@
 
 - [ ] 统计范围统一为**半开区间** `[from, to)`。每段有效区间与范围的交集按 02 §6 的公式：`max(0, min(end, to) - max(start, from))`。这是全项目唯一一处裁剪实现，P3 与本计划共用，**不得复制第二份**。
 - [ ] **运行中区间的终点取同一协调器快照的单调归属终点**，不另采墙钟（02 §6、08 §1）。实现上即：由 P2 传入该次快照的终点值，本层不读时钟。
-- [ ] 排除口径：`needs_review = 1`、`voided_at` 非空、以及 `discarded` 会话的区间，一律不计入任何"已确认"数字；它们只在"待确认"一栏出现。
+- [ ] 排除口径：`needs_review = 1`、`voided_at` 非空、以及 `discarded` 会话的区间，一律不计入任何"已确认"数字；只有未作废的待确认区间进入“待确认”栏；voided_at 非空或 discarded 的记录不显示为待确认，仅可在历史/审计中查看。
+- [ ] 同一串行边界内先经 P2 取得已验证样本并完成必要异常事务，再开启一致读事务读取事实与 epoch/revision，构造内部 StatsSnapshot 后释放边界；聚合/序列化在外部基于此快照进行。采样至读快照完成之间不允许 pause/resume/finish 等写入穿插。
+- [ ] 内部 StatsSnapshot 带 epoch/revision、as_of、run_id、session_id/session_version、开放 interval_id 及 attribution_end；先确认该区间仍是快照中的有效开放区间，再计 live，闭合事实不得重复叠加。公共 TimerSnapshot 可保留展示字段，P2 提供内部统计接缝而非暴露 Instant。
 - [ ] 三类分列，**不得合并**：已确认闭合区间（含 `recovering` 会话里已可信的前缀）；实时暂计（当前开放区间）；待确认部分。
 - [ ] `measure` 分离：**人工仅 `FOREGROUND`**；机器分 `BACKGROUND` 与 `PASSIVE` 两项；`WAITING` 单列。**禁止把并行机器时长加成人工**——这是 F-103 的核心，1h 前台 + 1h 后台必须报 1h 人工而不是 2h。
 - [ ] 每个结果 DTO 必须带 `measure`、`timezone`、`range`、`as_of`、`revision`（02 §6 原文）。`revision` 与数据来自**同一读事务**（00 §5）。
+- [ ] 测试：统计取样与 pause/resume/finish/异常分割并发，输出只能对应跃迁前或后的完整快照，不混用版本、不重复计时；作废记录不显示待确认。
 - [ ] 测试：半开区间端点相接不重叠；范围完全在区间内/外/部分相交的边界；跨日 `23:50–00:10` 无暂停 session **两天各 10 分钟**（F-010 的验收项，不是"不计入任一日"）；`needs_review`/`voided_at`/`discarded` 被排除；1h 前台 + 1h 后台 → 人工 1h、机器 1h；`WAITING` 不被并入任何一项；DTO 五个字段齐全且 `revision` 与快照一致。
 
 ## Task 2：Today 聚合
@@ -67,7 +70,7 @@
 
 文件：services/export.rs、tests/export_markdown.rs。
 
-- [ ] 周回顾含三部分（F-018 原文）：**人工投入**（按 P1 的周界与用户时区）、**完成任务**（按 `task_change` 的完成事件时刻选，不用 `updated_at`、也不用 session 结束时间——02 §10）、**待确认记录**（单列，不与确认工时混在一起）。
+- [ ] 周回顾含三部分（F-018 原文）：**人工投入**（按本服务明确的周界与用户时区（首版周一至下一周一，半开范围））、**完成任务**（按 `task_change` 的完成事件时刻选，不用 `updated_at`、也不用 session 结束时间——02 §10）、**待确认记录**（单列，不与确认工时混在一起）。
 - [ ] 明确标注口径，不宣称 AI 结论：文案只说事实与已确认数字，不含"效率提升""节省时间"这类推断（04 的 F-206 禁止把采纳率说成节省时间）。
 - [ ] 手写 Markdown 拼接，不引模板引擎；表格列宽不做对齐美化（等宽字体外无意义）。
 - [ ] 测试：跨周边界的记录归到正确的周；已完成任务按完成事件时刻入周（改过 `updated_at` 不影响）；待确认单独成节且不影响人工合计；同一个周重复生成内容稳定；空周也能生成合法文档。

@@ -4,7 +4,7 @@
 
 **Goal:** 把"计时已经跑完之后"的四件事做扎实：崩溃重启后的四类判定与恢复确认（`reconcile`）、对已完成历史的修正（`correct`）、手工补录（`backfill`）、以及作废整次会话（`discard_session`）——全部带 `time_edit` 审计，且不产生重叠或负时长。
 
-**Architecture:** 新增 `services/recovery.rs`（启动扫描与恢复确认）与 `services/history.rs`（修正、补录、作废）。两者都**只消费** P2 已提交的事实与 P1 的仓储原语：区间分割用 P2 已经实现的那一套，本计划不另写一份时钟逻辑。服务拥有事务，仓储接受 `&Transaction`；一次用户命令恰好加一次 `revision`。
+**Architecture:** 新增 `services/recovery.rs`（启动扫描与恢复确认）与 `services/history.rs`（修正、补录、作废）。恢复与历史服务**只消费** P2 已提交的事实与 P1 的仓储原语：区间分割用 P2 已经实现的那一套，本计划不另写一份时钟逻辑。服务拥有事务，仓储接受 `&Transaction`；一次用户命令恰好加一次 `revision`。
 
 **Tech Stack:** Rust 1.98 · rusqlite 0.40（沿用 P1）· 无新依赖
 
@@ -15,7 +15,8 @@
 - `.../04-functional-spec.zh.md` F-006、F-008、F-009、F-015、F-017
 
 **依赖的前置计划：**
-- **P1**（`2026-10-03-worktrace-v01-foundation.md`）：`storage::{meta, guards, task_repo, session_repo, checkpoint_repo}`、`error::AppError`、`domain::{session, interval, localdate}`
+- **P1**（`2026-10-03-worktrace-v01-foundation.md`）：`storage::{meta, guards, task_repo, session_repo, checkpoint_repo}`、`error::AppError`、`domain::{session, interval}`
+- **P4**：`domain::localdate::LocalDate` 与 Rust 时区校验能力；本计划的日界裁剪使用相同的时区库与别名策略，不再选第二套。
 - **P2**（`2026-10-03-p2-timer-coordinator.md`）：协调器已提交的 `recovering` 事实与区间分割原语（可信前缀 + 待确认余段）、`TimerSnapshot`、`start/pause/resume/finish`
 
 **边界（不要越界）：**
@@ -50,7 +51,7 @@
 
 接口：`reconcile(request)`。`request` 含 `expected_data_epoch`、`session_id`、`session.expected_row_version`、`action`（`confirm` / `discard_uncertain`）、`target_state`（`paused` / `finished`），`confirm` 时另带**用户确认后的归属起止**。
 
-- [ ] 前置：仅 `recovering`。非 `recovering` 返回明确错误码（不要压成 `DOMAIN_ERROR`）；`running`/`paused` 想改历史必须先走 `correct` 或先 `finish`。
+- [ ] 前置：仅 `recovering`。非 `recovering` 返回明确错误码（不要压成 `DOMAIN_ERROR`）；`running`/`paused` 想改可信历史必须先 `finish`，再走 `correct`。
 - [ ] **一次事务处理该会话的全部待确认区间**，不做"一次一条"的多次往返——否则用户确认到一半崩溃会留下半确认状态。
 - [ ] 用户给出的起止必须**合法且不与既有人工时间重叠**（半开区间：端点相接不算重叠）。已知单调时长**只作候选**，用户不接受时不强迫。
 - [ ] `discard_uncertain` 只把目标区间置 `voided_at` 并清 `needs_review`，**保留此前有效闭合区间**；它**不能**用来作废整次会话（那是 `discard_session`）。
@@ -62,10 +63,11 @@
 
 文件：services/history.rs、tests/correct.rs。
 
-接口：`correct(request)`。`request` 含 `expected_data_epoch`、`session_id`、`interval_id`、`interval.expected_row_version`、新的起止或删除意图、`reason`。
+接口：`correct(request)`。`request` 含 `expected_data_epoch`、`session_id`、`interval_id`、`session.expected_row_version`、新的起止或删除意图、`reason`。
 
 - [ ] 前置：会话必须是 `finished`。`recovering` 返回 `RECOVERY_REQUIRED` 并把用户指向 `reconcile`；`running`/`paused` 返回明确错误（先 `finish`）。
 - [ ] 修正后的区间必须满足：非负、`ended_at >= started_at`、**与同会话其他有效区间不重叠**（半开区间）。负区间与人工重叠一律拒绝。
+- [ ] 历史修正用所属 session.row_version 做并发保护，不新增 interval.row_version。所有改变该 session 区间事实的命令在同事务增加 session.row_version；修改不同区间的旧版本请求也拒绝，刷新后重新确认。
 - [ ] 重算该区间的 `duration_ms`（用户确认的起止之差），**保留修正前后的值到 `time_edit`**；不得留下"改了起止但 `duration_ms` 没跟着变"的行。
 - [ ] 已完成任务的"完成时刻"**不因修正区间而移动**：报告按 `task_change` 里完成事件的时刻选完成项，不用 `updated_at`、也不用 session 结束时间代替（02 §10）。本任务不得新增或改写完成事件。
 - [ ] 删除误记 = 置 `voided_at`（保留审计），不是 `DELETE`。
@@ -96,6 +98,18 @@
 
 ---
 
+## Task 6：任务状态编排与会话联动
+
+文件：services/tasks.rs、services/mod.rs、tests/task_session_atomicity.rs。
+
+- [ ] 提供 transition_task(request) 服务；输入含 expected_data_epoch、task_id、task.expected_row_version、目标状态与 cause。P1 task_repo 仅为事务原语，P7/托盘只调用此服务，不拆成任务和会话多个命令。
+- [ ] 在同一串行协调器边界采样；按总纲 §9 先验证请求，再检测异常。若独立异常事务已提交，原用户任务命令返回 RECOVERY_REQUIRED，不执行原意图。
+- [ ] 完成/取消任务前检查所有关联会话：存在 recovering 或隔离故障则整体拒绝；否则同事务复用 P2 结束原语结束全部 running/paused、更新任务状态/质量、写 task_change，并增加一次 revision。各被修改 session 的 row_version 同步增加。
+- [ ] 设为 Blocked/Waiting 时，同事务暂停该任务 running session 并更新任务；正常暂停不自动改变 Doing。是否能进入目标状态仍以 02 §5 跃迁表为准。
+- [ ] reopen 显式回 Ready、清当前质量并保留历史，不自动恢复旧会话；单独 finish 会话不自动完成任务。
+- [ ] 先生成待应用的内存变化，事务提交后一次应用；事务失败字段级回滚且内存不变，提交后应用失败按 P2 故障恢复规则处理，不重复提交。
+- [ ] 测试：完成/取消多会话仅一次 revision、recovering 整体拒绝、Blocked/Waiting 暂停联动、暂停仍 Doing、显式 reopen、末步骤失败全部回滚、任务状态变更与 tick/历史修正并发。
+
 ## 完成门槛与人工验收
 
 - [ ] `cargo fmt --check`、`cargo test`、`cargo clippy --all-targets` 全绿；P1 分层检查通过；P2/P4 测试无回归。
@@ -106,5 +120,6 @@
 ## 下游接口（供 P5 / P7 消费）
 
 - `reconcile` / `correct` / `backfill` / `discard_session` 的服务入口与 DTO：实施后登记真实 Rust 签名。
+- transition_task 服务及其 DTO：P7 任务入口与托盘完成动作共用，不能直调仓储。
 - 区间规则（半开相交、按日界裁剪）：P5 直接调用，不复制。
 - 恢复扫描入口：P6 在启动顺序里调用；P7 负责把四类判定的结果呈现给用户。
