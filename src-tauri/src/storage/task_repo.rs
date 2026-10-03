@@ -214,3 +214,130 @@ pub(crate) fn enum_error(column: usize, field: &'static str, value: &str) -> rus
         }),
     )
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 估时信封与基准冻结（P2 Task 3）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 任务的估时信封。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EstimateEnvelope {
+    /// 当前估时（用户/AI 给的）。可能为空。
+    pub estimated_json: Option<String>,
+    /// **首次 start 时冻结下来的基准**。一旦冻结就不再随 `estimated_json` 变化
+    /// （02 §9：后续改估时不改基准；显式重新定基准须保留 task_change）。
+    pub baseline_estimate_json: Option<String>,
+}
+
+/// 本次调用是否真的冻结了。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FreezeOutcome {
+    /// 首次 start：写入了基准（`baseline` 为 `None` 表示当时本来就没有估时）。
+    Frozen {
+        baseline: Option<String>,
+        new_version: i64,
+    },
+    /// 早已冻结过，本次**不动**。`baseline` 是当时冻结下来的值。
+    AlreadyFrozen { baseline: Option<String> },
+}
+
+/// 读估时信封。
+pub fn read_estimate(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<EstimateEnvelope>, AppError> {
+    conn.query_row(
+        "SELECT estimated_json, baseline_estimate_json FROM task WHERE id = ?1",
+        [task_id],
+        |r| {
+            Ok(EstimateEnvelope {
+                estimated_json: r.get(0)?,
+                baseline_estimate_json: r.get(1)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(map_sqlite)
+}
+
+/// 首次 `start` 时冻结估时基准。
+///
+/// **判据是「这个任务还没有任何会话」，不是「`baseline_estimate_json` 是不是空」**——
+/// 否则一个本来就没估时的任务会在每次 start 时反复「冻结」（每次都是 `NULL`），
+/// 而 02 §9 要的是「第一次 start 时冻结，后续不改」。用会话存在与否做标记，
+/// 第一次之后无论基准是不是 `NULL` 都不再动它。
+pub fn freeze_baseline_estimate(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    expected_version: i64,
+    now: i64,
+) -> Result<FreezeOutcome, AppError> {
+    let before = get_task(tx, task_id)?.ok_or(DomainError::EmptyText { field: "task" })?;
+    guard_row_version(before.row_version, expected_version)?;
+
+    let existing: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM work_session WHERE task_id = ?1",
+            [task_id],
+            |r| r.get(0),
+        )
+        .map_err(map_sqlite)?;
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT baseline_estimate_json FROM task WHERE id = ?1",
+            [task_id],
+            |r| r.get(0),
+        )
+        .map_err(map_sqlite)?;
+
+    if existing > 0 {
+        return Ok(FreezeOutcome::AlreadyFrozen { baseline: current });
+    }
+
+    let estimated: Option<String> = tx
+        .query_row(
+            "SELECT estimated_json FROM task WHERE id = ?1",
+            [task_id],
+            |r| r.get(0),
+        )
+        .map_err(map_sqlite)?;
+
+    let n = tx
+        .execute(
+            "UPDATE task SET baseline_estimate_json = ?1, row_version = row_version + 1,
+                             updated_at = ?2
+             WHERE id = ?3 AND row_version = ?4",
+            rusqlite::params![estimated, now, task_id, expected_version],
+        )
+        .map_err(map_sqlite)?;
+    if n == 0 {
+        return Err(AppError::VersionConflict {
+            expected: expected_version,
+            actual: -1,
+        });
+    }
+
+    record_change(
+        tx,
+        task_id,
+        &format!(
+            "{{\"baseline_estimate_json\":{}}}",
+            json_or_null(current.as_deref())
+        ),
+        &format!(
+            "{{\"baseline_estimate_json\":{}}}",
+            json_or_null(estimated.as_deref())
+        ),
+        now,
+    )?;
+
+    Ok(FreezeOutcome::Frozen {
+        baseline: estimated,
+        new_version: expected_version + 1,
+    })
+}
+
+/// 把可选的 JSON 片段拼进审计文本：`None` 写成 `null`。
+fn json_or_null(v: Option<&str>) -> String {
+    v.unwrap_or("null").to_string()
+}

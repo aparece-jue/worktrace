@@ -235,23 +235,52 @@ pub fn close_interval(
     })
 }
 
+/// 一次会话状态更新要改的字段。`None` 表示「保持不动」。
+///
+/// 用结构体而不是一串 `Option` 参数：调用点写 `..Default::default()` 时字段名是自解释的，
+/// 而 `update_session_state(tx, id, v, st, None, Some(run), None)` 没人读得懂。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionStateUpdate<'a> {
+    /// 结束时刻。`None` 保持原值。
+    pub ended_at: Option<i64>,
+    /// 切到当前 run。resume 与恢复重建都要用（02 §10：恢复后显式 resume 要把
+    /// `session.run_id` 切到当前 application_run，否则下次启动会把新会话误当旧进程记录）。
+    pub run_id: Option<&'a str>,
+    /// 待确认标记。异常分割置真、确认/作废置假。
+    pub needs_review: Option<bool>,
+}
+
 /// 更新会话状态，带乐观并发校验。同时 `row_version + 1`。
+///
+/// 除状态外还能改 `ended_at`/`run_id`/`needs_review`——resume 要切 run_id，
+/// 异常分割要置 needs_review，两者都需要。其余字段仍然只能通过各自的专门入口改。
 pub fn update_session_state(
     tx: &Transaction<'_>,
     id: &str,
     expected_version: i64,
     target: SessionState,
-    ended_at: Option<i64>,
+    update: SessionStateUpdate<'_>,
 ) -> Result<SessionRow, AppError> {
     let before = get_session(tx, id)?.ok_or(DomainError::EmptyText { field: "session" })?;
     guard_row_version(before.row_version, expected_version)?;
 
     let n = tx
         .execute(
-            "UPDATE work_session SET state = ?1, ended_at = COALESCE(?2, ended_at),
-                                     row_version = row_version + 1
-             WHERE id = ?3 AND row_version = ?4",
-            rusqlite::params![target.as_str(), ended_at, id, expected_version],
+            "UPDATE work_session
+                SET state = ?1,
+                    ended_at = COALESCE(?2, ended_at),
+                    run_id = COALESCE(?3, run_id),
+                    needs_review = COALESCE(?4, needs_review),
+                    row_version = row_version + 1
+              WHERE id = ?5 AND row_version = ?6",
+            rusqlite::params![
+                target.as_str(),
+                update.ended_at,
+                update.run_id,
+                update.needs_review.map(|b| b as i64),
+                id,
+                expected_version
+            ],
         )
         .map_err(map_sqlite)?;
     if n == 0 {
