@@ -308,9 +308,14 @@ pub fn scan_recovery(conn: &Connection, current_run_id: &str) -> Result<Recovery
 ///
 /// 一次只允许一条路径进入（外部那层 `Mutex`），所以「用户命令」与「周期采样」
 /// 天然串行——这就是 D6 选定的边界。命令体必须在阻塞线程上取锁执行，见模块头。
+///
+/// **字段私有**：拿到锁不等于拿到「可以随便动的协调器」。可变访问一律走本类型的
+/// 方法（`start`/`resume`/`snapshot`/`tick`/`sample_tick`/`explicit_exit`）——
+/// 其中 `start`/`resume` 挂着恢复门禁（第 8 条）。若把 `&mut Coordinator` 递出去，
+/// 「不得忽略历史」就只剩纪律；Task 1 的命令层就在下一轮，这道口子不能留。
 pub struct AppState {
-    pub db: Db,
-    pub coordinator: Coordinator,
+    db: Db,
+    coordinator: Coordinator,
     recovery: RecoveryScan,
 }
 
@@ -324,6 +329,18 @@ pub fn lock_app(shared: &SharedApp) -> MutexGuard<'_, AppState> {
 }
 
 impl AppState {
+    /// 只读借用数据库句柄：诊断与只读校验（例如在 App **自己那条连接**上取
+    /// `total_changes()`）。写入一律走服务方法。
+    pub fn db(&self) -> &Db {
+        &self.db
+    }
+
+    /// 只读借用协调器：展示运行态（`run_id`/`tick_seq`/`live`/故障标记）。
+    /// 需要可变入口时用本类型的命令方法，别在这里开第二条路。
+    pub fn coordinator(&self) -> &Coordinator {
+        &self.coordinator
+    }
+
     pub fn recovery(&self) -> &RecoveryScan {
         &self.recovery
     }
@@ -438,11 +455,19 @@ impl AppState {
             meta::require_meta(&tx)?.revision
         };
         let clean_exit_recorded = run_repo::mark_clean_exit(&tx, &run_id, at)?;
+        // 报告里的退出时刻以**库里那一行**为准（不是本次传入的 `at`）：
+        // 重复退出不覆盖第一次的值，回一个没落库的时刻会让 Task 4 把它写进
+        // 日志/UI 时与库里的记录互相矛盾。
+        let clean_exit_at = run_repo::get_run(&tx, &run_id)?
+            .and_then(|run| run.clean_exit_at)
+            .ok_or_else(|| AppError::Storage {
+                detail: "clean_exit_at missing right after a clean exit".into(),
+            })?;
         tx.commit().map_err(map_sqlite)?;
 
         Ok(ExitReport {
             run_id,
-            clean_exit_at: at,
+            clean_exit_at,
             sessions_ended,
             recovering_kept,
             revision,
@@ -456,6 +481,8 @@ impl AppState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitReport {
     pub run_id: String,
+    /// **库里那一行**的 `clean_exit_at`（重复退出时是第一次写入的时刻，
+    /// 不是本次传入的 `at`）。
     pub clean_exit_at: i64,
     /// 被本次退出结束的会话（原状态 `running`/`paused`）。
     pub sessions_ended: Vec<String>,

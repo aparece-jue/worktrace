@@ -1,9 +1,13 @@
 //! P7 Task 0：事件信封与四条去重规则（00 §5）。
 //!
-//! 计划原文要求四条规则**各一条断言**，加上「广播按提交顺序」与
-//! 「广播失败只记诊断、不回滚已提交业务」。这些规则在 Task 2 会由前端再实现一遍
+//! 计划原文要求四条规则**各一条断言**。这些规则在 Task 2 会由前端再实现一遍
 //! （`useSyncExternalStore` 那一侧），但**规则本身只在 Rust 侧断言**——
 //! 前端测试只断言展示与转发（总纲 §5 第 8 条）。
+//!
+//! ⚠️ **本文件只放「信封 + 去重规则」的结构性事实。**
+//! 「广播按提交顺序」与「广播失败不回滚已提交业务」在 **`tests/periodic_sampling.rs`
+//! 的真实路径上**验（提交后可见 + 双写者单调非降 + 失败回滚），这里不再用
+//! 「顺序 emit 到一个 `Vec`」冒充它们（fix round 1：那两条原本恒真）。
 
 use std::sync::{Arc, Mutex};
 
@@ -11,9 +15,6 @@ use worktrace_lib::services::events::{
     Broadcaster, EmitOutcome, EventEnvelope, EventSink, NotificationVerdict, QueryVerdict,
     RevisionGate, SnapshotEffect,
 };
-use worktrace_lib::storage::db::Db;
-use worktrace_lib::storage::meta::{bump_revision, init_meta, read_meta};
-use worktrace_lib::storage::migrations::migrate;
 
 const EPOCH_A: &str = "epoch-a";
 const EPOCH_B: &str = "epoch-b";
@@ -27,14 +28,6 @@ impl EventSink for RecordingSink {
     fn broadcast(&self, envelope: &EventEnvelope) -> Result<(), String> {
         self.seen.lock().unwrap().push(envelope.clone());
         Ok(())
-    }
-}
-
-struct FailingSink;
-
-impl EventSink for FailingSink {
-    fn broadcast(&self, _envelope: &EventEnvelope) -> Result<(), String> {
-        Err("webview gone".to_string())
     }
 }
 
@@ -192,9 +185,16 @@ fn rule4_a_revision_gap_requires_a_fresh_snapshot() {
 // 广播：顺序与失败
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 广播按提交顺序：同一串行边界内提交之后逐条发出，收到的就是提交次序。
+/// 出口把每次调用原样转发给 sink，并如实累计诊断计数。
+///
+/// ⚠️ **只证明类型/接口形状**（转发 + 计数），**不证明「广播按提交顺序」，也不证明
+/// 「广播失败不回滚业务」**：这里没有事务、没有并发、没有已提交业务，任何「不丢不重」
+/// 的实现都会过。那两条的证据在 `tests/periodic_sampling.rs`：
+/// `a_tick_is_broadcast_after_the_commit_inside_the_same_boundary`、
+/// `two_writers_and_the_sampler_never_let_the_outlet_see_a_backwards_revision`、
+/// `a_failed_tick_broadcast_never_rolls_back_the_committed_heartbeat`。
 #[test]
-fn broadcasts_follow_commit_order() {
+fn the_outlet_forwards_every_call_and_counts_diagnostics() {
     let sink = Arc::new(RecordingSink::default());
     let broadcaster = Broadcaster::new(Arc::clone(&sink) as Arc<dyn EventSink>);
 
@@ -214,66 +214,4 @@ fn broadcasts_follow_commit_order() {
         .collect();
     assert_eq!(seen, vec![1, 2, 3], "广播顺序就是提交顺序");
     assert_eq!(broadcaster.diagnostics().out_of_order, 0);
-}
-
-/// 广播失败**只记诊断**：已提交的业务不因它回滚，用户也不会被要求重做。
-#[test]
-fn a_failed_broadcast_is_only_a_diagnostic_and_never_rolls_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut db = Db::open(dir.path().join("w.db")).unwrap();
-    migrate(db.connection()).unwrap();
-
-    // 一次真实的业务写：插一行 + 恰好一次 revision，然后提交。
-    let tx = db.connection_mut().unchecked_transaction().unwrap();
-    init_meta(&tx).unwrap();
-    tx.execute(
-        "INSERT INTO project(id,name,row_version,status,created_at,updated_at)
-         VALUES('p1','项目',0,'active',1000,1000)",
-        [],
-    )
-    .unwrap();
-    let revision = bump_revision(&tx).unwrap();
-    tx.commit().unwrap();
-
-    let broadcaster = Broadcaster::new(Arc::new(FailingSink) as Arc<dyn EventSink>);
-    let outcome = broadcaster.emit(notification(EPOCH_A, revision));
-    assert_eq!(outcome, EmitOutcome::Failed);
-
-    let diagnostics = broadcaster.diagnostics();
-    assert_eq!((diagnostics.sent, diagnostics.failed), (0, 1));
-    assert_eq!(diagnostics.last_failure.as_deref(), Some("webview gone"));
-
-    // 已提交的业务还在，revision 也没被回退。
-    let count: i64 = db
-        .connection()
-        .query_row("SELECT COUNT(*) FROM project WHERE id='p1'", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(count, 1, "广播失败不得回滚已提交业务");
-    assert_eq!(
-        read_meta(db.connection()).unwrap().unwrap().revision,
-        revision
-    );
-}
-
-/// 信封字段就是那五个：多一个都会变成第二个真相源。
-#[test]
-fn the_envelope_carries_exactly_the_five_contract_fields() {
-    let envelope = notification(EPOCH_A, 1);
-    let json = serde_json::to_value(&envelope).unwrap();
-    let mut keys: Vec<String> = json
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(|k| k.to_string())
-        .collect();
-    keys.sort();
-    assert_eq!(
-        keys,
-        vec!["at", "data_epoch", "event", "payload", "revision"]
-    );
-    assert_eq!(json["event"], "domain.changed");
-    assert_eq!(json["data_epoch"], EPOCH_A);
-    assert!(json["at"].as_i64().unwrap() > 0, "at 是 Unix 毫秒");
 }

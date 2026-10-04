@@ -3,8 +3,18 @@
 //! 计划原文：「**无窗口引用时周期采样仍被驱动**且空闲不写库」。
 //! 这里的「无窗口」不是模拟出来的：采样驱动是一个只认进程的后台线程，
 //! 测试进程里**根本没有窗口对象**，窗口回调在启动时返回一次 `Ok(())` 之后就不存在了。
+//!
+//! ## 证据口径（fix round 1 订正）
+//!
+//! - **写入探针必须取在 App 自己那条连接上**：`SELECT total_changes()` 是**连接级**
+//!   计数，新开一条连接去问它恒为 0（评审实测：写入连接返回 1，新连接返回 0）。
+//!   所以 [`Rig::app_total_changes`] 在锁内、在 App 的连接上取——它与「全表行数」
+//!   互补：行数抓 INSERT/DELETE，`total_changes` 连 UPDATE 也抓。
+//! - **广播的两条性质在真实路径上验**（`sampling_action`：同一临界区内「提交 → 广播」），
+//!   不是在 `Mutex<Vec>` 上摆一条顺序序列。结构性用例另见 `tests/event_protocol.rs`。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,13 +27,18 @@ use worktrace_lib::services::bootstrap::{
 use worktrace_lib::services::events::{EventEnvelope, EventSink};
 use worktrace_lib::services::timer::coordinator::StartRequest;
 use worktrace_lib::storage::db::Db;
-use worktrace_lib::storage::meta::init_meta;
+use worktrace_lib::storage::meta::{bump_revision, init_meta};
 use worktrace_lib::storage::migrations::migrate;
 
 const WALL: i64 = 1_700_000_000_000;
 /// 采样节拍：测试里压到 10ms，免得每个用例都等一秒。
 const INTERVAL_MS: u64 = 10;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 三种出口
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 照单全收。
 #[derive(Default)]
 struct RecordingSink {
     events: Mutex<Vec<EventEnvelope>>,
@@ -42,20 +57,88 @@ impl RecordingSink {
     }
 }
 
-struct Harness {
-    /// 先声明：Drop 时先停采样线程、再删临时目录。
-    running: Box<RunningApp>,
-    app: SharedApp,
-    sink: Arc<RecordingSink>,
-    clock: Arc<Mutex<FakeClock>>,
-    db_path: PathBuf,
-    epoch: String,
-    run_id: String,
-    _dir: tempfile::TempDir,
+/// 永远失败：用来证明**广播失败不回滚已提交业务**。
+#[derive(Default)]
+struct FailingSink {
+    calls: AtomicUsize,
 }
 
-/// 建库（元数据 + 给定任务），再走**真实启动入口**。
-fn harness(tasks: &[&str]) -> Harness {
+impl EventSink for FailingSink {
+    fn broadcast(&self, _envelope: &EventEnvelope) -> Result<(), String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err("webview gone".to_string())
+    }
+}
+
+/// 广播**当时**回读库：证明广播发生在**提交之后**。
+///
+/// 用**另一条连接**读，不是 `lock_app`：广播就发生在临界区内部，再用同一把锁会自锁；
+/// 而另一条连接看不见未提交的数据——这正是「提交后可见」的判据。
+struct PostCommitSink {
+    db_path: PathBuf,
+    seen: Mutex<Vec<SeenAtEmit>>,
+}
+
+#[derive(Debug, Clone)]
+struct SeenAtEmit {
+    revision: i64,
+    observed_revision: i64,
+    /// 广播那一刻，库里**已经提交**的检查点的最大 `elapsed_ms`。
+    committed_checkpoint_elapsed_ms: Option<i64>,
+}
+
+impl PostCommitSink {
+    fn new(db_path: PathBuf) -> Self {
+        Self {
+            db_path,
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn seen(&self) -> Vec<SeenAtEmit> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl EventSink for PostCommitSink {
+    fn broadcast(&self, envelope: &EventEnvelope) -> Result<(), String> {
+        let db = Db::open(&self.db_path).map_err(|e| format!("{e:?}"))?;
+        let observed_revision: i64 = db
+            .connection()
+            .query_row(
+                "SELECT revision FROM app_meta WHERE singleton = 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let committed_checkpoint_elapsed_ms: Option<i64> = db
+            .connection()
+            .query_row("SELECT MAX(elapsed_ms) FROM interval_checkpoint", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| e.to_string())?;
+
+        self.seen.lock().unwrap().push(SeenAtEmit {
+            revision: envelope.revision,
+            observed_revision,
+            committed_checkpoint_elapsed_ms,
+        });
+        Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 样板
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 临时目录 + 库/锁路径，库里已经建好元数据与给定任务。
+struct Fixture {
+    dir: tempfile::TempDir,
+    db_path: PathBuf,
+    lock_path: PathBuf,
+}
+
+fn fixture(tasks: &[&str]) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("worktrace.db");
     let lock_path = dir.path().join("instance.lock");
@@ -75,15 +158,36 @@ fn harness(tasks: &[&str]) -> Harness {
     tx.commit().unwrap();
     drop(db);
 
-    let clock = Arc::new(Mutex::new(FakeClock::new(WALL, 0)));
-    let sink = Arc::new(RecordingSink::default());
-    let mut config = StartupConfig::new(&db_path, &lock_path);
+    Fixture {
+        dir,
+        db_path,
+        lock_path,
+    }
+}
+
+/// 跑起来的应用。**字段顺序即 Drop 顺序**：先停采样线程，再删临时目录。
+struct Rig {
+    running: Box<RunningApp>,
+    clock: Arc<Mutex<FakeClock>>,
+    db_path: PathBuf,
+    epoch: String,
+    run_id: String,
+    _dir: tempfile::TempDir,
+}
+
+fn clock() -> Arc<Mutex<FakeClock>> {
+    Arc::new(Mutex::new(FakeClock::new(WALL, 0)))
+}
+
+/// 走**真实启动入口**起一个应用。
+fn launch(fx: Fixture, clock: Arc<Mutex<FakeClock>>, sink: Arc<dyn EventSink>) -> Rig {
+    let mut config = StartupConfig::new(&fx.db_path, &fx.lock_path);
     config.sampling_interval_ms = INTERVAL_MS;
 
     let running = match startup(
         config,
         Box::new(Arc::clone(&clock)),
-        Arc::clone(&sink) as Arc<dyn EventSink>,
+        sink,
         &NoProbe,
         &|| -> Result<(), AppError> { Ok(()) },
     )
@@ -93,25 +197,37 @@ fn harness(tasks: &[&str]) -> Harness {
         Startup::AlreadyRunning { .. } => panic!("测试进程应当是唯一实例"),
     };
 
-    let app = Arc::clone(running.app());
+    let db_path = fx.db_path.clone();
     let epoch = running.data_epoch().to_string();
     let run_id = running.run_id().to_string();
-
-    Harness {
+    Rig {
         running,
-        app,
-        sink,
         clock,
         db_path,
         epoch,
         run_id,
-        _dir: dir,
+        _dir: fx.dir,
     }
 }
 
-impl Harness {
+/// 记录型出口的样板（大多数用例用它）。
+fn rig_recording(tasks: &[&str]) -> (Rig, Arc<RecordingSink>) {
+    let sink = Arc::new(RecordingSink::default());
+    let rig = launch(
+        fixture(tasks),
+        clock(),
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+    );
+    (rig, sink)
+}
+
+impl Rig {
+    fn app(&self) -> SharedApp {
+        Arc::clone(self.running.app())
+    }
+
     fn start(&self, task_id: &str) -> Result<(), AppError> {
-        let mut state = lock_app(&self.app);
+        let mut state = lock_app(self.running.app());
         state
             .start(StartRequest {
                 expected_data_epoch: self.epoch.clone(),
@@ -125,6 +241,7 @@ impl Harness {
             .map(|_| ())
     }
 
+    /// **另一条**连接：读全局事实（行数、已提交的检查点）。
     fn open_db(&self) -> Db {
         Db::open(&self.db_path).unwrap()
     }
@@ -134,6 +251,23 @@ impl Harness {
             .connection()
             .query_row(sql, [], |r| r.get(0))
             .unwrap()
+    }
+
+    /// 在锁内、在 **App 自己那条连接**上取标量。
+    fn app_scalar(&self, sql: &str) -> i64 {
+        lock_app(self.running.app())
+            .db()
+            .connection()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// App 连接上的累计写入行数。
+    ///
+    /// **必须在这条连接上取**：`total_changes()` 是连接级计数，新开的连接恒为 0
+    /// （那等于没有断言）。它连 UPDATE 都算——行数快照抓不到的那一类。
+    fn app_total_changes(&self) -> i64 {
+        self.app_scalar("SELECT total_changes()")
     }
 
     /// 等采样驱动跑够 `n` 拍（10ms 一拍，给足 10 秒）。
@@ -162,135 +296,154 @@ impl Harness {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 驱动本身
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// 窗口全关仍在跑：进程里没有任何窗口对象，采样照样被驱动。
 #[test]
 fn the_sampler_keeps_ticking_with_no_window_anywhere() {
-    let h = harness(&[]);
+    let (rig, _sink) = rig_recording(&[]);
 
-    h.wait_for_ticks(5);
-    let first = h.running.sampling_ticks();
-    h.wait_for_ticks(first + 5);
+    rig.wait_for_ticks(5);
+    let first = rig.running.sampling_ticks();
+    rig.wait_for_ticks(first + 5);
 
     assert!(
-        h.running.sampling_ticks() > first,
+        rig.running.sampling_ticks() > first,
         "采样驱动必须在没有窗口的情况下继续跑"
     );
-    assert_eq!(h.running.sampling_errors(), 0, "空闲采样不该报错");
+    assert_eq!(rig.running.sampling_errors(), 0, "空闲采样不该报错");
 }
 
 /// 空闲（无活动会话）**不产生任何写入**，也不广播 tick。
 #[test]
 fn idle_sampling_writes_nothing_and_notifies_nothing() {
-    let h = harness(&[]);
-    h.wait_for_ticks(2);
+    let (rig, sink) = rig_recording(&[]);
+    rig.wait_for_ticks(2);
 
-    let before_changes = h.scalar("SELECT total_changes()");
-    let before_rows = table_rows(&h);
-    let before_revision = h.scalar("SELECT revision FROM app_meta WHERE singleton = 1");
+    // 写入探针取在 **App 自己那条连接**上（新连接上 total_changes 恒为 0）。
+    let before_changes = rig.app_total_changes();
+    let before_rows = table_rows(&rig);
+    let before_revision = rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1");
 
     for _ in 0..5 {
-        lock_app(&h.app).sample_tick().unwrap();
+        lock_app(rig.running.app()).sample_tick().unwrap();
     }
 
     assert_eq!(
-        h.scalar("SELECT total_changes()"),
+        rig.app_total_changes(),
         before_changes,
-        "空闲采样一拍都不该写库（心跳、tick 都不加 revision）"
+        "空闲采样一拍都不该写库：App 连接上的 total_changes 也必须一动不动"
     );
-    assert_eq!(table_rows(&h), before_rows, "任何表的行数都不该变");
+    assert_eq!(table_rows(&rig), before_rows, "任何表的行数都不该变");
     assert_eq!(
-        h.scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
+        rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
         before_revision,
         "空闲不得制造 revision"
     );
     assert!(
-        h.sink.events().is_empty(),
+        sink.events().is_empty(),
         "没有活动会话就没有 tick 通知：{:?}",
-        h.sink.events()
+        sink.events()
     );
 }
 
 /// 有活动会话时，采样驱动自己跑出 tick 通知（走同一条串行边界）。
 #[test]
 fn an_active_session_is_ticked_and_broadcast_by_the_scheduler() {
-    let h = harness(&["t1"]);
-    h.start("t1").unwrap();
-    let revision_after_start = h.scalar("SELECT revision FROM app_meta WHERE singleton = 1");
+    let (rig, sink) = rig_recording(&["t1"]);
+    rig.start("t1").unwrap();
+    let revision_after_start = rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1");
     assert_eq!(
         revision_after_start, 1,
         "start 是一次业务写，恰好加一次 revision"
     );
 
-    let got_tick = h.wait_until(|| {
-        h.sink
-            .events()
+    let got_tick = rig.wait_until(|| {
+        sink.events()
             .iter()
             .any(|e| e.event == "timer.tick" && e.payload["session_id"].is_string())
     });
     assert!(got_tick, "有活动会话时采样驱动应当广播 timer.tick");
 
-    let tick = h
-        .sink
+    let tick = sink
         .events()
         .into_iter()
         .find(|e| e.event == "timer.tick" && e.payload["session_id"].is_string())
         .unwrap();
-    assert_eq!(tick.data_epoch, h.epoch);
-    assert_eq!(tick.payload["run_id"], h.run_id);
+    assert_eq!(tick.data_epoch, rig.epoch);
+    assert_eq!(tick.payload["run_id"], rig.run_id);
     assert!(
         tick.payload["tick_seq"].as_u64().unwrap() >= 1,
         "tick 的序号应当已经前进：{tick:?}"
     );
     assert_eq!(tick.revision, revision_after_start);
     assert_eq!(
-        h.scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
+        rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
         revision_after_start,
         "tick 不加业务 revision"
     );
 }
 
 /// 采样驱动也驱动**检查点心跳**：30 秒到期后写出带进度的检查点。
+///
+/// 顺带钉住 `at` 的**来路**：它必须等于 `platform::clock` 采样到的挂钟，
+/// 而不是某个回显调用方字面量的值。
 #[test]
 fn the_scheduler_drives_the_checkpoint_heartbeat() {
-    let h = harness(&["t1"]);
-    h.start("t1").unwrap();
-    let revision_after_start = h.scalar("SELECT revision FROM app_meta WHERE singleton = 1");
+    let (rig, sink) = rig_recording(&["t1"]);
+    rig.start("t1").unwrap();
+    let revision_after_start = rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1");
 
     // start 会写一个 elapsed=0 的初始检查点。
-    let before = h.scalar("SELECT COUNT(*) FROM interval_checkpoint");
+    let before = rig.scalar("SELECT COUNT(*) FROM interval_checkpoint");
 
     // 推进 30 秒（挂钟与单调钟一起走，不构成异常）。
-    h.clock.lock().unwrap().advance_both(30_000);
+    rig.clock.lock().unwrap().advance_both(30_000);
+    let expected_at = rig.clock.lock().unwrap().wall_ms();
 
-    let progressed = h.wait_until(|| {
-        h.scalar("SELECT COALESCE(MAX(elapsed_ms), 0) FROM interval_checkpoint") >= 30_000
+    let progressed = rig.wait_until(|| {
+        rig.scalar("SELECT COALESCE(MAX(elapsed_ms), 0) FROM interval_checkpoint") >= 30_000
     });
     assert!(
         progressed,
         "心跳到期后应当由采样驱动写出带进度的检查点（初始检查点数 {before}）"
     );
     assert_eq!(
-        h.scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
+        rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
         revision_after_start,
         "心跳不加 revision"
+    );
+
+    // M1：`at` 来自时钟采样。
+    let saw_expected_at = rig.wait_until(|| {
+        sink.events()
+            .iter()
+            .any(|e| e.event == "timer.tick" && is_active_tick(e) && e.at == expected_at)
+    });
+    assert!(
+        saw_expected_at,
+        "tick 的 at 应当等于假时钟的挂钟采样 {expected_at}：{:?}",
+        sink.events().iter().map(|e| e.at).collect::<Vec<_>>()
     );
 }
 
 /// 用户命令与周期采样走**同一把锁**：并发 start 只可能一个成功。
 #[test]
 fn commands_and_sampling_share_one_serial_boundary() {
-    let h = harness(&["t1", "t2"]);
+    let (rig, _sink) = rig_recording(&["t1", "t2"]);
     // 先确认采样驱动真的在跑，否则「它还在跑」这条断言会变成计时竞态。
-    h.wait_for_ticks(1);
-    let ticks_before = h.running.sampling_ticks();
+    rig.wait_for_ticks(1);
+    let ticks_before = rig.running.sampling_ticks();
     let barrier = Arc::new(std::sync::Barrier::new(2));
 
     let results: Vec<Result<(), AppError>> = std::thread::scope(|scope| {
         let handles: Vec<_> = ["t1", "t2"]
             .into_iter()
             .map(|task| {
-                let app = Arc::clone(&h.app);
-                let epoch = h.epoch.clone();
+                let app = rig.app();
+                let epoch = rig.epoch.clone();
                 let barrier = Arc::clone(&barrier);
                 scope.spawn(move || {
                     barrier.wait();
@@ -325,17 +478,167 @@ fn commands_and_sampling_share_one_serial_boundary() {
         "被串行边界挡住的第二个 start 应当拿到可预期的领域冲突，而不是唯一索引的存储错误"
     );
 
-    h.wait_for_ticks(ticks_before + 1);
+    rig.wait_for_ticks(ticks_before + 1);
     assert!(
-        h.running.sampling_ticks() > ticks_before,
+        rig.running.sampling_ticks() > ticks_before,
         "并发命令期间采样驱动仍在跑：{ticks_before} -> {}",
-        h.running.sampling_ticks()
+        rig.running.sampling_ticks()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 广播的两条性质：走真实路径（sampling_action）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **提交之后才广播，而且与提交同处一条串行边界。**
+///
+/// 判据是「广播那一刻，库里已经能看到刚提交的心跳」：出口用另一条连接回读，
+/// 未提交的数据在它眼里不存在。若把广播挪到提交之前（或挪出临界区再补一次读），
+/// 这条断言会红。
+#[test]
+fn a_tick_is_broadcast_after_the_commit_inside_the_same_boundary() {
+    let fx = fixture(&["t1"]);
+    let sink = Arc::new(PostCommitSink::new(fx.db_path.clone()));
+    let rig = launch(fx, clock(), Arc::clone(&sink) as Arc<dyn EventSink>);
+    rig.start("t1").unwrap();
+
+    // 推进 30 秒：心跳到期。采样驱动会在**同一临界区**里「写检查点 → 提交 → 广播 tick」。
+    rig.clock.lock().unwrap().advance_both(30_000);
+
+    let saw_committed_heartbeat = rig.wait_until(|| {
+        sink.seen()
+            .iter()
+            .any(|s| s.committed_checkpoint_elapsed_ms.unwrap_or(0) >= 30_000)
+    });
+    assert!(
+        saw_committed_heartbeat,
+        "至少有一次广播发生在「带进度的检查点已提交」之后：{:?}",
+        sink.seen()
+    );
+
+    for seen in sink.seen() {
+        assert!(
+            seen.observed_revision >= seen.revision,
+            "广播必须发生在提交之后：包里是 revision {}，广播当时库里已经是 {}（{seen:?}）",
+            seen.revision,
+            seen.observed_revision
+        );
+    }
+}
+
+/// **两个写者 + 采样驱动同时广播，出口看到的 revision 序列单调非降。**
+///
+/// 每个写者都在**同一把锁**下完成「提交 + 广播」——这正是生产接线的形状
+/// （`sampling_action` 与 Task 1 的命令都要这样）。把广播挪到锁外面，
+/// 这里就会看到 revision 倒退。
+#[test]
+fn two_writers_and_the_sampler_never_let_the_outlet_see_a_backwards_revision() {
+    let (rig, sink) = rig_recording(&["t1"]);
+    rig.wait_for_ticks(1);
+    let broadcaster = Arc::clone(rig.running.broadcaster());
+
+    std::thread::scope(|scope| {
+        for writer in 0..2 {
+            let app = rig.app();
+            let broadcaster = Arc::clone(&broadcaster);
+            let epoch = rig.epoch.clone();
+            let db_path = rig.db_path.clone();
+            scope.spawn(move || {
+                // 自己的连接只用来写；**顺序**由 App 的那把锁保证。
+                let mut own = Db::open(&db_path).unwrap();
+                for i in 0..25 {
+                    let guard = lock_app(&app);
+                    let tx = own.connection_mut().unchecked_transaction().unwrap();
+                    tx.execute(
+                        "INSERT INTO project(id,name,row_version,status,created_at,updated_at)
+                         VALUES(?1,'项目',0,'active',1,1)",
+                        [format!("p-{writer}-{i}")],
+                    )
+                    .unwrap();
+                    let revision = bump_revision(&tx).unwrap();
+                    tx.commit().unwrap();
+
+                    broadcaster.emit(EventEnvelope::domain_changed(
+                        epoch.clone(),
+                        revision,
+                        WALL,
+                        serde_json::json!({ "writer": writer, "i": i }),
+                    ));
+                    // guard 在这里才释放：提交与广播在同一个临界区里。
+                    drop(guard);
+                }
+            });
+        }
+    });
+
+    let revisions: Vec<i64> = sink.events().iter().map(|e| e.revision).collect();
+    assert!(
+        revisions.len() >= 50,
+        "两个写者各 25 次提交+广播，出口至少该收到这么多条：{}",
+        revisions.len()
+    );
+    for pair in revisions.windows(2) {
+        assert!(
+            pair[1] >= pair[0],
+            "出口看到的 revision 序列必须单调非降，实际：{revisions:?}"
+        );
+    }
+    assert_eq!(
+        rig.running.broadcaster().diagnostics().out_of_order,
+        0,
+        "生产出口自己也不该记到任何一次倒退"
+    );
+}
+
+/// **广播失败只记诊断，不回滚已提交业务。**
+///
+/// 用真实路径：活动会话 + 心跳到期 ⇒ 检查点已提交，随后 tick 的广播全部失败。
+/// 断言「已提交的检查点还在、revision 没被回滚、采样本身没出错、失败被记成诊断」。
+#[test]
+fn a_failed_tick_broadcast_never_rolls_back_the_committed_heartbeat() {
+    let fx = fixture(&["t1"]);
+    let failing = Arc::new(FailingSink::default());
+    let rig = launch(fx, clock(), Arc::clone(&failing) as Arc<dyn EventSink>);
+    rig.start("t1").unwrap();
+    let revision_after_start = rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1");
+
+    rig.clock.lock().unwrap().advance_both(30_000);
+
+    let committed = rig.wait_until(|| {
+        rig.scalar("SELECT COALESCE(MAX(elapsed_ms), 0) FROM interval_checkpoint") >= 30_000
+    });
+    assert!(committed, "心跳应当已经提交");
+    let failed = rig.wait_until(|| rig.running.broadcaster().diagnostics().failed >= 1);
+    assert!(failed, "广播失败应当被记成诊断");
+    assert!(failing.calls.load(Ordering::SeqCst) >= 1);
+
+    // 已提交的事实没有被回滚，也没有被二次提交。
+    assert!(
+        rig.scalar("SELECT COALESCE(MAX(elapsed_ms), 0) FROM interval_checkpoint") >= 30_000,
+        "广播失败不得回滚已经提交的检查点"
+    );
+    assert_eq!(
+        rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
+        revision_after_start,
+        "回滚会连 revision 一起退回去——它没有动"
+    );
+    assert_eq!(
+        rig.app_scalar("SELECT COUNT(*) FROM work_session WHERE state = 'running'"),
+        1,
+        "会话仍在计时"
+    );
+    assert_eq!(
+        rig.running.sampling_errors(),
+        0,
+        "广播失败不是采样失败：两者必须分开计数"
     );
 }
 
 /// 所有表的行数快照：空闲采样必须让它一动不动。
-fn table_rows(h: &Harness) -> Vec<(String, i64)> {
-    let db = h.open_db();
+///
+/// 行数抓 INSERT/DELETE；**UPDATE 要另外靠 `app_total_changes()`**（见上面那条用例）。
+fn table_rows(rig: &Rig) -> Vec<(String, i64)> {
+    let db = rig.open_db();
     let mut stmt = db
         .connection()
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -357,4 +660,9 @@ fn table_rows(h: &Harness) -> Vec<(String, i64)> {
             (name, count)
         })
         .collect()
+}
+
+/// 这条通知是不是「有活动会话的 tick」。
+fn is_active_tick(envelope: &EventEnvelope) -> bool {
+    envelope.event == "timer.tick" && envelope.payload["session_id"].is_string()
 }

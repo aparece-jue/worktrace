@@ -23,6 +23,14 @@
 # upward edge exactly like services -> commands. It was the one reverse edge left
 # unguarded when the domain rule learned both words.
 #
+# P7 Task 0 fix round 1 added the platform rule (I4): platform sits at the bottom
+# with domain, so `crate::services::` / `crate::storage::` / `crate::commands::`
+# inside src/platform are all upward edges. Nothing checked them before, and the
+# very next task (P7 Task 4, the tray) is the one that will want to "reuse the same
+# commands" -- i.e. the exact place where platform -> services would appear.
+# Doc links inside `//!` comments name services::bootstrap on purpose and are
+# stripped like every other comment line.
+#
 # Why a real script instead of an inline snippet in the plan:
 #   A plain grep also matches the doc comments that *state* the rule, so the
 #   check reported a "leak" on every module header. A gate that always fails
@@ -73,6 +81,42 @@ function Test-LayerLeak {
     return $true
 }
 
+function Test-EntryPointLeak {
+    param(
+        [string[]]$Files,
+        [string]$Pattern,
+        [string]$Label
+    )
+
+    $lines = @()
+    foreach ($f in $Files) {
+        # main.rs is not mirrored into the workspace, so a missing file is fine.
+        if (-not (Test-Path $f)) { continue }
+        if (Get-Command rg -ErrorAction SilentlyContinue) {
+            $raw = & rg -n --no-heading $Pattern $f
+            if ($LASTEXITCODE -gt 1) { throw "search failed: rg exit $LASTEXITCODE" }
+            $lines += $raw
+        } else {
+            $lines += Get-ChildItem -File $f |
+                Select-String -Pattern $Pattern |
+                ForEach-Object { "$($_.Path):$($_.LineNumber):$($_.Line)" }
+        }
+    }
+
+    $code = $lines | Where-Object {
+        $_ -notmatch ':\s*(//|\*|/\*)' -and $_ -notmatch '^\s*(//|\*)'
+    }
+
+    if ($code) {
+        Write-Host "  LEAK in ${Label}:"
+        $code | Select-Object -First 10 | ForEach-Object { Write-Host "    $_" }
+        return $false
+    }
+
+    Write-Host "  $Label clean"
+    return $true
+}
+
 $ok = $true
 $ok = (Test-LayerLeak 'src/commands' 'storage::|rusqlite|\bConnection\b' 'commands') -and $ok
 $ok = (Test-LayerLeak 'src/domain'  'rusqlite|std::fs|platform::|storage::|commands::|services::' 'domain')  -and $ok
@@ -86,6 +130,15 @@ $ok = (Test-LayerLeak 'src/storage' 'platform::|commands::|services::'  'storage
 # `commands -> services` direction (P4 Task 2; see the header comment).
 # Both rules share this one check so the three output lines keep their shape.
 $ok = (Test-LayerLeak 'src/services' 'std::time|SystemTime|Instant::now|commands::' 'services') -and $ok
+
+# platform must not reach up into any sibling layer (P7 Task 0, review I4).
+$ok = (Test-LayerLeak 'src/platform' 'crate::services::|crate::storage::|crate::commands::' 'platform') -and $ok
+
+# One startup entry, machine-checked: lib.rs / main.rs wire the app, they do not
+# open the database, migrate it or build an application_run themselves. That order
+# lives in services/bootstrap.rs only (P7 Task 0 requirement 1; the next task is
+# exactly the one that rewrites lib.rs, so the rule has to exist before it does).
+$ok = (Test-EntryPointLeak @('src/lib.rs', 'src/main.rs') 'Db::open|migrate\(|run_repo::' 'entry points') -and $ok
 
 if (-not $ok) {
     Write-Host 'LAYER CHECK FAILED'

@@ -403,7 +403,7 @@ fn an_unfinished_previous_run_closes_the_gate_on_business_timing() {
     assert_eq!(running.recovery().unfinished_sessions, vec!["s-old"]);
 
     let mut state = lock_app(running.app());
-    let before = total_changes(&state.db);
+    let before = total_changes(state.db());
     let err = state
         .start(StartRequest {
             expected_data_epoch: running.data_epoch().to_string(),
@@ -418,13 +418,13 @@ fn an_unfinished_previous_run_closes_the_gate_on_business_timing() {
 
     assert_eq!(err.code(), "RECOVERY_REQUIRED");
     assert_eq!(
-        total_changes(&state.db),
+        total_changes(state.db()),
         before,
         "被门禁拒绝的请求不得写入任何东西（不采样、不建会话、不加 revision）"
     );
     assert_eq!(
         state
-            .db
+            .db()
             .connection()
             .query_row(
                 "SELECT COUNT(*) FROM work_session WHERE run_id <> 'run-old'",

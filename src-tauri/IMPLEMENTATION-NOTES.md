@@ -121,6 +121,10 @@
   `instance.notify`（`platform/single_instance.rs`），既有实例消费它。
   通知失败**不改变**「退出」这个决定。
 - **周期采样驱动是一个不挂在任何窗口上的线程**（`platform/scheduler.rs`，F-009）：
-  窗口对象根本传不进它的签名。空闲（无活动会话）时它只读不写——
-  由 `tests/periodic_sampling.rs` 用 `SELECT total_changes()` 与全表行数钉住。
+  窗口对象根本传不进它的签名。空闲（无活动会话）时它只读不写——由
+  `tests/periodic_sampling.rs` 用三件事钉住：**App 自己那条连接上的**
+  `SELECT total_changes()`、全表行数、`revision`。
+  ⚠️ `total_changes()` 是**连接级**计数：在测试里新开一条连接取它恒为 0，等于没有断言
+  （本轮评审抓到的注水；修法是 `Harness::app_total_changes()`——在锁内、在 App 的连接上取，
+  并做过反向验证：临时让空闲路径写一行，该断言确实变红）。
 

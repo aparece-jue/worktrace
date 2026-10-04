@@ -33,6 +33,7 @@ impl EventSink for RecordingSink {
 struct Harness {
     running: Box<RunningApp>,
     db_path: PathBuf,
+    clock: Arc<Mutex<FakeClock>>,
     _dir: tempfile::TempDir,
 }
 
@@ -51,9 +52,10 @@ fn harness() -> Harness {
 
     let mut config = StartupConfig::new(&db_path, &lock_path);
     config.sampling_interval_ms = 10;
+    let clock = Arc::new(Mutex::new(FakeClock::new(WALL, 0)));
     let running = match startup(
         config,
-        Box::new(FakeClock::new(WALL, 0)),
+        Box::new(Arc::clone(&clock)),
         Arc::new(RecordingSink::default()) as Arc<dyn EventSink>,
         &NoProbe,
         &|| -> Result<(), AppError> { Ok(()) },
@@ -67,6 +69,7 @@ fn harness() -> Harness {
     Harness {
         running,
         db_path,
+        clock,
         _dir: dir,
     }
 }
@@ -274,14 +277,26 @@ fn explicit_exit_is_idempotent() {
     seed_sessions(&h);
 
     let first = h.running.shutdown().unwrap();
+    assert_eq!(first.clean_exit_at, WALL);
     let revision_after_first = h.scalar("SELECT revision FROM app_meta WHERE singleton = 1");
 
+    // 让第二次退出拿到一个**不同**的时刻：报告里的 clean_exit_at 必须回**库里那一行**
+    // （第一次的值），而不是本次传入的 `at`——否则 Task 4 会把一个没落库的时刻写进日志/UI。
+    h.clock.lock().unwrap().advance_both(60_000);
     let second = h.running.shutdown().unwrap();
     assert!(second.sessions_ended.is_empty());
     assert!(!second.revision_changed);
     assert!(
         !second.clean_exit_recorded,
         "clean_exit_at 已经写过，不再覆盖"
+    );
+    assert_eq!(
+        second.clean_exit_at, WALL,
+        "重复退出回的是库里保留的第一次时刻，不是本次传入的 at"
+    );
+    assert_eq!(
+        h.int_opt("SELECT clean_exit_at FROM application_run WHERE clean_exit_at IS NOT NULL"),
+        Some(WALL)
     );
     assert_eq!(second.revision, first.revision);
     assert_eq!(
