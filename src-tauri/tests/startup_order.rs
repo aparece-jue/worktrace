@@ -202,6 +202,132 @@ fn a_second_startup_notifies_the_existing_instance_and_touches_no_database() {
     drop(held);
 }
 
+/// `StartupStep::ALL` 的**唯一消费者**：把「启动步骤有几条」钉成测试事实，
+/// 而不是注释里的一句话。
+///
+/// 四条断言各防一种漂移：
+///
+/// 1. `ALL.len() == 9` —— 防从 `ALL` 里**删条目**（删一条立即红）；
+/// 2. `ALL` 无重复 —— 防把同一条登记两遍冒充「九条」；
+/// 3. `as_str()` 两两不同 —— 防两个变体共用同一个诊断名（日志与断言再也分不清步骤）；
+/// 4. 两条路径**实测**步骤的并集 == `ALL` 集合（双向）—— 防「新步骤只接进
+///    `startup()`、忘了登记进 `ALL`」，以及反向的「`ALL` 里躺着一条两条路径都
+///    走不到的幽灵步骤」。正常启动 8 步、拿锁失败 2 步，并集正好 9 条。
+///
+/// 防不到的一种也写出来，别当它不存在：给枚举新增变体、却既没接进任何路径、
+/// 也没登记进 `ALL`。Rust 稳定版无法枚举变体（`std::mem::variant_count` 仍是
+/// nightly，本仓也不引派生宏），没有测试能替作者数变体个数。拦它的是编译器：
+/// `as_str()` 的穷尽 `match` 会编译失败，逼作者回到 `bootstrap.rs` 动手；而只要
+/// 他把新变体接进任一条路径，断言 4 就红。
+#[test]
+fn startup_step_all_is_the_union_of_what_both_paths_record() {
+    // 1. 条数：计划里的六步拆成九条记录（①拆两条、②拆两条、⑤拆两条）。
+    assert_eq!(
+        StartupStep::ALL.len(),
+        9,
+        "StartupStep::ALL 必须是 9 条——正常启动 8 步 ∪ 拿锁失败 2 步"
+    );
+
+    // 2. 无重复：同一个变体不得在 ALL 里出现两次。
+    let mut distinct: Vec<StartupStep> = Vec::new();
+    for step in StartupStep::ALL {
+        assert!(
+            !distinct.contains(&step),
+            "StartupStep::ALL 里有重复条目：{:?}",
+            step
+        );
+        distinct.push(step);
+    }
+
+    // 3. 诊断名互不相同：`as_str()` 是日志与断言里的稳定名字，撞名就没法定位步骤。
+    let mut names: Vec<&str> = Vec::new();
+    for step in StartupStep::ALL {
+        assert!(
+            !names.contains(&step.as_str()),
+            "两个变体映射到同一个诊断名：{}",
+            step.as_str()
+        );
+        names.push(step.as_str());
+    }
+
+    // 4. 两条路径**实测**（不抄字面量）：拿锁失败 2 步、正常启动 8 步。
+    let fx = fixture();
+
+    // 拿锁失败路径：测试自己持锁，模拟既有实例。
+    let held = InstanceLock::acquire(&fx.lock_path)
+        .unwrap()
+        .expect("测试自己先持锁，模拟既有实例");
+    let blocked_probe = RecordingProbe::default();
+    let blocked_sink = Arc::new(RecordingSink::default());
+    let outcome = startup(
+        StartupConfig::new(&fx.db_path, &fx.lock_path),
+        Box::new(FakeClock::new(WALL, 0)),
+        blocked_sink,
+        &blocked_probe,
+        &|| -> Result<(), AppError> { Ok(()) },
+    )
+    .expect("拿不到锁不是错误，是一条正常分支");
+    assert!(
+        matches!(outcome, Startup::AlreadyRunning { .. }),
+        "持锁时第二次启动必须走 AlreadyRunning 分支"
+    );
+    let blocked_steps = blocked_probe.steps();
+    assert_eq!(
+        blocked_steps.len(),
+        2,
+        "拿锁失败路径记录 2 步：单实例检查 + 通知既有实例"
+    );
+    drop(held);
+
+    // 正常启动路径：锁已放开；同一个 fixture（失败路径没碰过库）。
+    let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
+    let running = match startup(
+        StartupConfig::new(&fx.db_path, &fx.lock_path),
+        Box::new(FakeClock::new(WALL, 0)),
+        sink,
+        &probe,
+        &|| -> Result<(), AppError> { Ok(()) },
+    )
+    .expect("启动应当成功")
+    {
+        Startup::Running(running) => running,
+        Startup::AlreadyRunning { .. } => panic!("锁已放开，本进程应当是唯一实例"),
+    };
+    let ok_steps = probe.steps();
+    assert_eq!(
+        ok_steps.len(),
+        8,
+        "正常启动记录 8 步（不含拿锁失败路径的 ExistingInstanceNotified）"
+    );
+    drop(running);
+
+    // 两条路径的并集（按变体去重）。
+    let mut union = ok_steps.clone();
+    for step in &blocked_steps {
+        if !union.contains(step) {
+            union.push(*step);
+        }
+    }
+
+    // 方向一：路径记到的每一步都必须在 ALL 里。
+    for step in &union {
+        assert!(
+            StartupStep::ALL.contains(step),
+            "启动路径记录了 StartupStep::ALL 之外的步骤：{:?}",
+            step
+        );
+    }
+    // 方向二：ALL 里每一条都必须被某条路径记到——不是走不到的幽灵步骤。
+    for step in StartupStep::ALL {
+        assert!(
+            union.contains(&step),
+            "StartupStep::ALL 里的步骤两条路径都没记录：{:?}",
+            step
+        );
+    }
+}
+
 /// 开窗口失败 ⇒ 启动失败（不留下一个还在跑的采样线程与一把没人放的锁）。
 #[test]
 fn a_failing_window_open_aborts_the_start_and_releases_the_lock() {
