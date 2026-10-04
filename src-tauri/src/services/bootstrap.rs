@@ -50,8 +50,8 @@ use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
-use crate::services::history::{CorrectRequest, HistoryEditReport};
-use crate::services::recovery::{ReconcileReport, ReconcileRequest};
+use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditReport};
+use crate::services::recovery::{DiscardSessionRequest, ReconcileReport, ReconcileRequest};
 use crate::services::timer::coordinator::{
     CommandOutcome, Coordinator, ResumeRequest, SessionRequest, StartRequest,
 };
@@ -738,6 +738,75 @@ impl AppState {
             let AppState { db, .. } = self;
             crate::services::history::correct(db, env, req, now)?
         };
+
+        let mirrored = {
+            let AppState { coordinator, .. } = self;
+            coordinator
+                .live()
+                .map(|live| live.id == session_id)
+                .unwrap_or(false)
+        };
+        if mirrored {
+            let AppState {
+                db, coordinator, ..
+            } = self;
+            coordinator
+                .load_session(db.connection(), &session_id)
+                .map_err(|_| AppError::RecoveryRequired)?;
+        }
+        Ok(outcome)
+    }
+
+    /// 手工补录的命令入口（P3 S2）。`env` 是**新建**信封（只带 epoch）。
+    ///
+    /// **提交后什么都不做**——这是它与 [`AppState::reconcile`] 的两点不同之一
+    /// （另一点是它不重扫门禁）：补录新建的是一条 `finished` 行，它不改变协调器
+    /// 正镜像的那条会话（`live` 仍指向正在计时的那条，或本来就是 `None`），
+    /// 也不产生任何待处理事实，所以既不需要 `rescan_recovery`（S1 的调用方只有
+    /// `reconcile`/`discard_session`），也不需要 `load_session`。
+    pub fn backfill(
+        &mut self,
+        env: WriteEnvelope,
+        req: BackfillRequest,
+    ) -> Result<WriteOutcome<HistoryEditReport>, AppError> {
+        let (now, run_id) = {
+            let coordinator = &self.coordinator;
+            (coordinator.wall_ms()?, coordinator.run_id().to_string())
+        };
+        let AppState { db, .. } = self;
+        crate::services::history::backfill(db, env, req, now, &run_id)
+    }
+
+    /// 作废整次的命令入口（P3 S2）。`env` 的版本位是**会话**版本。
+    ///
+    /// **无状态前置**：`recovering`/`running`/`paused`/`finished` 都能作废——包括
+    /// 「`paused` 却仍有待确认区间」这一类四类判定盖不住的形态（Ruling 6 的出口）。
+    ///
+    /// 提交之后两步（与 [`AppState::reconcile`] 同一条收尾口径）：
+    /// 1. [`AppState::rescan_recovery`]（S1）**无条件**重扫门禁——事实刚变，
+    ///    被判成终态/已作废的记录不再挡计时，快照必须跟着走；
+    /// 2. **当且仅当被作废的会话正是协调器此刻镜像的那条**时 `Coordinator::load_session`
+    ///    刷新它（Ruling 13）。这里通常**就是**镜像那条（用户正在计时时作废它），
+    ///    刷新后 `live.state` 停在 `discarded`——与 `finish` 之后停在 `finished`
+    ///    **完全同一口径**：`live` 只表示「本 run 最后装载过哪条会话」，
+    ///    不是「正在计时」，所以**不要**把 `live` 清成 `None`。
+    ///
+    /// 两处失败都映射 [`AppError::RecoveryRequired`]（P2 的提交后约定）：事务已经落库，
+    /// 缺的是「让内存与事实重新对上」。
+    pub fn discard_session(
+        &mut self,
+        env: WriteEnvelope,
+        req: DiscardSessionRequest,
+    ) -> Result<WriteOutcome<HistoryEditReport>, AppError> {
+        let now = self.coordinator.wall_ms()?;
+        let session_id = req.session_id.clone();
+        let outcome = {
+            let AppState { db, .. } = self;
+            crate::services::recovery::discard_session(db, env, req, now)?
+        };
+
+        // 提交之后的第一步：门禁重算（失败 ⇒ 标记挡住计时，旧快照不动）。
+        self.rescan_recovery()?;
 
         let mirrored = {
             let AppState { coordinator, .. } = self;

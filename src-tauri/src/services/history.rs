@@ -1,6 +1,22 @@
-//! 已完成历史的时间修正（P3 Task 3）：`correct`。
+//! 已完成历史的时间修正（P3 Task 3）：`correct`，与手工补录（P3 Task 4）：`backfill`。
 //!
-//! # 只修「可信历史」
+//! # `backfill`：把**已经发生**的人工时间补录成一条终态会话
+//!
+//! 补录不是「补一次计时」：它直接建一条 `finished` 会话与一条**可信闭合**区间
+//! （[`session_repo::create_finished_session`]，S6）——**不启动计时、不占前台槽位**
+//! （`uq_running_foreground` 全程不受影响）、**不伪造完成事件**（不写 `task_change`，
+//! 02 §3 原文）、不冻结估时基准（那是 `start` 的事）、不写 `interval_checkpoint`。
+//!
+//! 校验（写之前全部做完）：任务存在 · 范围非负（[`IntervalRange::new`]）·
+//! `ended_at <= now`（未来的「已发生工时」不是事实）· 与**全部**有效人工时间不重叠
+//! （S7，跨会话、端点相接不算、正在计时的区间算重叠、机器模式不参与互斥）。
+//! 成功必然 `Changed`：它新建了一条会话与一条区间。
+//!
+//! 审计是**创建型**的：`before_json` 只有 `change` 键（补录前没有这条会话，
+//! 与 `create_task` 把 `before_json` 写成 `"{}"` 同一口径），`after_json` 是下面那份
+//! 共享形状。`reason = backfill`，端点是用户给定的值 ⇒ **不写** `candidate_*`（Ruling 8）。
+//!
+//! # `correct`：只修「可信历史」
 //!
 //! 只接 `finished` 会话（02 §3 的 `correct` 行）：`recovering` 走 [`reconcile`]，
 //! `running`/`paused` 先 `finish`（它们的事实还在变），`discarded` 是整次作废的记录
@@ -47,7 +63,8 @@
 //!
 //! `before_json`/`after_json` 各带 `session{id,state,run_id,needs_review,row_version}`
 //! 与该会话**全部区间**的逐字段值（含 `voided_at`）——改动前后的值都留在里面。
-//! `change = correct_retime | correct_delete`、`reason = correct:retime | correct:delete`。
+//! `change = correct_retime | correct_delete`、`reason = correct:retime | correct:delete`；
+//! `backfill` 用 `change = reason = backfill`（创建型，见上文）。
 //! 端点是**用户给定的值**，不是候选推导 ⇒ **不写** `candidate_end`/`candidate_end_source`
 //! （Ruling 8）。用户给的理由（`CorrectRequest::reason`）去空白后写在 `after_json` 的
 //! `user_reason` 键里：`reason` 列要留给可机器过滤的 `correct:*` 取值。
@@ -56,12 +73,15 @@ use rusqlite::Transaction;
 
 use crate::domain::error::DomainError;
 use crate::domain::interval::IntervalRange;
-use crate::domain::session::SessionState;
+use crate::domain::session::{SessionMode, SessionState, TimerKind};
 use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
 use crate::storage::db::{map_sqlite, Db};
 use crate::storage::guards::guard_row_version;
-use crate::storage::session_repo::{self, IntervalRow, SessionRow, SessionStateUpdate};
+use crate::storage::session_repo::{
+    self, IntervalRow, NewFinishedSession, SessionRow, SessionStateUpdate,
+};
+use crate::storage::task_repo;
 use crate::storage::time_edit_repo::{self, TimeEdit};
 use crate::storage::WriteOutcome;
 
@@ -259,6 +279,110 @@ fn with_settled((mut report, settled): (HistoryEditReport, Settled)) -> HistoryE
     report.data_epoch = settled.data_epoch;
     report
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 手工补录（P3 Task 4）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一次手工补录的请求。
+///
+/// `env` 是**新建**信封：补录没有可校验的行版本（它不修改任何既有的可编辑对象）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillRequest {
+    pub task_id: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+}
+
+/// 用户命令：把一段**已经发生**的人工时间补录成一条 `finished` 会话。
+///
+/// 全部校验都在任何写入之前 ⇒ 「整条命令拒绝」就是零变化（不会留下半个会话）。
+/// 固定字段（02 §6：人工只有 FOREGROUND；V0.1 不提供补录倒计时/机器会话的入口）：
+/// `mode = FOREGROUND`、`timer_kind = stopwatch`、`target_duration_ms = NULL`，
+/// `run_id` 取**当前 run**（由调用方从协调器取：服务层够不着协调器）。
+///
+/// 本函数**不碰镜像、不碰门禁**：它新建的是一条终态会话，不改变协调器正镜像的那条，
+/// 也不产生任何待处理事实；提交后的收尾归 `AppState::backfill`（那里明确什么都不做）。
+pub fn backfill(
+    db: &mut Db,
+    env: WriteEnvelope,
+    req: BackfillRequest,
+    now: i64,
+    run_id: &str,
+) -> Result<WriteOutcome<HistoryEditReport>, AppError> {
+    let tx = write_tx(db, &env)?;
+
+    // ① 任务必须存在（补录的是「这个任务的时间」）。
+    task_repo::get_task(&tx, &req.task_id)?.ok_or(DomainError::UnknownTask)?;
+
+    // ② 范围合法：非负，且不越过「现在」——未来的「已发生工时」不是事实。
+    let range = IntervalRange::new(req.started_at, req.ended_at)?;
+    if range.end > now {
+        return Err(AppError::Domain {
+            detail: "补录的结束时刻不能晚于当前时间。".into(),
+        });
+    }
+
+    // ③ 与全部有效人工时间不重叠（S7：跨会话、半开、端点相接不算；
+    //    正在计时的区间算重叠；机器模式按独立口径不参与互斥）。
+    session_repo::require_no_human_overlap(&tx, range.start, range.end, None)?;
+
+    // ④ 一次事务里建会话 + 区间 + 审计：失败一起回滚。
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let interval_id = uuid::Uuid::new_v4().to_string();
+    let session = session_repo::create_finished_session(
+        &tx,
+        &NewFinishedSession {
+            id: &session_id,
+            task_id: &req.task_id,
+            run_id,
+            mode: SessionMode::Foreground,
+            timer_kind: TimerKind::Stopwatch,
+            target_duration_ms: None,
+            interval_id: &interval_id,
+            started_at: range.start,
+            ended_at: range.end,
+            duration_ms: range.duration_ms(),
+        },
+    )?;
+
+    let intervals = session_repo::intervals_of_session(&tx, &session_id)?;
+    let interval = intervals
+        .first()
+        .cloned()
+        .ok_or_else(|| AppError::Storage {
+            detail: "backfilled interval vanished after insert".into(),
+        })?;
+    record_backfill(&tx, &session, &intervals, now)?;
+
+    // 成功必然 `Changed`：这条命令的定义就是「新建事实」。
+    let outcome = settle(&tx, WriteOutcome::Changed(report(session, interval)))?.map(with_settled);
+    tx.commit().map_err(map_sqlite)?;
+    Ok(outcome)
+}
+
+/// 补录的创建型审计：改动前没有这条会话，所以 `before_json` 只有判别键。
+fn record_backfill(
+    tx: &Transaction<'_>,
+    session: &SessionRow,
+    intervals: &[IntervalRow],
+    now: i64,
+) -> Result<(), AppError> {
+    time_edit_repo::write(
+        tx,
+        &TimeEdit {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session.id.clone(),
+            before_json: serde_json::json!({ "change": BACKFILL_CHANGE }).to_string(),
+            after_json: edit_json(BACKFILL_CHANGE, session, intervals, None),
+            reason: Some(BACKFILL_CHANGE.to_string()),
+            created_at: now,
+        },
+    )
+}
+
+/// 补录在 `time_edit` 两个判别位上的取值（审计的消费者按它过滤）。
+const BACKFILL_CHANGE: &str = "backfill";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 审计

@@ -48,7 +48,10 @@
 //! - `"change": "reconcile_confirm"`（`reason = "reconcile:confirm"`）：确认的端点是
 //!   **用户给定的值**，不是推导出来的候选 ⇒ **不写** `candidate_end_source`；
 //! - `"change": "reconcile_discard_uncertain"`（`reason = "reconcile:discard_uncertain"`）：
-//!   只作废，同样不推导候选端点。
+//!   只作废，同样不推导候选端点；
+//! - `"change": "discard_session"`（`reason = "discard_session"`，P3 Task 4）：作废**整次**
+//!   的全部区间，同样不推导候选端点——它不是「丢弃不确定区间」的另一个按钮，
+//!   两者的语义与审计取值都不同（02 §3/§4）。
 //!
 //! 四种形状的 `before_json`/`after_json` 都带 `session` 与 `intervals`
 //! （逐字段的区间前后值，含 `voided_at`），改动前的事实原样留在 `before_json` 里。
@@ -56,8 +59,9 @@
 //! # 本模块不做的事
 //!
 //! **不解门禁**——那是 S1 `AppState::rescan_recovery`（提交之后由 `AppState` 调）干的；
-//! [`reconcile`] 是**用户命令**：它自己拥有事务、恰好加一次 `revision`，但 `AppState.recovery`
-//! 这份门禁快照不归它改。也不重建协调器镜像：提交后的 `load_session` 同样在 `AppState` 里。
+//! [`reconcile`] 与 [`discard_session`] 是**用户命令**：它们自己拥有事务、恰好加一次
+//! `revision`，但 `AppState.recovery` 这份门禁快照不归它们改。也不重建协调器镜像：
+//! 提交后的 `load_session` 同样在 `AppState` 里。
 //!
 //! [`attention_overview`] 是**只读**入口（同一读事务信封），不写任何事实。
 
@@ -77,6 +81,7 @@ use crate::storage::session_repo::{
 use crate::storage::time_edit_repo::{self, TimeEdit};
 use crate::storage::WriteOutcome;
 
+use super::history::HistoryEditReport;
 use super::tx::{settle, write_tx};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -644,6 +649,164 @@ fn finished_end(intervals: &[IntervalRow], session_started_at: i64) -> i64 {
         .filter_map(|interval| interval.ended_at)
         .max()
         .unwrap_or(session_started_at)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 作废整次（P3 Task 4）：`discard_session`
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一次「作废整次」的请求。`env` 的版本位是**会话**版本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardSessionRequest {
+    pub session_id: String,
+}
+
+/// 用户命令：作废整次会话——**全部区间**软作废 + 会话 `discarded`。
+///
+/// # 为什么它不走 `end_session_in_tx`
+///
+/// 那条原语按 `run_id` 拒跨 run（`timer/primitives.rs`），而「作废整次」必须能作用于
+/// **旧 run 留下的会话**——那正是恢复材料。所以这里只做 S8 的区间作废加会话状态更新：
+/// 因而不受 `StaleRunContext` 限制，**也不参与「以可信方式闭合」**——它不会把停机时间
+/// 算成工时（未知终点的段作废后仍是 `NULL`）。
+///
+/// # 无状态前置（Ruling 6）
+///
+/// `running` / `paused` / `recovering` / `finished` 一视同仁：`paused` 却仍挂着待确认
+/// 区间这一类四类判定盖不住的形态，出口就是这条命令。已 `discarded` 且区间都已作废时
+/// 是**幂等**的：零写入、零审计、零版本（不移动第一次作废时记下的 `ended_at`）。
+///
+/// # 与 `reconcile(DiscardUncertain)` 的区别（02 §3/§4：不许含糊共用一个丢弃按钮）
+///
+/// - `reconcile` 只作废**待确认**区间，可信前缀原样保留，且只接 `recovering`；
+/// - `discard_session` 作废**全部**区间（含可信前缀与运行中的开放区间）并把会话推成
+///   `discarded`，**不隐式改变任务状态**、不删除任何审计行。
+///
+/// 两者的 `time_edit.reason`（`reconcile:discard_uncertain` / `discard_session`）与
+/// 规则文案都不同，所以在错误与审计上可分辨。
+///
+/// `ended_at` 记 `max(now, session.started_at)`（`ck_session_range` 的下界兜底）；
+/// `run_id` **不动**（终态会话不再参与门禁与联动）；`needs_review` 清假。
+/// 端点是用户给定的整段事实，没有候选推导 ⇒ **不写** `candidate_*`（Ruling 8）。
+pub fn discard_session(
+    db: &mut Db,
+    env: WriteEnvelope,
+    req: DiscardSessionRequest,
+    now: i64,
+) -> Result<WriteOutcome<HistoryEditReport>, AppError> {
+    let expected_version = env.expected_row_version.ok_or_else(|| AppError::Domain {
+        detail: "缺少记录版本，无法安全地作废这次会话。".into(),
+    })?;
+
+    let tx = write_tx(db, &env)?;
+
+    let session =
+        session_repo::get_session(&tx, &req.session_id)?.ok_or(DomainError::UnknownSession)?;
+    guard_row_version(session.row_version, expected_version)?;
+
+    let before_intervals = session_repo::intervals_of_session(&tx, &req.session_id)?;
+    // 报告要答「作废了哪一段」，所以一条区间都没有的会话只能显式拒绝
+    // （`HistoryEditReport.interval` 是必填的）；这也是防御分支，正常路径造不出来。
+    let first = before_intervals
+        .first()
+        .cloned()
+        .ok_or_else(|| AppError::Domain {
+            detail: "这条会话没有任何计时区间，无法作废。".into(),
+        })?;
+
+    // 幂等：已经到了「整次作废」的终态，没有任何字段要改。
+    // 已经 `discarded` 的会话在下面也不会再移动 `ended_at`——作废时刻是**第一次**
+    // 作废的时刻（与 `void_interval` 不覆盖 `voided_at`、`mark_clean_exit` 不覆盖
+    // 第一次退出时刻同一口径），否则重复提交会把一个终态会话的终点一直往后推。
+    let all_voided = before_intervals
+        .iter()
+        .all(|interval| interval.voided_at.is_some());
+    if all_voided && session.state == SessionState::Discarded && !session.needs_review {
+        let outcome = settle(&tx, WriteOutcome::Unchanged(report(session.clone(), first)))?.map(
+            |(mut report, settled)| {
+                report.revision = settled.revision;
+                report.data_epoch = settled.data_epoch;
+                report
+            },
+        );
+        tx.commit().map_err(map_sqlite)?;
+        return Ok(outcome);
+    }
+
+    // 全部区间软作废（含运行中的开放区间与已归一的候选段）。
+    // `void_interval` 的已知/未知时长规则见 S8：有 `duration_ms` 的保留端点，
+    // 没有的把 `ended_at` 清回 `NULL`——不给未确认的候选补 0 时长冒充事实。
+    let mut first_voided = None;
+    for interval in &before_intervals {
+        let voided = session_repo::void_interval(&tx, &interval.id, now)?;
+        if first_voided.is_none() {
+            first_voided = Some(voided);
+        }
+    }
+    let reported = first_voided.unwrap_or(first);
+
+    let ended_at = if session.state == SessionState::Discarded {
+        // 已经作废过：不动它第一次记下的终点。
+        None
+    } else {
+        Some(now.max(session.started_at))
+    };
+    let updated = session_repo::update_session_state(
+        &tx,
+        &req.session_id,
+        expected_version,
+        SessionState::Discarded,
+        SessionStateUpdate {
+            ended_at,
+            // `run_id` 不动：终态会话不再参与门禁与联动。
+            run_id: None,
+            needs_review: Some(false),
+        },
+    )?;
+
+    let after_intervals = session_repo::intervals_of_session(&tx, &req.session_id)?;
+    record_edit(
+        &tx,
+        &ScanEdit {
+            change: "discard_session",
+            before: &session,
+            after: &updated,
+            before_intervals: &before_intervals,
+            after_intervals: &after_intervals,
+            // Ruling 8：整段事实由用户给定，没有候选端点推导。
+            candidate: None,
+            reason: "discard_session",
+        },
+        now,
+    )?;
+
+    let outcome = settle(
+        &tx,
+        WriteOutcome::Changed(HistoryEditReport {
+            session: updated,
+            interval: reported,
+            // 下面由 `settle` 的结果填权威值。
+            revision: 0,
+            data_epoch: String::new(),
+        }),
+    )?
+    .map(|(mut report, settled)| {
+        report.revision = settled.revision;
+        report.data_epoch = settled.data_epoch;
+        report
+    });
+    tx.commit().map_err(map_sqlite)?;
+    Ok(outcome)
+}
+
+/// 报告骨架（`revision`/`data_epoch` 由 `settle` 的结果填）。
+fn report(session: SessionRow, interval: IntervalRow) -> HistoryEditReport {
+    HistoryEditReport {
+        session,
+        interval,
+        revision: 0,
+        data_epoch: String::new(),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

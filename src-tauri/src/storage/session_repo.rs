@@ -241,6 +241,79 @@ pub fn close_interval(
     })
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 手工补录的建会话原语（P3 Task 4，S6）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一条**补录**会话的全部字段。
+///
+/// `started_at`/`ended_at`/`duration_ms` 由服务算好（仓储不读时钟、不推算工时）；
+/// 其余字段是补录的固定形状，调用方照样逐字段写出来——一眼能看出「补录只有这一种」。
+pub struct NewFinishedSession<'a> {
+    pub id: &'a str,
+    pub task_id: &'a str,
+    pub run_id: &'a str,
+    pub mode: SessionMode,
+    pub timer_kind: TimerKind,
+    pub target_duration_ms: Option<i64>,
+    pub interval_id: &'a str,
+    pub started_at: i64,
+    pub ended_at: i64,
+    pub duration_ms: i64,
+}
+
+/// 建立一个**终态**会话与它的可信闭合区间（P3 Task 4 的 `backfill`）。
+///
+/// **为什么不能复用 [`create_session`]**：它把 `state` 硬编 `'running'` 并紧跟
+/// [`open_interval`]——那会短暂占用 `uq_running_foreground` 的前台槽位，而补录
+/// 既不计时也不占前台（02 §3）。这里 `state` 直接写 `finished`：会话建好就是终态，
+/// 一条 `running` 行都不会出现。
+///
+/// 区间两端都是**用户给定的事实**（不是候选端点）：`needs_review = 0`、
+/// `duration_ms` 与起止同一次写入，所以 `ck_interval_duration` 恒成立。
+/// `sampled_end_wall_at` 留 `NULL`——补录没有采样，不得把服务算的时刻写成采样证据；
+/// 也**不写** `interval_checkpoint`（检查点是计时路径的产物）。
+pub fn create_finished_session(
+    tx: &Transaction<'_>,
+    facts: &NewFinishedSession<'_>,
+) -> Result<SessionRow, AppError> {
+    tx.execute(
+        "INSERT INTO work_session(id, task_id, run_id, mode, state, timer_kind,
+                                  target_duration_ms, started_at, ended_at, needs_review,
+                                  row_version)
+         VALUES(?1, ?2, ?3, ?4, 'finished', ?5, ?6, ?7, ?8, 0, 0)",
+        rusqlite::params![
+            facts.id,
+            facts.task_id,
+            facts.run_id,
+            facts.mode.as_str(),
+            facts.timer_kind.as_str(),
+            facts.target_duration_ms,
+            facts.started_at,
+            facts.ended_at
+        ],
+    )
+    .map_err(map_sqlite)?;
+
+    tx.execute(
+        "INSERT INTO work_interval(id, session_id, started_at, ended_at, duration_ms,
+                                   sampled_end_wall_at, needs_review, voided_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, NULL, 0, NULL)",
+        rusqlite::params![
+            facts.interval_id,
+            facts.id,
+            facts.started_at,
+            facts.ended_at,
+            facts.duration_ms
+        ],
+    )
+    .map_err(map_sqlite)?;
+
+    get_session(tx, facts.id)?.ok_or_else(|| AppError::Storage {
+        detail: "session vanished after insert".into(),
+    })
+}
+
 /// 一次会话状态更新要改的字段。`None` 表示「保持不动」。
 ///
 /// 用结构体而不是一串 `Option` 参数：调用点写 `..Default::default()` 时字段名是自解释的，
