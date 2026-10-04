@@ -22,7 +22,12 @@ use super::task_repo::enum_error;
 use super::WriteOutcome;
 
 /// `project` 的一行。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` 是给 IPC 用的（P7 Task 1）：`services::catalog::ProjectList.items`
+/// 直接装它，查询响应原样把它交给前端。**派生在行类型上**而不是另写一份 DTO——
+/// 行类型是这条投影的唯一出处，第二份形状迟早与列漂移。`status` 的 JSON 形状由
+/// `domain::project::ProjectStatus` 那份手写实现决定（就是落库字符串）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProjectRow {
     pub id: String,
     pub name: String,

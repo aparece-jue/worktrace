@@ -35,6 +35,15 @@ impl TagKind {
     }
 }
 
+/// IPC/JSON 形状：**就是落库用的那套字符串**（[`TagKind::as_str`]）。
+///
+/// 手写而不是派生，理由与 [`crate::domain::task::TaskStatus`] 的实现逐字相同。
+impl serde::Serialize for TagKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// 标签名的规范化：只去首尾空白。
 ///
 /// 唯一性口径是「同 kind + 规范化后的名字 + **大小写敏感**」：

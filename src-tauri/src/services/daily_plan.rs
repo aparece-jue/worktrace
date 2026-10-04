@@ -125,7 +125,10 @@ fn unknown_timezone(raw: &str) -> AppError {
 ///
 /// 日期与时区都是**原始输入**：它们在这里过 [`parse_local_date`] /
 /// [`normalize_timezone`] 两道唯一入口（R-T4-h），调用方不要自己先校验一遍。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Deserialize`（P7 Task 1）：这个形状本来就是 IPC 的（三个字段都是字符串），
+/// 所以命令层直接收它，不再造一个逐字相同的转发 DTO。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct DailyPlanQuery {
     pub date: String,
     pub timezone: String,
@@ -133,7 +136,7 @@ pub struct DailyPlanQuery {
 }
 
 /// 读结果：这一天（这个时区）选中的任务 + 这次读看到的库身份与业务版本。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DailyPlanView {
     /// 按 `task.created_at, task.id` 稳定排序。
     pub tasks: Vec<TaskRow>,
@@ -144,7 +147,7 @@ pub struct DailyPlanView {
 }
 
 /// 加入 / 移除的产物：这一天**当前**的计划 + 提交后的 `revision` 与库身份。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DailyPlanChange {
     /// 按 `task.created_at, task.id` 稳定排序。
     pub tasks: Vec<TaskRow>,

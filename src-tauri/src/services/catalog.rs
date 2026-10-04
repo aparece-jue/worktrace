@@ -103,6 +103,22 @@ fn invalid(field: &'static str, value: &str) -> AppError {
     .into()
 }
 
+/// 项目状态输入的校验入口（**读路径**）。
+///
+/// 与写路径的 [`parse_project_status`] 只差一条：这里**不拒绝 `done`**。它是 schema
+/// 取值域里的合法值，读路径必须读得懂（分工写在 `domain/project.rs` 的模块注释里）。
+/// 列表筛选用这一个；写路径仍用 [`parse_project_status`]。
+pub fn parse_project_status_read(raw: &str) -> Result<ProjectStatus, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(DomainError::EmptyText {
+            field: "项目状态"
+        }
+        .into());
+    }
+    ProjectStatus::parse(trimmed).ok_or_else(|| invalid("项目状态", raw))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 项目与任务归属的写服务（P4 Task 2）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -131,7 +147,11 @@ impl ProjectTarget {
 }
 
 /// 项目写命令的产物。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`（P7 Task 1）：**这就是写命令的 IPC 响应形状**，不再另立一份 DTO。
+/// `project` 的 JSON 形状由行类型的 derive 决定，`status` 由
+/// `domain::project::ProjectStatus` 的手写实现决定（落库字符串）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProjectChange {
     pub project: ProjectRow,
     /// 提交后的权威 `revision`；`Unchanged` 时与调用前相等。
@@ -141,7 +161,7 @@ pub struct ProjectChange {
 }
 
 /// 任务归属写命令的产物。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TaskProjectChange {
     pub task: TaskRow,
     /// 提交后的权威 `revision`；`Unchanged` 时与调用前相等。
@@ -229,7 +249,7 @@ pub fn archive_project(
 
 /// 完整项目列表的**读结果信封**（COMP-01）：`items` 与 `data_epoch` / `revision`
 /// 出自**同一个读事务**。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProjectList {
     /// 按 `created_at, id` 稳定排序。
     pub items: Vec<ProjectRow>,
@@ -241,7 +261,7 @@ pub struct ProjectList {
 
 /// 标签列表的**读结果信封**（COMP-01）：`items` 与 `data_epoch` / `revision`
 /// 出自**同一个读事务**。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TagList {
     /// 按 `created_at, id` 稳定排序。
     pub items: Vec<TagRow>,
@@ -334,7 +354,7 @@ fn require_version(env: &WriteEnvelope) -> Result<i64, AppError> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 新建标签写命令的产物。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TagChange {
     pub tag: TagRow,
     /// 提交后的权威 `revision`。
@@ -344,7 +364,7 @@ pub struct TagChange {
 }
 
 /// 打标 / 去标写命令的产物：这个任务**当前**的标签集合。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TaskTagsChange {
     pub tags: Vec<TagRow>,
     /// 提交后的权威 `revision`；`Unchanged` 时与调用前相等。
@@ -497,7 +517,7 @@ pub fn untag_task(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 任务写命令的产物（捕获与理清为待办共用这一形状）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TaskChange {
     pub task: TaskRow,
     /// 提交后的权威 `revision`。
@@ -612,7 +632,7 @@ pub struct TaskQuery {
 }
 
 /// 筛选查询的结果：四项都出自**同一个读事务**（R-T5-b）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TaskQueryResult {
     /// 这一页的任务（`created_at, id` 稳定排序）。
     pub tasks: Vec<TaskRow>,
@@ -622,6 +642,87 @@ pub struct TaskQueryResult {
     pub data_epoch: String,
     /// 这次读看到的业务版本。查询**不**改它。
     pub revision: i64,
+}
+
+/// 项目筛选的**三值 IPC 形状**（D3 裁决），对应 `task_repo::ProjectFilter`。
+///
+/// JSON 形状固定为 `"any"` / `"none"` / `{"id":"<project_id>"}`：前两个是单元变体的
+/// 外部标签，第三个是 `Id` 变体的小写标签 + 内容。三态**不能**压成
+/// `Option<Option<String>>`——那样「不限制项目」与「只要没有项目的」在类型上长得一样
+/// （仓储的注释写着同一条理由）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectSelector {
+    /// 不限制项目。
+    Any,
+    /// 只要**没有**项目的任务。
+    None,
+    /// 只要归属到指定项目的任务。
+    Id(String),
+}
+
+impl From<ProjectSelector> for task_repo::ProjectFilter {
+    fn from(selector: ProjectSelector) -> Self {
+        match selector {
+            ProjectSelector::Any => task_repo::ProjectFilter::Any,
+            ProjectSelector::None => task_repo::ProjectFilter::None,
+            ProjectSelector::Id(id) => task_repo::ProjectFilter::Id(id),
+        }
+    }
+}
+
+/// 筛选查询的 **IPC 请求形状**（D3 裁决）。
+///
+/// 为什么不直接收 [`TaskQuery`]：后者的字段是 `storage::task_repo` 的类型
+/// （`TaskFilter` / `Page` / `ProjectFilter`），命令层构造它必踩分层门禁
+/// （`commands 禁 storage::`）。这里把同一个请求表达成 IPC 友好的形状，
+/// 解析与校验只有一处（下面的 [`TryFrom`] 实现）。
+///
+/// **枚举一律是字符串**：serde 的枚举反序列化失败拿不到 `ErrorResponse.code`，
+/// 非法取值会退化成 Tauri 的反序列化错误（00 §4 只认那五个码），所以校验必须显式做。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct TaskQueryRequest {
+    /// 状态集合；**空集合 = 不限制状态**（与 `TaskFilter` 同义）。
+    /// 每个值走 [`TaskStatus::parse`]（读路径：整个取值域都收，含 V0.1 不写的 `Scheduled`）。
+    pub statuses: Vec<String>,
+    pub project: ProjectSelector,
+    /// 情境（上下文）标签 id。**必须是 `Context` 类**——那条拒绝留在服务入口
+    /// （[`list_tasks_filtered`]），这里不重复实现。
+    pub context_tag_id: Option<String>,
+    /// 每页条数，1..=100。
+    pub limit: i64,
+    /// 偏移，>= 0。
+    pub offset: i64,
+    /// 请求方手上的库身份。
+    pub expected_data_epoch: String,
+}
+
+impl TryFrom<TaskQueryRequest> for TaskQuery {
+    type Error = AppError;
+
+    /// 唯一一次解析：非法状态串 ⇒ `UnknownEnumValue`（稳定错误码 `DOMAIN_ERROR`）。
+    ///
+    /// 分页越界**不在这里拒绝**：`limit`/`offset` 的规则只有一处
+    /// （`task_repo::require_page`，读路径会抛出来），在这里再写一份就等于给它
+    /// 第二次定义。
+    fn try_from(req: TaskQueryRequest) -> Result<Self, AppError> {
+        let mut statuses = Vec::with_capacity(req.statuses.len());
+        for raw in &req.statuses {
+            statuses.push(TaskStatus::parse(raw).ok_or_else(|| invalid("任务状态", raw))?);
+        }
+        Ok(TaskQuery {
+            filter: TaskFilter {
+                statuses,
+                project: req.project.into(),
+                context_tag_id: req.context_tag_id,
+            },
+            page: Page {
+                limit: req.limit,
+                offset: req.offset,
+            },
+            expected_data_epoch: req.expected_data_epoch,
+        })
+    }
 }
 
 /// 任务筛选查询（F-002 的轻量 GTD 列表）。

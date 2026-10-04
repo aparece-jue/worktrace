@@ -1,0 +1,13 @@
+{
+  "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+  "project": {
+    "created_at": 1700000000000,
+    "description": null,
+    "id": "22222222-2222-4222-8222-222222222222",
+    "name": "Worktrace V0.1",
+    "row_version": 2,
+    "status": "archived",
+    "updated_at": 1700000060000
+  },
+  "revision": 8
+}

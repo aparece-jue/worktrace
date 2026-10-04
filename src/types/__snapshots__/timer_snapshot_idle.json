@@ -1,0 +1,15 @@
+{
+  "active_ms": 0,
+  "as_of": 1700000301000,
+  "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+  "overtime_ms": null,
+  "pending_ms": null,
+  "remaining_ms": null,
+  "revision": 7,
+  "run_id": "55555555-5555-4555-8555-555555555555",
+  "session_id": null,
+  "session_version": null,
+  "state": null,
+  "tick_seq": 43,
+  "timer_kind": null
+}

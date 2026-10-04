@@ -22,7 +22,10 @@ use super::task_repo::{enum_error, record_change, require_task};
 use super::WriteOutcome;
 
 /// `tag` 的一行。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` 的来由与 [`crate::storage::project_repo::ProjectRow`] 逐字相同：
+/// `services::catalog::TagList.items` 直接装它交给 IPC。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TagRow {
     pub id: String,
     pub kind: TagKind,

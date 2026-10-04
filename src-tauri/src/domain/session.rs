@@ -53,6 +53,15 @@ impl SessionState {
     }
 }
 
+/// IPC/JSON 形状：**就是落库用的那套小写字符串**（[`SessionState::as_str`]）。
+///
+/// 手写而不是派生，理由与 [`crate::domain::task::TaskStatus`] 的实现逐字相同。
+impl serde::Serialize for SessionState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// 会话模式。02 §6 的统计口径依赖它：人工**只有** `FOREGROUND`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionMode {
@@ -110,6 +119,15 @@ impl TimerKind {
             "countdown" => Some(Self::Countdown),
             _ => None,
         }
+    }
+}
+
+/// IPC/JSON 形状：**就是落库用的那套小写字符串**（[`TimerKind::as_str`]）。
+///
+/// 手写而不是派生，理由与 [`crate::domain::task::TaskStatus`] 的实现逐字相同。
+impl serde::Serialize for TimerKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 

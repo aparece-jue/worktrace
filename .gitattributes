@@ -1,0 +1,5 @@
+# IPC snapshots are compared byte for byte by src-tauri/tests/ipc_snapshots.rs.
+# core.autocrlf=true is set in this repo, so git would rewrite LF as CRLF on
+# checkout and turn that test red without anyone touching a Rust type.
+# Pin the working-tree line ending for the contract files.
+src/types/__snapshots__/*.json text eol=lf

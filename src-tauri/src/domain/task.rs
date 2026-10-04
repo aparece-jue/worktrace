@@ -79,6 +79,17 @@ impl TaskStatus {
     }
 }
 
+/// IPC/JSON 形状：**就是落库用的那套字符串**（[`TaskStatus::as_str`]）。
+///
+/// 手写而不是派生：派生序列化的是**变体名**，而变体名与 `as_str()` 是两份各自会漂移的
+/// 事实（今天 `Inbox` 两边恰好同形，`Scheduled` 之后新增的变体未必）。手写一份，
+/// 等价于在每个字段上写 `serialize_with`，但只有一处定义。
+impl serde::Serialize for TaskStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// 跃迁原因。`Reopen` 是 `Done`/`Cancelled` 回到 `Ready` 的**唯一**合法原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitionCause {

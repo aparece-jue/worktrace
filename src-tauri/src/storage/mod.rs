@@ -62,4 +62,19 @@ impl<T> WriteOutcome<T> {
             Self::Unchanged(value) => WriteOutcome::Unchanged(f(value)),
         }
     }
+
+    /// 取出载荷，丢弃「变了 / 没变」这一位。
+    ///
+    /// **这是给命令层（IPC）用的**（P7 Task 1）：`commands` 不得出现 `storage::` 的名字
+    /// （分层门禁），所以它写不出 `match WriteOutcome::Changed(…)`；而方法调用不需要
+    /// 在调用点写出类型名。命令层据此把写结果原样交给前端。
+    ///
+    /// 丢掉的那一位在 IPC 形状里**没有单独字段**：规格没给它位置，响应里的 `revision`
+    /// 仍然是提交后的权威值，客户端据此使缓存失效。要恢复这一位就得给响应加层信封，
+    /// 那属于契约变更，不在 Task 1 里做。
+    pub fn into_value(self) -> T {
+        match self {
+            Self::Changed(value) | Self::Unchanged(value) => value,
+        }
+    }
 }

@@ -89,25 +89,13 @@ impl EventEnvelope {
 
 /// tick 事件的载荷：00 §5 的计时字段，一个不多一个不少。
 ///
-/// 为什么手写而不是 `serde_json::to_value(snapshot)`：给 `TimerSnapshot` 加
-/// `Serialize` 属 Task 1 的 DTO 工作（它要与前端的类型快照逐字节对齐），
-/// 本任务不碰。字段名与 00 §5 一致；Task 1 接手时改成 derive 即可，形状不变。
+/// **就是 [`TimerSnapshot`] 的 serde 形状**（P7 Task 1 订正）：原先这里手写一份
+/// `json!`，当时的理由是本类型还没有 `Serialize`（「属 Task 1 的 DTO 工作」）。
+/// 现在它有了，两份形状必须合成一份——留着两份，就是给「改了 Rust 类型忘了改前端类型」
+/// 留一道手写的缝。`tests/ipc_snapshots.rs` 同时钉住 `TimerSnapshot` 的快照与
+/// 「载荷 = 快照的 JSON」这条等式。
 pub fn timer_tick_payload(snapshot: &TimerSnapshot) -> serde_json::Value {
-    serde_json::json!({
-        "data_epoch": snapshot.data_epoch,
-        "revision": snapshot.revision,
-        "run_id": snapshot.run_id,
-        "session_id": snapshot.session_id,
-        "session_version": snapshot.session_version,
-        "tick_seq": snapshot.tick_seq,
-        "as_of": snapshot.as_of,
-        "active_ms": snapshot.active_ms,
-        "pending_ms": snapshot.pending_ms,
-        "state": snapshot.state.map(|s| s.as_str()),
-        "timer_kind": snapshot.timer_kind.map(|k| k.as_str()),
-        "remaining_ms": snapshot.remaining_ms,
-        "overtime_ms": snapshot.overtime_ms,
-    })
+    serde_json::to_value(snapshot).expect("timer snapshot is plain JSON data")
 }
 
 /// 广播出口。**实现必须是投递式（非阻塞）的**：它在串行边界内被调用，

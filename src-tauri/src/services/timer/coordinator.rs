@@ -48,7 +48,10 @@ pub struct StartRequest {
 }
 
 /// 一次 `pause` / `finish` 请求。
-#[derive(Debug, Clone)]
+///
+/// `Deserialize`（P7 Task 1）：字段全是字符串/整数，**形状就是 IPC 的形状**，
+/// 所以命令层直接收它，不必再造一个逐字相同的转发 DTO。
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct SessionRequest {
     pub expected_data_epoch: String,
     pub session_id: String,
@@ -56,7 +59,9 @@ pub struct SessionRequest {
 }
 
 /// 一次 `resume` 请求。**两份版本**：任务与会话各自有自己的并发版本。
-#[derive(Debug, Clone)]
+///
+/// `Deserialize` 的理由与 [`SessionRequest`] 相同：没有枚举字段，直接当 IPC 入参用。
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct ResumeRequest {
     pub expected_data_epoch: String,
     pub task_id: String,
@@ -66,13 +71,59 @@ pub struct ResumeRequest {
 }
 
 /// 命令成功后的产物。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`（P7 Task 1）：**这就是计时命令的 IPC 响应形状**。`snapshot` 的形状
+/// 由 [`TimerSnapshot`] 的 derive 决定，不另抄一份。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CommandOutcome {
     pub snapshot: TimerSnapshot,
     /// 本次事务后的权威 `revision`。前端据此丢弃过期响应。
     pub revision: i64,
     /// 请求目标任务的提交后版本（快照可能指向另一条仍在运行的会话）。
     pub task_version: i64,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 请求里那两个枚举的**唯一**校验入口（P7 Task 1）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// IPC 形状里 `mode` / `timer_kind` 是**字符串**：serde 的枚举反序列化失败拿不到
+// `ErrorResponse.code`，非法取值会退化成 Tauri 的反序列化错误（00 §4 只认那五个码）。
+// 所以命令层收到字符串后必须显式过这里，而不是让请求类型去 derive `Deserialize`。
+// 两个函数与 `services::catalog::parse_tag_kind` 同一形状：解析规则只有 domain 那一处。
+
+/// `mode` 输入的校验入口。取值域就是 [`SessionMode::ALL`]（`FOREGROUND` 等大写串）。
+pub fn parse_session_mode(raw: &str) -> Result<SessionMode, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(DomainError::EmptyText {
+            field: "会话模式"
+        }
+        .into());
+    }
+    SessionMode::parse(trimmed).ok_or_else(|| unknown_enum_value("会话模式", raw))
+}
+
+/// `timer_kind` 输入的校验入口。取值域是 `stopwatch` / `countdown`。
+pub fn parse_timer_kind(raw: &str) -> Result<TimerKind, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(DomainError::EmptyText {
+            field: "计时类型"
+        }
+        .into());
+    }
+    TimerKind::parse(trimmed).ok_or_else(|| unknown_enum_value("计时类型", raw))
+}
+
+/// 「这个值不在取值域里」。与 `services::catalog::invalid` 同形：`field` 面向用户、
+/// `value` 原样回显，错误码落在 `DOMAIN_ERROR` 上。
+fn unknown_enum_value(field: &'static str, value: &str) -> AppError {
+    DomainError::UnknownEnumValue {
+        field,
+        value: value.to_string(),
+    }
+    .into()
 }
 
 /// 协调器在内存里持有的会话事实。**每一条都能在库里找到对应行**——

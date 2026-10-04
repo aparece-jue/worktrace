@@ -17,7 +17,10 @@ use super::guards::guard_row_version;
 use super::WriteOutcome;
 
 /// `task` 的一行。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` 的来由与 [`crate::storage::project_repo::ProjectRow`] 逐字相同：
+/// `TaskQueryResult.tasks` / `DailyPlanView.tasks` 直接装它交给 IPC。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TaskRow {
     pub id: String,
     pub project_id: Option<String>,
