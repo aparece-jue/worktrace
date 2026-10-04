@@ -30,6 +30,7 @@ use worktrace_lib::services::events::{EventEnvelope, EventSink};
 use worktrace_lib::services::recovery::{
     ConfirmedRange, DiscardSessionRequest, ReconcileAction, ReconcileRequest, ReconcileTargetState,
 };
+use worktrace_lib::services::timer::anchor::SampleVerdict;
 use worktrace_lib::services::timer::coordinator::{ResumeRequest, StartRequest};
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::{init_meta, require_meta};
@@ -828,6 +829,20 @@ fn accepting_the_correction_commits_the_audit_then_clears_the_flag() {
     assert_eq!(after_json["sampled_monotonic_ms"], app.mono_now());
     assert_eq!(after_json["clock_correction_accepted"], true);
     assert_eq!(after_json["intervals_changed"], false);
+    // 审计必须写清「被接受的是哪一种异常」：这一拍相对检测器的 `last`（= 置标记那一拍）
+    // 只多出一段 `lifetime_ref` 累计偏差（长间隔那一步重建过参照），所以判决是 `Drifted`。
+    // 值取自**这一次观察**——多观察一次就是另一个数（见下一个用例的 `Jumped` 探针）。
+    assert_eq!(
+        after_json["verdict"], "Drifted { cumulative_gap_ms: 31000 }",
+        "审计的 verdict 必须是这一拍观察到的判决"
+    );
+    assert_eq!(
+        state.coordinator().last_verdict(),
+        SampleVerdict::Drifted {
+            cumulative_gap_ms: 31_000
+        },
+        "同一次观察的产物必须与审计一致（retry_recovery 也读它）"
+    );
 
     // 不自动确认任何可疑工时：区间逐字段与接受之前**完全一样**。
     assert_eq!(intervals_of(state.db(), &session_id), intervals_before);
@@ -850,6 +865,164 @@ fn accepting_the_correction_commits_the_audit_then_clears_the_flag() {
     state
         .start(start_request(&epoch, "t2", t2_version))
         .expect("接受校正之后 start 必须成功");
+}
+
+/// S4 的「`observe` **恰好一次**」探针（§0.3 S4 顺序的第 ② 步）。
+///
+/// 同一个采样看两次，第二次的增量恒为 0（`anchor.rs::observe` 会推进 `last`），判决就从
+/// **依赖 `last`** 的 `Jumped` 掉成 `Drifted`：审计会写错「被接受的是哪种异常」，而
+/// `last_verdict`（`Coordinator::retry_recovery` 会读它）也跟着错。
+///
+/// 所以这里让未接受标记置真之后**再跳一次**，断言审计与 `last_verdict` 都是这一拍的
+/// `Jumped`——多观察一次，这两条断言**必红**。
+#[test]
+fn accepting_the_correction_observes_the_sample_exactly_once() {
+    let paths = fixture();
+    let db = seeded(&paths);
+    drop(db);
+    let app = started(paths);
+    let epoch = app.epoch();
+    let mut state = lock_app(app.running.app());
+
+    let session_id = flag_the_unaccepted_correction(&app, &mut state);
+    // 标记已置真（会话 `recovering`），此时时钟又跳一次：这一拍相对检测器的 `last`
+    // 是一段 5 秒的挂钟单拍跳变（`Jumped` 的判据依赖 `last`，看两次就不成立了）。
+    app.advance_wall_only(5_000);
+
+    let accepted = state.accept_detected_clock_correction(&epoch).unwrap();
+    assert!(accepted.accepted);
+
+    let edits = time_edit_repo::edits_of_session(state.db().connection(), &session_id).unwrap();
+    let edit = edits
+        .iter()
+        .find(|edit| edit.reason.as_deref() == Some("clock_correction:accepted"))
+        .expect("接受校正必须留下自己那条审计");
+    let after_json: serde_json::Value = serde_json::from_str(&edit.after_json).unwrap();
+    assert_eq!(
+        after_json["verdict"], "Jumped { delta_gap_ms: 5000 }",
+        "审计的 verdict 必须来自**这一次**观察"
+    );
+    assert_eq!(after_json["sampled_wall_at"], app.wall_now());
+    assert_eq!(
+        state.coordinator().last_verdict(),
+        SampleVerdict::Jumped {
+            delta_gap_ms: 5_000
+        },
+        "多观察一次会把这一拍的判决降级成 `Drifted`（`last` 已被它推进）"
+    );
+}
+
+/// Ruling 34：这条路上观察到的**非 `Trusted`** 判决不得被静默丢掉——**长间隔**。
+///
+/// 若本命令是睡眠/休眠之后的**第一个采样入口**，`observe` 已经把那一拍消费掉：丢掉判决
+/// 就等于把停机时间留在开放区间里当成工时，既不分割也不标 `needs_review`
+/// （违反 08 §1 / 02 §4 的「异常必须在最后可信检查点分割」与总纲 §9）。
+/// 它必须走既有异常处理：系统恢复事务先提交，再拒绝原命令。
+///
+/// 这条同时是 `pre-p3-closure` 第 2 行（长间隔 / 无基线 / 未知终点 / 可信前缀）在本文件里的证据。
+#[test]
+fn a_long_gap_seen_by_the_correction_command_is_not_counted_as_work() {
+    let paths = fixture();
+    let db = seeded(&paths);
+    drop(db);
+    let app = started(paths);
+    let epoch = app.epoch();
+    let mut state = lock_app(app.running.app());
+
+    let version = task_version(state.db(), "t1");
+    state.start(start_request(&epoch, "t1", version)).unwrap();
+    let session_id = state.coordinator().live().unwrap().id.clone();
+    let open_before = intervals_of(state.db(), &session_id);
+    assert_eq!(open_before.len(), 1);
+    assert_eq!(open_before[0].ended_at, None, "起点是一条开放区间");
+
+    let before = world(state.db());
+    let samples_before = app.sample_count();
+    // 睡眠/休眠：两个时钟一起走了 129 秒（长间隔，两钟同步 ⇒ 不是墙钟校正）。
+    app.advance(129_000);
+
+    let error = state.accept_detected_clock_correction(&epoch).unwrap_err();
+    assert_code(&error, "RECOVERY_REQUIRED");
+    assert_eq!(
+        app.sample_count() - samples_before,
+        1,
+        "这条路径只取一次样本"
+    );
+
+    // 既有异常处理的产物：区间收成待确认段、会话 `recovering`、恰好一次 revision + 一条审计。
+    let after = world(state.db());
+    assert_eq!(after.revision, before.revision + 1);
+    assert_eq!(after.edits.len(), before.edits.len() + 1);
+    assert_eq!(
+        after.edits.last().unwrap().reason.as_deref(),
+        Some("untrusted observation gap")
+    );
+    let session = session_of(state.db(), &session_id);
+    assert_eq!(session.state, "recovering");
+    assert_eq!(session.needs_review, 1);
+    let intervals = intervals_of(state.db(), &session_id);
+    assert_eq!(intervals.len(), 1, "没有可信前缀时不另造余段");
+    assert_eq!(intervals[0].needs_review, 1);
+    assert_eq!(intervals[0].duration_ms, None, "无证据不猜时长");
+    assert_eq!(
+        intervals[0].ended_at,
+        Some(app.wall_now()),
+        "开放区间收在候选终点上（候选不是事实）"
+    );
+
+    // 停机时间**不进可信暂计**：它只是待确认。
+    let snapshot = state.snapshot().unwrap();
+    assert_eq!(snapshot.state, Some(SessionState::Recovering));
+    assert_eq!(snapshot.active_ms, 0, "停机时间不得被静默算成工时");
+    assert_eq!(
+        snapshot.pending_ms,
+        Some(129_000),
+        "它进的是待确认，不是工时"
+    );
+
+    // 这条路上也没有发生任何「接受」。
+    assert!(
+        after
+            .edits
+            .iter()
+            .all(|edit| edit.reason.as_deref() != Some("clock_correction:accepted")),
+        "没有待接受的校正：不得写接受审计"
+    );
+}
+
+/// Ruling 34 的另一半：**`live` 为 `None`**（本 run 还没有过任何会话）时的同一拍长间隔。
+///
+/// 既有异常处理对「没有会话」什么都不写——没有开放工时需要分割，重定基线是 `start`
+/// 路径的事（`Coordinator::start` 的 `live.is_none()` 分支）。所以这里如实返回
+/// `RECOVERY_REQUIRED` 且**零写入**（与 `snapshot`/`start` 同一条最小口径，不新造机制），
+/// 下一拍就恢复可信。
+#[test]
+fn a_long_gap_without_a_live_session_is_reported_without_writing() {
+    let paths = fixture();
+    let db = seeded(&paths);
+    drop(db);
+    let app = started(paths);
+    let epoch = app.epoch();
+    let mut state = lock_app(app.running.app());
+
+    assert!(state.coordinator().live().is_none());
+    let before = world(state.db());
+    app.advance(129_000);
+
+    let error = state.accept_detected_clock_correction(&epoch).unwrap_err();
+    assert_code(&error, "RECOVERY_REQUIRED");
+    assert!(!state.coordinator().is_faulted());
+    assert_eq!(
+        world(state.db()),
+        before,
+        "没有会话：既有异常处理不写任何事实（与 snapshot/start 同一口径）"
+    );
+
+    // 下一拍已经可信：不残留故障，也不谎报「有待接受的校正」。
+    let again = state.accept_detected_clock_correction(&epoch).unwrap();
+    assert!(!again.accepted);
+    assert_eq!(again.revision, before.revision);
+    assert!(state.guard_business_timing().is_ok());
 }
 
 /// 失败保留标记（§0.3 S4 的「不提交、不清标记」）：审计写失败 ⇒ 整体回滚，
@@ -1043,6 +1216,10 @@ fn a_failed_anomaly_transaction_rolls_everything_back_and_faults_the_coordinator
 
 /// `docs/validation/pre-p3-closure.md` 第 4 行后半：**S12 用户显式重试成功后重算门禁，
 /// 失败不清故障**；成功之后计时真的可用（「故障态下计时仍可用」的唯一证据）。
+///
+/// **门禁重算必须可证伪**：成功路径唯一能证明「`rescan_recovery()` 真的跑了」的事实，
+/// 是一条**本次重试之前才注入**的、别的 run 的恢复材料——它不在启动快照里，只有重扫
+/// 才会看见它。所以这里注入之后先断言缓存快照**还是**开着的，重试成功后再断言它**关了**。
 #[test]
 fn retry_recovery_clears_the_fault_only_after_a_successful_commit() {
     let paths = fixture();
@@ -1063,6 +1240,33 @@ fn retry_recovery_clears_the_fault_only_after_a_successful_commit() {
         "重试失败不得清故障（否则坏事实会在下一拍被当成好事实）"
     );
     assert_eq!(world(state.db()), before, "重试失败同样零写入");
+
+    // 注入一条**别的 run** 的 `recovering` 会话（带一条待确认区间）：启动时库是干净的，
+    // 所以它不在门禁快照里——只有真的重扫过，下面那条「门禁关了」才可能成立。
+    insert_session(
+        state.db(),
+        "s-other",
+        "t3",
+        OLD_RUN,
+        "recovering",
+        WALL - 300_000,
+        None,
+        1,
+    );
+    insert_interval(
+        state.db(),
+        "s-other-pending",
+        "s-other",
+        WALL - 300_000,
+        Some(WALL - 300_000),
+        None,
+        1,
+        None,
+    );
+    assert!(
+        !state.recovery().requires_recovery(),
+        "注入不改缓存快照：重扫才会看到它"
+    );
 
     // 排障之后重试：那笔恢复事务提交一次，故障态清除，门禁按**提交后**的事实重算。
     allow_time_edit_writes(state.db());
@@ -1090,16 +1294,46 @@ fn retry_recovery_clears_the_fault_only_after_a_successful_commit() {
         None,
         "候选时长不是工时"
     );
-    assert!(
-        !state.recovery().requires_recovery(),
-        "重扫按提交后的事实算：本 run 的 recovering 不是门禁事实"
-    );
 
-    // 闭环的最后一步：故障清除之后计时真的可用。
+    // **门禁字段跟着事实走了**：刚注入的那条别的 run 的恢复材料必须出现在快照里。
+    assert!(
+        state.recovery().requires_recovery(),
+        "重试成功后必须按提交后的事实重算门禁（否则这里会是启动时的空快照）"
+    );
+    assert!(
+        state
+            .recovery()
+            .unfinished_sessions
+            .iter()
+            .any(|id| id == "s-other"),
+        "快照必须包含刚注入的那条会话：{:?}",
+        state.recovery()
+    );
+    assert_code(
+        &state.guard_business_timing().unwrap_err(),
+        "RECOVERY_REQUIRED",
+    );
     let t2_version = task_version(state.db(), "t2");
+    let error = state
+        .start(start_request(&epoch, "t2", t2_version))
+        .unwrap_err();
+    assert_code(&error, "RECOVERY_REQUIRED");
+
+    // 把那批事实处理掉（这里是直接清掉）⇒ 显式重扫之后门禁放开、计时真的可用：
+    // 「故障态下计时仍可用」这条闭环没有被注入的恢复材料挡住。
+    state
+        .db()
+        .connection()
+        .execute_batch(
+            "DELETE FROM work_interval WHERE session_id = 's-other';
+             DELETE FROM work_session WHERE id = 's-other';",
+        )
+        .unwrap();
+    assert!(!state.rescan_recovery().unwrap().requires_recovery());
+    assert!(state.guard_business_timing().is_ok());
     state
         .start(start_request(&epoch, "t2", t2_version))
-        .expect("重建成功之后 start 必须可用");
+        .expect("重建成功且恢复事实清掉之后 start 必须可用");
 }
 
 /// `docs/validation/pre-p3-closure.md` 第 4 行末句：**单调倒退仍需新 run，禁止用 S12 掩盖**。

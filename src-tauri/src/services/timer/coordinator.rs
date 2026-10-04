@@ -1451,8 +1451,10 @@ impl Coordinator {
     ///    [`Coordinator::observe`] **恰好一次**。必须观察：不推进检测器的 `last`，
     ///    下一拍会把「距上次观察很久」误判成长间隔 `Suspended`；而同一个采样看两次，
     ///    第二次的增量恒为 0，会把刚判出来的异常覆盖成 `Trusted`。
-    /// ③ 没有待接受的校正（或本 run 没有会话）⇒ `Unchanged`：无审计、零变化、不加版本。
-    ///    判据只看内存标记——它只在 `live.state == Recovering` 的分支里被置真。
+    /// ③ 「没有待接受的校正（或本 run 没有会话）」⇒ 本来会返回 `Unchanged`（无审计、
+    ///    零变化、不加版本）。但这条路上观察到的**非 `Trusted` 判决不得被静默丢掉**：
+    ///    交给既有异常处理——该提交的系统恢复事务先提交，再按总纲 §9 拒绝原命令
+    ///    （`RECOVERY_REQUIRED`）。理由见方法体里的第 ③ 步。
     /// ④ 一个用户事务：写 `time_edit`（`before_json` = 三参照点，`after_json` =
     ///    本次样本 + `clock_correction_accepted: true` + `intervals_changed: false`）
     ///    → `revision` 恰好 +1 → 提交。**提交之后**才调
@@ -1482,14 +1484,35 @@ impl Coordinator {
         let sample = self.read_sample(db)?;
         let verdict = self.observe(sample);
 
+        // ③ 「本来会返回 `Unchanged`」的那条路上，观察到的**非 `Trusted`** 判决不得
+        //    被静默丢掉（Ruling 34）。为什么不能丢：`observe` 已经推进了检测器的 `last`，
+        //    这一拍之后**再也判不出来**。最要命的是长间隔 `Suspended`——若本命令是
+        //    睡眠/休眠之后的**第一个采样入口**，那段停机时间会既不被分割、也不标
+        //    `needs_review`，直接留在开放区间里被算成工时（违反 08 §1 / 02 §4 的
+        //    「异常必须在最后可信检查点分割」与总纲 §9 的「先提交独立系统恢复事务」）。
+        //    所以交给**既有异常处理**：分割区间、写审计、置 `recovering`、加一次 revision
+        //    （`snapshot`/`tick`/`heartbeat`/`start` 走的都是它）。
+        //
+        //    判据只看内存标记（它只在 `live.state == Recovering` 分支里被置真）与 `live`：
+        //    **`flag == true` 的正常接受路径不受影响**（用户正是在接受那一拍校正）。
+        let would_be_unchanged = !self.unaccepted_clock_correction || self.live.is_none();
+        if would_be_unchanged && verdict.needs_recovery() {
+            // `handle_anomaly` 失败时自己置故障态并返回 `RECOVERY_REQUIRED`；
+            // 成功时它返回提交后的快照，但这条命令的意图（接受校正）**没有执行**，
+            // 所以对外一律 `RECOVERY_REQUIRED`（总纲 §9：异常优先于用户命令）。
+            let _ = self.handle_anomaly(db, sample, verdict)?;
+            return Err(AppError::RecoveryRequired);
+        }
+
         // 单调读数倒退不是墙钟校正：那是硬故障，只能新 run 安全重建
         // （`retry_recovery` 也解不开，见 `Coordinator::retry_recovery`）。
+        // 它必须排在接受路径之前——`flag == true` 时也不许把硬故障当成可接受的校正。
         if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
             self.faulted = true;
             return Err(AppError::RecoveryRequired);
         }
 
-        // ③ 没有待接受的校正 ⇒ 幂等零变化（判据只看内存标记，见上面的顺序说明）。
+        // ④ 没有待接受的校正 ⇒ 幂等零变化（判据只看内存标记，见上面的顺序说明）。
         let Some(session_id) = self
             .live
             .as_ref()
@@ -1504,7 +1527,7 @@ impl Coordinator {
             });
         };
 
-        // ④ 一个用户事务：审计 → 恰好一次版本。`settle` 负责「`Changed` 才加一次」
+        // ⑤ 一个用户事务：审计 → 恰好一次版本。`settle` 负责「`Changed` 才加一次」
         //    并在**同一个事务**里读回权威 `revision`/`data_epoch`。
         let tx = db
             .connection_mut()
@@ -1548,7 +1571,7 @@ impl Coordinator {
         accepted.revision = settled.revision;
         tx.commit().map_err(map_sqlite)?;
 
-        // ⑤ 提交之后才清标记并前移长期参照。
+        // ⑥ 提交之后才清标记并前移长期参照。
         self.accept_clock_correction(sample);
         Ok(accepted)
     }
