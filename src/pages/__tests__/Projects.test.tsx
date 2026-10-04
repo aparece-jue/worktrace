@@ -268,6 +268,55 @@ describe("项目页：项目详情", () => {
     });
   });
 
+  it("M5②：详情「共 N 条」用服务端 total，并明说这一页列了多少（不静默截断）", async () => {
+    // 反向验证：把文案改回用 `tasks.length` ⇒ 「共 120 条」与截断那句同时红
+    // （服务端说 120、这一页只给了 2 条）。
+    backend = createBackend();
+    backend.projects = [project({ id: "p-1", name: "项目甲" })];
+    const detail = backend.holdNext<TaskQueryResult>("list_tasks");
+    await mountProjects();
+
+    clickIn("project-p-1", "open-p-1");
+    await waitFor(() => expect(backend.count("list_tasks")).toBe(1));
+    await act(async () => {
+      detail.resolve({
+        tasks: [
+          task({ id: "t-1", title: "第一条", project_id: "p-1" }),
+          task({ id: "t-2", title: "第二条", project_id: "p-1" }),
+        ],
+        total: 120,
+        data_epoch: EPOCH,
+        revision: backend.revision,
+      });
+    });
+
+    expect(screen.getByTestId("detail-total").textContent).toBe("共 120 条（本次列出最早的 2 条）");
+    expect(screen.getByTestId("detail-task-t-1")).not.toBeNull();
+    expect(screen.getByTestId("detail-task-t-2")).not.toBeNull();
+    expect(screen.queryByTestId("detail-task-t-3")).toBeNull();
+  });
+
+  it("M1/M3：详情读失败时给出失败态（不是永远转圈），成功之后提示被清掉", async () => {
+    // 反向验证：把 `loadDetail` 里的 `setError(null)` 与 `detail-failed` 那一支去掉
+    // ⇒ 失败后永远停在「正在读取项目任务…」、成功之后红条还挂着 ⇒ 三句红。
+    backend = createBackend();
+    backend.projects = [project({ id: "p-1", name: "项目甲" })];
+    backend.fail.list_tasks = failure({ code: "DOMAIN_ERROR", message: "项目详情读失败。" });
+    await mountProjects();
+
+    clickIn("project-p-1", "open-p-1");
+    expect(await screen.findByTestId("detail-failed")).not.toBeNull();
+    expect(screen.queryByTestId("detail-loading")).toBeNull();
+
+    delete backend.fail.list_tasks;
+    backend.tasks = [task({ id: "t-7", title: "恢复之后", project_id: "p-1" })];
+    backend.revision = 6;
+    await changed(6);
+
+    expect(await screen.findByTestId("detail-task-t-7")).not.toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("切换项目之后，上一个项目的任务响应晚到不得覆盖新选中的列表", async () => {
     // 反向验证：把 `loadDetail()` 里那句「回答的是不是现在这个项目」去掉 ⇒ 迟到的
     // 甲项目响应会把乙项目的列表顶掉（显示回到加载态），第二句断言红。

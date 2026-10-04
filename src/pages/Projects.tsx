@@ -94,7 +94,16 @@ export function Projects() {
   const [action, setAction] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  /**
+   * 三个**各自独立**的失败槽（M1）：写命令一条、项目列表一条、详情一条。
+   * 共用一个槽位时，任何一条查询成功上屏都会把写命令的失败提示（例如
+   * `VERSION_CONFLICT` 那句）擦掉——用户刚要重试就看不到原因了。
+   */
+  const [commandError, setCommandError] = useState<string | null>(null);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  /** 要上屏的那条：写命令那条优先（它带着用户刚做的动作），其次列表、最后详情。 */
+  const error = commandError ?? projectsError ?? detailError;
   const [busy, setBusy] = useState(false);
 
   /**
@@ -124,9 +133,11 @@ export function Projects() {
       // 判据：比**本视图**已上屏的那一份旧（epoch 变了也算）⇒ 丢弃，不覆盖新列表。
       if (projectsWatermark.isStale(result, epoch)) return;
       projectsWatermark.applied(result);
+      // M1：成功上屏就把**这条查询**上一次的失败提示清掉（别的槽位不受影响）。
+      setProjectsError(null);
       setProjects(result.items);
     } catch (cause) {
-      setError(toIpcError(cause).message);
+      setProjectsError(toIpcError(cause).message);
     }
   }, [epoch, projectsWatermark]);
 
@@ -145,9 +156,10 @@ export function Projects() {
       if (detailWatermark.isStale(result, epoch)) return;
       if (asked !== selectedRef.current) return;
       detailWatermark.applied(result);
+      setDetailError(null);
       setDetail({ projectId: asked, tasks: result.tasks, total: result.total });
     } catch (cause) {
-      setError(toIpcError(cause).message);
+      setDetailError(toIpcError(cause).message);
     }
   }, [epoch, selected, detailWatermark]);
 
@@ -167,12 +179,12 @@ export function Projects() {
     try {
       await command();
       // **先清提示再重拉**：`load()` 失败时会写回新的提示，顺序反了会把刚写上的那句擦掉。
-      setError(null);
+      setCommandError(null);
       await reload();
     } catch (cause) {
       // 命令路径：VERSION_CONFLICT ⇒ 冲突刷新（refresh 推失效 ⇒ 本页 useEffect 重拉），
       // requires_handshake ⇒ 重新握手；上屏的文案恒为 Rust 的 `message`。
-      setError(reportCommandError(cause));
+      setCommandError(reportCommandError(cause));
     } finally {
       setBusy(false);
     }
@@ -182,7 +194,7 @@ export function Projects() {
   async function create(): Promise<void> {
     const name = draft.trim();
     if (name === "") {
-      setError("请输入项目名称。");
+      setCommandError("请输入项目名称。");
       return;
     }
     if (epoch === null) return;
@@ -196,7 +208,7 @@ export function Projects() {
   async function rename(project: ProjectRow): Promise<void> {
     const name = renameDraft.trim();
     if (name === "") {
-      setError("请输入项目名称。");
+      setCommandError("请输入项目名称。");
       return;
     }
     if (epoch === null) return;
@@ -233,7 +245,7 @@ export function Projects() {
   async function addAction(): Promise<void> {
     const title = action.trim();
     if (title === "") {
-      setError("请输入任务标题。");
+      setCommandError("请输入任务标题。");
       return;
     }
     if (epoch === null || selected === null) return;
@@ -247,6 +259,11 @@ export function Projects() {
   }
 
   const disabled = epoch === null || busy;
+  /**
+   * M3（同口径）：读项目列表失败时 `projects` 仍是 `null`，只按它判会**永远停在
+   * 「正在读取项目…」**。失败态单独一句话，原因由上面的 `ErrorNotice` 给（Rust 的 message）。
+   */
+  const projectsFailed = epoch !== null && projects === null && projectsError !== null;
   const current = projects?.find((project) => project.id === selected) ?? null;
   /** 详情里要显示的那一份：必须与当前选中的项目对得上（否则回到加载态）。 */
   const shownDetail = detail !== null && detail.projectId === selected ? detail : null;
@@ -281,6 +298,10 @@ export function Projects() {
 
       {epoch === null ? (
         <Typography.Text type="secondary">正在连接…</Typography.Text>
+      ) : projectsFailed ? (
+        <Typography.Text type="secondary" data-testid="projects-failed">
+          读取项目失败：见上面的提示。改条件、或等下一次自动刷新时会重试。
+        </Typography.Text>
       ) : projects === null ? (
         <Typography.Text type="secondary" data-testid="projects-loading">
           正在读取项目…
@@ -388,7 +409,12 @@ export function Projects() {
             </Button>
           </Space.Compact>
 
-          {shownDetail === null ? (
+          {shownDetail === null && detailError !== null ? (
+            // M3（同口径）：详情读失败时也有自己的一句话，不是永远转圈。
+            <Typography.Text type="secondary" data-testid="detail-failed">
+              读取项目任务失败：见上面的提示。
+            </Typography.Text>
+          ) : shownDetail === null ? (
             <Typography.Text type="secondary" data-testid="detail-loading">
               正在读取项目任务…
             </Typography.Text>

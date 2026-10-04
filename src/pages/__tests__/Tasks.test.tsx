@@ -275,6 +275,136 @@ describe("任务页：分页与计数", () => {
   });
 });
 
+describe("任务页：失败态、计数与越界页", () => {
+  it("M3：失败态与在飞态分得开——失败不再永远停在「正在查询…」", async () => {
+    // 反向验证：删掉 `failed` 那一支（回到只判 `shown === null`）⇒ 界面只剩
+    // 「正在查询…」⇒ `tasks-failed` 找不到、`queryByTestId("tasks-loading")` 也非 null。
+    backend = createBackend();
+    backend.fail.list_tasks = failure({ code: "DOMAIN_ERROR", message: "读路径拒绝了这个条件。" });
+    await mountTasks();
+
+    expect(await screen.findByTestId("tasks-failed")).not.toBeNull();
+    expect(screen.queryByTestId("tasks-loading")).toBeNull();
+    expect(screen.queryByText(/这个条件下没有任务/)).toBeNull();
+  });
+
+  it("M1：一次成功上屏把上一次的失败提示清掉", async () => {
+    // 反向验证：把 `load()` 里那句 `setError(null)` 去掉 ⇒ 失败那条红条在成功之后
+    // 仍挂着 ⇒ `queryByRole("alert")` 非 null，红。
+    backend = createBackend();
+    backend.fail.list_tasks = failure({ code: "DOMAIN_ERROR", message: "先失败一次。" });
+    await mountTasks();
+    expect((await screen.findByRole("alert")).textContent).toBe("先失败一次。");
+
+    delete backend.fail.list_tasks;
+    backend.tasks = [task({ id: "t-9", title: "恢复之后", status: "Ready" })];
+    backend.revision = 6;
+    await changed(6);
+
+    expect(await screen.findByText("恢复之后")).not.toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("M2：「共 N 条」属于**当前这一份**——条件刚变、响应还在飞时不显示上一个条件的计数", async () => {
+    // 反向验证：把「共 N 条」改回读 `view.total` ⇒ 新条件在飞时那句会显示上一个条件的
+    // 「共 5 条」⇒ 中间那句 `queryByTestId("task-total")` 非 null，红。
+    backend = createBackend();
+    backend.tasks = Array.from({ length: 5 }, (_, index) =>
+      task({ id: `t-${index + 1}`, title: `任务${index + 1}`, status: "Ready" }),
+    );
+    await mountTasks();
+    expect(screen.getByTestId("task-total").textContent).toBe("共 5 条");
+
+    const held = backend.holdNext<TaskQueryResult>("list_tasks");
+    fireEvent.click(screen.getByText("等待中"));
+
+    // 新条件的响应还在飞：计数与列表一起收起来
+    expect(screen.queryByTestId("task-total")).toBeNull();
+    expect(screen.getByTestId("tasks-loading")).not.toBeNull();
+
+    await act(async () => {
+      held.resolve({
+        tasks: [task({ id: "t-w", title: "等别人", status: "Waiting" })],
+        total: 1,
+        data_epoch: EPOCH,
+        revision: backend.revision,
+      });
+    });
+    expect(screen.getByTestId("task-total").textContent).toBe("共 1 条");
+  });
+
+  it("M4：总数变小之后，越界的那一页夹回最后一页（不是渲染成「没有任务」）", async () => {
+    // 反向验证：去掉 `load()` 里那段 `page > lastPage` 的夹取 ⇒ 第 3 页（offset 40）
+    // 配 total 20 会渲染成「这个条件下没有任务」⇒ 后面三句红。
+    backend = createBackend();
+    backend.tasks = Array.from({ length: 45 }, (_, index) =>
+      task({
+        id: `t-${index + 1}`,
+        title: `任务${index + 1}`,
+        status: "Ready",
+        created_at: AT + index,
+      }),
+    );
+    await mountTasks();
+
+    fireEvent.click(screen.getByTitle("3"));
+    await waitFor(() => expect(backend.count("list_tasks")).toBe(2));
+    expect(rowCount()).toBe(5);
+
+    // 真相缩到 20 条：下一次重拉就会越界
+    backend.tasks = backend.tasks.slice(0, 20);
+    backend.revision = 6;
+    await changed(6);
+
+    await waitFor(() => expect(lastRequest("list_tasks")).toMatchObject({ offset: 0 }));
+    await waitFor(() => expect(rowCount()).toBe(20));
+    expect(screen.queryByText(/这个条件下没有任务/)).toBeNull();
+    expect(screen.getByTestId("task-total").textContent).toBe("共 20 条");
+  });
+
+  it("M5①：页码属于「问题身份」——上一页的迟到响应不得覆盖当前页", async () => {
+    // 反向验证：把 `question` 元组里的 `page` 去掉 ⇒ 第 2 页迟到的响应与"现在这个问题"
+    // 对得上（revision 也相同，水位判据区分不了）⇒「第二页的那条」上屏，红。
+    backend = createBackend();
+    backend.tasks = Array.from({ length: 45 }, (_, index) =>
+      task({
+        id: `t-${index + 1}`,
+        title: `任务${index + 1}`,
+        status: "Ready",
+        created_at: AT + index,
+      }),
+    );
+    await mountTasks();
+
+    // 先正常翻到第 2 页（它上屏之后，分页器才在——加载态里列表与分页器一起收起，M2）
+    fireEvent.click(screen.getByTitle("2"));
+    await waitFor(() => expect(backend.count("list_tasks")).toBe(2));
+    await waitFor(() => expect(rowCount()).toBe(20));
+
+    // 扣住第 2 页的一次重拉（事件触发），再翻到第 3 页
+    const second = backend.holdNext<TaskQueryResult>("list_tasks");
+    backend.revision = 6;
+    await changed(6);
+    await waitFor(() => expect(backend.count("list_tasks")).toBe(3));
+
+    fireEvent.click(screen.getByTitle("3"));
+    await waitFor(() => expect(rowCount()).toBe(5));
+
+    await act(async () => {
+      second.resolve({
+        tasks: [task({ id: "t-p2", title: "第二页的那条", status: "Ready" })],
+        total: 45,
+        data_epoch: EPOCH,
+        // 与已上屏那份**同版本**：水位判据区分不了它，只有"页码属于问题身份"能挡
+        revision: backend.revision,
+      });
+    });
+
+    expect(screen.queryByText("第二页的那条")).toBeNull();
+    expect(rowCount()).toBe(5);
+  });
+});
+
 describe("任务页：旧响应与重复行", () => {
   it("I1-A：页面查询响应到达**不推全局水位**——同 revision 的通知仍必须让它重拉", async () => {
     // 反向验证（评审 I1 的探针 A）：把 `load()` 改回 `domainState.markApplied(result)`

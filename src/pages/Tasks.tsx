@@ -88,7 +88,14 @@ export function Tasks() {
     tasks: TaskRow[];
     total: number;
   } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /**
+   * 两条查询**各自的**失败提示（M1）。共用一个槽位会让一条查询的成功把另一条的失败
+   * 擦掉——实测过：`list_tags` 成功上屏会把 `list_tasks` 刚写上的失败提示清掉。
+   */
+  const [listError, setListError] = useState<string | null>(null);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  /** 要上屏的那条：主列表那条优先（它是这一页的主体），其次是筛选选项那条。 */
+  const error = listError ?? optionsError;
 
   /**
    * **本页两条查询各自**的视图水位（评审 I1）：主列表一份、筛选选项一份。
@@ -100,8 +107,11 @@ export function Tasks() {
   const [listWatermark] = useState(createViewWatermark);
   const [optionsWatermark] = useState(createViewWatermark);
 
-  /** 现在这个问题：三个筛选条件 + 分页窗口。 */
-  const question = [status, projectId, contextId ?? "", page].join("|");
+  /**
+   * 现在这个问题：三个筛选条件 + 分页窗口（M7：语义是**元组**，用 JSON 而不是 `|` 拼串——
+   * 拼串在取值里出现分隔符时会撞车）。
+   */
+  const question = JSON.stringify([status, projectId, contextId, page]);
   /**
    * 最新那个已提交的问题。`load()` 的异步续体拿它跟**发起时**的问题比：
    * 不一样就说明这条响应已经不是现在要显示的东西了（判据①）。
@@ -142,10 +152,12 @@ export function Tasks() {
       if (optionsWatermark.isStale(selectable, epoch)) return;
       optionsWatermark.applied(tags);
       optionsWatermark.applied(selectable);
+      // M1：成功上屏就把**这条查询**上一次的失败提示清掉（另一条的提示不受影响）。
+      setOptionsError(null);
       setContexts(tags.items);
       setProjects(selectable.items);
     } catch (cause) {
-      setError(toIpcError(cause).message);
+      setOptionsError(toIpcError(cause).message);
     }
   }, [epoch, optionsWatermark]);
 
@@ -166,11 +178,21 @@ export function Tasks() {
       if (listWatermark.isStale(result, epoch)) return;
       // 判据①：这条响应回答的是不是现在这个问题。
       if (asked !== questionRef.current) return;
+      // M4：页码越界（总数变小，这一页已经不存在了）⇒ 夹回最后一页再查一次。
+      // 这一次响应**不上屏**（它回答的"问题"已经不是现在的了），也不推水位。
+      // 不夹取的话，越界页会渲染成"这个条件下没有任务"——那是在说谎。
+      const lastPage = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
+      if (page > lastPage) {
+        setPage(lastPage);
+        return;
+      }
       // 「收到」≠「用上」：真的上屏之后才推进本视图水位，此后更旧的响应会被判据②挡掉。
       listWatermark.applied(result);
+      // M1：成功上屏就把**这条查询**上一次的失败提示清掉。
+      setListError(null);
       setView({ question: asked, tasks: result.tasks, total: result.total });
     } catch (cause) {
-      setError(toIpcError(cause).message);
+      setListError(toIpcError(cause).message);
     }
   }, [epoch, status, projectId, contextId, page, question, listWatermark]);
 
@@ -189,7 +211,13 @@ export function Tasks() {
    * 这时少显示（回到加载态），而不是把上一个条件的行挂在新的筛选标签下面。
    */
   const shown = view !== null && view.question === question ? view : null;
-  const busy = epoch !== null && shown === null;
+  const busy = epoch !== null && shown === null && listError === null;
+  /**
+   * M3：失败态与在飞态必须分得开——查询失败后 `shown` 仍是 `null`，如果只按它判，
+   * 界面会**永远停在「正在查询…」**。判据是**主列表**那条错误（筛选选项的失败不影响
+   * 列表自己的状态）。
+   */
+  const failed = epoch !== null && shown === null && listError !== null;
 
   return (
     <Flex vertical gap={16}>
@@ -244,16 +272,26 @@ export function Tasks() {
 
       <ErrorNotice message={error} />
 
-      {view !== null ? (
+      {/*
+        M2：「共 N 条」读的是**当前这一份**（`shown`）的 total。读 `view.total` 会在条件刚变、
+        新响应还在飞时把**上一个条件**的计数挂在下面——那句数字与屏幕上的列表对不上。
+      */}
+      {shown !== null ? (
         <Space size={8}>
           <Typography.Text type="secondary" data-testid="task-total">
-            共 {view.total} 条
+            共 {shown.total} 条
           </Typography.Text>
         </Space>
       ) : null}
 
       {epoch === null ? (
         <Typography.Text type="secondary">正在连接…</Typography.Text>
+      ) : failed ? (
+        // M3：失败态有自己的一句话（不是永远转圈的"正在查询…"）。文案不给第二份错误内容：
+        // 具体原因由上面的 ErrorNotice 展示 Rust 的 message。
+        <Typography.Text type="secondary" data-testid="tasks-failed">
+          查询失败：见上面的提示。改条件、或等下一次自动刷新时会重试。
+        </Typography.Text>
       ) : busy ? (
         <Typography.Text type="secondary" data-testid="tasks-loading">
           正在查询…

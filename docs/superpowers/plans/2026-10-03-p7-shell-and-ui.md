@@ -147,12 +147,15 @@
 
 文件：`src/pages/Projects.tsx`（新建）、`src/pages/Tasks.tsx`（新建）、`src/ipc.ts`（Task 1 建立）、`src/state/domainState.ts`、`src/pages/__tests__/`（新建）。
 
-- [ ] F-004 界面归属本计划：Projects 页创建、改名、归档；项目详情列出任务并可新建第一条行动。归档保留历史，提交带 epoch/项目版本；确认归档后更新列表。列表用 `catalog::list_projects`（含归档/done 历史可读）与 `catalog::list_selectable_projects`（只含 active，供选择器），**不直调 `project_repo`**。
-- [ ] Tasks 页使用 P4 查询（Task 1 的 `TaskQueryRequest` → `list_tasks_filtered`）：下一步行动=Ready，等待中=Waiting，阻塞=Blocked，按情境选择 Context。可结合项目筛选；不把 Waiting/Blocked 混为同一状态。
-- [ ] 展示无项目、无情境、空列表、加载、查询失败、分页及版本冲突（`VERSION_CONFLICT` 按 R8 只决定**行为**：刷新 + 展示 Rust 给的 `message`）；改变条件重置分页，旧响应不能覆盖新筛选结果（比 `data_epoch`/`revision`，不比到达顺序）。筛选与计数都用服务数据（`TaskQueryResult.total` 与 `tasks` 出自**同一个读事务**，`services/catalog.rs:616`）。
-- [ ] 理清项目级想法时可创建项目并手工新增行动；不承诺原 Inbox 项自动转换、迁移来源/标签或删除。AI 生成下一步行动不属本次首版范围。
-- [ ] 测试：项目 CRUD 与归档保留任务、版本冲突、多标签任务只出现一次、筛选交集、分页、空列表、旧筛选响应被忽略。
-- [ ] **本阶段不做（依赖 P3/P5/P6）**：统计视图与导出（P5/P8）；归档/完成状态的批量操作（V0.1 无此入口）。
+（2026-10-04 **已落地**，逐条对照见下面「Task 5 的落地」与「Task 5 fix round 1」两节；
+六条 checkbox 全部完成，验收判据由「Task 5 的落地」一节的用例与反向验证背书。）
+
+- [x] F-004 界面归属本计划：Projects 页创建、改名、归档；项目详情列出任务并可新建第一条行动。归档保留历史，提交带 epoch/项目版本；确认归档后更新列表。列表用 `catalog::list_projects`（含归档/done 历史可读）与 `catalog::list_selectable_projects`（只含 active，供选择器），**不直调 `project_repo`**。
+- [x] Tasks 页使用 P4 查询（Task 1 的 `TaskQueryRequest` → `list_tasks_filtered`）：下一步行动=Ready，等待中=Waiting，阻塞=Blocked，按情境选择 Context。可结合项目筛选；不把 Waiting/Blocked 混为同一状态。
+- [x] 展示无项目、无情境、空列表、加载、查询失败、分页及版本冲突（`VERSION_CONFLICT` 按 R8 只决定**行为**：刷新 + 展示 Rust 给的 `message`）；改变条件重置分页，旧响应不能覆盖新筛选结果（比 `data_epoch`/`revision`，不比到达顺序）。筛选与计数都用服务数据（`TaskQueryResult.total` 与 `tasks` 出自**同一个读事务**，`services/catalog.rs:616`）。
+- [x] 理清项目级想法时可创建项目并手工新增行动；不承诺原 Inbox 项自动转换、迁移来源/标签或删除。AI 生成下一步行动不属本次首版范围。
+- [x] 测试：项目 CRUD 与归档保留任务、版本冲突、多标签任务只出现一次、筛选交集、分页、空列表、旧筛选响应被忽略。
+- [x] **本阶段不做（依赖 P3/P5/P6）**：统计视图与导出（P5/P8）；归档/完成状态的批量操作（V0.1 无此入口）。
 
 ## Task 6：双窗口同步实验与外壳验收
 
@@ -559,6 +562,47 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
   `tag_task`/`untag_task` 的界面（Task 5 只做查询侧的情境筛选）；统计视图与导出（P5/P8）；
   归档/完成状态的批量操作（V0.1 无此入口）；完成/取消/Blocked/Waiting/reopen 的状态入口
   （P8，依赖 P3 的 `transition_task`）。
+  **（fix round 1 之后前端为 133 条，见下节）**
+
+## Task 5 fix round 1（2026-10-04）
+
+**状态**：`87e810b`（I1 + 回归用例）+ 第二个提交（Minor + 本节登记）。独立评审的 1 条 Important
+与 7 条 Minor 逐条落地；前端 **118 → 133 条**全绿、`pnpm build` EXIT 0；**Task 6a 的 6 条双
+上下文用例未改一行且全绿**（本轮只碰 `syncLab.ts` 的一段注释，见下面的登记）。
+
+**I1（Important）：页面把「过滤 + 分页后的查询响应」当权威快照推全局水位**
+
+- **错在哪**：全局水位的前提是「已应用的是**权威快照**（全量、含所有状态、能回答任何视图的
+  问题）」，而 `TaskQueryResult` / `ProjectList` 是**局部视图**，不满足这个前提。评审探针实测
+  两个后果：① 同 `revision` 的 `domain.changed` 被判「快照已包含」而 `drop` ⇒ `invalidated`
+  不动、页面不再重拉；② 30 秒校验比的是 `identity.revision > seenRevision()`，而 `seen` 已被
+  推平 ⇒ 末次通知丢失时不再 `resync`（状态栏永久停在旧状态，连 `rehandshake()` 也救不回来）。
+- **修法**：新增 `src/components/viewWatermark.ts`——**一个视图一份水位**（epoch 那一半与
+  `FreshnessGate::isStaleResponse` 同义；revision 那一半只比**本视图上屏过**的那一版，且只
+  前进）。`Tasks.tsx` 的主列表与筛选选项各一份、`Projects.tsx` 的项目列表与详情各一份，两页
+  都不再调 `domainState.markApplied`。`markApplied` / `isStaleResponse` 的文档收紧到「只给全量
+  快照」，并把 I1 的两个后果写进警告（**行为不变**）。
+- **回归用例**（都带「怎么才会红」）：`Tasks.test.tsx` 的 I1-A（页面响应上屏后镜像水位仍是 5；
+  同 revision 的通知仍必须让 `invalidated` 前进并触发重拉）、I1-C（辅助查询同理）；
+  `Projects.test.tsx` 的项目列表同一条；`components/__tests__/viewWatermark.test.ts` 四条纯函数
+  判据。
+- **反向验证**：4 处定向变异（两页各改回全局水位 / 辅助查询改回全局水位 / 去掉辅助查询的本视图
+  判旧）逐项**只红点名用例**、逐字节还原，原始输出见 `p7-task5-report.md` §10。
+- **登记（不半改）**：Task 6a 的实验替身 `src/state/__tests__/syncLab.ts` 的 `createScreen` 仍用
+  全局水位——它的场景 1/3 收敛断言（`getView().revision` 随这一页的读回前进）依赖这条旧口径。
+  本轮只在注释里写明分叉，**行为与断言一律不动**，留给 Task 6a / P8 一起对齐。
+
+**Minor（7 条）**
+
+| 条 | 落点 |
+| --- | --- |
+| M1 失败提示没有清除路径 | **按查询分槽**：`Tasks.tsx` 的 `listError` / `optionsError`、`Projects.tsx` 的 `commandError` / `projectsError` / `detailError`；每条查询成功上屏只清自己那一格（共用一格时 `list_tags` 成功会把 `list_tasks` 的失败擦掉——修 I1 时实测出来的） |
+| M2 「共 N 条」读上一个条件的计数 | 改读 `shown.total`（并只在 `shown !== null` 时渲染） |
+| M3 失败后永远停在「正在查询…」 | 失败态独立成句（`tasks-failed` / `projects-failed` / `detail-failed`），与在飞态分开 |
+| M4 越界页渲染成「没有任务」 | `load()` 里夹取：`page > ceil(total/PAGE_SIZE)` ⇒ `setPage(lastPage)` 再查一次（那一次响应不上屏） |
+| M5 四处判据无用例 | ① 页码属于问题身份（用例）；② 详情计数与截断文案（用例）；③ 辅助查询的本视图判旧（用例）；④「辅助查询不推水位」按 I1 修完自动作废 |
+| M6 计划 checkbox 仍是 `- [ ]` | Task 5 六条 checkbox 勾选并指向「Task 5 的落地」/ 本节 |
+| M7 `question` 用竖线拼串 | 改成元组 `JSON.stringify([status, projectId, contextId, page])` |
 
 ## Task 6a 的落地（2026-10-04）：自动化半边
 
