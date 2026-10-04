@@ -8,6 +8,8 @@
 //! - 唤醒请求的接收决策（抬起 / 重建 / 什么都不做）；
 //! - 主窗 label 与 `tauri.conf.json` / `capabilities/default.json` 的一致性
 //!   （对不上就等于「重建出来的窗口没有权限」）；
+//! - 实验窗口 `sync-lab`（Task 6a）同样这一条：**不是静态窗口**、配置与主窗同源
+//!   （只改 label）、且登记进权限名单；
 //! - 托盘的「暂停」「退出」落在**与 IPC 相同的**命令体/服务入口上（用效果相等与
 //!   显式退出的库内证据断言）。
 //!
@@ -22,6 +24,7 @@ use std::time::{Duration, Instant};
 use worktrace_lib::commands::{self, StartTimerRequest, TrayPause};
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
+use worktrace_lib::platform::sync_lab;
 use worktrace_lib::platform::tray::{self, MenuItemSpec, TrayAction};
 use worktrace_lib::platform::window::{self, ActivationPlan};
 use worktrace_lib::services::bootstrap::{
@@ -256,6 +259,65 @@ fn read_json(path: &std::path::Path) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("读不到 {}：{error}", path.display()));
     serde_json::from_str(&raw)
         .unwrap_or_else(|error| panic!("{} 不是合法 JSON：{error}", path.display()))
+}
+
+/// 实验窗口 `sync-lab`（P7 Task 6a）：**不做成静态窗口**，但必须进权限名单，
+/// 而且与主窗**同源**——入口 URL、标题、尺寸都来自主窗那一份配置，只改 label。
+///
+/// 三件事任缺其一，实机实验就废：不在名单里 ⇒ 它的 JS 没有 `core:` 权限（连事件都
+/// 监听不了，§2.0 就卡住）；配置不同源 ⇒ 它跑的不是同一份前端，结论说明不了主窗的
+/// 行为；做成静态窗口 ⇒ 启动就多一个窗，`manual-shell.md` 的既有验收步骤被污染。
+#[test]
+fn the_experiment_window_is_opened_on_demand_from_the_main_window_config() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    // ① `tauri.conf.json` 里**没有** `sync-lab`。窗口配置按 tauri 自己的类型解析
+    //    （不是只看 label 字符串）：下面要拿它做「只改 label」的逐字段比对。
+    let config = read_json(&manifest.join("tauri.conf.json"));
+    let windows: Vec<tauri::utils::config::WindowConfig> = config["app"]["windows"]
+        .as_array()
+        .expect("tauri.conf.json 的 app.windows 必须是数组")
+        .iter()
+        .map(|window| {
+            serde_json::from_value(window.clone())
+                .expect("app.windows 的每一项都必须是合法的 WindowConfig")
+        })
+        .collect();
+    assert!(
+        window::window_config_for(&windows, sync_lab::SYNC_LAB_WINDOW_LABEL).is_none(),
+        "`sync-lab` 必须是实验时由 Rust 侧创建的窗口，不做成 tauri.conf.json 的静态窗口"
+    );
+
+    // ② 实验窗口的配置 = 主窗那份**只改 label**（比 JSON 而不是逐字段抄一遍：
+    //    以后给主窗加字段，这条断言自动跟上）。
+    let main = window::window_config_for(&windows, window::MAIN_WINDOW_LABEL)
+        .expect("tauri.conf.json 应当有 label = main 的窗口");
+    let lab = sync_lab::lab_config_from(main);
+    assert_eq!(lab.label, sync_lab::SYNC_LAB_WINDOW_LABEL);
+    let mut expected = serde_json::to_value(main).expect("WindowConfig 应当可序列化");
+    expected["label"] = serde_json::json!(sync_lab::SYNC_LAB_WINDOW_LABEL);
+    assert_eq!(
+        serde_json::to_value(&lab).expect("WindowConfig 应当可序列化"),
+        expected,
+        "除 label 外必须与主窗逐字段相同（入口 URL、标题、尺寸都是同一处来源）"
+    );
+
+    // ③ 权限名单覆盖它——否则窗口能开、JS 一条命令都调不了。
+    let capabilities = read_json(&manifest.join("capabilities/default.json"));
+    let labels: Vec<&str> = capabilities["windows"]
+        .as_array()
+        .expect("capabilities/default.json 的 windows 必须是数组")
+        .iter()
+        .filter_map(|label| label.as_str())
+        .collect();
+    assert!(
+        labels.contains(&sync_lab::SYNC_LAB_WINDOW_LABEL),
+        "实验窗口必须登记进权限名单，否则它的 JS 没有任何 `core:` 权限（现有：{labels:?}）"
+    );
+    assert!(
+        labels.contains(&window::MAIN_WINDOW_LABEL),
+        "主窗（以及按配置重建出来的那一份）照样要在名单里（现有：{labels:?}）"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

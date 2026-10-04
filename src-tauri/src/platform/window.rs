@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tauri::utils::config::WindowConfig;
 use tauri::{AppHandle, Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
 use crate::platform::single_instance;
@@ -109,28 +110,38 @@ fn raise<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 从一份窗口配置表里挑出 label 对应的那份。
+///
+/// **窗口长什么样只有 `tauri.conf.json` 一处来源**：主窗重建（[`rebuild_main_window`]）
+/// 与实验窗口（`platform::sync_lab`，P7 Task 6a）都从这里读，谁都不手抄第二份。
+/// 找不到就是「建不出来」，由调用方决定怎么报（[`main_window_config`] 直接报错）。
+pub fn window_config_for<'a>(windows: &'a [WindowConfig], label: &str) -> Option<&'a WindowConfig> {
+    windows.iter().find(|window| window.label == label)
+}
+
+/// 主窗那份窗口配置（`tauri.conf.json` 缺失 main 时是错误，不是默认值）。
+pub fn main_window_config<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<WindowConfig> {
+    window_config_for(&app.config().app.windows, MAIN_WINDOW_LABEL)
+        .cloned()
+        .ok_or_else(|| {
+            tauri::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("tauri.conf.json has no window with label `{MAIN_WINDOW_LABEL}`"),
+            ))
+        })
+}
+
 /// 关掉之后的重建：**从 `tauri.conf.json` 那一份窗口配置建**（标题、尺寸、最小尺寸
 /// 都还是同一处来源，不在这里手抄第二份），所以新窗口与首次启动那个一模一样。
 ///
 /// 新窗口 = 新的 JS 上下文 = 前端重新挂载：它按 Task 2 的顺序先监听再拉快照，
 /// 于是「重开窗口立即拉快照」不需要核心额外推一次通知。
 fn rebuild_main_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
-    let config = app
-        .config()
-        .app
-        .windows
-        .iter()
-        .find(|window| window.label == MAIN_WINDOW_LABEL)
-        .ok_or_else(|| {
-            tauri::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("tauri.conf.json has no window with label `{MAIN_WINDOW_LABEL}`"),
-            ))
-        })?;
+    let config = main_window_config(app)?;
 
     // 重建出来的窗口 label 不变 ⇒ `capabilities/default.json` 的 windows 名单照样覆盖它
     // （两处一致性由 `tests/shell_lifecycle.rs` 读文件核对）。
-    WebviewWindowBuilder::from_config(app, config)?.build()?;
+    WebviewWindowBuilder::from_config(app, &config)?.build()?;
     Ok(())
 }
 

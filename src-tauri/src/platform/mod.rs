@@ -5,10 +5,13 @@
 //! P7 Task 4 加上托盘与主窗生命周期（`tray` / `window`）——**托盘只装配 UI**，
 //! 「动作 → 命令体」的映射在 `commands::` 那侧，由 `lib.rs` 接线（这一层不得反向
 //! 引用上层，理由写在 `tray` 的模块头）。
+//! P7 Task 6a 加上实验窗口 `sync-lab`（`sync_lab`）：同样只碰窗口对象，
+//! 「什么时候开」由 debug 构建才存在的 dev 命令决定（理由写在 `sync_lab` 的模块头）。
 
 pub mod clock;
 pub mod paths;
 pub mod scheduler;
 pub mod single_instance;
+pub mod sync_lab;
 pub mod tray;
 pub mod window;
