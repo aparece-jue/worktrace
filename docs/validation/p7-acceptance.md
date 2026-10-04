@@ -1,7 +1,8 @@
 # P7 验收记录（桌面外壳与核心交互）
 
 日期：2026-10-04。核对对象：P7 计划（`docs/superpowers/plans/2026-10-03-p7-shell-and-ui.md`）
-从 `ae9ec00` 起的全部改动（Task 0 → Task 6b，**60 个提交**，HEAD `34d84e5`，工作树干净）。
+从 `ae9ec00` 到 **`34d84e5`** 的全部改动（Task 0 → Task 6b，**60 个提交**；核对时工作树干净）。
+**门禁数字与接口行号都以 `34d84e5` 那棵树为准**；本记录自身的文档提交在它之后（见文末「提交链」）。
 
 **校验基线（本记录自己跑出来的，命令与原始输出摘要见第三节）**：
 `cargo test --offline` **464 passed / 0 failed / 1 ignored**（P7 开始时 357）；
@@ -21,8 +22,10 @@
 - **P7 的自动化半边：可以验收。** Rust 464 passed / 0 failed、`fmt --check` EXIT 0、
   `clippy --all-targets -D warnings` 0 条、`check-layers.ps1` 六条规则 PASSED；
   前端 13 files / 133 tests EXIT 0、`pnpm build`（`tsc && vite build`）EXIT 0。
-  零新增依赖（`Cargo.toml`/`Cargo.lock` 在本轮全部提交里逐字节未变；`package.json` 只加了
-  4 个钉版本的 devDependency）。
+  零新增依赖：`Cargo.lock` 在整轮里**逐字节未变**（实测 `git diff --stat ae9ec00..34d84e5 --
+  src-tauri/Cargo.lock` 无输出）；`src-tauri/Cargo.toml` **只改了一行依赖声明**——
+  `tauri` 的 feature 列表加 `tray-icon`（+5/−1，无增删依赖行，见 §3.1）；
+  `package.json` 只加了 4 个钉版本的 devDependency 与一条 `test` 脚本（+5/−1）。
 - **V0.1 的桌面外壳在单窗口下「能用」**：能捕获、理清、开始/暂停/继续/结束计时、管项目与标签、
   按 GTD 三列表筛任务；关掉全部窗口后进程与托盘留下、周期采样继续（**这一条的设计与决策函数
   有断言，实机结论为空**，见第五节）。
@@ -220,8 +223,10 @@ LAYER CHECK PASSED
   357 → 393（Task 0）→ 394（Task 0 fix）→ 404（Task 1a）→ 431（Task 1a fix）→ 437（Task 1b）
   → 449（Task 4）→ 452（Task 4 fix）→ 456（Task 3 契约）→ 458（Task 6a 前置 1/3）→
   **464（Task 6a 前置 2/3，本记录复跑一致）**。
-- **零新增 crate**：`Cargo.toml`/`Cargo.lock` 在 `ae9ec00..34d84e5` 全程逐字节未变
-  （Task 4 只是启用了 `tauri` 已有的 `tray-icon` feature，可选依赖本来就在解析图里）。
+- **零新增 crate**：`Cargo.lock` 在 `ae9ec00..34d84e5` **逐字节未变**（`git diff --stat` 无输出）。
+  `src-tauri/Cargo.toml` **改了一行**：Task 4 启用 `tauri` 已有的 `tray-icon` feature
+  （`tauri = { version = "2", features = ["tray-icon"] }`，+5/−1）——可选依赖本来就在解析图里，
+  启用 feature 不引入新包，所以 lock 不动。**没有增删任何依赖行。**
   Task 6a 前置件报告另跑过一次性探针 `cargo check --offline --lib --release`（EXIT 0，93 s），
   证明发布档位下 dev 面没有悬空引用——**它不在共享门禁里**，建议归 P8 的发布门禁（R-04）。
 
@@ -515,6 +520,8 @@ interface ViewWatermark {
 | **F-016 单实例唤起** | `manual-shell.md` §3 | **未跑**。第二个进程自己退出、`application_run` 不增加、既有实例**重建**或**抬起**主窗 |
 | **双窗口竞态 (a)(b)(c)** | `manual-sync.md` §2.1–§2.3 | **未跑**。真实双 WebView 的广播时序、真实 IPC 下「旧响应晚到」长什么样 |
 | **跨窗口 30 秒收敛 / 显示前校验** | `manual-sync.md` §2.4–§2.5 | **未跑**；§2.5 的两条还**没有可观察通道**，已标「不可观察 / 存疑」，不得凭感觉判通过 |
+| **F-020 界面侧（多窗口一致性）** | `manual-sync.md` §2.0 / §4 | **未跑**。自动化那半边只证明「规则在两个上下文里各自成立」，**真实双 WebView 的展示是否一致仍须真机看** |
+| **F-001 / F-002 与计时非法请求的实机走查** | `manual-shell.md` §5（判据对照在 `manual-sync.md` §4） | **未跑**。自动用例覆盖了展示与转发（`Inbox.test.tsx` 13 条、`Timer.test.tsx` 8 条），但**外壳人工验收不能用单元测试代替**（总纲 §5 第 6 条 / 08 §6） |
 | **平台事件实机验收**（锁屏 / 休眠 / 唤醒 / 改时 / 关窗后采样 / 事件到达延迟） | 登记在计划文末「仍待与归属」 | **未跑、且仍无归属**：P7 只登记步骤，结论由实机跑出、P8 复核。`docs/validation/p2-clock-mapping.md` §6/§7 已声明这些**未验证、不得当成已验证** |
 | **多入口开发/打包路径 + Windows 打包验证**（00 §7） | 登记在计划文末 | **未做**，归 P8，与 R-04 的发布产物门禁一起 |
 
@@ -594,7 +601,7 @@ P4 的约定在 P7 继续有效，并且**这一条正是 P7 最容易违反的�
 | 23 | **计时族命令「提交后重建失败」那一笔不发 `domain.changed`** | 见 §4.5。收敛靠 30 秒 `get_revision`；协调器解锁要等下一次成功重建（P3/P6 范围） |
 | 24 | **`manual-sync.md` §2.5 的两条不可观察** | 「隐藏期间不再每 30 秒轮询」「恢复后立刻有一次 `get_revision`」**没有计数出口** ⇒ 已标「不可观察 / 存疑」，不得凭感觉判通过。要给结论得先给注入开关/日志加校验计数 |
 | 25 | **`@mui/material` 与 `@emotion/*` 是模板遗留死依赖** | `src/App.tsx` 未使用、`package.json` 里仍在。**只登记，不在 P7 删**（删依赖属清理任务且需用户确认） |
-| 26 | **前端镜像 `worktrace-web/` 不是测试环境** | 镜像里缺 15 份快照 fixture 时直接跑 `pnpm test` 会**假 4 红**。评审/实施一律用 `git archive` 完整导出到工作区外再装依赖；**绝不在仓库目录跑 `pnpm install`** |
+| 26 | **前端镜像 `worktrace-web/` 不是测试环境** | 镜像曾缺 15 份快照 fixture，直接跑 `pnpm test` 会**假 4 红**（控制器已补齐，现 0 缺失）。评审/实施一律用 `git archive` 完整导出到工作区外再装依赖；**绝不在仓库目录跑 `pnpm install`**（会把 Windows 侧装的 `node_modules` 重链成 linux 原生二进制） |
 | 27 | **`dist` 的 728 kB 单 chunk 告警** | 既存（antd 体积），P7 未做代码分割 |
 | 28 | **术语「上下文」vs「情境」** | 用户文案按 `99-glossary.zh.md` §5 用「上下文」，04 F-005 与计划写「情境」。**仍待用户拍**；若改，`zh_kind`、`error_contract` 的逐字断言、`tags.rs` 两条 needle 共 5 处一起改 |
 
@@ -637,7 +644,7 @@ P4 的约定在 P7 继续有效，并且**这一条正是 P7 最容易违反的�
 | 4 写事务信封 | **已核对**：一次业务写恰好 `revision + 1`；心跳与 tick **不加**；被拒命令零变化（P1/P2/P4 的用例 + IPC 逐条覆盖） |
 | 5 测试策略 | **已遵守**：时间经 `FakeClock` 注入；库用 `tempfile`；前端时间经 `vi.useFakeTimers` |
 | 6 **人工验收单列** | **已遵守，且是本记录的重点**：F-009/F-011/F-016/F-020 与双窗口同步都给了可复现的手工步骤（`manual-shell.md` / `manual-sync.md`），**一处也没拿单测冒充**；**没有把仓储/服务层测试标为「UI 已验收」**（见 §5.3） |
-| 7 改动纪律 | **已遵守**：`greet` 命令与模板页按计划在 P7 **明确处理**（`7d8f3eb`）；`@mui`/`@emotion` 死依赖只登记不删；`services/timer/**` 的业务逻辑整轮零改动 |
+| 7 改动纪律 | **已遵守**：`greet` 命令与模板页按计划在 P7 **明确处理**（`7d8f3eb`）；`@mui`/`@emotion` 死依赖只登记不删。**计时内核的语义整轮零改动**——`src-tauri/src/services/timer/**` 只动了**只读的契约面与入口**（实测 `git diff --stat ae9ec00..HEAD`：`coordinator.rs` +103、`snapshot.rs` +40）：`snapshot.rs` 加 `task_id`/`task_row_version`/`task_title` 三个字段（每次采样重读任务行）、`coordinator.rs` 加 `parse_session_mode`/`parse_timer_kind`（命令层不 import `domain` 的替代）与几处 serde derive、一个 `wall_ms()` 取时钟的入口。**状态机、事务边界、心跳与采样语义一行未改**（P2 的既有用例全部原样通过） |
 | 8 断言口径 | **已核对，且抓到并修掉多类恒真/不可失败的断言**：Task 0 的 `total_changes()` 恒 0（C1）、顺序 emit 到 Vec（I1）、测试自己先 commit 的「不回滚」（I2）；Task 1b 的 `>= 15` 快照计数；Task 6a 的三条反向验证声明。**这些是真实缺陷，不是形式**（见第八节） |
 
 ---
@@ -695,9 +702,9 @@ I4（分层门禁**没有 platform 规则**——而 Task 4 的托盘正是 plat
 订正后做了 **round 2 反向验证：8 处变异（6 红 + 2 预期绿 + 控制组）**，全部在
 `git archive HEAD` 的导出副本上做、工作树全程干净。
 
-> **给本记录读者的提醒**：Task 6a 报告里原来那三条声明**当时是自报的**，
-> 独立评审逐条实跑才证伪。用户要求「如实写」的例子说的是「3 条中 2 条被证伪」——
-> **按 `p7-task6a-report.md` §7.3 与评审结论，实际是 3 条全部不成立**，本记录按事实写 3 条。
+> **给本记录读者的提醒**：上面那三条声明**当时是自报的**（作者按自己的理解写「把实现改坏成
+> 什么样它会红」），独立评审逐条实跑才证伪。**三条全部不成立**，不是部分——订正之后由
+> round 2 的 8 处变异重新背书（R5'/R7'/R8' 分别对应上面三行）。
 
 ### 8.6 本记录自己复核出的两处订正
 
@@ -763,11 +770,12 @@ I4（分层门禁**没有 platform 规则**——而 Task 4 的托盘正是 plat
 | Task 5 | `f7a423b` / `1bb275f` / `f574659` / `db60a7c` / `44e06b4`（计划）/ `2cb637d`；fix round 1 `87e810b` / `77deb3d` |
 | Task 6a | `b7b9250` / `7111c8f` / `98f8217`（计划）；fix round 1 `684d495` / `ec45527` / `d4e042d`（计划） |
 | Task 6a 前置件 | `c22eb8e` / `2660303` / `34d84e5` |
-| Task 6b | 本记录；见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task6b-report.md` |
+| Task 6b | `44d63f1`（两处文档同步）/ `d3eac98`（完成门槛与计划勾选）/ `75afe46`（本记录）/ 其后的自查订正提交；细节见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task6b-report.md` |
 
 **推送状态**（`git rev-parse origin/dev` 实测）：`origin/dev == 94aa875`；
 `ae9ec00..94aa875` 的 **43 个提交已推送**，`94aa875..HEAD` 的 **17 个提交尚未 push**
-（Task 5 之后全部，含 Task 6a、Task 6a 前置件与本轮）。本轮按纪律不 push。
+（Task 5 之后全部，含 Task 6a、Task 6a 前置件）；**Task 6b 自己的 3 个文档提交在其后，
+同样未 push**。本轮按纪律不 push。
 
 ## 仍未达成 / 存疑（一句话索引）
 
