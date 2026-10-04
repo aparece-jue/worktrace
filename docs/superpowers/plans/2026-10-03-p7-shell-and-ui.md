@@ -197,7 +197,7 @@
 
 ## 已实现的接入基座（2026-10-04）
 
-首次与恢复后身份握手、周期版本校验统一调用 services::handshake::get_revision(db)，无需 expected_data_epoch；业务查询仍必须带握手得到的 epoch。顺序为监听并缓冲事件→握手→业务快照；epoch 变化时丢弃旧请求结果并重新握手。get_revision 仅返回身份/版本，不代替完整业务视图。P2 命令结果在提交后从一个读事务重建，结果 revision 与 snapshot.revision 相同。分层脚本已检查 commands 禁止依赖 storage/rusqlite/Connection；IPC 与事件协议当时仍待实现（2026-10-04 晚订正：**IPC 的 Rust 半边已落地**，见下一节；事件**发送侧**仍未接线）。
+首次与恢复后身份握手、周期版本校验统一调用 services::handshake::get_revision(db)，无需 expected_data_epoch；业务查询仍必须带握手得到的 epoch。顺序为监听并缓冲事件→握手→业务快照；epoch 变化时丢弃旧请求结果并重新握手。get_revision 仅返回身份/版本，不代替完整业务视图。P2 命令结果在提交后从一个读事务重建，结果 revision 与 snapshot.revision 相同。分层脚本已检查 commands 禁止依赖 storage/rusqlite/Connection；IPC 与事件协议当时仍待实现（2026-10-04 晚订正：**IPC 的 Rust 半边已落地**，见下一节）。
 
 ## Task 1 的 Rust 半边已实现（2026-10-04 晚）
 
@@ -224,8 +224,37 @@
   `Unchanged` 不发；广播失败只记诊断。响应形状不变（不加 `{changed, value}` 信封）。
 - **24 条命令体逐条有用例**（fix round 1 补上）：`tests/ipc_commands.rs` 调 `commands::*_impl`
   （包装只剩一行转发），覆盖「走对服务 / 带对信封 / 各自不同的终态」。
-- **仍未接线**：Task 1b 的前端（`src/ipc.ts`/`src/types/ipc.ts`/`App.tsx`/`main.tsx`/`index.html`），
-  以及 TS 侧对快照的类型级断言（见 Task 1 的 D1 那条）。
+- **仍未接线**：无。Task 1b 的前端已落地（见下一节）；Task 1 的 IPC 契约、事件发送侧与
+  TS 侧的一致性检查**都已接上**。
+
+## Task 1b 的 TS 半边已实现（2026-10-04 晚）
+
+细节与逐条验证见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task1b-report.md`：
+
+- **前端测试基建**（「前置任务」那一节的落地）：`pnpm add -D --offline`（**必须钉版本**，
+  见下）装上 `vitest@5.0.1` / `jsdom@30.1.1` / `@testing-library/react@16.3.3`；
+  `vitest.config.ts`（`environment: "jsdom"` + 复用 `@vitejs/plugin-react`）；
+  `package.json` 加 `"test": "vitest run"`。测试**显式 import** vitest 的
+  `describe/it/expect`，`tsconfig.json` 因此一字未动。
+  ⚠️ **必须钉版本**：本地 store 只有 `vitest@5.0.1`，而**不钉版本**时 pnpm 按缓存下来的
+  registry 元数据解析到 `5.0.3`，随后 `ERR_PNPM_NO_OFFLINE_TARBALL` 失败（实测）。
+- **`src/types/ipc.ts`（手写）**：请求/响应 DTO、行类型与枚举取值域。枚举是
+  **字符串字面量联合，且由 `as const` 数组推导**——联合类型在运行期被擦除，数组是它
+  在运行期唯一的影子，也是「改枚举串即红」能落到 `vitest run` 而不是只落到 `tsc` 的前提。
+- **`src/ipc.ts`**：24 条命令的薄封装（统一发 `{ request }`，三条无入参的不发这个键）、
+  错误规范化（`IpcError`；非法 `project` 形状这类**走 Tauri 反序列化**、拿不到
+  `ErrorResponse` 的失败兜底成客户端本地码 `TRANSPORT_ERROR`，**原始 message 原样保留**）、
+  `createFreshnessGate()` + `sendVersioned()`（规则②③的水位原语）、
+  `startEventSession()`（「先订阅并暂存 → 拉快照 → 按序交付」的调用顺序原语）。
+- **外壳替换**：`src/App.tsx` 换成固定布局 + 三个区域占位（`data-region="nav"/"page"/"status"`），
+  `index.html` 标题改为真实首页；`greet` 在**代码树里 0 命中**（`git grep -n greet -- src src-tauri index.html README.md`）。
+- **TS ↔ 快照的机械检查**（Task 1 的 D1 那条验收项）：`src/types/__tests__/snapshot-contract.test.ts`
+  读 `src/types/__snapshots__/*.json`，断言每个响应 DTO 的**键集合**（编译期 `keyof` 对齐 +
+  运行期与快照相等，含嵌套行类型与 `authority.records`）与**字面量联合**（快照里出现过的
+  取值必须落在 TS 的取值域里）。反向验证：改 TS 的枚举串 ⇒ `pnpm test` 红；
+  改 TS 的字段名 ⇒ `pnpm build`（`tsc`）红。
+- **外壳冒烟用例**：`@tauri-apps/api/mocks` 的 `mockIPC` 记账，断言应用能挂载、三个区域都在、
+  且一个命令都没被调用。
 
 ## 仍待与归属（2026-10-04 登记）
 
@@ -233,6 +262,30 @@
 - **「多入口开发/打包路径」与 Windows 打包验证**（`00-architecture.zh.md` §7 的待验证项）同样**无归属**：登记到 P8，与 R-04 的发布产物门禁一起做。
 - **`@mui/material` 与 `@emotion/*` 是模板遗留死依赖**（`src/App.tsx` 未使用，`package.json` 里仍在）：**只登记，不在 P7 删**——删依赖属清理任务且需用户确认。
 - **维护态错误码**：P6 Task 4 引入后，再登记为 Task 1 的透传项（P7 只登记、不实现）。
+
+## 遗留与边界（2026-10-04 Task 1b 登记）
+
+- **包装层 `targets` 未覆盖**：`run_command` 的 `targets`（错误响应的 `authority.records`
+  就由它决定）只活在 `#[tauri::command]` 包装里，命令体拿不到它；要观测它就得有 Tauri
+  运行时（`tauri/test` 的 `mock_builder`），本轮没有启用。`tests/error_contract.rs` 覆盖的是
+  `capture_error_response` 这个**机制**（喂显式 targets），`tests/ipc_snapshots.rs` 钉的是一份
+  **样例** `ErrorResponse`——两者都**不是**「逐条命令的 targets」的断言。
+  `tests/ipc_commands.rs` 的文件头原先声称「逐条断言在那两份里」，**不实，已订正**。
+  **登记为遗留**：补它的代价是要么启用 `tauri/test`，要么为 15 处包装加一份只服务测试的
+  `pub` 助手——两者都超出 Task 1b 的范围，不值得在本轮顺手做。
+- **计时族命令「提交后重建失败」那一笔不发 `domain.changed`**：`start`/`pause`/`resume`/`finish`
+  在 `tx.commit()` **之后**才 `rebuild_from_committed`（失败映射为 `RECOVERY_REQUIRED`，
+  见 `services/timer/coordinator.rs` 那段约定）。命令因此返回 `Err`，命令层的 `announce`
+  不会被执行——**这一次已提交的写没有对应通知**。这是 00 §5「一次业务写对应一条
+  `domain.changed`」的一个已知例外，**本轮不改代码**（要改就得让"提交成功"与"响应成功"
+  解耦，那是 P6 的故障路径范围）。自愈路径：后续 `timer.tick` 带新的 `revision`，
+  客户端的 30 秒 `get_revision` 校验也会收敛；且 `requires_handshake` 为 **false**
+  （`capture_error_response` 只在 `DataEpochMismatch` 或权威捕获失败时置真），
+  客户端不会因此重新握手。
+- **TS ↔ 快照检查盖不住「Rust 新增枚举变体」**：快照里只有**样例值**（例如 `task.status`
+  只有 `"Ready"`），所以新变体在它进入某份快照之前，`snapshot-contract.test.ts` 看不出来。
+  覆盖整个取值域的那一半靠 `src/types/ipc.ts` 的 `as const` 数组与 Rust 的 `ALL` 常量人工对齐
+  ——这是「不上 DTO 生成器」的已知代价（D1 裁决），不是遗漏。
 
 ## 开工前已核实（2026-10-04）
 
