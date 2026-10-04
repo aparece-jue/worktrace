@@ -18,7 +18,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `tray-icon`（P7 Task 4，F-011）：托盘图标与菜单。**离线可行**——它是 `tauri` 的
+# 可选依赖，`tray-icon 0.25.1` / `muda` 早就在 `Cargo.lock` 的解析图里，Windows 侧
+# cargo 缓存里也有（已实测）。图标取 `app.default_window_icon()`（构建期嵌好的
+# `bundle.icon`），所以**不启用** `image-png` / `image-ico`：那要 `image` crate，
+# 本机离线缓存与 `Cargo.lock` 里都没有。
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
