@@ -352,6 +352,54 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
 - 细节与原始输出见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task2-report.md`
   的「Fix round 2」一节（前端 61 条）。
 
+## Task 3 的落地（2026-10-04）
+
+细节、逐条反向验证与原始输出见
+`.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task3-report.md`：
+
+- **收件箱页**（`src/pages/Inbox.tsx`，F-001/F-002）：回车一条 `create_task` 并**当场重拉**
+  （"立即可见"不赌事件到得比响应早）；空白标题在界面层拦住（判据与
+  `services::catalog::create_task` 的 `title.trim().is_empty()` 相同，连命令都不发，省一次
+  往返；Rust 对同一输入同样拒绝，那条 `message` 才是用户看到的文案）；置为 Ready；
+  **开始只发一条 `start_timer`** —— `Inbox → Ready → Doing` 两步跃迁在 Rust 的**同一个事务**
+  里，前端不拆成两条命令（用例用 `mockIPC` 计数钉住）。列表列 Inbox/Clarifying/Ready/Doing
+  四个状态：`finish` 不改任务状态、而 P7 又没有"完成/重开"入口，不带 `Doing` 的话任务只要
+  开始过一次就再也点不到。
+- **入口只出现在 02 §5 允许的状态上**（`canClarify`/`canStart`），但**前端过滤只是体验**：
+  服务拒绝时按 R8 把 `message` 原样上屏（用例两条：漏过滤时按钮出现即红；服务拒绝时文案正确）。
+  完成/取消/Blocked/Waiting/reopen 的入口按计划属 P8（`transition_task` 尚不存在）。
+- **计时页**（`src/pages/Timer.tsx`）：暂停/继续/结束各一条命令，请求由
+  `src/components/timerRequests.ts` **从快照**构造；**不做本地状态机** —— 按钮集合只由快照的
+  `state` 决定，点击与命令响应都不改本地状态（用例钉住"响应到了按钮也还没变，等那一拍
+  `timer.tick`"）；`active_ms`/`pending_ms`/`remaining_ms`/`overtime_ms` 原样展示（前端不读
+  时钟、不做减法，暂停值冻结是 P2 的事）；倒计时到点只弹一句提示，**不发 `finish_timer`**、
+  也不改任务状态。
+- **错误口径（R8）**：`src/components/commandError.ts` 只按 `code`/`requires_handshake` 决定
+  **行为**（重新握手 / 冲突刷新 / 只提示），文案只有 `ErrorResponse.message` 一个来源——
+  没有「码 → 文案」表，未知 `code` 也原样展示（两条用例各钉一半）。
+- **接线**：`src/App.tsx` 导航两项（仍不引路由）+ 状态栏（单独组件，外壳不跟着每拍 tick
+  重渲染）；挂载 `domainState.start()`、卸载 `domainState.stop()` —— 页面自己不开会话、
+  也不各自订阅事件，只从 `src/state/hooks.ts` 读镜像（新增 `useDataEpoch` /
+  `useHandshakePhase`）。Task 1b 那条「一个命令都不调用」的冒烟断言因此改写为
+  「命令集合恰好是那四条」。
+- **镜像的三处增补**（都是页面用得上、且**不新增协议分支**的只读入口）：`rehandshake()`
+  （R8 的 `requires_handshake`：再校验一次，必要时重取）、`refresh()`（R8 的冲突刷新，与
+  闸门规则④共用同一份 `resync`）、`isStaleResponse()`（页面查询响应按本上下文**唯一那把**
+  闸门判旧，页面不各自维护第二份水位）。
+- **待接线（不是"遗留掉就算了"）**：「继续」要 `resume_timer` 的 `task_id` +
+  `task_expected_version`，而**当前**的 `TimerSnapshot` 没有任务字段、24 条命令里也没有
+  「会话 → 任务」的读路径 ⇒ 冷启动（重开窗口 / 托盘暂停之后）**构造不出**这条请求。
+  本轮过渡落法：请求构造收在 `buildResumeRequest(snapshot, taskIdentity)` **一个函数**里，
+  任务身份由发起 `start_timer` 的收件箱页经外壳交给计时页；**身份不可得时「继续」不出现**。
+  契约侧给 `TimerSnapshot` 补上 `task_id`/`task_row_version` 之后，接线就是把这个函数的第二个
+  入参换成快照字段（三行），外壳那份过渡状态与 `Inbox.onSessionStarted` 一并删掉。
+- **顺带收（Task 2 复验点名）**：`beginSession` 的事件入口**按代次过滤**（`stop()` 之后
+  `unlisten` 回来之前旧订阅 flush 出来的通知不再被新代次接纳）；补「旧代次握手失败 ⇒
+  新代次不受影响」用例；`start()` 里那处永不触发的代次检查在注释里写明是**不变式断言**。
+- **测试**：前端 61 → **84 条**（收件箱 11、计时 7、镜像 +4、外壳 1 → 2）；四个提交**各自**
+  `pnpm test` / `pnpm build` EXIT 0（逐提交把工作树临时还原成该提交的 `src/` 后实测）。
+  本轮**一个 Rust 文件都没改**，分层门禁与 cargo 侧由 Rust 实施者负责。
+
 ## 遗留与边界（2026-10-04 Task 2 fix round 1 登记）
 
 - **协议向量能把"两侧不一致"逼出来，但替代不了"同一条规则两处实现"的风险，而且完全
