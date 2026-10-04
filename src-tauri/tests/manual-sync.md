@@ -48,45 +48,81 @@ DevTools 控制台里读不到「水位 / 失效计数」。本文档的判据�
 （列表里有没有那条任务、计时区显示的是 running 还是 paused）与**数据库里的列值**上。
 `document.visibilityState` 是浏览器自带属性，可以直接在控制台读（§2.5 用）。
 
-## 1. 前置（**尚未落地**，属 `src-tauri/` 侧）
+## 1. 前置（**已落地**，`src-tauri/` 侧）
 
-计划 Task 6a 指定了两个前置件，**本轮（前端 + 文档）没有实现它们**，原因是本轮的硬约束是
-「不改 `src-tauri/` 的 Rust 生产代码」：
+计划 Task 6a 指定的两个前置件**已经落地**。下面写的是它们的**实际形状**——第 2 节照这里
+写；计划原文那几行写在契约冻结之前，不要照抄（差异见本节末尾）。
 
-1. **第二个窗口 `sync-lab`**：`src-tauri/src/platform/sync_lab.rs`（或等价位置）用
-   `WebviewWindowBuilder` 在实验时创建（**不做成 `tauri.conf.json` 的静态窗口**）。
-   ⚠️ `src-tauri/capabilities/default.json` 的 `windows` 现在**只有 `"main"`**，
-   新窗口必须逐个登记，否则它的 JS 没有任何权限调命令。
-2. **三个 dev 注入开关**（`#[cfg(debug_assertions)]`，只在 debug 构建编译）：
+1. **第二个窗口 `sync-lab`**：`src-tauri/src/platform/sync_lab.rs` 用
+   `WebviewWindowBuilder` 在实验时创建（**不是** `tauri.conf.json` 的静态窗口：启动时
+   不会出现，`manual-shell.md` 的既有验收步骤不受影响）。窗口配置与主窗**同源**——
+   读 `tauri.conf.json` 里 `main` 那一份、**只改 label**（入口 URL、标题、尺寸全一样），
+   所以它跑的是同一份前端。
+   `src-tauri/capabilities/default.json` 的 `windows` 已登记 `["main", "sync-lab"]`；
+   「label 与配置/权限名单一致」由 `tests/shell_lifecycle.rs` 读那两个文件核对。
+2. **四个 dev 注入命令**（`#[cfg(debug_assertions)]`，**只在 debug 构建编译**）：
    - `__p7_drop_next_event(kind)` —— 丢掉下一条**指定事件名**的通知（末次事件丢失）；
-   - `__p7_delay_next_query_ms(command, ms)` —— 让下一次指定命令的响应延迟返回
-     （**先取数据再 sleep，绝不跨 `await` 持 `Connection`**）；
-   - `__p7_replay_event(revision)` —— 用一条**旧 `revision`** 重播 `domain.changed`。
-   落点是 `services/events.rs` 的广播出口与命令层；另外计划要求「加一条测试断言发布
-   handler 列表里没有它们」。
+   - `__p7_delay_next_query_ms(command, ms)` —— 让**装开关那个窗口**里下一次指定命令的
+     响应延迟返回（**先取数据再 sleep，绝不跨 `await` 持 `Connection`**）；
+   - `__p7_replay_event(revision)` —— 用一条**旧 `revision`** 重播 `domain.changed`；
+   - `__p7_open_sync_lab()` —— 开实验窗口（上面那条的触发入口）。
 
-**两处与计划原文的差异，实施时按这里写**（计划写这几行时契约还没冻结）：
+   落点：命令面在 `src-tauri/src/commands/dev.rs`；丢弃开关的状态在 `services/events.rs`
+   的广播出口；延迟开关由命令包装（`commands/mod.rs` 的 `run_command`，键 = 调用方窗口
+   label + 命令名）在**放锁之后**调。发布构建里它们**不存在**（命令体整份带守卫 +
+   注册表里每条臂带守卫）；「发布构建的 handler 列表里没有它们」由
+   `tests/dev_injections.rs` 读源码核对。
 
-- 计划写的是 `__p7_drop_next_event`（不带筛选）。**必须按事件名筛**：有活动会话时采样
-  每秒广播一条 `timer.tick`，不筛的话「丢掉下一条」会被一条无害的 tick 吃掉，
-  实验看起来"什么都没发生"。本轮的自动化实验里总线上只有 `domain.changed`，
-  所以那条替身没暴露这个问题——这是实机才会遇到的差别。
-- 计划写的是 `__p7_replay_event(seq)`「用旧 `event_seq` 重播」。**信封里没有 `event_seq`**
+### 控制台怎么调（第 2 节各步的入口命令）
+
+页面**没有** `window.__TAURI__`（`tauri.conf.json` 没开 `withGlobalTauri`），但 Tauri
+注入的 `__TAURI_INTERNALS__` 一直都在。第 2 节里写作 `__p7_drop_next_event("domain.changed")`
+的那几行，在 **DevTools 控制台**里就是：
+
+```js
+// ① 开第二个窗口（在 A/main 的控制台执行；返回值就是新窗口的 label）
+await __TAURI_INTERNALS__.invoke("__p7_open_sync_lab")
+// ② 丢掉下一条 domain.changed（在 B/sync-lab 的控制台执行）
+await __TAURI_INTERNALS__.invoke("__p7_drop_next_event", { kind: "domain.changed" })
+// ③ 让「这个窗口」下一次 list_tasks 的响应晚 5 秒返回（在 B 的控制台执行）
+await __TAURI_INTERNALS__.invoke("__p7_delay_next_query_ms", { command: "list_tasks", ms: 5000 })
+// ④ 用旧 revision 重播一条通知（在 B 的控制台执行；R 见 2.3.2）
+await __TAURI_INTERNALS__.invoke("__p7_replay_event", { revision: R - 1 })
+```
+
+**确认哪个窗口是哪个**：在任一窗口的控制台读
+`window.__TAURI_INTERNALS__.metadata.currentWindow.label`（应为 `main` / `sync-lab`）。
+
+⚠️ **三条开关的作用域不一样，别记混**：
+
+- **丢弃**丢的是那一次**广播**本身（所有窗口都收不到）——所以 2.1 / 2.3.1 / 2.4 里 A 的
+  界面照常更新（A 用的是**自己的命令响应**：捕获页成功之后当场重拉一次，不等通知）；
+- **延迟**只作用于**装开关的那个窗口**：2.2 在 B 上装 ⇒ 被延迟的是 **B** 的那次重拉，
+  不是先跑到的那次 A 的重拉（`sync-lab` / `main` 就是这里的键）；
+- **重播**广播给所有窗口：两个窗口都会收到那条旧版本通知（判据仍然是 B 的展示不变）。
+
+**两处与计划原文的差异（已按这里实现）**：
+
+- 丢弃开关**按事件名筛**（计划原文不带筛选）：有活动会话时采样每秒广播一条 `timer.tick`，
+  不筛的话「丢掉下一条」会被一条无害 tick 吃掉，实验看起来"什么都没发生"。
+  实现是「事件名相同才消费掉开关」，`tests/dev_injections.rs` 有专门一条断言。
+- 重播开关的参数是**旧 `revision`**（计划原文写 `event_seq`）：信封里没有 `event_seq`
   （00 §5 与 `src/types/ipc.ts` 的 `EventEnvelope` 是 `data_epoch` / `event` / `revision` /
-  `at` / `payload`），所以这条开关的参数是**旧的 `revision`**。
+  `at` / `payload`）。
 
-**在这两个前置件落地之前，第 2 节一步都做不了**：2.0 本身就要 `sync-lab` 窗口（前置件 1），
-2.1–2.4 还要注入开关（前置件 2）。没有它们就无法确定性地造出那三种竞态，"没观察到"与
-"规则不成立"分不开。**不要做、也不要写成结论。** 这几条规则的**规则侧**已由 6a 的自动化
-用例钉住（对照表见 §4）。
+**前置落地之前的限制已经解除**：第 2 节七步现在都能做。这几条规则的**规则侧**仍然由 6a 的
+自动化用例钉住（对照表见 §4），实机补的是真实双 WebView 的广播时序。
 
 ## 2. 步骤
 
-### 2.0 同时打开两个窗口（**前置：§1 的第 1 件已落地**）
+### 2.0 同时打开两个窗口
 
 1. `pnpm tauri dev`（或安装包）启动，确认主窗 `main` 出现。
-2. 由 Rust 侧创建第二个窗口 `sync-lab`（前置件 1）；确认它跑的是**同一份前端**、
-   label 就是 `sync-lab`。
+2. 在 **A（`main`）** 的 DevTools 控制台执行 §1 的第 ① 条
+   `await __TAURI_INTERNALS__.invoke("__p7_open_sync_lab")`：Rust 侧按主窗那份配置建出
+   第二个窗口，**返回值就是它的 label**（应为 `sync-lab`）；也可以在它的控制台读
+   `window.__TAURI_INTERNALS__.metadata.currentWindow.label` 复核。它跑的是**同一份前端**
+   （配置与主窗同源、只改 label）。
    - ⚠️ **同一窗口里的 DOM 分栏 / iframe / 普通浏览器标签页都不算第二个 JS 上下文**：
      本实验要的是**两个各自独立的 WebView**（各有自己的模块实例、自己的水位、自己的事件
      订阅）。同窗分栏共享同一个 `domainState`；浏览器标签页连 Tauri 后端都没有
