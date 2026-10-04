@@ -66,11 +66,12 @@
 - [ ] **DTO 形状（D1 裁决，取代原先的「生成器」口径）**：**不上 DTO 生成器**——`ts-rs`/`specta`/`typeshare` 在本机**两侧 cargo 缓存都是 0 命中**（离线取不到），引入需联网并**经用户确认**。改为：
   - **命令层显式声明 serde DTO**：请求 `Deserialize`、响应 `Serialize`；
   - **服务结果类型加 `Serialize`**：`ProjectList`/`TagList`（`services/catalog.rs:233`/`:245`）、`TaskQueryResult`（`:616`）、`DailyPlanView`（`services/daily_plan.rs:137`）、`TimerSnapshot`（`services/timer/snapshot.rs:14`）、`CommandOutcome`（`services/timer/coordinator.rs:70`），以及写命令返回的 Change 家族（`ProjectChange`/`TaskProjectChange`/`TaskChange`/`TagChange`/`TaskTagsChange`/`DailyPlanChange`）；
-  - **请求类型加 `Deserialize`**：`TaskQueryRequest`（本任务新增，见下）、`StartRequest`/`SessionRequest`/`ResumeRequest`（`services/timer/coordinator.rs:39`/`:52`/`:60`）；
+  - **请求类型加 `Deserialize`**：`SessionRequest`/`ResumeRequest`（`services/timer/coordinator.rs:52`/`:60`）、`DailyPlanQuery`（`services/daily_plan.rs:129`）、`ProjectTarget`/`ProjectSelector`/`TaskQueryRequest`（`services/catalog.rs`）。**`StartRequest` 不加**（2026-10-04 实施后订正，见计划末尾「Task 1 的 Rust 半边已实现」一节）：它的 IPC 形状是「`mode`/`timer_kind` 为字符串」，给它加 `Deserialize` 就得给这两个枚举派生反序列化，而那条路径拿不到 `ErrorResponse.code`（见下面「非法参数」那条）；本仓又不留「定义了没人调」的 API，所以不造这份死面——IPC 侧收的是 `commands::StartTimerRequest`（字符串字段），命令体解析后再构造 `StartRequest`；
   - **行类型也要能序列化**：`ProjectList.items`/`TaskQueryResult.tasks`/`DailyPlanView.tasks` 直接装 `ProjectRow`/`TagRow`/`TaskRow`，所以 `storage/{project_repo,tag_repo,task_repo}.rs` 的行类型加 `Serialize`；但**命令层不得出现 `storage::` 的名字**（分层门禁），命令层只是把服务结果原样交回 IPC；
-  - **状态/类别枚举不派生 `Serialize`**：在各自领域文件里写一份 `Serialize` 实现，内部 `serialize_str(self.as_str())`（`domain/task.rs:36`、`domain/project.rs:28`、`domain/tag.rs:22`、`domain/session.rs:26`/`:100` 已有 `as_str()`）——等价于在每个字段上写 `serialize_with`，但**只有一份**，JSON 里就是库里那套小写字符串；
+  - **状态/类别枚举不派生 `Serialize`**：在各自领域文件里写一份 `Serialize` 实现，内部 `serialize_str(self.as_str())`（`domain/task.rs:36`、`domain/project.rs:28`、`domain/tag.rs:22`、`domain/session.rs:26`/`:100` 已有 `as_str()`）——等价于在每个字段上写 `serialize_with`，但**只有一份**。⚠️ **JSON 里就是 `as_str()` 那套字符串，不是统一小写**（2026-10-04 订正）：`TaskStatus`（`"Ready"`/`"Inbox"`）与 `TagKind`（`"Context"`）**首字母大写**，与 schema 的 CHECK 逐字一致；只有 `ProjectStatus`（`active`）、`SessionState`（`running`）、`TimerKind`（`stopwatch`）是小写。**Task 1b 的 TS 联合类型必须照这个写**，写成全小写就是永远不命中的静默 bug；
   - **前端类型手写** `src/types/ipc.ts`（不手写第二份业务规则）；
-  - **一致性由一条 Rust 集成用例钉住**：`tests/ipc_snapshots.rs` 把每个响应 DTO 序列化成 JSON，与 `src/types/__snapshots__/*.json` **逐字节比对**（`serde_json` 已在依赖里，**零新增依赖**）。改了 Rust 类型忘了改前端类型或快照 ⇒ 红灯。**替代物是这条用例，不是生成器。**
+  - **一致性由一条 Rust 集成用例钉住**：`tests/ipc_snapshots.rs` 把每个响应 DTO 序列化成 JSON，与 `src/types/__snapshots__/*.json` **逐字节比对**（`serde_json` 已在依赖里，**零新增依赖**）。改了 Rust 类型忘了改前端类型或快照 ⇒ 红灯。**替代物是这条用例，不是生成器。** 快照按 LF 存放（仓库根 `.gitattributes` 钉了 `text eol=lf`——本仓库 `core.autocrlf=true`，不钉的话换台机器 checkout 出 CRLF 会让逐字节比对在没改任何类型的情况下变红）；
+  - **Task 1b 的验收项（这条一致性承诺的另一半，2026-10-04 登记）**：快照只钉住 **Rust ↔ JSON**，手写的 `src/types/ipc.ts` 与快照之间**没有机械联系**。Task 1b 必须补一条 vitest 用例：读 `src/types/__snapshots__/*.json`，对每个类型做**键集合 + 字面量联合**的类型级断言（例如状态联合类型必须与快照里出现过的取值集合一致）。没有这条，「改了 Rust 类型忘了改前端类型」仍然只能靠人记得。
 - [ ] **`TaskQuery` 的 IPC 口（D3 裁决）**：`TaskQuery` 的字段是 `TaskFilter`/`Page`（`src-tauri/src/storage/task_repo.rs:151`/`:163`/`:175`），命令层构造它必踩 `commands 禁 storage::`。在 `services::catalog` 新增 IPC 友好的请求 DTO **`TaskQueryRequest`**：
   - `statuses: Vec<String>`——每个值过 `TaskStatus::parse`（`src-tauri/src/domain/task.rs:51`）校验，非法值 ⇒ 稳定错误码；
   - `project: ProjectSelector`——三值，对应 `task_repo::ProjectFilter`（`Any` / `None` / `Id(String)`）；JSON 形状固定 `"any"` / `"none"` / `{"id":"<project_id>"}`；
@@ -85,6 +86,7 @@
 - [ ] **`APP_ID` 与 `identifier` 统一（D4 裁决）**：`src-tauri/tauri.conf.json:5` 的 `identifier` 由 `com.worktrace.app` 改为 **`com.worktrace.desktop`**，与 `platform::paths::APP_ID`（`src-tauri/src/platform/paths.rs:9`）一致。**库路径不动**：数据目录仍是 `%APPDATA%\com.worktrace.desktop\`，`worktrace.db`（`paths.rs:33`）与同目录的 `instance.lock`（`paths.rs:40`）保持现状；P6 的备份/日志目录沿用同一个 `app_data_dir()`，**不因改名迁移任何数据**（P7 是首次接线，没有待迁移的旧库）。
 - [ ] **非法参数必须拿到稳定错误码**：IPC 形状里 `mode`/`timer_kind`/`statuses` 一律是**字符串**，在命令体内用 `SessionMode::parse`/`TimerKind::parse`（`src-tauri/src/domain/session.rs:82`/`:107`）、`TaskStatus::parse` 校验后再构造服务请求——**不要**依赖 serde 的枚举反序列化：它的错误拿不到 `ErrorResponse` 的 `code`，非法取值会退化成 Tauri 的反序列化错误。请求类型上的 `Deserialize` 因此只用于**已是强类型**的入参（测试与内部复用），IPC 路径不依赖它。
 - [ ] 测试：命令层不直接引用 `rusqlite`/`storage::`（`src-tauri/scripts/check-layers.ps1` + grep 自查）；未知/非法参数返回稳定错误码而不是 panic；每个响应 DTO 的 JSON 快照与 `src/types/__snapshots__/*.json` 一致；`TaskQueryRequest` 的非法状态串与越界分页 ⇒ 领域/校验错误且**零写入**。
+- [ ] **写命令广播 `domain.changed`（2026-10-04 实施，fix round 1 裁决）**：00 §5 的「同一 epoch 内一次业务写对应一条 `domain.changed`」。落点是命令层：拿到写结果后、**释放锁之前**（同一临界区，所以「广播顺序 = 提交顺序」）广播一条，**载荷就是该命令的响应 DTO**。**仅 `Changed` 才广播**——`Unchanged`（改同名、重复打标、重复加入计划）没有 revision 变化，也就没有缓存要失效；判据是 `storage::WriteOutcome::into_parts()` 的第二个返回值。**响应形状不变**：不加 `{changed, value}` 信封（那会改 15 份快照，而且规格没给它位置），这一位只用于「要不要广播」这个内部判断。广播失败只记诊断，不影响命令结果、不回滚已提交业务。计时命令（`start`/`pause`/`resume`/`finish`）没有幂等重复这一支，能走到广播就说明跃迁真的提交了。
 - [ ] **本阶段不做（依赖 P3/P5/P6）**：恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；维护态分流（错误码由 P6 引入、展示由 P8 做）。
 
 ## 前置任务：前端测试基建（Task 2 开工前，Windows 侧）
@@ -217,9 +219,13 @@
   `WORKTRACE_UPDATE_IPC_SNAPSHOTS=1 cargo test --offline --test ipc_snapshots`。
   快照按 LF 存放（`.gitattributes` 钉了 `text eol=lf`——本仓库 `core.autocrlf=true`）。
 - **事件频道名 `worktrace:event`**（`lib.rs` 的 `EVENT_CHANNEL`），Task 2 的 `domainState` 按它订阅。
-- **仍未接线**：命令层**不发 `domain.changed`**——00 §5 的「一次业务写一条通知」目前只有
-  发送出口、没有生产发送方，`timer.tick` 由周期采样驱动发出。Task 2/6a 之前要补：写命令提交后、
-  仍在同一临界区内广播。**登记，不是已完成。**
+- **写命令广播 `domain.changed`**（fix round 1 补上）：命令体在提交之后、释放锁之前广播一条，
+  载荷 = 该命令的响应 DTO；**仅 `Changed` 才发**（`WriteOutcome::into_parts` 的第二位），
+  `Unchanged` 不发；广播失败只记诊断。响应形状不变（不加 `{changed, value}` 信封）。
+- **24 条命令体逐条有用例**（fix round 1 补上）：`tests/ipc_commands.rs` 调 `commands::*_impl`
+  （包装只剩一行转发），覆盖「走对服务 / 带对信封 / 各自不同的终态」。
+- **仍未接线**：Task 1b 的前端（`src/ipc.ts`/`src/types/ipc.ts`/`App.tsx`/`main.tsx`/`index.html`），
+  以及 TS 侧对快照的类型级断言（见 Task 1 的 D1 那条）。
 
 ## 仍待与归属（2026-10-04 登记）
 
