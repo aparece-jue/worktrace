@@ -53,6 +53,9 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
    - 现象：
 6. 再点一次「暂停」：
    - [ ] 什么都不发生（没有第二条 `domain.changed`、`revision` 不变）→ 现象：
+7. **怎么算不通过**：可点项不是恰好四项（多、少，或 P8 那一项可点）；点禁用项有任何反应
+   （菜单关闭、窗口变化、控制台出现命令）；**没有计时**时点「暂停」却让 `revision` **+1**、
+   或让 `work_session` 多出一行；重复点「暂停」出现第二条 `domain.changed`。
 
 ## 2. F-009：关掉全部窗口后托盘仍可用、计时继续
 
@@ -151,12 +154,15 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
 4. **重新核一遍 `clean_exit_at`**：关掉主窗（不退出）之后启动第二个实例，第二个进程
    **不得**给本次 run 写下 `clean_exit_at`（它连库都不打开）：
    `SELECT clean_exit_at FROM application_run WHERE id = '<上面取到的 run id>'` 仍为 NULL → 现象：
+5. **怎么算不通过**：出现**第二个托盘图标**（第二个进程没有自己退出）；`application_run`
+   **多出一行**（第二个进程建了 run）；既有实例**没有**把主窗抬起/重建并聚焦（超过 0.5 秒仍无变化）；
+   第二个进程给本次 run 写下了 `clean_exit_at`。
 
 ## 4. F-001 / F-002 与计时非法请求（Task 6b 走查）
 
 > **为什么单列一节**：计划 Task 6b 把「F-001/F-002（捕获、理清、计时非法请求）」列进
 > **外壳人工验收**，并写明「不能用单元测试代替（08 §6）」。它的自动化半边在
-> `src/pages/__tests__/Inbox.test.tsx`（13 条）与 `Timer.test.tsx`（8 条）——那些钉的是
+> `src/pages/__tests__/Inbox.test.tsx`（**15 条**——用例数随修复轮变动，引用时以 `grep -c` 为准）与 `Timer.test.tsx`（8 条）——那些钉的是
 > **展示与转发**；这一节走的是**真实窗口里的那条路**：真 IPC、真事务、真错误响应。
 >
 > 每一步记**现象**（界面文案逐字抄、SQL 结果、控制台报错），不要只写「通过」。
