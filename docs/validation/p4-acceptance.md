@@ -127,18 +127,27 @@ P4 **不涉及**这四项（DB 执行边界与单调/墙钟映射已由 P1/P2 �
   （Task 1 改 detail 语言 ⇒ 1 红；Task 2 塞回旧 import ⇒ 只有分层门禁红；Task 3 改回英文映射 ⇒ 4 红；
   Task 4 去掉 `, task.id` ⇒ 1 红；Task 5 三处篡改各 1 红；Task 6 五处篡改 + 分层注入 + 骨架篡改）。
   空测试与恒真断言是本轮抓到的**真实缺陷**（三次），不是形式。
-- **已知缺陷（P1/P2 遗留，未修）**：
+- **已知缺陷（P1/P2 遗留，未修）**——下列 1、3、4 条**当时为遗留，2026-10-04 已收口**
+  （提交 `a8c4376`，门禁 355 passed / 0 failed，见文末「2026-10-04 FOLLOW-04 收口」）：
   1. `task_repo.rs` 的 `EmptyText { field: "task.title" }` / `"task"`（`transition_task`、
      `freeze_baseline_estimate` 两处）⇒ 用户看到「「task.title」不能为空。」这类半英文文案；
      `session_repo.rs`（`"session"`/`"interval"`）与 `checkpoint_repo.rs`（`"interval"`）同属一类；
      另有第三套「任务不存在」文案在 `task_repo.rs::require_active_project`（手写中文）。
+     **2026-10-04 已收口**：列名改「任务标题」，「找不到任务」的两处改 `UnknownTask`，
+     会话/区间改新增的 `UnknownSession`/`UnknownInterval`；这套「列名/英文进用户句子」
+     已变成测试门禁（变体级 + 构造点级 + 禁用子串）。
   2. ~~`domain/task.rs` 的 `NotInThisVersion { what: to.as_str() }`~~ —— 终评指出这是**唯一还活着的**
      内部标识泄漏路径，已在最终修复波修掉（渲染点走 `zh_status`，禁用词表补 `Scheduled`/`Review`/`Cancelled`）；
   3. `storage/guards.rs` 的 `guard_row_version_of` ⇒ `AppError::Domain { detail: "no such {table}" }`（整句英文）；
+     **2026-10-04 已收口**：函数删除（零生产调用），测试改走 `task_repo::get_task` + `guard_row_version`。
   4. `services/timer/coordinator.rs` 的 `AppError::Domain { detail: "no such session" }`（整句英文，
-     P2 遗留、当前不可达）；
+     P2 遗留、当前不可达）；**2026-10-04 已收口**：改用 `DomainError::UnknownSession`。
+     同批还收掉两处同类漏点：`checkpoint_repo.rs` 三条英文 **`Domain`** detail（原先被登记成
+     Storage 诊断，实际会进用户文案），以及 `IntervalOpenInWrongState` 把**会话**状态拿去查
+     **任务**状态映射表，导致 `running`/`recovering` 等原样进句子（新增 `zh_session_state`）。
   5. `task_repo::create_task` 对 `done` 项目放行，而 P4 的 `set_task_project` 拒绝 `done`——
-     V0.1 写不出 `done` 项目，当前无实际差异，但 V0.2 引入 `done` 前必须对齐。
+     V0.1 写不出 `done` 项目，当前无实际差异，但 V0.2 引入 `done` 前必须对齐（该条已由提交
+     `9e7a89a` 处理，见下方「2026-10-04 复审更新」）。
   **P4 已修的同类问题**：`TagNameTaken` 漏 `Domain`（Task 3）、`create_task` 的两处借用 P1 文案（Task 5）、
   `TaskHasRunningSession` 的「再改归属」措辞（Task 5）。
 
@@ -176,10 +185,15 @@ SQL 全参数化（含分页）；FK 的 `ON DELETE RESTRICT` 未被破坏；`se
    `"session"`/`"interval"`）、`guards.rs` 的 `no such {table}`、`coordinator.rs` 的 `"no such session"`；
    同批处理 `create_task` 对 `done` 项目放行（`task_repo.rs` 的 `Some(_) => {}`）与
    `require_active_project` 把 `done` 说成「已归档」。
+   **已收口**（2026-10-04）：文案部分提交 `a8c4376`（门禁 355 passed / 0 failed）——列名与
+   英文 detail 全部改成中文领域变体（新增 `UnknownSession`/`UnknownInterval`，变体清单
+   26 → 28），`guard_row_version_of` 删除；`done` 那两项由提交 `9e7a89a` 先行处理。本条目关闭。
 2. **口径已定、代码已补全（P7 前门禁，2026-10-04 收口）**：所有对外写结果都回 `data_epoch`/`revision`（P2 计时快照早已回、P4 的 11 个写入口由提交 `27f8a7a` 补齐）；
    项目/标签/任务标签读服务统一为「同一个读事务里 `guard_epoch` 并返回 `{items, data_epoch, revision}`」这一种 epoch 契约（`list_tasks_filtered` 与 `plan_for` 是样板，未改）。
    **仍未收口的一项**：同一列两种入参形状（`create_task` 的 `Option<&str>` vs `set_task_project` 的 `ProjectTarget`）——这属接口造型，留待 P7 定 IPC 形状时一并处理，不属 COMP-01/COMP-03。
-3. **零调用公开面**：`guard_row_version_of`（建议直接删，而不是翻译它的英文）；`AuthorityTarget::new`、
+3. **零调用公开面**：`guard_row_version_of`（建议直接删，而不是翻译它的英文）**已于 2026-10-04 删除**
+   （提交 `a8c4376`：生产零调用、不存在时的 detail 是整句英文；测试改走 `task_repo::get_task` +
+   `guards::guard_row_version`，「未知记录 vs 版本冲突」的区分断言未削弱）；`AuthorityTarget::new`、
    `LocalDate::{year,month,day}`、`parse_project_status`、`system_timezone_name` 保留并登记「P4 内无生产消费者」。
    （本轮未新增零调用面：四个读入口都有测试消费者，`ProjectList`/`TagList` 是它们的返回类型。）
 4. **`daily_plan` 的 `(local_date, timezone)` 读索引**（需新迁移）与**容器拆分**
@@ -217,3 +231,15 @@ P4 核心验收结论保留；完整响应信封、完整项目列表服务以�
 **门禁**（提交 `27f8a7a` 上实跑）：`cargo test --offline` **350 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED。**反向验证**：去掉 `list_projects` 的 `guard_epoch` ⇒ 两条读信封用例红；`Settled::read` 返回常量 epoch ⇒ 写结果用例红（`left: "not-the-epoch"`）。
 
 **仍未完成**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃、前端握手时序）与 UI 不在本轮范围；`create_task` 的 `Option<&str>` 与 `set_task_project` 的 `ProjectTarget` 两种入参形状仍并存。**FOLLOW-06 已收口**（提交 `6f29c92`）：计时命令必须先提交再应用内存，因此 `rebuild_from_committed` 改为在**同一个提交后读事务**内取齐 session / 前台会话 / 快照（含其 `revision`）/ `task_version`，`CommandOutcome.revision` 直接复用 `snapshot.revision`，不再另读；这条「提交后同一串行边界内重建」的例外已写进 00 §5 与总纲 §10，而不是让 P2 悄悄偏离统一口径。
+
+## 2026-10-04 FOLLOW-04 收口：用户可见文案全中文 + 三条机器门禁（提交 a8c4376）
+
+第九节「已知缺陷」第 1、3、4 条与第十一节 triage 第 1 条涉及的文案问题，在本轮全部收口；第九节第 2 条（`NotInThisVersion` 印内部状态名）在更早的终评修复波已修，第 5 条（`create_task` 对 `done` 放行）由 `9e7a89a` 修。**门禁数字（提交 `a8c4376` 上实跑）**：`cargo test --offline` **355 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED（352 → 355：本轮新增 3 条门禁用例）。
+
+**改了哪些点位**：`coordinator.rs` 的 `AppError::Domain { detail: "no such session" }` → `UnknownSession`；`task_repo.rs` 的 `EmptyText { field: "task.title" }` → 「任务标题」、两处 `EmptyText { field: "task" }` → `UnknownTask`；`session_repo.rs` 的 `"session"`/`"interval"` 与 `checkpoint_repo.rs` 的 `"interval"` → 新增的 `DomainError::UnknownSession`/`UnknownInterval`（**变体清单 26 → 28**）；`session_repo.rs` 的 `NotInThisVersion { what: "stopwatch with a budget" }` → 「给正计时设预算」；`storage/guards.rs` 的 `guard_row_version_of` 删除（零生产调用，测试改走 `task_repo::get_task` + `guard_row_version`，未知记录/版本冲突的区分断言不削弱）。
+
+**两处原清单之外的漏点**（顺带审计发现）：① `checkpoint_repo.rs` 三条英文不变量文案用的是 `AppError::Domain` 而不是 Storage，会原样进用户句子（「操作不被允许：checkpoint must not move backwards.」）⇒ 改中文；`AppError::Storage` 的内部诊断按契约保留英文、未动。② `IntervalOpenInWrongState` 走的是**任务**状态映射表，而 `state` 来自 `SessionState::as_str()`，五个会话状态整句漏成英文 ⇒ 新增 `zh_session_state`（运行中/已暂停/待确认/已结束/已作废）；`close_interval` 里借用 `IllegalTransition { from: "closed", to: "closed" }` 的分支改回 `NoOpenInterval`。
+
+**门禁**（`tests/error_contract.rs`）：变体级（除 `UnknownEnumValue` 外，用户文案不得含 ASCII 字母；豁免理由写在断言处，另补会话状态五个取值逐一核对）、构造点级（扫 `src/**/*.rs`，内联字面量的 `EmptyText{field}`/`NotInThisVersion{what}`/`AppError::Domain{detail}` 必须含 CJK）、禁用子串（`no such`/`task.title`/`stopwatch with a budget`/checkpoint 三句不得回到 `src`）。**反向验证**：三处篡改分别打红对应规则（变体级在 `error_contract.rs:311`、构造点级在 `:468`、禁用子串在 `:503`），逐字还原后与备份 SHA-256 一致。详细交付与原始输出见[待评审清单的 FOLLOW-04 小节](p1-p4-review-backlog.md)。
+
+**仍未做**（按边界）：P7 的 IPC 接线与前端时序、`capture_error_response` 接线（FOLLOW-01 仍归 P7）；`tests/` 里两处**手造**的英文 detail 夹具保留（用途是证明两个 detail 可辨，扫描范围只覆盖 `src/**/*.rs`）。

@@ -20,7 +20,7 @@
 | FOLLOW-01 | P7 统一接入 capture_error_response | 服务已实现，生产 IPC 尚未接入。在原事务结束后、同一串行边界捕获；按 kind/id 匹配 records，不按请求下标；读取失败要求整份重新握手，不用 timer.snapshot 补错误版本 |
 | FOLLOW-02 | error_response.rs 的返回顺序注释 | 文件开头仍写“按同一份顺序逐条返回”，实际按 kind 白名单分组、组内保持请求顺序。实际实现符合 P4 计划；2026-10-04 已修正注释，返回顺序未改变 |
 | FOLLOW-03 | P3 扫描版本与审计规则 | 文档已明确：扫描查询零写；实际修改 session 状态/run_id/区间事实时修改对象版本，并在同一批事务增加一次 revision、记审计。paused 重绑定适用；recovering 保持原恢复归属直至 reconcile。P3 尚未实施，后续按真实扫描测试验证 |
-| FOLLOW-04 | 中文错误提示一致性 | P4 验收记录仍登记 P1/P2 遗留的内部列名、英文提示等；建议 P7 前集中清理。Storage.detail 仅诊断，Domain.detail 会进入用户 message，不能混用 |
+| FOLLOW-04 | 中文错误提示一致性 | 已修复（2026-10-04，提交 **a8c4376**，门禁 355 passed / 0 failed）：`DomainError` 新增 `UnknownSession`/`UnknownInterval`（变体清单 26 → 28），`task_repo`/`session_repo`/`checkpoint_repo`/`coordinator` 的列名与英文文案全部改成中文领域变体，会话状态补 `zh_session_state`，零调用的 `guard_row_version_of` 删除；「用户可见文案必须是中文」已变成三条机器门禁（变体级 / 构造点级 / 禁用子串）并经三处篡改反向验证。Storage.detail 仅诊断（保留英文），Domain.detail 会进入用户 message，不能混用 |
 | FOLLOW-05 | 平台验收 | 正式系统事件、锁屏/休眠/改时、多窗口/托盘、备份恢复及跨机器容差验证由 P6/P7/P8 承接；自动测试不能替代实机验收 |
 | FOLLOW-06 | P2 提交后重建的一致读 | 已修复（2026-10-04）：rebuild_from_committed 在提交后开启一个读事务，session、区间、前台会话、快照元数据和 task_version 均在同一读快照内取得；CommandOutcome.revision 复用 snapshot.revision，不再另读。保留同次采样及提交后失败进入 RECOVERY_REQUIRED 的原规则。这是计时结果的明确例外：提交后应用内存/重建响应，不要求在业务写事务内生成最终展示快照。 |
 | FOLLOW-07 | commands 分层门禁 | 已修复（2026-10-04）：check-layers.ps1 增加 src/commands 对 storage::、rusqlite、Connection 的检查；正常通过，并须执行反向注入验证。命令层继续只调用服务，不接受连接。 |
@@ -100,3 +100,38 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 历史 FOLLOW-06 所谓“提交后只读一次”不准确：原实现 build 和随后 require_meta 各读一次元数据，且实体分次读取。现改为一个提交后读事务，并直接复用 snapshot.revision。历史记录中的未完成说法以本节和最新表格为准。
 
 本轮验证：352 个测试通过；分层正向通过，临时注入 commands 对 storage 的引用后门禁明确返回 1，移除探针后再次通过。首次握手用例覆盖无初始 epoch、恢复后库身份改变/旧查询拒绝、未初始化元数据拒绝且零创建。
+
+## FOLLOW-04 收口（2026-10-04，提交 a8c4376）
+
+**交付**：用户可见错误文案全部中文化，且从此由**测试门禁**守着，不再是约定。门禁数字：`cargo test --offline` **355 passed / 0 failed**、`cargo fmt --check` EXIT 0、`cargo clippy --all-targets --offline -- -D warnings` 无告警、`scripts/check-layers.ps1` PASSED（在提交 `a8c4376` 上实跑）。
+
+**改动的点位**（行号为提交后位置；`file:line` 均在 `src-tauri/` 下）：
+
+1. `src/services/timer/coordinator.rs:193`：手写 `AppError::Domain { detail: "no such session" }` → `DomainError::UnknownSession`。P4 验收记录里登记的最后一条「整句英文进用户文案」。
+2. `src/storage/task_repo.rs:73`：`EmptyText { field: "task.title" }` → 「任务标题」。这是**校验**错误（标题为空），字段名会被拼进「「…」不能为空。」，所以照 `catalog.rs`/`domain/localdate.rs`/`tag_repo.rs` 的先例用中文，不用列名。
+3. `src/storage/task_repo.rs:295` 与 `:440`：`EmptyText { field: "task" }` → `UnknownTask`。这两处语义是**找不到任务**，与 `:572` `set_task_project` 的注释口径（「『找不到』用 `UnknownTask`，不是 `EmptyText`」）统一。
+4. `src/storage/session_repo.rs:181`/`:264`：`EmptyText { field: "session" }` → **新增** `DomainError::UnknownSession`；`src/storage/session_repo.rs:203`、`src/storage/checkpoint_repo.rs:70`：`EmptyText { field: "interval" }` → **新增** `DomainError::UnknownInterval`。两个变体照 `UnknownTask`/`UnknownProject`/`UnknownTag` 写（「找不到这个会话。」「找不到这段计时区间。」），`tests/error_contract.rs` 的变体清单同步 26 → 28。
+5. `src/storage/session_repo.rs:143`：`NotInThisVersion { what: "stopwatch with a budget" }` → 「给正计时设预算」。
+6. **顺带审计的两处发现（原清单之外，一并改）**：
+   - `src/storage/checkpoint_repo.rs:85`/`:90`/`:100` 的三条不变量违反用的是 **`AppError::Domain`**（不是 `AppError::Storage`），detail 会原样进用户句子（用户会读到「操作不被允许：checkpoint must not move backwards.」）⇒ 改中文。`AppError::Storage` 的诊断（`task vanished after insert`、`expected journal_mode=wal…`、`app_meta is not initialised` 等）按契约**保留英文**，本次一字未动。
+   - `DomainError::IntervalOpenInWrongState` 原先走 `zh_status`（**任务**状态映射表），而它的 `state` 来自 `SessionState::as_str()` ⇒ 五个会话状态一个都不在表里，整句漏成英文（「会话处于「recovering」时不该有开放的计时区间。」）⇒ 新增 `zh_session_state`（运行中/已暂停/待确认/已结束/已作废）；同时 `session_repo::close_interval` 里借用 `IllegalTransition { from: "closed", to: "closed" }` 的分支改回 `NoOpenInterval`（该分支语义本就是 NoOpenInterval 的注释所写「没有开放区间，却要求闭合」，原先那句会渲染成关于**任务**跃迁、且带内部标识的胡话）。
+7. 删除零调用的 `storage::guards::guard_row_version_of`（`detail: format!("no such {table}")`，生产零调用、只剩测试用）。`tests/transaction_boundary.rs` 三处调用改用 `task_repo::get_task` + `guards::guard_row_version`：`start_session` 的请求校验用 `ok_or(DomainError::UnknownTask)`，「未知记录 = `DOMAIN_ERROR`」与「版本不符 = `VERSION_CONFLICT`」两个区分与断言强度都保留（后者仍断言 `expected/actual = (7, 1)`）。其余构造点逐个核对，**确认已是中文**：`services/catalog.rs:46/79/86/525`、`storage/project_repo.rs:96/123/203`、`storage/tag_repo.rs:112`、`domain/tag.rs:48/59`、`domain/project.rs:60`、`domain/localdate.rs:38`（`field: FIELD`，表达式）、`storage/task_repo.rs:89`、`domain/task.rs:113`（`what: to.as_str()`，表达式、经 `zh_status`，未动）。
+
+**门禁（`src-tauri/tests/error_contract.rs`，三条规则分工）**：
+
+- **变体级**：除 `UnknownEnumValue` 外，其余 `DomainError` 变体渲染出的用户文案不得含 ASCII 字母。豁免写在断言处：`UnknownEnumValue` 要回显**非法取值与列名**（「「state」里是一个无法识别的值 "???"。」），那是诊断所需；它的生产构造点（`services/daily_plan`）用的是中文列名「时区」。另加一条把 `SessionState` 五个取值逐一核对（映射表漏一个就红）。这条规则抓出的正是第 6 条那两处：①的「至少含一个 CJK」对「中文句子里夹一个英文词」恒真，抓不住。
+- **构造点级**：扫 `src/**/*.rs`（`env!("CARGO_MANIFEST_DIR")` 定位），**内联字面量**形式的 `EmptyText { field: … }`、`NotInThisVersion { what: … }` 与 `AppError::Domain { detail: … }` 必须至少含一个 CJK 字符；表达式形式（`field: FIELD`、`what: to.as_str()`、`detail: other.to_string()`）跳过。只剔**整行注释**，注释里引用历史文案（如「原先借用 `EmptyText{field:"project"}`」）不算产出文案。
+- **禁用子串**：`no such` / `task.title` / `stopwatch with a budget` / checkpoint 三句英文片段不得回到 `src`（表里没有 `vanished`——Storage 诊断按契约保留英文，那些片段由用户可见文本侧的禁用词表守）。同时把 `no such` / `vanished` / `task.title` / `stopwatch with a budget` 加进 `errors_never_leak_paths_sql_or_payload` 既有的禁用词表。
+
+**反向验证**（三处篡改，逐字还原后与备份 SHA-256 一致：`error.rs` `56180f67…`、`task_repo.rs` `f9ac21fa…`、`checkpoint_repo.rs` `9158a1a9…`、`error_contract.rs` `743679c3…`）：
+
+| 篡改 | 结果 | 红在哪条断言 |
+| --- | --- | --- |
+| `UnknownSession` 文案改成「找不到这个 session。」 | 1 failed | 变体级规则 ④：`error_contract.rs:311`「除 UnknownEnumValue 外的用户文案不得含 ASCII 字母：找不到这个 session。」——①的 CJK 断言放行，正是新规则补上的缺口 |
+| `task_repo` 的 `field` 改回 `"task"` | 1 failed | 构造点级：`error_contract.rs:468` 点名 `src/storage/task_repo.rs:75`「必须含中文："task"」 |
+| `checkpoint_repo` 的 detail 改回 `checkpoint must not move backwards.` | 2 failed | 禁用子串：`error_contract.rs:503` 点名 `checkpoint_repo.rs`；构造点级：`:468` 点名 `checkpoint_repo.rs:102` |
+
+另有一次「整句英文」的对照篡改（`UnknownSession` → `"no such session."`）同时打红变体级 ①（CJK）与禁用子串两条，说明两道网都在工作。
+
+**仍未做**（按边界）：P7 的 IPC 接线与前端时序、`capture_error_response` 接线不在本轮（FOLLOW-01）；`tests/` 里仍有两处**手造**的英文 detail 夹具（`error_contract.rs` 的 `"no such task"`/`"illegal transition"`，用途是证明两个 detail 可辨）与一句注释，扫描范围本就只覆盖 `src/**/*.rs`，未动。
+
