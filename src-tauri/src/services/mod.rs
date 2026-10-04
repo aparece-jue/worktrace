@@ -6,6 +6,7 @@
 pub mod timer;
 
 pub mod error_response;
+pub mod handshake;
 
 // P4：项目/标签/今日计划的输入校验入口（Task 1 建，T2/T3/T4 复用）。
 pub mod catalog;
