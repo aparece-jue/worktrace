@@ -51,6 +51,25 @@ export function useTimerSnapshot(): TimerSnapshot | null {
 }
 
 /**
+ * **正在计时**的那条会话属于哪条任务（快照的 `task_id`）；没有 running 会话时为 `null`。
+ *
+ * 判据与 Rust 逐字对齐：只有 `state='running'` 占用前台槽位
+ * （`uq_running_foreground` 的唯一索引与 `session_repo::require_no_running_foreground`
+ * 都只约束 running），**暂停的会话不挡新会话**。
+ *
+ * 只订阅这一个**原始值**而不是整份快照：收件箱页要用它禁掉那条任务上的「开始」，
+ * 而它不该跟着每一拍 `timer.tick` 重渲染（`useTimerSnapshot` 会）。
+ */
+const selectRunningTaskId = (): string | null => {
+  const timer = domainState.getView().timer;
+  return timer !== null && timer.state === "running" ? timer.task_id : null;
+};
+
+export function useRunningTaskId(): string | null {
+  return useSyncExternalStore(subscribe, selectRunningTaskId);
+}
+
+/**
  * 缓存失效计数：每接纳一条 `domain.changed`（或整体失效）加一。
  *
  * 页面把它放进自己那次「重拉数据」的 `useEffect` 依赖里即可——事件只作失效，

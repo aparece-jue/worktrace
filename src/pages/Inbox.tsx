@@ -20,6 +20,8 @@
  * 以及列表里的状态标签（捕获 / 理清 Ready / 开始计时这三处）。完成/取消/Blocked/Waiting/
  * reopen 属 P8（P3 的 `transition_task` 接入后）。前端的取舍**只是体验**：即使漏了，
  * Rust 也会按同一张表拒绝，那条 `message` 照 R8 上屏。
+ * 另有一条与状态表无关的禁用：**正在计时的那条任务**上不给「开始」（再点必败，见
+ * `runningTaskId`）。
  *
  * 本页**不自己订阅事件**：状态从 `src/state/hooks.ts` 读，事件只通过 `invalidated`
  * 让这里的 `useEffect` 重拉一次数据。
@@ -38,9 +40,8 @@ import {
 } from "../ipc";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { reportCommandError } from "../components/commandError";
-import type { TaskIdentity } from "../components/timerRequests";
 import { domainState } from "../state/domainState";
-import { useDataEpoch, useInvalidation } from "../state/hooks";
+import { useDataEpoch, useInvalidation, useRunningTaskId } from "../state/hooks";
 import type { ProjectRow, TaskRow, TaskStatus } from "../types/ipc";
 
 /**
@@ -74,21 +75,20 @@ function canStart(status: TaskStatus): boolean {
   return status === "Inbox" || status === "Clarifying" || status === "Ready" || status === "Doing";
 }
 
-export interface InboxProps {
-  /**
-   * 会话真的开起来之后，把"这条会话属于哪个任务"交给外壳（计时页发 `resume` 要用）。
-   *
-   * ⚠️ 过渡接口：契约给 `TimerSnapshot` 补上任务身份之后，这个回调与外壳里那份状态
-   * 一起删掉（见 `src/components/timerRequests.ts` 的模块头）。
-   */
-  onSessionStarted(task: TaskIdentity): void;
-}
-
-export function Inbox({ onSessionStarted }: InboxProps) {
+export function Inbox() {
   /** 库身份：还没握手成功（`null`）时**一条带 epoch 的命令都不发**。 */
   const epoch = useDataEpoch();
   /** 缓存失效计数（事件只作失效）：它一变就重拉本页数据。 */
   const invalidated = useInvalidation();
+  /**
+   * 正在计时的那条任务（快照的 `task_id`）：它上面的「开始」**点必败**
+   * （Rust 的 `require_no_running_foreground` 与唯一索引 `uq_running_foreground` 都只认
+   * `state='running'` 的前台会话），所以直接不给入口。
+   *
+   * 判据只在 `running` 上生效：**暂停的会话不占用前台槽位**，Rust 允许为同一条任务再开一个
+   * 会话，前端就不多拦（多拦会把一个合法动作变成灰色的）。
+   */
+  const runningTaskId = useRunningTaskId();
 
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
@@ -184,7 +184,9 @@ export function Inbox({ onSessionStarted }: InboxProps) {
     if (epoch === null || !canStart(task.status)) return;
     setBusy(true);
     try {
-      const outcome = await startTimer({
+      // 提交后的任务版本不用在这里记：会话一开起来，快照就会带上任务的 id / 版本 / 标题
+      // （`build()` 每次采样重读任务行），计时页与状态栏都从那里取。
+      await startTimer({
         expected_data_epoch: epoch,
         task_id: task.id,
         task_expected_version: task.row_version,
@@ -193,9 +195,6 @@ export function Inbox({ onSessionStarted }: InboxProps) {
         mode: "FOREGROUND",
         timer_kind: "stopwatch",
       });
-      // 任务行在上面那笔事务里跃迁过（Inbox → Ready → Doing），所以版本取响应里的
-      // 提交后版本，而不是列表里那份旧值。
-      onSessionStarted({ id: task.id, title: task.title, row_version: outcome.task_version });
       await afterWrite();
     } catch (cause) {
       setError(reportCommandError(cause));
@@ -260,7 +259,8 @@ export function Inbox({ onSessionStarted }: InboxProps) {
                   size="small"
                   type="primary"
                   data-testid={`start-${task.id}`}
-                  disabled={disabled}
+                  // 这条任务已经在计时（快照的 running 会话属于它）⇒ 再点必败，不给入口。
+                  disabled={disabled || task.id === runningTaskId}
                   onClick={() => void start(task)}
                 >
                   开始

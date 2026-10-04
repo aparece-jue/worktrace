@@ -36,17 +36,22 @@ const events = vi.hoisted(() => {
 vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 
 import { Inbox } from "../Inbox";
-import type { TaskIdentity } from "../../components/timerRequests";
 import { domainState } from "../../state/domainState";
-import { EPOCH, createBackend, failure, project, task, type Backend } from "./fakeBackend";
+import {
+  EPOCH,
+  createBackend,
+  failure,
+  project,
+  runningSnapshot,
+  task,
+  type Backend,
+} from "./fakeBackend";
 
 let backend: Backend;
 
-/** 挂上页面并启动镜像（页面要等握手拿到 epoch 才会发业务查询）。 */
-async function mountInbox(
-  onSessionStarted: (started: TaskIdentity) => void = () => undefined,
-): Promise<void> {
-  render(<Inbox onSessionStarted={onSessionStarted} />);
+/** 挂上页面并启动镜像（页面要等握手拿到 epoch 才会发业务查询）。**页面没有 props**。 */
+async function mountInbox(): Promise<void> {
+  render(<Inbox />);
   await act(async () => {
     await domainState.start();
   });
@@ -167,8 +172,7 @@ describe("收件箱：F-002 任务理清", () => {
     // `clarify_ready`），`count("start_timer")` 或 `count("clarify_ready")` 立刻红。
     backend = createBackend();
     backend.tasks = [task({ id: "t-9", title: "开始我", status: "Inbox", row_version: 2 })];
-    const started: TaskIdentity[] = [];
-    await mountInbox((current) => started.push(current));
+    await mountInbox();
 
     const row = await screen.findByTestId("task-t-9");
     backend.commands.length = 0;
@@ -187,9 +191,37 @@ describe("收件箱：F-002 任务理清", () => {
         timer_kind: "stopwatch",
       },
     });
-    // 任务身份（含**提交后**的版本，Inbox → Ready → Doing 两次跃迁）交给外壳：
-    // 计时页的「继续」要用它，而快照里没有任务字段。
-    expect(started).toEqual([{ id: "t-9", title: "开始我", row_version: 4 }]);
+    // 提交后的任务版本**不必在这里记**：会话一开起来，快照就带上任务的 id / 版本 / 标题
+    // （`build()` 每次采样重读任务行），计时页与状态栏都从那里取。
+  });
+
+  it("正在计时的那条任务：「开始」被禁掉（再点必败）；别的任务不受影响", async () => {
+    // M3：`require_no_running_foreground` 与唯一索引 `uq_running_foreground` 都只认
+    // `state='running'` 的前台会话 ⇒ 那条任务上再点「开始」必失败，所以不给入口。
+    backend = createBackend();
+    backend.tasks = [
+      task({ id: "t-9", title: "正在计时", status: "Doing", row_version: 4 }),
+      task({ id: "t-8", title: "另一条", status: "Ready", row_version: 0 }),
+    ];
+    backend.snapshot = runningSnapshot({ task_id: "t-9", state: "running" });
+    await mountInbox();
+
+    const timed = await screen.findByTestId("task-t-9");
+    expect((within(timed).getByTestId("start-t-9") as HTMLButtonElement).disabled).toBe(true);
+    const other = screen.getByTestId("task-t-8");
+    expect((within(other).getByTestId("start-t-8") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("暂停的会话不挡「开始」：Rust 只对 running 占用前台槽位，前端不多拦", async () => {
+    // 与上一条合起来就是 M3 的边界：判据只看 `state === "running"`——多拦会把一个
+    // Rust 允许的动作变成灰色的。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-9", title: "已暂停", status: "Doing", row_version: 4 })];
+    backend.snapshot = runningSnapshot({ task_id: "t-9", state: "paused", session_version: 2 });
+    await mountInbox();
+
+    const row = await screen.findByTestId("task-t-9");
+    expect((within(row).getByTestId("start-t-9") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("置为 Ready：一条 clarify_ready，请求带任务版本；成功后标签变 Ready", async () => {

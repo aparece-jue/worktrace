@@ -12,11 +12,9 @@
  *    卸载时 `domainState.stop()`。**页面自己不开会话、也不各自订阅事件**——
  *    它们只通过 `src/state/hooks.ts` 读同一个入口。
  *
- * 「当前任务」由外壳持有：计时页的「继续」需要任务的 id 与版本，而**当前**的契约里没有
- * 「会话 → 任务」的读路径（见 `src/components/timerRequests.ts` 的模块头）——所以由发起
- * `start_timer` 的收件箱页把身份交给外壳，外壳再交给计时页。
- * ⚠️ **过渡机制**：`TimerSnapshot` 补上 `task_id` / `task_row_version` 之后，这份状态与
- * `Inbox` 的 `onSessionStarted` 一起删掉。
+ * 「当前任务」不在外壳里存：计时页与状态栏的标题都读**快照自己的** `task_title`
+ * （契约随 `task_id` / `task_row_version` 一起下发，见 `src/components/timerRequests.ts`
+ * 的模块头）。外壳因此不持有任何跨页面的业务状态。
  *
  * 不做的事：不引路由与状态库；不做多面板 `dockview` 布局（R-04 之后再说，
  * `src/components/DockviewDemo.tsx` 仍在仓库里但不进发布产物）；不做业务判断。
@@ -26,7 +24,6 @@ import { useEffect, useState } from "react";
 import { Layout, Menu, Typography } from "antd";
 
 import "./App.css";
-import type { TaskIdentity } from "./components/timerRequests";
 import { formatDuration } from "./components/duration";
 import { Inbox } from "./pages/Inbox";
 import { SESSION_STATE_TEXT, Timer } from "./pages/Timer";
@@ -55,13 +52,16 @@ const PHASE_TEXT: Record<string, string> = {
  *
  * 单独一个组件是有意的——它每拍 `timer.tick` 都要重渲染，而外壳与页面不必跟着重渲染。
  */
-function StatusBar({ currentTask }: { currentTask: TaskIdentity | null }) {
+function StatusBar() {
   const phase = useHandshakePhase();
   const timer = useTimerSnapshot();
 
   const parts = [`连接：${PHASE_TEXT[phase] ?? phase}`];
   if (timer !== null && timer.session_id !== null && timer.state !== null) {
-    parts.push(currentTask?.title ?? "（本窗口不知道的任务）");
+    // 「当前任务」只有快照一个来源。快照没给标题（理论上只有任务行读不到）时
+    // **少显示一段**，不编一句"不知道的任务"出来——占位文案会在会话切换的那一拍
+    // 露出来，而它不是任何权威值。
+    if (timer.task_title !== null) parts.push(timer.task_title);
     parts.push(`${SESSION_STATE_TEXT[timer.state]} ${formatDuration(timer.active_ms)}`);
   }
   return <Typography.Text type="secondary">{parts.join(" · ")}</Typography.Text>;
@@ -69,7 +69,6 @@ function StatusBar({ currentTask }: { currentTask: TaskIdentity | null }) {
 
 export default function App() {
   const [page, setPage] = useState<PageKey>("inbox");
-  const [currentTask, setCurrentTask] = useState<TaskIdentity | null>(null);
 
   useEffect(() => {
     // 启动：失败不改本地状态（镜像自己会置 `phase: "failed"`，状态栏照实显示）。
@@ -101,15 +100,11 @@ export default function App() {
           />
         </Sider>
         <Content className="app-page" data-region="page">
-          {page === "inbox" ? (
-            <Inbox onSessionStarted={setCurrentTask} />
-          ) : (
-            <Timer currentTask={currentTask} onSessionEnded={() => setCurrentTask(null)} />
-          )}
+          {page === "inbox" ? <Inbox /> : <Timer />}
         </Content>
       </Layout>
       <Footer className="app-status" data-region="status">
-        <StatusBar currentTask={currentTask} />
+        <StatusBar />
       </Footer>
     </Layout>
   );

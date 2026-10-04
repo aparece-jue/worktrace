@@ -1,11 +1,16 @@
 /**
- * 外壳用例（P7 Task 1b 建立，Task 3 更新）：应用能挂载、渲染外壳与页面，
+ * 外壳用例（P7 Task 1b 建立，Task 3 / 接线轮更新）：应用能挂载、渲染外壳与页面，
  * 并**经镜像的唯一入口**启动事件会话。
  *
  * Task 1b 那条「一个命令都不调用」的断言到这里必然要改：Task 3 把页面接进外壳之后，
  * 挂载就会由 `domainState.start()` 发 `get_revision` + `timer_snapshot`，收件箱页再发两条
  * 读查询。所以现在钉的是**命令集合恰好是这四条**——多一条（模板页留下的 `greet`、
- * 或页面自己偷偷开第二条订阅/第二条查询）都会红。
+ * 或页面自己偷偷开第二条订阅/第二条查询）都会红。**不做去重**：每条命令恰好被调用一次
+ * 也是这条断言的一部分。
+ *
+ * 外壳**不持有任何跨页面的业务状态**（接线轮删掉了过渡的「当前任务」）：计时页与状态栏的
+ * 标题都读快照自己的 `task_title`。下面两条用例把这一点钉住：快照给了标题就显示，
+ * 没给就整段不渲染——**任何状态（含结束后那一拍）都不出现占位文案**。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,8 +45,48 @@ import { domainState } from "../state/domainState";
 const EPOCH = "epoch-a";
 const AT = 1_700_000_000_000;
 
-/** 四条命令的最小假后端（形状与 `src/types/ipc.ts` 一致）。 */
-function scriptShell(): string[] {
+/** 空闲快照（形状与 `TimerSnapshot::idle` 一致）。 */
+const IDLE = {
+  data_epoch: EPOCH,
+  revision: 5,
+  run_id: "run-1",
+  session_id: null,
+  session_version: null,
+  task_id: null,
+  task_row_version: null,
+  task_title: null,
+  tick_seq: 1,
+  as_of: AT,
+  active_ms: 0,
+  pending_ms: null,
+  state: null,
+  timer_kind: null,
+  remaining_ms: null,
+  overtime_ms: null,
+};
+
+/** 一条正在计时的会话快照；任务三件由调用方逐条覆盖（默认：有标题）。 */
+function activeSnapshot(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    ...IDLE,
+    revision: 6,
+    session_id: "session-1",
+    session_version: 1,
+    task_id: "task-1",
+    task_row_version: 1,
+    task_title: "写周报",
+    state: "running",
+    timer_kind: "stopwatch",
+    ...overrides,
+  };
+}
+
+/**
+ * 外壳用到的命令的最小假后端（形状与 `src/types/ipc.ts` 一致）。
+ *
+ * `session` 为 `null`（默认）时 `timer_snapshot` 回空闲快照；给一份就回它。
+ */
+function scriptShell(session: Record<string, unknown> | null = null): string[] {
   const called: string[] = [];
   mockIPC((command: string) => {
     called.push(command);
@@ -49,24 +94,9 @@ function scriptShell(): string[] {
       case "get_revision":
         return { data_epoch: EPOCH, revision: 5 };
       case "timer_snapshot":
-        return {
-          data_epoch: EPOCH,
-          revision: 5,
-          run_id: "run-1",
-          session_id: null,
-          session_version: null,
-          task_id: null,
-          task_row_version: null,
-          task_title: null,
-          tick_seq: 1,
-          as_of: AT,
-          active_ms: 0,
-          pending_ms: null,
-          state: null,
-          timer_kind: null,
-          remaining_ms: null,
-          overtime_ms: null,
-        };
+        return session ?? IDLE;
+      case "finish_timer":
+        return { snapshot: IDLE, revision: 9, task_version: 2 };
       case "list_tasks":
         return { tasks: [], total: 0, data_epoch: EPOCH, revision: 5 };
       case "list_selectable_projects":
@@ -103,7 +133,8 @@ describe("应用外壳", () => {
     expect(nav?.textContent).toContain("计时");
 
     await waitFor(() => expect(called).toContain("list_tasks"));
-    expect([...new Set(called)].sort()).toEqual([
+    // 不去重（M4）：这条断言同时钉住「恰好四条」与「每条恰好一次」。
+    expect([...called].sort()).toEqual([
       "get_revision",
       "list_selectable_projects",
       "list_tasks",
@@ -128,5 +159,37 @@ describe("应用外壳", () => {
 
     unmount();
     await waitFor(() => expect(events.open).toBe(0));
+  });
+
+  it("「当前任务」只有快照一个来源：标题来自 `task_title`，计时页与状态栏同一份", async () => {
+    scriptShell(activeSnapshot({ task_title: "写季报" }));
+    const { container } = render(<App />);
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "计时" }));
+
+    await waitFor(() => expect(screen.getByTestId("timer-task-title").textContent).toBe("写季报"));
+    const status = container.querySelector('[data-region="status"]');
+    await waitFor(() => expect(status?.textContent).toContain("写季报"));
+    expect(status?.textContent).toContain("运行中");
+  });
+
+  it("M1：快照没给标题就不显示、也不占位——结束后那一拍同样不闪占位文案", async () => {
+    const called = scriptShell(activeSnapshot({ task_title: null }));
+    const { container } = render(<App />);
+    fireEvent.click(screen.getByRole("menuitem", { name: "计时" }));
+    const status = (): string =>
+      container.querySelector('[data-region="status"]')?.textContent ?? "";
+
+    // 会话在、标题缺：状态栏少一段、页面整段不渲染，都不编文案。
+    await waitFor(() => expect(status()).toContain("运行中"));
+    expect(status()).not.toContain("本窗口不知道");
+    expect(screen.queryByTestId("timer-task-title")).toBeNull();
+
+    // 结束：命令响应里已经没有会话了，而展示值仍由快照决定 ⇒ 这一拍**不会**掉进占位文案
+    // （旧实现正是在这里清掉过渡身份、而快照还没换，于是闪一下「（本窗口不知道的任务）」）。
+    fireEvent.click(screen.getByTestId("finish-button"));
+    await waitFor(() => expect(called).toContain("finish_timer"));
+    expect(status()).not.toContain("本窗口不知道");
+    expect(screen.queryByTestId("timer-task-title")).toBeNull();
   });
 });

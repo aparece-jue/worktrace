@@ -15,11 +15,13 @@
  * 「到点只提示、不自动完成」在这里就是一句 `Alert`——不发 `finish_timer`，
  * 也不把任务改成完成（那条联动属 P8）。
  *
- * ## 「继续」为什么要一个任务身份
+ * ## 「继续」与标题都只有快照一个来源
  *
- * `resume_timer` 要 `task_id` + `task_expected_version`，而**当前**的快照里没有任务字段
- * （契约侧正在补）。所以「继续」用发起这次会话时记下的任务身份；拿不到它（冷启动）时
- * **按钮不出现**——这是过渡行为，接线方式写在 `buildResumeRequest` 旁边。
+ * `resume_timer` 要 `task_id` + `task_expected_version`，`task_id` / `task_row_version` /
+ * `task_title` 三件都由快照下发（`build()` 每次采样重读任务行），所以冷启动（重开窗口、
+ * 托盘暂停之后的 F-009 正常路径）与本窗口刚点完「开始」是**同一条路径**；判据写在
+ * [`buildResumeRequest`] 一处——**快照不自洽就不给这个入口**，不是"点了再失败"。
+ * 标题同理：`task_title` 为空时**不渲染**（也不编占位文案），因为那不是任何权威值。
  */
 
 import { useState } from "react";
@@ -29,11 +31,7 @@ import { finishTimer, pauseTimer, resumeTimer } from "../ipc";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { reportCommandError } from "../components/commandError";
 import { formatDuration } from "../components/duration";
-import {
-  buildResumeRequest,
-  sessionRequestOf,
-  type TaskIdentity,
-} from "../components/timerRequests";
+import { buildResumeRequest, sessionRequestOf } from "../components/timerRequests";
 import { useDataEpoch, useTimerSnapshot } from "../state/hooks";
 import type { CommandOutcome, SessionState } from "../types/ipc";
 
@@ -46,19 +44,7 @@ export const SESSION_STATE_TEXT: Record<SessionState, string> = {
   discarded: "已丢弃",
 };
 
-export interface TimerProps {
-  /**
-   * 本上下文启动的那条会话属于哪个任务；冷启动（重开窗口/托盘暂停后）为 `null`。
-   *
-   * ⚠️ 过渡入参：契约给 `TimerSnapshot` 补上任务身份之后，这个 prop 与它在外壳里的状态
-   * 一起删掉（见 `src/components/timerRequests.ts` 的模块头）。
-   */
-  currentTask: TaskIdentity | null;
-  /** 会话真的结束了（快照里没有会话了）——外壳据此放下那条任务身份。 */
-  onSessionEnded(): void;
-}
-
-export function Timer({ currentTask, onSessionEnded }: TimerProps) {
+export function Timer() {
   const epoch = useDataEpoch();
   const snapshot = useTimerSnapshot();
   const [error, setError] = useState<string | null>(null);
@@ -69,17 +55,14 @@ export function Timer({ currentTask, onSessionEnded }: TimerProps) {
   const paused = state === "paused";
   /** 到点：只有倒计时会到点（正计时的 `remaining_ms`/`overtime_ms` 恒为 `null`）。 */
   const overdue = snapshot?.timer_kind === "countdown" && (snapshot.overtime_ms ?? 0) > 0;
-  /** 这一拍能不能发「继续」：会话在、任务身份也有。不可得 ⇒ 按钮不出现。 */
-  const canResume = paused && buildResumeRequest(snapshot, currentTask) !== null;
-  /** 会话还在、但本窗口不知道它属于哪个任务（冷启动）。 */
-  const resumeUnavailable = paused && !canResume;
+  /** 这一拍能不能发「继续」：快照自洽（已暂停 + 任务三件齐备）。不可得 ⇒ 按钮不出现。 */
+  const canResume = buildResumeRequest(snapshot) !== null;
 
   async function run(command: () => Promise<CommandOutcome>): Promise<void> {
     setBusy(true);
     try {
-      const outcome = await command();
-      // 快照里没有会话了 ⇒ 那条任务身份不再指向任何活动会话。
-      if (outcome.snapshot.session_id === null) onSessionEnded();
+      // 响应**不进展示**：按钮集合与标题都仍由快照决定（不做本地状态机）。
+      await command();
       setError(null);
     } catch (cause) {
       setError(reportCommandError(cause));
@@ -95,7 +78,7 @@ export function Timer({ currentTask, onSessionEnded }: TimerProps) {
   }
 
   async function resume(): Promise<void> {
-    const request = buildResumeRequest(snapshot, currentTask);
+    const request = buildResumeRequest(snapshot);
     if (request === null) return;
     await run(() => resumeTimer(request));
   }
@@ -126,7 +109,12 @@ export function Timer({ currentTask, onSessionEnded }: TimerProps) {
       ) : (
         <Flex vertical gap={12}>
           <Space size={8} wrap>
-            <Typography.Text strong>{currentTask?.title ?? "（本窗口不知道的任务）"}</Typography.Text>
+            {/* 标题只有快照一个来源：没给就不渲染，也不编占位文案。 */}
+            {snapshot.task_title !== null ? (
+              <Typography.Text strong data-testid="timer-task-title">
+                {snapshot.task_title}
+              </Typography.Text>
+            ) : null}
             {state !== null ? <Tag>{SESSION_STATE_TEXT[state]}</Tag> : null}
             <Typography.Text type="secondary">
               已计时 <span className="timer-active">{formatDuration(snapshot.active_ms)}</span>
@@ -185,15 +173,6 @@ export function Timer({ currentTask, onSessionEnded }: TimerProps) {
               </Button>
             ) : null}
           </Space>
-
-          {resumeUnavailable ? (
-            // 过渡行为：契约里还没有「会话 → 任务」的读路径，这条会话不是本窗口开始的，
-            // 继续的请求构造不出来（`resume_timer` 要任务的 id 与版本），所以按钮不出现。
-            // 字段落地后这一段与 `canResume` 的第二个条件一起删掉。
-            <Typography.Text type="secondary">
-              这条会话不是本窗口开始的，本窗口不知道它属于哪个任务，暂时无法继续（暂停与结束不受影响）。
-            </Typography.Text>
-          ) : null}
         </Flex>
       )}
     </Flex>
