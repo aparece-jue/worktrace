@@ -370,20 +370,28 @@ fn tick_seq_keeps_counting_across_sessions_within_a_run() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 快照的任务身份（P7 Task 3 的契约补口）
+// 快照的任务身份与标题（P7 Task 3 的契约补口）
 //
 // 缺口：`resume_timer` 要 `task_id` + `task_expected_version`，而「这条暂停的会话属于
 // 哪个任务」原本**没有**任何读路径——`TaskRow` 不带会话、24 条命令里没有 session→task
 // 的查询、托盘只做 `pause`。于是重开窗口（F-009 的正常路径）或托盘暂停之后，前端
-// **构造不出**「继续」按钮的请求。下面四条把这条缝钉住。
+// **构造不出**「继续」按钮的请求。标题同理没有第二个来源（没有「按 id 取任务」的读路径），
+// 不随快照下发就只能永久显示占位文案。下面五条把这条缝钉住。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 前端 `buildResumeRequest`（`src/components/timerRequests.ts`）的逐条镜像：
-/// **任务身份两件套同时可得**才能构造出 `ResumeRequest`，否则返回 `None`
-/// （调用方据此让「继续」按钮不出现——不是"点了再失败"）。
+/// **快照自洽**才构造得出 `ResumeRequest`——`state == Paused` 且 `task_id` /
+/// `task_row_version` / `task_title` 三件齐备，否则返回 `None`（调用方据此让「继续」
+/// 按钮不出现——不是"点了再失败"）。
 fn resume_request_of(snapshot: &TimerSnapshot) -> Option<ResumeRequest> {
+    if snapshot.state != Some(SessionState::Paused) {
+        return None;
+    }
     let task_id = snapshot.task_id.clone()?;
     let task_row_version = snapshot.task_row_version?;
+    // 标题不参与请求构造，但**要求它在**：界面拿不到标题就说不清在继续哪条任务，
+    // 所以判据里它和另外两个字段同级（与前端那份逐字一致）。
+    snapshot.task_title.as_ref()?;
     Some(ResumeRequest {
         expected_data_epoch: snapshot.data_epoch.clone(),
         task_id,
@@ -393,12 +401,12 @@ fn resume_request_of(snapshot: &TimerSnapshot) -> Option<ResumeRequest> {
     })
 }
 
-/// 空闲快照**没有**任务身份：两个字段都是 `None`，JSON 里是 `null`。
+/// 空闲快照**没有**任务身份：三个字段都是 `None`，JSON 里是 `null`。
 ///
 /// 更要紧的是**键必须存在**：`serde(skip_serializing_if = "Option::is_none")` 会让
-/// 空闲快照直接少两个键，而 `src/types/ipc.ts` 声明的是 `string | null`——前端读到的
-/// 会是 `undefined`。`Value::Null` 与"缺键"在下标取值上长得一样，所以两条 `contains_key`
-/// 不是重复断言，是这条用例里唯一能分辨二者的断言。
+/// 空闲快照直接少几个键，而 `src/types/ipc.ts` 声明的是 `string | null`——前端读到的
+/// 会是 `undefined`。`Value::Null` 与"缺键"在下标取值上长得一样，所以这几条
+/// `contains_key` 不是重复断言，是这条用例里唯一能分辨二者的断言。
 #[test]
 fn an_idle_snapshot_carries_no_task_identity() {
     let dir = tempfile::tempdir().unwrap();
@@ -414,6 +422,7 @@ fn an_idle_snapshot_carries_no_task_identity() {
 
     assert_eq!(snap.task_id, None, "没有会话就没有任务身份");
     assert_eq!(snap.task_row_version, None);
+    assert_eq!(snap.task_title, None, "没有会话就没有标题可展示");
 
     let json = serde_json::to_value(&snap).unwrap();
     let object = json.as_object().expect("快照的 JSON 形状是对象");
@@ -422,13 +431,16 @@ fn an_idle_snapshot_carries_no_task_identity() {
         object.contains_key("task_row_version"),
         "空闲时也必须有这个键"
     );
+    assert!(object.contains_key("task_title"), "空闲时也必须有这个键");
     assert_eq!(json["task_id"], serde_json::Value::Null, "Option ⇒ null");
     assert_eq!(json["task_row_version"], serde_json::Value::Null);
+    assert_eq!(json["task_title"], serde_json::Value::Null);
 }
 
-/// 有会话时两个字段跟着**这条会话**走：running 与 paused 各一条，且换会话就换身份。
+/// 有会话时几个字段跟着**这条会话**走：running 与 paused 各一条，且换会话就换身份。
 ///
-/// 两条会话分属两个不同版本的任务（0 与 7），是为了让「填常量」在这里也活不下来。
+/// 两条会话分属两个不同版本、不同标题的任务（0/'任务' 与 7/'另一个任务'），是为了让
+/// 「填常量」在这里也活不下来。
 #[test]
 fn a_snapshot_carries_the_task_identity_of_its_own_session() {
     let mut h = harness(TimerKind::Stopwatch, None);
@@ -439,6 +451,11 @@ fn a_snapshot_carries_the_task_identity_of_its_own_session() {
     assert_eq!(running.state, Some(SessionState::Running));
     assert_eq!(running.task_id.as_deref(), Some("t1"), "会话属于 t1");
     assert_eq!(running.task_row_version, Some(0), "t1 的 row_version");
+    assert_eq!(
+        running.task_title.as_deref(),
+        Some("任务"),
+        "标题取自这条会话所属的那一行任务"
+    );
 
     // 另一个任务（版本 7）+ 它的暂停会话：身份必须跟着会话换。
     h.db.connection()
@@ -471,9 +488,52 @@ fn a_snapshot_carries_the_task_identity_of_its_own_session() {
     );
     assert_eq!(paused.task_row_version, Some(7), "t2 的 row_version");
     assert_eq!(
+        paused.task_title.as_deref(),
+        Some("另一个任务"),
+        "标题跟着会话换，不是常量"
+    );
+    assert_eq!(
         paused.session_version,
         Some(3),
         "会话版本与任务版本是两份版本，不得串用"
+    );
+    // 判据要求三件齐备 ⇒ 这一份自洽的暂停快照确实构造得出请求。
+    assert!(resume_request_of(&paused).is_some());
+}
+
+/// 任务标题**每次采样重读**：暂停期间改标题，下一拍快照里的标题跟着变。
+///
+/// 这条同时证明标题不是从内存镜像缓存来的——`LiveSession` 里只有 `task_id`（会话一生
+/// 不变），标题每次都由 `build()` 从任务行取；缓存的实现会在这里给出旧文案。
+#[test]
+fn the_snapshot_task_title_tracks_a_rename_and_is_not_cached() {
+    let mut h = harness(TimerKind::Stopwatch, None);
+    h.start(0);
+    h.set_state(SessionState::Paused, 1);
+    h.coord.load_session(h.db.connection(), "s1").unwrap();
+
+    let before = h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(before.state, Some(SessionState::Paused));
+    assert_eq!(before.task_title.as_deref(), Some("任务"));
+
+    h.db.connection()
+        .execute("UPDATE task SET title='改过的标题' WHERE id='t1'", [])
+        .unwrap();
+
+    let after = h.coord.snapshot(&mut h.db).unwrap();
+    assert_eq!(
+        after.task_title.as_deref(),
+        Some("改过的标题"),
+        "标题必须每次重读，不能缓存在内存镜像里"
+    );
+    assert_eq!(
+        after.task_row_version, before.task_row_version,
+        "这一条只改标题，任务版本没动"
+    );
+    // 标题变了不影响请求构造：三件仍然齐备。
+    assert_eq!(
+        resume_request_of(&after).map(|r| r.task_expected_version),
+        Some(0)
     );
 }
 
@@ -553,7 +613,7 @@ impl CommandHarness {
 }
 
 /// **本次补口的目的**：真实的 `start → pause` 之后，只拿一份**全新查询**的快照
-/// （模拟"重开窗口"：本窗口没有那次 `start` 的上下文），用快照里的两个任务字段
+/// （模拟"重开窗口"：本窗口没有那次 `start` 的上下文），用快照里的任务三件套
 /// 就能构造出 `ResumeRequest`，并且它真的 `resume` 成功。
 ///
 /// 注意 `start` 会冻结估时基准，把 `task.row_version` 从 0 推到 1——所以
@@ -581,10 +641,19 @@ fn the_snapshot_task_identity_is_enough_to_resume_a_paused_session() {
         fresh.task_row_version.is_some(),
         "有会话就必须给出任务版本，否则「继续」的请求构造不出来"
     );
+    assert_eq!(
+        fresh.task_title.as_deref(),
+        Some("任务"),
+        "有会话就必须给出标题，否则界面只能显示占位文案"
+    );
 
     let request = resume_request_of(&fresh).expect("快照必须给出可用的任务身份");
     assert_eq!(request.task_id, "t1");
     assert_eq!(request.session_id, fresh.session_id.clone().unwrap());
+    assert_eq!(
+        request.task_expected_version,
+        fresh.task_row_version.unwrap()
+    );
 
     let resumed = c.coord.resume(&mut c.db, request).unwrap();
     assert_eq!(resumed.snapshot.state, Some(SessionState::Running));

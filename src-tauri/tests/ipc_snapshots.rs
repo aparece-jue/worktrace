@@ -97,9 +97,9 @@ fn task_row() -> TaskRow {
 
 /// 活动会话的快照：正计时以外的分支（`pending_ms` / 倒计时字段）都要有值。
 ///
-/// `task_id` / `task_row_version`（P7 Task 3 的契约补口）取 `task_row()` 的常量：
-/// 快照里的任务版本**不要求**等于同一份 JSON 里别的任务行的版本（这里 `task_version`
-/// 是 3，`CommandOutcome.task_version` 是 4），它只要求形状稳定。
+/// `task_id` / `task_row_version` / `task_title`（P7 Task 3 的契约补口）取 `task_row()`
+/// 的常量：快照里的任务版本**不要求**等于同一份 JSON 里别的任务行的版本（这里
+/// `task_version` 是 3，`CommandOutcome.task_version` 是 4），它只要求形状稳定。
 fn timer_snapshot_active() -> TimerSnapshot {
     TimerSnapshot {
         data_epoch: EPOCH.to_string(),
@@ -109,6 +109,9 @@ fn timer_snapshot_active() -> TimerSnapshot {
         session_version: Some(4),
         task_id: Some(TASK_ID.to_string()),
         task_row_version: Some(3),
+        // 与 `task_row().title` 同一句话：它是**界面唯一的标题来源**（24 条命令里没有
+        // 「按 id 取任务」的读路径），所以样例值取任务行那一份，不另编一个。
+        task_title: Some("写 P7 Task 1 的报告".to_string()),
         tick_seq: 42,
         as_of: AT + 300_000,
         active_ms: 300_000,

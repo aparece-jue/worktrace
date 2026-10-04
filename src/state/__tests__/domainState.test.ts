@@ -85,6 +85,7 @@ function sample(overrides: Partial<TimerSnapshot> = {}): TimerSnapshot {
     session_version: 1,
     task_id: "task-1",
     task_row_version: 1,
+    task_title: "写周报",
     tick_seq: 1,
     as_of: AT,
     active_ms: 1_000,

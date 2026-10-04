@@ -55,6 +55,7 @@ function sample(tickSeq: number): TimerSnapshot {
     session_version: 1,
     task_id: "task-1",
     task_row_version: 1,
+    task_title: "写周报",
     tick_seq: tickSeq,
     as_of: AT,
     active_ms: tickSeq * 1_000,

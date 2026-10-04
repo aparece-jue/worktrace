@@ -405,17 +405,23 @@ impl Coordinator {
         };
 
         // 任务身份（P7 Task 3 的契约补口）：`resume` 要 `task_id` + `task_expected_version`，
-        // 所以快照必须带上会话所属任务与**当前**的任务版本。任务行**每次采样重读**，
-        // 不缓存在 `LiveSession` 里——暂停期间改标题会 bump `task.row_version`，缓存的值
-        // 会让前端拿着过期版本去撞 `VERSION_CONFLICT`。
+        // 界面要标题，所以快照必须带上会话所属任务、**当前**的任务版本与标题。任务行
+        // **每次采样重读**，不缓存在 `LiveSession` 里——暂停期间改标题会 bump
+        // `task.row_version`，缓存的值会让前端拿着过期版本去撞 `VERSION_CONFLICT`，
+        // 标题也会一直停在旧文案上。
         //
         // 纯读：不采样（样本由入口传入）、不写库、不 bump revision，也不新开事务——
         // 就用调用方给的这个连接（`rebuild_from_committed` 里是它那个读事务）。
-        // 任务行读不到时只让**版本**是 `None`（`task_id` 仍如实给出）：一次查询不该因为
-        // 一条脏数据把整个计时展示打没；前端的「继续」按钮要求两者同时可得，于是它会跟着
+        // **一次查询取齐版本与标题**（`task_id` 来自会话行），不为标题再查一次库。
+        // 任务行读不到时只让**版本与标题**是 `None`（`task_id` 仍如实给出）：一次查询不该
+        // 因为一条脏数据把整个计时展示打没；前端的「继续」按钮要求三件齐备，于是它会跟着
         // 不出现，而不是"点了再失败"。正常路径下这里不可能为空——`work_session.task_id`
         // 是 `ON DELETE RESTRICT` 的外键，仓里也没有删任务的口。
-        let task_row_version = task_repo::get_task(conn, &live.task_id)?.map(|t| t.row_version);
+        let task = task_repo::get_task(conn, &live.task_id)?;
+        let (task_row_version, task_title) = match task {
+            Some(row) => (Some(row.row_version), Some(row.title)),
+            None => (None, None),
+        };
 
         // 暂计只加**当前可信开放区间**：非 running、没有基线、或没有开放区间都不加。
         let live_ms = match (&self.anchor_state, &live.open_interval, live.state) {
@@ -438,9 +444,10 @@ impl Coordinator {
             run_id: self.run_id.clone(),
             session_id: Some(live.id),
             session_version: Some(live.row_version),
-            // 与会话身份同源、同时机：两者都来自这一次采样，不来自调用方传值。
+            // 与会话身份同源、同时机：三者都来自这一次采样，不来自调用方传值。
             task_id: Some(live.task_id),
             task_row_version,
+            task_title,
             tick_seq: self.tick_seq,
             as_of,
             active_ms,

@@ -219,6 +219,15 @@ export interface TimerSnapshot {
    * Rust 侧**每次采样重读**（暂停期间改任务会 bump 它），所以这里拿到的总是当前值。
    */
   task_row_version: number | null;
+  /**
+   * 任务标题（`task.title`）；无会话时为 `null`。
+   *
+   * **这是界面唯一的标题来源**：24 条命令里没有「按 id 取任务」的读路径（`list_tasks`
+   * 只按 status / project / context 筛），所以冷启动或托盘暂停之后，计时页与状态栏的
+   * 「当前任务」只能从这里取。与 `task_row_version` 同一时机：Rust 侧**每次采样重读**，
+   * 暂停期间改标题下一拍就跟着变。
+   */
+  task_title: string | null;
   tick_seq: number;
   as_of: number;
   active_ms: number;

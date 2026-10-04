@@ -45,6 +45,16 @@ pub struct TimerSnapshot {
     /// **每次采样重读任务行**，不在协调器内存里缓存：暂停期间改标题会 bump 任务的
     /// `row_version`，缓存的值会让「继续」拿着过期版本去撞 `VERSION_CONFLICT`。
     pub task_row_version: Option<i64>,
+    /// 任务标题（`task.title`）；无会话时为 `None`。
+    ///
+    /// **为什么标题也要进契约**：24 条命令里没有「按 id 取任务」的读路径
+    /// （`list_tasks` 只按 status / project / context 筛，`TaskRow` 不带会话），
+    /// 所以冷启动（重开窗口）或托盘暂停之后，计时页与状态栏的「当前任务」**没有第二个
+    /// 来源**——只补 `task_id` / `task_row_version` 的话，界面只能永久显示占位文案。
+    ///
+    /// 与任务版本同一口径、同一时机：**每次采样重读任务行**（`build()` 已经为版本读了
+    /// 那一行，多带一个字段不额外查库），所以暂停期间改标题下一拍就跟着变，不是缓存值。
+    pub task_title: Option<String>,
     /// 当前 run 内递增。**新会话不清零，新 run 才重置**（00 §5）。
     pub tick_seq: u64,
     /// 本次采样的归属挂钟时刻 `A(M)`。
@@ -79,10 +89,11 @@ impl TimerSnapshot {
             run_id,
             session_id: None,
             session_version: None,
-            // 空闲快照没有会话，也就没有任务身份可给——两个字段必须一起是 `None`：
-            // 前端的「继续」按钮要求 `task_id` 与 `task_row_version` 同时可得。
+            // 空闲快照没有会话，也就没有任务身份可给——三个字段必须一起是 `None`：
+            // 前端的「继续」按钮要求 `task_id` / `task_row_version` / `task_title` 同时可得。
             task_id: None,
             task_row_version: None,
+            task_title: None,
             tick_seq,
             as_of,
             active_ms: 0,
