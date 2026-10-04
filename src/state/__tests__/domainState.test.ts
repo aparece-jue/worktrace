@@ -1008,6 +1008,29 @@ describe("生命周期：订阅、卸载与多窗口", () => {
     expect(h.state.isStaleResponse({ data_epoch: OTHER_EPOCH, revision: 9 }, null)).toBe(false);
   });
 
+  it("markApplied()：页面把查询响应**用上**之后才推水位，此后更旧的响应被判过期", async () => {
+    // Task 5 的接线：页面（任务列表 / 项目页）的查询响应也是权威快照，上屏之后调它。
+    //
+    // 反向验证：把 `markApplied` 改成空实现（只声明不推水位）⇒ "第 6 版过期"那句红；
+    // 改成无条件 `publish`（绕过 `applySnapshot` 的 stale_ignored）⇒ 最后那句
+    // "水位只前进"红。
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample());
+    await h.state.start();
+
+    h.state.markApplied({ data_epoch: EPOCH, revision: 7 });
+    expect(h.state.getView()).toMatchObject({ dataEpoch: EPOCH, revision: 7 });
+    // 之后同 epoch 内更旧的响应（例如迟到的筛选结果）会被判过期
+    expect(h.state.isStaleResponse({ data_epoch: EPOCH, revision: 6 }, EPOCH)).toBe(true);
+    expect(h.state.isStaleResponse({ data_epoch: EPOCH, revision: 7 }, EPOCH)).toBe(false);
+
+    // 更旧的标记不会把水位拉回去：水位只前进（同版/更旧是 stale_ignored，不改视图）
+    h.state.markApplied({ data_epoch: EPOCH, revision: 6 });
+    expect(h.state.getView().revision).toBe(7);
+  });
+
   it("两个实例互不共享内存（多窗口各自一个 JS 上下文）", async () => {
     const a = harness();
     const b = harness();

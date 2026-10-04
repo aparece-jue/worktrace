@@ -138,6 +138,21 @@ export interface DomainState {
    * 闸门规则①/③的读侧一半），所以页面不必各自维护第二份水位、也不自己拼比较条件。
    */
   isStaleResponse(stamp: VersionStamp, requestEpoch: string | null): boolean;
+  /**
+   * 记下**已经上屏**的一份带 epoch 的业务响应（`FreshnessGate::markApplied`）。
+   *
+   * 页面的查询响应也是权威快照——它回答的是"现在"——所以页面在**真的把结果用上之后**
+   * 调一次（"收到" ≠ "用上"，`src/ipc.ts` 的 `markApplied` 就是这么写的）。此后同 epoch
+   * 内更旧的响应会被 {@link isStaleResponse} 判过期而丢弃：这正是"旧响应不得覆盖新结果"
+   * 里**比 `data_epoch`/`revision`** 的那一半（另一半是页面自己那个"回答的是不是现在这个
+   * 问题"的身份判据，见 `src/pages/Tasks.tsx` 的判据①）。
+   *
+   * 只**前进**水位（同 epoch 内更旧或同版的标记不会把它拉回去，换 epoch 重新起算），
+   * 顺带把水位反映到视图的 `dataEpoch`/`revision` 两个字段上——它们本来就是
+   * "已应用的一致快照"的投影。除此之外不动任何状态：换 epoch 的整体失效仍由
+   * {@link verify} 那条路走，页面不该也不能用这个入口改库身份。
+   */
+  markApplied(stamp: VersionStamp): void;
 }
 
 const INITIAL_VIEW: DomainView = {
@@ -575,6 +590,16 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     refresh: resync,
 
     isStaleResponse: (stamp, requestEpoch) => gate.isStaleResponse(stamp, requestEpoch),
+
+    markApplied(stamp) {
+      const before = gate.applied();
+      gate.markApplied(stamp);
+      const after = gate.applied();
+      // 只在水位真的前进时投影到视图：同版/更旧的标记是 `stale_ignored`，什么都不该变。
+      if (after !== null && (before === null || after.revision !== before.revision)) {
+        publish({ dataEpoch: after.data_epoch, revision: after.revision });
+      }
+    },
   };
 }
 
