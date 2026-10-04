@@ -296,12 +296,60 @@
   按新 epoch 重取；发现版本比已见版本靠前（末次通知丢了）⇒ 合并刷新 + 取新快照。
   这个 30 秒与 `Coordinator` 的 `HEARTBEAT_INTERVAL_MS`（检查点频率）无关。
 - **测试**：`src/state/__tests__/{domainState.test.ts,hooks.test.tsx,revision-protocol.test.ts}`；
-  前端 18 → **51 条**，Rust 437 → **438 条**（新增的向量 replay）。16 处反向验证逐条落在
-  对应断言上（见报告），另加 `src/__tests__/ipc.test.ts` 里那条把「未知 epoch」与「同 epoch
-  旧 revision」区分开的断言（上一轮定向复评的 Minor）。
+  前端 18 → **60 条**（fix round 1 之后），Rust 437 → **438 条**（新增的向量 replay）。
+  反向验证 25 处（Task 2 的 16 处 + fix round 1 的 9 处）逐条落在对应断言上（见报告），
+  另加 `src/__tests__/ipc.test.ts` 里那条把「未知 epoch」与「同 epoch 旧 revision」
+  区分开的断言（上一轮定向复评的 Minor）。
 - **遗留（2026-10-04 Task 2 登记）**：`FreshnessGate.onQueryResponse` 本阶段**没有生产调用者**
   ——它是 `RevisionGate::on_query_response` 的逐条镜像，为的是四条规则在 TS 侧一处分叉都不少；
   页面查询（Task 3/5）接上 `sendVersioned` / `onQueryResponse` 之前，它只被向量用例驱动。
+
+## Task 2 fix round 1（2026-10-04 深夜）
+
+独立评审对 Task 2 做了 26 处变异（20 处被杀、6 处存活）。本轮修完 3 条 Important + 5 条 Minor，
+细节与逐条反向验证见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task2-report.md` 的
+「Fix round 1」一节：
+
+- **I2（真实行为缺口）**：`resync()`/`verify()` 原先以 `stream === null` 早退，而 `stream` 在
+  `startEventSession` 返回之后才赋值——**整条启动缝里的「立即取快照 / 立即重新握手」都被静默丢掉**
+  （闸门记下了缺口，动作没发生，规则④退化成"等 30 秒轮询"）。改成 `live` 标志（`start()` 在
+  await 之前置位、`stop()` 与启动失败清位），并补 3 条用**真实 `startEventSession`** 的用例。
+- **I1**：`orderTimer` 的前三级判据（`data_epoch` / `run_id` / `session_id`）原先零覆盖——三行
+  各自改成 `if (false)` 都全绿。补 3 条只改一个字段的用例（跨库 / 跨 run / 跨会话），
+  每条都被对应变异杀掉。
+- **I3**：「load 期间暂存」没有区分性断言——只在 `load()` 里面投递事件时，"暂存"与"直通"
+  结果相同。改成**订阅那一刻**投递（`startEventSession` 的缝隙从注册就开始了）。
+- **M1/M3**：`stop()` 的 `detachLifecycle()` 删掉也无症状（泄漏 1 个 interval + 1 个监听）
+  ⇒ 补 `vi.getTimerCount()` 断言；以隐藏态启动仍会挂轮询的那个变异 ⇒ 补「启动即隐藏」用例。
+- **M4**：同一份源码里 `§5 规则 4`（30 秒）与 `闸门规则④`（跳号）混用 ⇒ `domainState.ts` 与
+  `src/ipc.ts` 各加一节「编号约定」（§5 规则 1–5 / 闸门规则①②③④ / orderTimer 的判据 1–5），
+  并把 `isStaleNotification` 那行标注成"只在文档里对照"。
+- **M5**：`markApplied` 与 `applySnapshot` 语义分叉（`<=` vs `<`、清不清缺口标记）⇒ 前者改成
+  后者的**同一次**状态迁移（只有一份实现），并补一条区分性用例；它本阶段仍没有生产调用者，
+  与 `onQueryResponse` 一起登记在下面。
+- **M8**：报告里「只删 `load()` 的握手水印没红」的说法是**当时那批用例**下的结论；在最终树上
+  这一处变异会红（`计时快照拿不到` / `展示值还没有基线` 两条用例的 `revision: 5` 对不上），
+  报告已按实测订正。
+
+## 遗留与边界（2026-10-04 Task 2 fix round 1 登记）
+
+- **协议向量能把"两侧不一致"逼出来，但替代不了"同一条规则两处实现"的风险，而且完全
+  不覆盖计时判据链**（评审的关键判断）：
+  - Rust 的 `Coordinator::is_stale_tick`（`src-tauri/src/services/timer/coordinator.rs:363`）
+    只判 `session_id` + `row_version`；前端的 `orderTimer`（`src/state/domainState.ts`）是
+    **五级**判据（`data_epoch` → `run_id` → `session_id` → `session_version` → `tick_seq`）。
+    两者**不是同一个函数**，没有共享向量、也没有 Rust 侧的对应断言——最密集的那半时序规则
+    仍只有一份前端实现 + 一份前端用例（这正是 6 处存活变异的根因）。
+    `domainState.ts` 头部那张对照表已把"对应"收紧成"部分对应"，但这只是措辞：
+    **要不要给计时判据链也造一份两侧共读的向量，是一个待定项**（要么把 `is_stale_tick`
+    扩成同一条链，要么承认它是展示侧独有、在 P8 的实机验收里覆盖）。
+  - 向量刻意不含的「`applied == None` 时的通知」那一格，**Rust 侧 `tests/event_protocol.rs`
+    也没覆盖**：该文件里三处 `on_notification` 全都跟在 `apply_snapshot` 之后
+    （逐条核对过），所以 `epoch == None ⇒ Rehandshake` 这条分支目前两侧都只有
+    "前端的不判未知"这一半有断言。
+- **`FreshnessGate.markApplied` 与 `onQueryResponse` 本阶段都没有生产调用者**（同前一条登记）：
+  它们是 `RevisionGate` 的逐条镜像，为的是四条规则在 TS 侧一处分叉都不少；页面（Task 3/5）
+  应用自己的带 epoch 查询响应时会用上它们，在那之前只被用例驱动。
 
 ## 仍待与归属（2026-10-04 登记）
 
