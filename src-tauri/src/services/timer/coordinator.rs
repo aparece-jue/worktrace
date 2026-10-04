@@ -18,6 +18,7 @@ use crate::domain::session::{SessionMode, SessionState, TimerBudget, TimerKind};
 use crate::domain::task::{TaskStatus, TransitionCause};
 use crate::error::AppError;
 use crate::platform::clock::{Clock, ClockSample};
+use crate::services::tx::settle;
 use crate::storage::checkpoint_repo::{self, Checkpoint};
 use crate::storage::db::{map_sqlite, Db};
 use crate::storage::guards::{guard_epoch, guard_row_version};
@@ -25,6 +26,7 @@ use crate::storage::meta::{bump_revision, require_meta};
 use crate::storage::session_repo::{self, SessionStateUpdate};
 use crate::storage::task_repo;
 use crate::storage::time_edit_repo::{self, TimeEdit};
+use crate::storage::WriteOutcome;
 
 use super::anchor::{AnchorState, SampleVerdict};
 use super::primitives::{end_session_in_tx, EndSessionFacts};
@@ -1408,6 +1410,147 @@ impl Coordinator {
             }
         }
         Ok(total)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 时钟校正的显式接受（P3 S4）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一次「显式接受已检测的墙钟校正」请求（P3 S4）。
+///
+/// 只有库身份：这条命令**不改任何既有对象的字段**（它写的是审计行与版本），
+/// 所以没有可校验的实体版本位——与 `WriteEnvelope` 里「关系操作没有实体版本」
+/// 同一档。
+#[derive(Debug, Clone)]
+pub struct AcceptClockCorrectionRequest {
+    pub expected_data_epoch: String,
+}
+
+/// 一次接受的结果。
+///
+/// `accepted == false` 表示**没有**待接受的校正：幂等零变化，这时 `revision` /
+/// `data_epoch` 是这次读到（或写事务里读回）的权威值，库一个字节都没改。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClockCorrectionAccepted {
+    pub accepted: bool,
+    pub data_epoch: String,
+    pub revision: i64,
+}
+
+impl Coordinator {
+    /// 用户命令：显式接受一次**已检测但未接受**的墙钟校正（P3 S4，08 §1）。
+    ///
+    /// 顺序是契约的一部分：
+    ///
+    /// ① **只读预检**（读事务 + `guard_epoch`，形状抄 `catalog::list_projects`）——
+    ///    旧 epoch 在这里就被拒，**不采样、不写任何东西**（总纲 §9：被拒的请求不得
+    ///    借采样或写异常事实）。写事务里再做一次 `guard_epoch`，两次都只接受请求带来的
+    ///    期望值（禁止「读出来再跟自己比」）。
+    /// ② [`Coordinator::read_sample`]（唯一带故障态与跨 run 判据的采样入口）+
+    ///    [`Coordinator::observe`] **恰好一次**。必须观察：不推进检测器的 `last`，
+    ///    下一拍会把「距上次观察很久」误判成长间隔 `Suspended`；而同一个采样看两次，
+    ///    第二次的增量恒为 0，会把刚判出来的异常覆盖成 `Trusted`。
+    /// ③ 没有待接受的校正（或本 run 没有会话）⇒ `Unchanged`：无审计、零变化、不加版本。
+    ///    判据只看内存标记——它只在 `live.state == Recovering` 的分支里被置真。
+    /// ④ 一个用户事务：写 `time_edit`（`before_json` = 三参照点，`after_json` =
+    ///    本次样本 + `clock_correction_accepted: true` + `intervals_changed: false`）
+    ///    → `revision` 恰好 +1 → 提交。**提交之后**才调
+    ///    [`Coordinator::accept_clock_correction`]（P2 已交付的内存半部：清标记并前移
+    ///    长期参照；它自己**不写审计、不加版本**）。
+    ///
+    /// **失败保留标记**：不提交就不清标记——审计没落库就宣称「已接受」，等于把证据
+    /// 擦掉了。重启后新 run 里该标记本就不存在（08 §1），所以没有别的出口。
+    ///
+    /// **不确认任何可疑工时**——那是 `reconcile` 的事（02 §4/§10、08 §1）。
+    pub fn accept_detected_clock_correction(
+        &mut self,
+        db: &mut Db,
+        req: AcceptClockCorrectionRequest,
+    ) -> Result<ClockCorrectionAccepted, AppError> {
+        // ① 只读预检。读事务什么都没写，直接结束它。
+        {
+            let tx = db
+                .connection()
+                .unchecked_transaction()
+                .map_err(map_sqlite)?;
+            guard_epoch(&tx, &req.expected_data_epoch)?;
+            drop(tx);
+        }
+
+        // ② 采样一次并**恰好观察一次**。
+        let sample = self.read_sample(db)?;
+        let verdict = self.observe(sample);
+
+        // 单调读数倒退不是墙钟校正：那是硬故障，只能新 run 安全重建
+        // （`retry_recovery` 也解不开，见 `Coordinator::retry_recovery`）。
+        if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
+            self.faulted = true;
+            return Err(AppError::RecoveryRequired);
+        }
+
+        // ③ 没有待接受的校正 ⇒ 幂等零变化（判据只看内存标记，见上面的顺序说明）。
+        let Some(session_id) = self
+            .live
+            .as_ref()
+            .filter(|_| self.unaccepted_clock_correction)
+            .map(|live| live.id.clone())
+        else {
+            let meta = require_meta(db.connection())?;
+            return Ok(ClockCorrectionAccepted {
+                accepted: false,
+                data_epoch: meta.data_epoch,
+                revision: meta.revision,
+            });
+        };
+
+        // ④ 一个用户事务：审计 → 恰好一次版本。`settle` 负责「`Changed` 才加一次」
+        //    并在**同一个事务**里读回权威 `revision`/`data_epoch`。
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        guard_epoch(&tx, &req.expected_data_epoch)?;
+
+        time_edit_repo::write(
+            &tx,
+            &TimeEdit {
+                id: uuid::Uuid::new_v4().to_string(),
+                session_id,
+                before_json: self.clock_references_json(),
+                // 形状与 P2 那条「无运行工时的墙钟异常」审计同源（Ruling 8/12）：
+                // 样本、接受位、判决、区间是否被改，四个键语义各不相同。
+                after_json: serde_json::json!({
+                    "sampled_wall_at": sample.wall_ms,
+                    "sampled_monotonic_ms": sample.monotonic_ms,
+                    "clock_correction_accepted": true,
+                    "verdict": format!("{verdict:?}"),
+                    "intervals_changed": false,
+                })
+                .to_string(),
+                reason: Some("clock_correction:accepted".to_string()),
+                created_at: sample.wall_ms,
+            },
+        )?;
+
+        let (mut accepted, settled) = settle(
+            &tx,
+            WriteOutcome::Changed(ClockCorrectionAccepted {
+                accepted: true,
+                // 下面由 `settle` 的结果填权威值。
+                data_epoch: String::new(),
+                revision: 0,
+            }),
+        )?
+        .into_parts()
+        .0;
+        accepted.data_epoch = settled.data_epoch;
+        accepted.revision = settled.revision;
+        tx.commit().map_err(map_sqlite)?;
+
+        // ⑤ 提交之后才清标记并前移长期参照。
+        self.accept_clock_correction(sample);
+        Ok(accepted)
     }
 }
 

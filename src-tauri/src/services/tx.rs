@@ -9,9 +9,10 @@
 //! 可见性 `pub(super)`：只有 `services` 自己的子模块用它，命令层与仓储层都不该直接拿——
 //! 事务的所有权属于服务层，仓储只接受 `&Transaction`。
 //!
-//! **使用者清单（P3 Task 6 收口，最终版）**：`catalog` / `daily_plan` / `recovery` /
-//! `history` / `tasks`。P3 的三个服务按 Ruling 2/4 随各自任务登记（Task 1 只注册
-//! `recovery`、Task 3 注册 `history`、Task 6 注册 `tasks` 并收口成这一份）。
+//! **使用者清单（P3 Task 7 收口）**：`catalog` / `daily_plan` / `recovery` /
+//! `history` / `tasks` / `timer::coordinator`（S4 的时钟校正接受——它只要 `settle`，
+//! 不建 `write_tx`：那条命令没有实体版本位）。P3 的三个服务按 Ruling 2/4 随各自任务
+//! 登记（Task 1 只注册 `recovery`、Task 3 注册 `history`、Task 6 注册 `tasks` 并收口）。
 
 use rusqlite::Transaction;
 

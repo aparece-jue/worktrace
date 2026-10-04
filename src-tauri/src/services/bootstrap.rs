@@ -54,11 +54,13 @@ use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditRepor
 use crate::services::recovery::{DiscardSessionRequest, ReconcileReport, ReconcileRequest};
 use crate::services::tasks::{TaskTransitionReport, TransitionTaskRequest};
 use crate::services::timer::coordinator::{
-    CommandOutcome, Coordinator, ResumeRequest, SessionRequest, StartRequest,
+    AcceptClockCorrectionRequest, ClockCorrectionAccepted, CommandOutcome, Coordinator,
+    ResumeRequest, SessionRequest, StartRequest,
 };
 use crate::services::timer::primitives::{end_session_in_tx, EndSessionFacts};
 use crate::services::timer::snapshot::TimerSnapshot;
 use crate::storage::db::{map_sqlite, Db};
+use crate::storage::guards::guard_epoch;
 use crate::storage::meta;
 use crate::storage::migrations::migrate;
 use crate::storage::run_repo;
@@ -845,6 +847,86 @@ impl AppState {
             db, coordinator, ..
         } = self;
         crate::services::tasks::transition_task(db, coordinator, env, req)
+    }
+
+    /// 时钟校正的显式接受的命令入口（P3 S4，§0.3）。第六个瘦包装。
+    ///
+    /// 只把两个字段解构出来递给协调器：这条命令**不改会话事实**（写的是审计与版本），
+    /// 所以既不需要取 `now`（`created_at` 取本次采样的挂钟），也不做提交后收尾
+    /// ——不重扫门禁、**不刷新镜像**（R13：刷新以「被改动的会话正是 `live` 镜像的那条」
+    /// 为条件，这里没有任何会话行被改动）。
+    ///
+    /// 失败保留标记：协调器只在审计提交之后清内存里的未接受标记，
+    /// 所以这里原样把错误交出去，不做任何「顺手清一下」的补偿。
+    pub fn accept_detected_clock_correction(
+        &mut self,
+        expected_data_epoch: &str,
+    ) -> Result<ClockCorrectionAccepted, AppError> {
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        coordinator.accept_detected_clock_correction(
+            db,
+            AcceptClockCorrectionRequest {
+                expected_data_epoch: expected_data_epoch.to_string(),
+            },
+        )
+    }
+
+    /// 重试协调器的**故障态恢复事务**（P3 S12，§0.3）。`faulted` 的唯一生产出口。
+    ///
+    /// 为什么必须有这个包装：[`Coordinator::retry_recovery`] 是 `pub`，但
+    /// `AppState.coordinator` 私有（同 [`AppState::db`] 的理由），所以服务层与命令层
+    /// 都够不着它；而 `refuse_if_faulted` 会拒绝 `snapshot`/`tick`/`start`/`pause`/
+    /// `resume`/`finish`/`heartbeat`/`system_pause` 等十个入口。
+    ///
+    /// 顺序是契约的一部分：
+    /// 1. **先只读预检**（读事务 + `guard_epoch`，模式抄 `catalog::list_projects`）：
+    ///    epoch 不一致直接 `DATA_EPOCH_MISMATCH`、**不进协调器**；
+    /// 2. 再 [`Coordinator::retry_recovery`]——它成功提交那笔恢复事务**之后**才清
+    ///    `faulted`（失败保留故障：坏事实不许在下一拍被当成好事实）；
+    /// 3. **随后无条件** [`AppState::rescan_recovery`]（S1）——那笔系统事务可能刚把某个
+    ///    会话推成 `recovering`，门禁字段必须跟着事实走。只调一个都闭环不了：
+    ///    只调 S12，新出现的 `recovering` 不会立刻挡计时；只重扫，`refuse_if_faulted`
+    ///    继续拒绝一切。返回的是**提交后**的权威快照。
+    ///
+    /// 第 3 步失败时本方法返回 [`AppError::RecoveryRequired`]（S1 的失败标记挡住计时，
+    /// 旧快照原样保留）——那**不是**「协调器没恢复」：第 2 步已经提交、故障态已经清了，
+    /// 不许对外宣称整体回滚。恢复出口是显式的再次重扫/重试成功，或安全的新 run。
+    ///
+    /// **epoch 口径（如实记下，不要假装它是事务内校验）**：第 1 步的预检与第 2 步内部
+    /// 那笔恢复事务之间存在理论窗口——[`Coordinator::retry_recovery`] 的签名里没有
+    /// `env`（P2 既有），与 P2 的异常事务同一口径。进程内由 `AppBoundary`/`lock_app`
+    /// （D6 单锁）串行、跨进程由单实例锁，所以实际只可能来自 P6 的恢复/替换库
+    /// （那会换 `data_epoch` 并要求重新握手）。
+    ///
+    /// **硬故障一律解不开**：单调钟倒退置真的 `faulted` 由协调器直接返回
+    /// `RECOVERY_REQUIRED`（单调读数已失去本 run 的意义，只能新 run 安全重建）。
+    /// **不做定时自动重试**：08 §1 的立场是「故障不能自己把证据擦掉」，
+    /// 这条入口只由用户显式触发（P8 的 IPC 命令）。
+    pub fn retry_recovery(&mut self, expected_data_epoch: &str) -> Result<TimerSnapshot, AppError> {
+        // 1. 只读预检：epoch 是**请求带来的**期望值，不与「读出来的当前值」自比。
+        {
+            let tx = self
+                .db
+                .connection()
+                .unchecked_transaction()
+                .map_err(map_sqlite)?;
+            guard_epoch(&tx, expected_data_epoch)?;
+            drop(tx);
+        }
+
+        // 2. 重试那笔恢复事务；成功提交后才清故障态。
+        let snapshot = {
+            let AppState {
+                db, coordinator, ..
+            } = self;
+            coordinator.retry_recovery(db)?
+        };
+
+        // 3. 无条件重扫门禁（S1），事实刚变，快照必须跟着变。
+        self.rescan_recovery()?;
+        Ok(snapshot)
     }
 }
 
