@@ -294,6 +294,8 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
   let onVisibilityChange: (() => void) | null = null;
   /** `stop()` 之后在途的异步结果不再写回（每停一次加一）。 */
   let generation = 0;
+  // Changes of authoritative identity invalidate requests, including A→B→A.
+  let identityGeneration = 0;
 
   function publish(patch: Partial<DomainView>): void {
     view = { ...view, ...patch };
@@ -317,6 +319,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     const previousEpoch = gate.epoch();
     const effect = gate.applySnapshot(stamp.data_epoch, stamp.revision);
     if (effect === "stale_ignored") return effect;
+    if (previousEpoch !== stamp.data_epoch) identityGeneration += 1;
     const changedEpoch = previousEpoch !== null && previousEpoch !== stamp.data_epoch;
     publish({
       dataEpoch: stamp.data_epoch,
@@ -335,8 +338,9 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
   }
 
   async function pullTimerSample(token: number): Promise<void> {
+    const identityToken = identityGeneration;
     const sample = await deps.timerSnapshot();
-    if (token !== generation) return;
+    if (token !== generation || identityToken !== identityGeneration) return;
     applySample(sample);
   }
 
@@ -356,7 +360,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     } catch {
       // 取不到快照：失效计数已经推过，下一次通知/轮询会再试（末次通知丢失仍要能收敛）。
     } finally {
-      resyncing = false;
+      if (token === generation) resyncing = false;
     }
   }
 
@@ -375,8 +379,9 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     verifying = true;
     const token = generation;
     try {
+      const identityToken = identityGeneration;
       const identity = await deps.getRevision();
-      if (token !== generation) return;
+      if (token !== generation || identityToken !== identityGeneration) return;
       if (gate.epoch() === null) {
         applyStamp(identity);
         return;
@@ -390,7 +395,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     } catch {
       // 校验失败不改动任何状态：等下一次通知/轮询（收敛靠的就是这个周期）。
     } finally {
-      verifying = false;
+      if (token === generation) verifying = false;
     }
   }
 
@@ -460,8 +465,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
    * ⚠️ 缝里交付的通知**不只是**判一下：跳号要当场 `resync()`、未知 epoch 要当场
    * `verify()`——那两个动作靠 `live`（不是 `stream`）才落得了地（fix round 1 / I2）。
    */
-  async function load(): Promise<void> {
-    const token = generation;
+  async function load(token: number): Promise<void> {
     // ① 握手：全仓唯一不要求已知 epoch 的入口（`services::handshake::get_revision`）。
     //    它失败 ⇒ 这次启动失败（没有库身份就没有镜像可言），订阅由 startEventSession 撤掉。
     const identity = await deps.getRevision();
@@ -534,7 +538,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
       // 当前代次，所以正常启动缝里的事件照常交付（这条包装不会把 flush 吃掉）。
       const opened = await deps.startEventSession<void>((envelope) => {
         if (token === generation) onEvent(envelope);
-      }, load);
+      }, () => load(token));
       if (token !== generation) {
         // 这一代已经被 stop() 作废：不要把会话复活（订阅要撤、轮询不要挂）。
         await opened.stream.close();
@@ -597,9 +601,14 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
       detachLifecycle();
       const open = stream;
       stream = null;
-      if (open !== null) await open.close();
+      // Reset synchronously: asynchronous cleanup belongs to the old generation
+      // and must never clear a session started while close() was pending.
+      verifying = false;
+      resyncing = false;
+      identityGeneration += 1;
       gate = createFreshnessGate();
       publish({ ...INITIAL_VIEW });
+      if (open !== null) await open.close();
     },
 
     rehandshake: verify,

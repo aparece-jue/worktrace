@@ -1056,3 +1056,109 @@ describe("生命周期：订阅、卸载与多窗口", () => {
     expect(b.state.getView().timer?.tick_seq).toBe(7);
   });
 });
+
+
+describe("异步响应与订阅的代次隔离", () => {
+  it("新库握手完成后丢弃仍在途的旧库计时快照", async () => {
+    let resolveOld!: (value: TimerSnapshot) => void;
+    let reads = 0;
+    let changed = false;
+    const state = track(createDomainState({
+      getRevision: async () => identity(changed ? OTHER_EPOCH : EPOCH, 5),
+      timerSnapshot: async () => {
+        reads += 1;
+        if (reads === 2) return new Promise<TimerSnapshot>(resolve => { resolveOld = resolve; });
+        return sample({ data_epoch: changed ? OTHER_EPOCH : EPOCH });
+      },
+      startEventSession,
+    }));
+    await state.start();
+    const pending = state.refresh();
+    await settle();
+    changed = true;
+    await state.rehandshake();
+    expect(state.getView().dataEpoch).toBe(OTHER_EPOCH);
+    const current = state.getView();
+    resolveOld(sample({ tick_seq: 99 }));
+    await pending;
+    expect(state.getView()).toBe(current);
+    expect(state.getView().timer?.data_epoch).toBe(OTHER_EPOCH);
+  });
+
+  it("旧订阅异步关闭完成不清空已启动的新订阅", async () => {
+    let resolveClose!: () => void;
+    let sessions = 0;
+    const state = track(createDomainState({
+      getRevision: async () => identity(EPOCH, 5),
+      timerSnapshot: async () => sample(),
+      startEventSession: async (_handler, load) => {
+        const value = await load();
+        const first = ++sessions === 1;
+        return { value, stream: { close: async () => {
+          if (first) await new Promise<void>(resolve => { resolveClose = resolve; });
+        } } };
+      },
+    }));
+    await state.start();
+    const closing = state.stop();
+    expect(state.getView().phase).toBe("idle");
+    await state.start();
+    const current = state.getView();
+    expect(current.phase).toBe("ready");
+    resolveClose();
+    await closing;
+    expect(state.getView()).toBe(current);
+    await state.refresh();
+    expect(state.getView().phase).toBe("ready");
+  });
+});
+
+
+it("停止重启后新代次刷新不被旧请求占住，旧响应不覆盖新镜像", async () => {
+  let resolveOld!: (value: TimerSnapshot) => void;
+  let reads = 0;
+  const state = track(createDomainState({
+    getRevision: async () => identity(EPOCH, 5),
+    timerSnapshot: async () => {
+      reads += 1;
+      if (reads === 2) return new Promise<TimerSnapshot>(resolve => { resolveOld = resolve; });
+      return sample({ tick_seq: reads });
+    },
+    startEventSession,
+  }));
+  await state.start();
+  const pending = state.refresh();
+  await settle();
+  await state.stop();
+  await state.start();
+  await state.refresh();
+  expect(reads).toBe(4);
+  const current = state.getView();
+  resolveOld(sample({ tick_seq: 99 }));
+  await pending;
+  expect(state.getView()).toBe(current);
+});
+
+it("新身份快照应用后，丢弃较早发起的迟到握手", async () => {
+  let resolveOld!: (value: RevisionSnapshot) => void;
+  let handshakes = 0;
+  let changed = false;
+  const state = track(createDomainState({
+    getRevision: async () => {
+      if (++handshakes === 2) return new Promise<RevisionSnapshot>(resolve => { resolveOld = resolve; });
+      return identity(changed ? OTHER_EPOCH : EPOCH, 5);
+    },
+    timerSnapshot: async () => sample({ data_epoch: changed ? OTHER_EPOCH : EPOCH }),
+    startEventSession,
+  }));
+  await state.start();
+  const pending = state.rehandshake();
+  await settle();
+  changed = true;
+  await state.refresh();
+  const current = state.getView();
+  expect(current.dataEpoch).toBe(OTHER_EPOCH);
+  resolveOld(identity(EPOCH, 5));
+  await pending;
+  expect(state.getView()).toBe(current);
+});
