@@ -73,6 +73,18 @@
 //! 只把结果写进诊断（正式诊断日志归 P6）。串行边界与 IPC 完全相同——同一把
 //! `Mutex<AppState>`、同样不在 UI 回调里开事务。
 //!
+//! # dev 注入开关（P7 Task 6a，**只在 debug 构建存在**）
+//!
+//! [`dev`] 是真实双窗口实验用的四条 dev 命令（丢一条通知 / 延迟一次响应 /
+//! 旧 revision 重播 / 开实验窗口），整份模块带 `#[cfg(debug_assertions)]`；
+//! `lib.rs` 的注册表里那四条也**逐条**带守卫。发布构建里它们不是「被关掉」，
+//! 是**不存在**（守卫与核对见 `dev` 的模块头与 `tests/dev_injections.rs`）。
+//!
+//! 它对命令层唯一的侵入是 [`run_command`] 的前两个参数：命令名与**调用方窗口**
+//! label。注入 (b) 按这两个键决定要不要把这一次的响应推迟返回——只按命令名分的话，
+//! 装在 B 上的开关会被 A 的重拉先吃掉（`manual-sync.md` §2.2），所以两个键都必须
+//! 与真实调用一致（`tests/dev_injections.rs` 核对）。
+//!
 //! # 本阶段不做
 //!
 //! 恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；维护态分流（P6）。
@@ -93,16 +105,28 @@ use crate::services::timer::coordinator::{
 use crate::services::timer::snapshot::TimerSnapshot;
 use crate::services::{catalog, daily_plan, handshake};
 
+/// 实验器材（P7 Task 6a）：四条 dev 命令，**只在 debug 构建编译**。
+#[cfg(debug_assertions)]
+pub mod dev;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 命令体的执行骨架
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 在**阻塞线程**上、**串行边界内**执行一次命令体，并统一映射错误。
 ///
+/// `command` 与 `window` 是这次调用的身份：命令名（与 `lib.rs` 注册表逐字一致）与
+/// **调用方窗口 label**。dev 注入 (b) 按这两个键决定要不要把这一次的**响应**推迟返回
+/// （P7 Task 6a，只在 debug 构建有作用）——按窗口分是必须的：一次 `domain.changed`
+/// 之后每个窗口都会重拉同一条查询，不按窗口分的话装在 B 上的开关会被 A 的重拉先吃掉，
+/// 实验结论就取决于两个 WebView 谁先跑（`manual-sync.md` §2.2）。
+///
 /// `targets` 是这次请求涉及的受控实体（错误上下文用，见
 /// [`capture_error_response`]）。它在 `body` 失败**之后**、**仍持有同一把锁**时被使用：
 /// 权威 `epoch`/`revision`/目标版本因此出自同一次读事务，不会互相矛盾。
 async fn run_command<T, F>(
+    command: &'static str,
+    window: &str,
     state: &State<'_, RunningApp>,
     targets: Vec<AuthorityTarget>,
     body: F,
@@ -112,7 +136,7 @@ where
     F: FnOnce(&mut AppState) -> Result<T, AppError> + Send + 'static,
 {
     let app = Arc::clone(state.app());
-    match tauri::async_runtime::spawn_blocking(move || {
+    let result = match tauri::async_runtime::spawn_blocking(move || {
         let mut guard = lock_app(&app);
         body(&mut guard).map_err(|error| capture_error_response(guard.db(), &error, &targets))
     })
@@ -120,7 +144,17 @@ where
     {
         Ok(result) => result,
         Err(join) => Err(internal_failure(join.to_string())),
-    }
+    };
+
+    // dev 注入 (b)（P7 Task 6a）：上面那次阻塞调用**已经取完数据、放开锁**，
+    // 这里只把响应推迟返回（`manual-sync.md` §2.2 要的「先取数据再 sleep」）。
+    // 发布构建里 `commands::dev` 整份不存在，这两行也随之不编译。
+    #[cfg(debug_assertions)]
+    dev::delay_response_if_armed(window, command).await;
+    #[cfg(not(debug_assertions))]
+    let _ = (command, window);
+
+    result
 }
 
 /// 阻塞任务 panic / 被取消：这是**缺陷**，不是用户错误，也不是业务失败。
@@ -312,9 +346,17 @@ pub struct StartTimerRequest {
 /// 它**不代替**业务快照：窗口拿到 epoch 之后仍要逐条拉自己需要的一致视图。
 #[tauri::command]
 pub async fn get_revision(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
 ) -> Result<handshake::RevisionSnapshot, ErrorResponse> {
-    run_command(&state, Vec::new(), get_revision_impl).await
+    run_command(
+        "get_revision",
+        window.label(),
+        &state,
+        Vec::new(),
+        get_revision_impl,
+    )
+    .await
 }
 
 /// [`get_revision`] 的命令体（IPC 包装只做转发）。
@@ -329,12 +371,17 @@ pub fn get_revision_impl(app: &mut AppState) -> Result<handshake::RevisionSnapsh
 /// 完整项目列表：`status = null` 时含归档与 `done` 的历史（Task 5 的列表用）。
 #[tauri::command]
 pub async fn list_projects(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: ListProjectsRequest,
 ) -> Result<catalog::ProjectList, ErrorResponse> {
-    run_command(&state, Vec::new(), move |app| {
-        list_projects_impl(app, request)
-    })
+    run_command(
+        "list_projects",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| list_projects_impl(app, request),
+    )
     .await
 }
 
@@ -355,12 +402,17 @@ pub fn list_projects_impl(
 /// 但它们的历史仍在完整列表里。
 #[tauri::command]
 pub async fn list_selectable_projects(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: EpochRequest,
 ) -> Result<catalog::ProjectList, ErrorResponse> {
-    run_command(&state, Vec::new(), move |app| {
-        list_selectable_projects_impl(app, request)
-    })
+    run_command(
+        "list_selectable_projects",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| list_selectable_projects_impl(app, request),
+    )
     .await
 }
 
@@ -375,13 +427,18 @@ pub fn list_selectable_projects_impl(
 /// 新建项目。同名项目允许存在（schema 没有唯一索引，F-004 也没要求）。
 #[tauri::command]
 pub async fn create_project(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: CreateProjectRequest,
 ) -> Result<catalog::ProjectChange, ErrorResponse> {
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, Vec::new(), move |app| {
-        create_project_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "create_project",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| create_project_impl(app, &broadcaster, request),
+    )
     .await
 }
 
@@ -408,14 +465,19 @@ pub fn create_project_impl(
 /// 重命名项目。改成同名 ⇒ 幂等：不写库、不加 `revision`，返回当前行。
 #[tauri::command]
 pub async fn rename_project(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: RenameProjectRequest,
 ) -> Result<catalog::ProjectChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Project, &request.project_id)];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
-        rename_project_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "rename_project",
+        window.label(),
+        &state,
+        targets,
+        move |app| rename_project_impl(app, &broadcaster, request),
+    )
     .await
 }
 
@@ -443,14 +505,19 @@ pub fn rename_project_impl(
 /// 归档项目（F-004）。已归档 ⇒ 幂等。
 #[tauri::command]
 pub async fn archive_project(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: ArchiveProjectRequest,
 ) -> Result<catalog::ProjectChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Project, &request.project_id)];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
-        archive_project_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "archive_project",
+        window.label(),
+        &state,
+        targets,
+        move |app| archive_project_impl(app, &broadcaster, request),
+    )
     .await
 }
 
@@ -481,10 +548,18 @@ pub fn archive_project_impl(
 /// 标签选择器的数据源：全部标签，可按 `kind` 过滤（四类各一组）。
 #[tauri::command]
 pub async fn list_tags(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: ListTagsRequest,
 ) -> Result<catalog::TagList, ErrorResponse> {
-    run_command(&state, Vec::new(), move |app| list_tags_impl(app, request)).await
+    run_command(
+        "list_tags",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| list_tags_impl(app, request),
+    )
+    .await
 }
 
 /// [`list_tags`] 的命令体（IPC 包装只做转发）。
@@ -502,13 +577,18 @@ pub fn list_tags_impl(
 /// 新建标签。
 #[tauri::command]
 pub async fn create_tag(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: CreateTagRequest,
 ) -> Result<catalog::TagChange, ErrorResponse> {
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, Vec::new(), move |app| {
-        create_tag_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "create_tag",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| create_tag_impl(app, &broadcaster, request),
+    )
     .await
 }
 
@@ -542,12 +622,17 @@ pub fn create_tag_impl(
 /// 某个任务身上的标签。写路径（打标/去标）不用它——它们在同一个写事务里读回集合。
 #[tauri::command]
 pub async fn tags_of_task(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: TaskTagsRequest,
 ) -> Result<catalog::TagList, ErrorResponse> {
-    run_command(&state, Vec::new(), move |app| {
-        tags_of_task_impl(app, request)
-    })
+    run_command(
+        "tags_of_task",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| tags_of_task_impl(app, request),
+    )
     .await
 }
 
@@ -565,6 +650,7 @@ pub fn tags_of_task_impl(
 /// 所以没有可校验的实体版本（裁决 R-T3-i）。重复打标 ⇒ 幂等。
 #[tauri::command]
 pub async fn tag_task(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: TaskTagRequest,
 ) -> Result<catalog::TaskTagsChange, ErrorResponse> {
@@ -573,7 +659,7 @@ pub async fn tag_task(
         target(AuthorityKind::Tag, &request.tag_id),
     ];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
+    run_command("tag_task", window.label(), &state, targets, move |app| {
         tag_task_impl(app, &broadcaster, request)
     })
     .await
@@ -602,6 +688,7 @@ pub fn tag_task_impl(
 /// 去标。口径与 [`tag_task`] 完全对称，包括「本来就不在集合里 ⇒ 幂等」。
 #[tauri::command]
 pub async fn untag_task(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: TaskTagRequest,
 ) -> Result<catalog::TaskTagsChange, ErrorResponse> {
@@ -610,7 +697,7 @@ pub async fn untag_task(
         target(AuthorityKind::Tag, &request.tag_id),
     ];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
+    run_command("untag_task", window.label(), &state, targets, move |app| {
         untag_task_impl(app, &broadcaster, request)
     })
     .await
@@ -647,10 +734,18 @@ pub fn untag_task_impl(
 /// 状态串、三值项目选择器与分页的校验都在它的 `TryFrom` 里，命令层只转发。
 #[tauri::command]
 pub async fn list_tasks(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: catalog::TaskQueryRequest,
 ) -> Result<catalog::TaskQueryResult, ErrorResponse> {
-    run_command(&state, Vec::new(), move |app| list_tasks_impl(app, request)).await
+    run_command(
+        "list_tasks",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| list_tasks_impl(app, request),
+    )
+    .await
 }
 
 /// [`list_tasks`] 的命令体（IPC 包装只做转发）。
@@ -665,13 +760,18 @@ pub fn list_tasks_impl(
 /// 捕获一个任务（F-002 的 Inbox 入口）。空标题被服务拒绝。
 #[tauri::command]
 pub async fn create_task(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: CreateTaskRequest,
 ) -> Result<catalog::TaskChange, ErrorResponse> {
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, Vec::new(), move |app| {
-        create_task_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "create_task",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| create_task_impl(app, &broadcaster, request),
+    )
     .await
 }
 
@@ -705,14 +805,19 @@ pub fn create_task_impl(
 /// 归 P3，不从这个入口进来）。
 #[tauri::command]
 pub async fn clarify_ready(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: ClarifyReadyRequest,
 ) -> Result<catalog::TaskChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
-        clarify_ready_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "clarify_ready",
+        window.label(),
+        &state,
+        targets,
+        move |app| clarify_ready_impl(app, &broadcaster, request),
+    )
     .await
 }
 
@@ -740,14 +845,19 @@ pub fn clarify_ready_impl(
 /// 改任务的归属（绑定到 active 项目 / 解除关联）。同值 ⇒ 幂等。
 #[tauri::command]
 pub async fn set_task_project(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: SetTaskProjectRequest,
 ) -> Result<catalog::TaskProjectChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
-        set_task_project_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "set_task_project",
+        window.label(),
+        &state,
+        targets,
+        move |app| set_task_project_impl(app, &broadcaster, request),
+    )
     .await
 }
 
@@ -779,11 +889,15 @@ pub fn set_task_project_impl(
 /// 读某一天（某个时区）的今日选择列表。日期与时区都在服务入口过唯一校验。
 #[tauri::command]
 pub async fn plan_for(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: daily_plan::DailyPlanQuery,
 ) -> Result<daily_plan::DailyPlanView, ErrorResponse> {
     let targets = Vec::new();
-    run_command(&state, targets, move |app| plan_for_impl(app, request)).await
+    run_command("plan_for", window.label(), &state, targets, move |app| {
+        plan_for_impl(app, request)
+    })
+    .await
 }
 
 /// [`plan_for`] 的命令体（IPC 包装只做转发）。
@@ -797,12 +911,13 @@ pub fn plan_for_impl(
 /// 把一个任务加入今日计划。重复加入 ⇒ 幂等。
 #[tauri::command]
 pub async fn add_to_plan(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: PlanMutationRequest,
 ) -> Result<daily_plan::DailyPlanChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
+    run_command("add_to_plan", window.label(), &state, targets, move |app| {
         add_to_plan_impl(app, &broadcaster, request)
     })
     .await
@@ -838,14 +953,19 @@ pub fn add_to_plan_impl(
 /// 把一个任务从今日计划里移除。口径与 [`add_to_plan`] 对称。
 #[tauri::command]
 pub async fn remove_from_plan(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: PlanMutationRequest,
 ) -> Result<daily_plan::DailyPlanChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
-        remove_from_plan_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "remove_from_plan",
+        window.label(),
+        &state,
+        targets,
+        move |app| remove_from_plan_impl(app, &broadcaster, request),
+    )
     .await
 }
 
@@ -885,8 +1005,18 @@ pub fn remove_from_plan_impl(
 /// 它自己也取一次采样（检测与展示值来自同一次采样），所以是一条**查询命令**，
 /// 不是纯读。
 #[tauri::command]
-pub async fn timer_snapshot(state: State<'_, RunningApp>) -> Result<TimerSnapshot, ErrorResponse> {
-    run_command(&state, Vec::new(), timer_snapshot_impl).await
+pub async fn timer_snapshot(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+) -> Result<TimerSnapshot, ErrorResponse> {
+    run_command(
+        "timer_snapshot",
+        window.label(),
+        &state,
+        Vec::new(),
+        timer_snapshot_impl,
+    )
+    .await
 }
 
 /// [`timer_snapshot`] 的命令体（IPC 包装只做转发）。
@@ -896,8 +1026,18 @@ pub fn timer_snapshot_impl(app: &mut AppState) -> Result<TimerSnapshot, AppError
 
 /// 推进一步：与快照同形，另外让 `tick_seq` 前进一步（前端据此丢弃旧 tick）。
 #[tauri::command]
-pub async fn timer_tick(state: State<'_, RunningApp>) -> Result<TimerSnapshot, ErrorResponse> {
-    run_command(&state, Vec::new(), timer_tick_impl).await
+pub async fn timer_tick(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+) -> Result<TimerSnapshot, ErrorResponse> {
+    run_command(
+        "timer_tick",
+        window.label(),
+        &state,
+        Vec::new(),
+        timer_tick_impl,
+    )
+    .await
 }
 
 /// [`timer_tick`] 的命令体（IPC 包装只做转发）。
@@ -909,12 +1049,13 @@ pub fn timer_tick_impl(app: &mut AppState) -> Result<TimerSnapshot, AppError> {
 /// `RECOVERY_REQUIRED`）；查询不受影响。
 #[tauri::command]
 pub async fn start_timer(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: StartTimerRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
+    run_command("start_timer", window.label(), &state, targets, move |app| {
         start_timer_impl(app, &broadcaster, request)
     })
     .await
@@ -951,12 +1092,13 @@ pub fn start_timer_impl(
 /// 暂停（会话与会话版本由快照给出）。暂停值冻结，不在前端算。
 #[tauri::command]
 pub async fn pause_timer(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: SessionRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Session, &request.session_id)];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
+    run_command("pause_timer", window.label(), &state, targets, move |app| {
         pause_timer_impl(app, &broadcaster, request)
     })
     .await
@@ -984,6 +1126,7 @@ pub fn pause_timer_impl(
 /// 继续计时。**两份版本**：任务与会话各自有自己的并发版本。
 #[tauri::command]
 pub async fn resume_timer(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: ResumeRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
@@ -992,9 +1135,13 @@ pub async fn resume_timer(
         target(AuthorityKind::Session, &request.session_id),
     ];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
-        resume_timer_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "resume_timer",
+        window.label(),
+        &state,
+        targets,
+        move |app| resume_timer_impl(app, &broadcaster, request),
+    )
     .await
 }
 
@@ -1020,14 +1167,19 @@ pub fn resume_timer_impl(
 /// 结束计时。到点只提示、不自动完成（F-003 的完整联动归 P8）。
 #[tauri::command]
 pub async fn finish_timer(
+    window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: SessionRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Session, &request.session_id)];
     let broadcaster = Arc::clone(state.broadcaster());
-    run_command(&state, targets, move |app| {
-        finish_timer_impl(app, &broadcaster, request)
-    })
+    run_command(
+        "finish_timer",
+        window.label(),
+        &state,
+        targets,
+        move |app| finish_timer_impl(app, &broadcaster, request),
+    )
     .await
 }
 

@@ -34,6 +34,16 @@
 //! - **单实例唤醒的接收侧**：[`platform::window::spawn_activation_watcher`] 消费
 //!   Task 0 的 `take_activation_request()`，把请求变成「抬起主窗（已关则重建）」——
 //!   Task 0 报告里那条「发送侧 + 接收原语」的交付边界到这里闭环。
+//!
+//! # 实验器材：dev 注入开关与 `sync-lab`（P7 Task 6a）
+//!
+//! 真实双窗口实验（`tests/manual-sync.md`）要的四条 dev 命令注册在下面
+//! `invoke_handler` 的末尾，**每条都带 `#[cfg(debug_assertions)]`**；命令体所在的
+//! `commands::dev` 整份同样带守卫，实验窗口的平台半边在 `platform::sync_lab`。
+//! 发布构建里它们不参与编译，也就无从注册（守卫由 `tests/dev_injections.rs` 核对）。
+//!
+//! 窗口仍然只在启动第⑥步开主窗——`sync-lab` 由人在需要时经 dev 命令开，
+//! `manual-shell.md` 的既有验收步骤不受影响。
 
 pub mod commands;
 pub mod domain;
@@ -131,6 +141,21 @@ pub fn run() {
             commands::pause_timer,
             commands::resume_timer,
             commands::finish_timer,
+            // P7 Task 6a 的 dev 注入开关与实验窗口（**只在 debug 构建**）。
+            //
+            // 每条臂上的 `#[cfg(debug_assertions)]` 由 `tauri::generate_handler!`
+            // 原样交给生成的 match 臂（tauri-macros 的 `command/handler.rs` 用
+            // `Attribute::parse_outer()` 读每条命令前的属性），而命令体所在的
+            // `commands::dev` 整份也带守卫 ⇒ **发布构建里这几条既不编译也不注册**，
+            // 不是「运行时关掉」。两道守卫由 `tests/dev_injections.rs` 读源码核对。
+            #[cfg(debug_assertions)]
+            commands::dev::__p7_drop_next_event,
+            #[cfg(debug_assertions)]
+            commands::dev::__p7_delay_next_query_ms,
+            #[cfg(debug_assertions)]
+            commands::dev::__p7_replay_event,
+            #[cfg(debug_assertions)]
+            commands::dev::__p7_open_sync_lab,
         ])
         .setup({
             let alive = Arc::clone(&alive);

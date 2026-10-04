@@ -20,6 +20,16 @@
 //!   所以 [`Broadcaster::emit`] **不返回 `Result`**：调用方从类型上就没法把它
 //!   当成业务失败往上抛。
 //!
+//! ## dev 注入开关（P7 Task 6a，**只在 debug 构建存在**）
+//!
+//! 真实双窗口实验（`tests/manual-sync.md`）要确定性地造出「末次通知丢失」，
+//! 所以广播出口留了一个 [`Broadcaster::arm_drop_next`]：丢掉下一条**指定事件名**的
+//! 通知。它**只影响投递**——业务写入、事务与 revision 都不经过它，丢一条通知不会
+//! 让任何已提交的业务回滚（与「广播失败只记诊断」同一条口径）。
+//!
+//! 方法、状态字段与 `EmitOutcome::Dropped` 都带 `#[cfg(debug_assertions)]`：
+//! 发布构建里它们整份不存在，不是「关掉」，是**没有**。
+//!
 //! ## 时间
 //!
 //! `at` 由调用方传入——服务层不得自取系统时间（分层门禁），
@@ -117,6 +127,11 @@ pub struct BroadcastDiagnostics {
     /// 这是**编程错误**的计数器，不是用户可见状态：顺序由「同一串行边界内、
     /// 提交之后广播」保证。真的出现时仍然投递（见 [`Broadcaster::emit`]）。
     pub out_of_order: u64,
+    /// 被 **dev 注入开关**（`arm_drop_next`，只在 debug 构建存在）丢掉的通知条数。
+    ///
+    /// 发布构建里它恒为 0：那时开关根本不存在。留着这个计数是为了让实机实验
+    /// （`tests/manual-sync.md` §2.1/§2.3.1）能分辨「开关没生效」与「规则没成立」。
+    pub dropped: u64,
     /// 最近一次失败的诊断文本。
     pub last_failure: Option<String>,
 }
@@ -126,6 +141,12 @@ pub struct BroadcastDiagnostics {
 pub enum EmitOutcome {
     Sent,
     Failed,
+    /// 被 dev 注入开关拦下（P7 Task 6a 的「丢一次通知」，只在 debug 构建存在）。
+    ///
+    /// 与 [`EmitOutcome::Failed`] 分开，是因为两者要分辨的事不同：失败是**通道**
+    /// 出问题（要记诊断），丢弃是**实验器材故意**做的（业务照常）。
+    #[cfg(debug_assertions)]
+    Dropped,
 }
 
 impl EmitOutcome {
@@ -147,6 +168,17 @@ struct BroadcastState {
 pub struct Broadcaster {
     sink: Arc<dyn EventSink>,
     state: Mutex<BroadcastState>,
+    /// dev 注入开关的状态（P7 Task 6a）：**只在 debug 构建存在**。
+    #[cfg(debug_assertions)]
+    dev: Mutex<DevInjections>,
+}
+
+/// dev 注入开关的状态。只在 debug 构建编译（`arm_drop_next` 是它唯一的写入方）。
+#[cfg(debug_assertions)]
+#[derive(Debug, Default)]
+struct DevInjections {
+    /// 「丢掉下一条 `kind` 事件」：`None` = 没装开关。
+    drop_next: Option<String>,
 }
 
 impl Broadcaster {
@@ -154,6 +186,8 @@ impl Broadcaster {
         Self {
             sink,
             state: Mutex::new(BroadcastState::default()),
+            #[cfg(debug_assertions)]
+            dev: Mutex::new(DevInjections::default()),
         }
     }
 
@@ -176,6 +210,15 @@ impl Broadcaster {
             }
         }
 
+        // dev 注入开关（P7 Task 6a，只在 debug 构建存在）：**按事件名**丢掉这一条。
+        // 顺序水位线在上面已经推进过——这条通知是「产生了但在路上丢了」，
+        // 不是「没产生」，客户端的跳号判据看到的正是这个缺口。
+        #[cfg(debug_assertions)]
+        if self.take_drop(&envelope.event) {
+            lock(&self.state).diagnostics.dropped += 1;
+            return EmitOutcome::Dropped;
+        }
+
         match self.sink.broadcast(&envelope) {
             Ok(()) => {
                 lock(&self.state).diagnostics.sent += 1;
@@ -193,6 +236,34 @@ impl Broadcaster {
     /// 诊断快照。
     pub fn diagnostics(&self) -> BroadcastDiagnostics {
         lock(&self.state).diagnostics.clone()
+    }
+
+    /// **dev 注入 (a)**（P7 Task 6a）：丢掉**下一条事件名为 `kind` 的通知**。
+    ///
+    /// ⚠️ 必须按事件名筛（`manual-sync.md` §1 的订正）：有活动会话时每秒一条
+    /// `timer.tick`，不筛的话「丢掉下一条」会被一条无害 tick 吃掉，实机看起来
+    /// 「什么都没发生」。所以开关只在**事件名相同**时被消费（见 [`Self::take_drop`]）。
+    ///
+    /// 重复装开关 = 后一次覆盖前一次（语义始终是「下一条」）。开关是**进程内全局**的：
+    /// 丢的是那次广播本身，不是某个窗口的收件箱——`manual-sync.md` §2.1 正是这么用的
+    /// （在 B 上装开关、在 A 上触发写，A 靠自己的命令响应更新，B 等 30 秒校验收敛）。
+    ///
+    /// 只影响**事件投递**：业务写入、事务、revision 都已经在调用它之前完成。
+    #[cfg(debug_assertions)]
+    pub fn arm_drop_next(&self, kind: &str) {
+        lock(&self.dev).drop_next = Some(kind.to_string());
+    }
+
+    /// 消费式判定：事件名**相同**才命中，命中即清空（一次一发）。
+    #[cfg(debug_assertions)]
+    fn take_drop(&self, kind: &str) -> bool {
+        let mut dev = lock(&self.dev);
+        if dev.drop_next.as_deref() == Some(kind) {
+            dev.drop_next = None;
+            true
+        } else {
+            false
+        }
     }
 }
 
