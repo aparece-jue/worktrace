@@ -261,6 +261,48 @@
 - **外壳冒烟用例**：`@tauri-apps/api/mocks` 的 `mockIPC` 记账，断言应用能挂载、三个区域都在、
   且一个命令都没被调用。
 
+## Task 2 的落地（2026-10-04 晚）
+
+细节与逐条反向验证见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task2-report.md`：
+
+- **状态镜像**（`src/state/domainState.ts`）：每个 JS 上下文一个订阅入口——模块单例
+  `domainState`；`createDomainState(deps)` 只服务测试与显式创建第二个上下文（多窗口各自
+  一个上下文，天然不共享内存）。页面通过 `src/state/hooks.ts` 的 `useSyncExternalStore`
+  hooks 读（`useDomainView` / `useTimerSnapshot` / `useInvalidation`），卸载由 React 调退订
+  函数，不额外挂监听。`App.tsx` **未改动**：外壳不自己开会话，启动接线归 Task 3/4——
+  Task 1b 那条「一个命令都不调用」的冒烟断言因此仍然成立。
+- **启动顺序**（00 §5 规则 1）：`startEventSession`（先订阅暂存 → `load()` 握手 + 拉计时快照
+  → 按原顺序 flush → 直通）。`load()` **在返回前把快照应用进水位**（Task 1b 说的
+  `markApplied` 前置），所以启动期那条缝里的通知按规则②/④判，而不是因为"还没应用过快照"
+  落到 apply 分支。计时快照拿不到**不让启动失败**（协调器故障态下 `timer_snapshot` 会返回
+  `RECOVERY_REQUIRED`，那是 P3/P6 的正常路径）：握手给的 epoch 与水位已经生效，展示值等
+  下一拍 tick 或 30 秒校验补齐。
+- **事件只作缓存失效**：`domain.changed` 只推 `invalidated` 计数（载荷**不**并进镜像——
+  权威状态只来自主动拉的一致快照），`timer.tick` 只更新展示值且**不推业务水位**（tick 不是
+  业务写；推了水位会让紧随其后的通知被规则②吞掉）。
+- **四条规则的 TS 镜像**：`src/ipc.ts` 的 `createFreshnessGate` 扩成 `RevisionGate` 的**逐条**
+  镜像（`applySnapshot` / `onNotification` / `onQueryResponse` + `seenRevision`）。两侧**共读**
+  `src/types/__vectors__/revision-gate.json`：Rust 的 `src-tauri/tests/revision_gate_vectors.rs`
+  与前端的 `src/state/__tests__/revision-protocol.test.ts` replay 同一份步骤、断言同一串判决
+  ——「改一条规则必须同时改两侧」是机械的（评审 M2 的另一半）。唯一保留的字面差异：
+  `epoch == None`（还没应用过快照）时 Rust 判 `Rehandshake`、前端 `isUnknownEpoch` 不判未知
+  （规则 1 的启动顺序让它不可达），向量因此不含这一格，改由两处用例单独钉住。
+- **计时展示值的判定顺序**（00 §5）：先 `data_epoch` → `run_id` → 会话/`session_version`，
+  **再**比 `tick_seq`；旧状态生成的 tick 即使序号较新也丢（不覆盖暂停/切换后的展示）；
+  较新 `session_version` 的未知 tick **先取计时快照**，不自行推导状态跃迁；展示值还没有基线
+  时，另一个 epoch 的 tick 也只触发重新握手（规则① 对 tick 一视同仁）。
+- **收敛**（规则 4）：可见窗口至多每 30 秒（`VERIFY_INTERVAL_MS = 30_000`）校验 `get_revision`；
+  隐藏窗口不轮询、**显示前**校验（`visibilitychange`）。校验发现 epoch 变了 ⇒ 全量失效 +
+  按新 epoch 重取；发现版本比已见版本靠前（末次通知丢了）⇒ 合并刷新 + 取新快照。
+  这个 30 秒与 `Coordinator` 的 `HEARTBEAT_INTERVAL_MS`（检查点频率）无关。
+- **测试**：`src/state/__tests__/{domainState.test.ts,hooks.test.tsx,revision-protocol.test.ts}`；
+  前端 18 → **51 条**，Rust 437 → **438 条**（新增的向量 replay）。16 处反向验证逐条落在
+  对应断言上（见报告），另加 `src/__tests__/ipc.test.ts` 里那条把「未知 epoch」与「同 epoch
+  旧 revision」区分开的断言（上一轮定向复评的 Minor）。
+- **遗留（2026-10-04 Task 2 登记）**：`FreshnessGate.onQueryResponse` 本阶段**没有生产调用者**
+  ——它是 `RevisionGate::on_query_response` 的逐条镜像，为的是四条规则在 TS 侧一处分叉都不少；
+  页面查询（Task 3/5）接上 `sendVersioned` / `onQueryResponse` 之前，它只被向量用例驱动。
+
 ## 仍待与归属（2026-10-04 登记）
 
 - **平台事件实机验收**（锁屏 / 休眠 / 唤醒 / 改时 / 关窗后采样 / 事件到达延迟）目前**无归属**：登记为「**P7 实机步骤 + P8 复核**」。`docs/validation/p2-clock-mapping.md` §6/§7（`:156`–`:172`）已声明这些**未验证、不得当成已验证**：探针是前台进程，证明不了关窗后仍采样，也证明不了系统事件的可靠性与到达延迟。
