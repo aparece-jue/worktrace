@@ -497,6 +497,63 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
 
 **反向验证（原始输出见 `p7-task4-report.md` 的 fix round 1 一节）**：拆掉 I1 防线 ⇒ 对应用例**卡死**（`running 1 test` + 「has been running for over 60 seconds」，90 秒未返回被 kill）；对调 `Pause`/`Quit` ⇒ 对应用例 FAILED（`left: Quit / right: Pause`）。
 
+## Task 5 的落地（2026-10-04）
+
+细节、逐条反向验证与原始输出见
+`.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task5-report.md`：
+
+- **任务页**（`src/pages/Tasks.tsx`，F-002 的轻量 GTD + F-005 情境）：下一步行动（`Ready`）/
+  等待中（`Waiting`）/ 阻塞（`Blocked`）三个列表**各查各的状态**——一次只发
+  `statuses: [选中的那一个]`，把 Waiting 与 Blocked 合成一条查询等于在界面上把它们当成
+  同一个状态（04 §「V0.1 轻量 GTD 补充验收」把它们列成两个列表；sabotage 验证：
+  合并 ⇒ 对应用例红）。项目筛选走**三值** `ProjectSelector`（不限 / 无项目 / 指定 id，
+  D3 裁决的形状，没有压成 `Option<Option<_>>`），情境筛选走 `list_tags(kind="Context")`；
+  **三个条件进同一条 `list_tasks`**，交集在服务端算（`task_repo::filter_clause`）。
+- **计数与分页都用服务数据**：`TaskQueryResult.total` 与 `tasks` 出自**同一个读事务**，
+  分页器与「共 N 条」都读 `total`，前端不数 `tasks.length`；**改条件即把页号归 1**
+  （否则新条件会带着旧 `offset` 去查，服务端只会照做）。无项目 / 无情境（情境下拉禁用，
+  不编选项）/ 空列表 / 加载 / 查询失败各有明确状态；查询失败**只提示不刷新**
+  （`refresh()` 会自失效 ⇒ 自触发重拉）。
+- **旧响应的两条判据**（比 `data_epoch`/`revision`，**不比到达顺序**）：
+  ① **问题身份**——响应发起时的条件+分页窗口要与"现在这个问题"一致（条件一变，旧响应
+  与旧结果都不得上屏）；② **版本**——`domainState.isStaleResponse`。两条都过了才
+  `setView`，**上屏之后**才 `markApplied`。用例各钉一半：同一筛选下旧响应晚到（rev 5 迟于
+  rev 6）只能靠②挡；切换筛选后旧筛选响应迟到（两份同 rev）只能靠①挡。
+- **镜像补一个只读原语**（`src/state/domainState.ts`）：`markApplied(stamp)` —— 页面的
+  查询响应也是权威快照，真的用上之后把本上下文**那唯一一把**水位推到
+  `data_epoch`/`revision`（同版/更旧是 `stale_ignored`，水位只前进）。它是计划里
+  「页面（Task 3/5）应用自己那份带 epoch 查询响应时会用 `markApplied`」那句的落地；
+  于是页面不必各自维护第二份水位。**辅助查询（标签 / 可选项目）不进水位**：让它推水位会把
+  一条正在飞的主列表响应按"更旧"丢掉，界面就停在加载态（代码注释里写明）。
+- **项目页**（`src/pages/Projects.tsx`，F-004）：列表用 `list_projects(status=null)`——
+  归档与 `done` 的历史照样读得到；创建 / 改名 / 归档都提交 epoch 与**列表里那一行的项目
+  版本**，归档先确认（Popconfirm），命令成功之后**当场重拉列表**（"确认归档后更新列表"
+  不赌 `domain.changed` 到得比响应早；sabotage 验证：去掉重拉 ⇒ 对应用例红）。入口与 Rust
+  写入口径逐条对齐：归档只给 `active`（`archived` 再归档是幂等空转、`done` 被
+  `ensure_writable_in_v01` 拒绝），改名不给 `done`——不给必败入口。
+- **项目详情**：`statuses: []`（空集合 = 不限制状态）列出该项目的任务、`total` 照实显示；
+  「新增第一条行动」是**一条** `create_task`（项目在请求里定死，不先建 Inbox 任务再改归属）。
+  **只列第一页**（服务端上限 100）：04 把"稳定分页"挂在 F-002 的下一步/等待/阻塞列表上
+  （任务页有分页器），F-004 这一句只要求"项目任务列表"；条数超过一页时文案会说出来，
+  不做静默截断。若复核要求详情也分页，改动点是详情自己的 page 状态 + 一个 `Pagination`，
+  两条判据已经就位。
+- **R8**：`VERSION_CONFLICT` 只决定**行为**（冲突刷新 + 展示 Rust 的 `message`），没有第二份
+  「码 → 文案」表；用例断言冲突后重拉一次、且**不重发**那条命令。
+- **接线**：`src/App.tsx` 导航四项（收件箱 → 项目 → 任务 → 计时，按 GTD 动线），页面挂载区
+  改成一个 `switch`；仍不引路由、页面仍无 props、外壳仍不持有跨页面业务状态。默认页仍是
+  收件箱，所以 Task 3 那条「命令集合恰好四条」的断言不受影响。
+- **测试**：前端 92 → **112 条**（任务页 10、项目页 7、镜像 +1、外壳 +2）。新增
+  `src/pages/__tests__/jsdomBridges.ts`：jsdom 没有 `matchMedia` / `ResizeObserver`，
+  而 antd 的分页器与浮层要用（判据写"不是函数"而不是"属性不存在"——jsdom 把 `matchMedia`
+  声明在 window 上但值不可调用）。**六处定向 sabotage 逐项变红且只红点名用例**
+  （去掉版本判据 / 去掉问题身份判据 / 改条件不重置分页 / 归档后不重拉 / 合并 Waiting+Blocked
+  / `markApplied` 空实现），每次逐字节还原。四个提交**各自**导出复跑：93 / 103 / 110 / 112
+  条全绿 + `pnpm build` EXIT 0。零新增依赖，`src-tauri/` 一个文件都没动。
+- **仍未做（照计划）**：Inbox 页的标签入口（Task 3 评审 M6）仍无入口——本轮没有新增
+  `tag_task`/`untag_task` 的界面（Task 5 只做查询侧的情境筛选）；统计视图与导出（P5/P8）；
+  归档/完成状态的批量操作（V0.1 无此入口）；完成/取消/Blocked/Waiting/reopen 的状态入口
+  （P8，依赖 P3 的 `transition_task`）。
+
 ## 仍待与归属（2026-10-04 登记）
 
 - **F-009 / F-011 / F-016 的实机验收**（2026-10-04 Task 4 登记）：**步骤已就位**——`src-tauri/tests/manual-shell.md`（Task 4 建立，Task 6b 一起用），分三节：
