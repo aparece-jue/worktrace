@@ -363,8 +363,9 @@ impl Coordinator {
 
     /// 客户端手上的会话版本是否已经过期。
     ///
-    /// `00 §5`：旧状态生成的 tick **即使序号较新也不能覆盖**暂停/切换后的展示。
-    /// 前端据此丢弃并改拉一次完整快照，而不是自行推导状态跃迁。
+    /// 这是仅检查会话身份/版本的局部探针，当前生产路径没有调用者。
+    /// 完整展示顺序由前端 `domainState::orderTimer` 判断（epoch/run/session/version/tick），
+    /// 本方法不是那条判据链的 Rust 镜像，也不能代替它。
     pub fn is_stale_tick(&self, session_id: &str, session_version: i64) -> bool {
         match &self.live {
             None => true,

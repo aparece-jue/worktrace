@@ -241,8 +241,8 @@ impl AuthorityKind {
 /// 错误上下文里的**一个被请求的目标**：读哪一类实体、读哪一条。
 ///
 /// 请求逐条给出、响应逐条返回，一一对应（同一个目标重复请求就重复返回）。
-/// `Deserialize` 是给 P7 的 IPC 用的：没有它，命令层只好再写一份「字符串 → 种类」的
-/// match，而那份 match 正是唯一可能把 `kind` 变成表名的地方。
+/// 命令层用白名单枚举和 `new` 构造目标，不接受客户端提供的种类或表名。
+/// `Deserialize` 保留为兼容能力；当前生产 IPC 不使用反序列化入口。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct AuthorityTarget {
     pub kind: AuthorityKind,

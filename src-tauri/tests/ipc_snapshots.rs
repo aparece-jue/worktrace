@@ -303,8 +303,8 @@ fn check(name: &str, value: &serde_json::Value) -> Result<(), String> {
     }
     let (expected_hint, actual_hint) = first_difference(&expected, &actual);
     Err(format!(
-        "{} 与 Rust 类型不一致（逐字节比对失败）。\n  提交的快照: {expected_hint}\n  现在的类型: {actual_hint}\n\
-         修法：要么改回类型，要么确认契约变更后用 WORKTRACE_UPDATE_IPC_SNAPSHOTS=1 重新生成并同步 src/types/ipc.ts",
+        "{} 与 Rust 归一化 JSON 快照不一致（内容或格式发生变化）。\n  提交的快照: {expected_hint}\n  当前归一化结果: {actual_hint}\n\
+         请先检查响应契约、JSON 键序及格式；确认变更后用 WORKTRACE_UPDATE_IPC_SNAPSHOTS=1 重新生成，契约变化时同步 src/types/ipc.ts",
         path.display(),
     ))
 }

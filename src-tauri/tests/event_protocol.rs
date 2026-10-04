@@ -85,6 +85,27 @@ fn rule1_a_new_epoch_invalidates_everything_and_unknown_epochs_only_rehandshake(
     );
 }
 
+/// 监听早于首份快照：通知不能自行确立库身份或推进任何水位。
+#[test]
+fn a_notification_before_the_first_snapshot_requires_handshake_without_adopting_identity() {
+    let mut gate = RevisionGate::new();
+    assert_eq!(
+        gate.on_notification(&notification(EPOCH_A, 42)),
+        NotificationVerdict::Rehandshake
+    );
+    assert_eq!(gate.epoch(), None);
+    assert_eq!(gate.applied_revision(), 0);
+    assert_eq!(gate.seen_revision(), 0);
+    assert_eq!(
+        gate.apply_snapshot(EPOCH_A, 41),
+        SnapshotEffect::CacheInvalidated
+    );
+    assert_eq!(
+        gate.on_notification(&notification(EPOCH_A, 42)),
+        NotificationVerdict::Apply
+    );
+}
+
 /// 规则②：应用快照后，丢弃**同 epoch 且 `revision <=` 快照版本**的通知。
 #[test]
 fn rule2_notifications_at_or_below_the_applied_snapshot_are_dropped() {

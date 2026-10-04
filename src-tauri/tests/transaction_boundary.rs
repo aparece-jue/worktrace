@@ -596,3 +596,65 @@ fn an_unknown_enum_value_fails_loudly_and_names_the_column() {
         err.message()
     );
 }
+
+/// Contract probe for P3: discarding a candidate endpoint without a known
+/// duration must preserve audit elsewhere and clear the endpoint, not invent
+/// duration or weaken the published CHECK.
+#[test]
+fn voiding_a_pending_candidate_requires_clearing_its_unknown_endpoint() {
+    let (_dir, mut db, _epoch) = bootstrap();
+    let tx = db.connection_mut().unchecked_transaction().unwrap();
+    task_repo::create_task(&tx, "candidate-task", "候选区间", Some("p1"), 1000).unwrap();
+    session_repo::create_session(
+        &tx,
+        "candidate-session",
+        "candidate-task",
+        "run-1",
+        SessionMode::Foreground,
+        TimerKind::Stopwatch,
+        None,
+        1000,
+        "candidate-interval",
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE work_session SET state='recovering', needs_review=1 WHERE id='candidate-session'",
+        [],
+    )
+    .unwrap();
+    for endpoint in [1000, 1500] {
+        tx.execute("UPDATE work_interval SET ended_at=?1, duration_ms=NULL, needs_review=1, voided_at=NULL WHERE id='candidate-interval'", [endpoint]).unwrap();
+        let before = session_repo::get_interval(&tx, "candidate-interval")
+            .unwrap()
+            .unwrap();
+        let err = tx.execute("UPDATE work_interval SET voided_at=2000, needs_review=0 WHERE id='candidate-interval'", []).unwrap_err();
+        assert!(err.to_string().contains("ck_interval_duration"));
+        assert_eq!(
+            session_repo::get_interval(&tx, "candidate-interval")
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        tx.execute("UPDATE work_interval SET voided_at=2000, needs_review=0, ended_at=NULL WHERE id='candidate-interval'", []).unwrap();
+        let voided = session_repo::get_interval(&tx, "candidate-interval")
+            .unwrap()
+            .unwrap();
+        assert_eq!(voided.voided_at, Some(2000));
+        assert_eq!(voided.ended_at, None);
+        assert_eq!(voided.duration_ms, None);
+        assert!(!voided.needs_review);
+    }
+    // Known trusted duration must remain intact when voided.
+    tx.execute("UPDATE work_interval SET ended_at=1500, duration_ms=500, needs_review=0, voided_at=NULL WHERE id='candidate-interval'", []).unwrap();
+    tx.execute(
+        "UPDATE work_interval SET voided_at=2000 WHERE id='candidate-interval'",
+        [],
+    )
+    .unwrap();
+    let known = session_repo::get_interval(&tx, "candidate-interval")
+        .unwrap()
+        .unwrap();
+    assert_eq!(known.ended_at, Some(1500));
+    assert_eq!(known.duration_ms, Some(500));
+    tx.rollback().unwrap();
+}

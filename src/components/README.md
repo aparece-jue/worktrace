@@ -2,6 +2,8 @@
 
 组件与对应 CSS 原样复制自 `test-tauri-project/src/components/`。
 
+当前这些复制组件均未接入生产页面，下面示例仅说明接口。`DockviewDemo` 是演示资产，V0.1 发布入口不得导入；P8 发布门禁验证它不进入产物。保留文件不表示产品已经使用其布局。
+
 - `FloatingInput.tsx`：浮动标签输入框；同时导出 `FormFloatingInput`，支持 Ant Design 表单校验状态。
 - `FloatingSelect.tsx`：浮动标签单选下拉框。
 - `DockviewDemo.tsx`：可拖动标签、分屏和调整大小的工作区演示（默认导出）。

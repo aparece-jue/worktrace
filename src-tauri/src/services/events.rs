@@ -129,8 +129,8 @@ pub struct BroadcastDiagnostics {
     pub out_of_order: u64,
     /// 被 **dev 注入开关**（`arm_drop_next`，只在 debug 构建存在）丢掉的通知条数。
     ///
-    /// 发布构建里它恒为 0：那时开关根本不存在。留着这个计数是为了让实机实验
-    /// （`tests/manual-sync.md` §2.1/§2.3.1）能分辨「开关没生效」与「规则没成立」。
+    /// 发布构建里它恒为 0：那时开关根本不存在。当前只有测试消费；P8 的开发诊断
+    /// 出口接入后，实机实验（`tests/manual-sync.md` §2.1/§2.3.1）才可读取该值确认注入命中。
     pub dropped: u64,
     /// 最近一次失败的诊断文本。
     pub last_failure: Option<String>,
@@ -373,8 +373,8 @@ impl RevisionGate {
     ///
     /// **只用于「使缓存失效」的通知（`domain.changed`）**。计时 tick 不走这里：
     /// tick 只更新展示值，它的新鲜度按 00 §5 的另一条判据（先 epoch / run_id /
-    /// session_version，再比 `tick_seq`），由前端（Task 2）实现，Rust 侧对应
-    /// `Coordinator::is_stale_tick`。把 tick 塞进这套版本水位线，会让同一
+    /// session_id / session_version，再比 `tick_seq`），由前端 `orderTimer` 实现；
+    /// Rust 的 `Coordinator::is_stale_tick` 只是局部探针，不是镜像。把 tick 塞进这套版本水位线，会让同一
     /// `revision` 下的第二拍 tick 被当成「过期通知」丢掉，计时展示就停住了。
     ///
     /// 判定顺序（就是规则的顺序，不要重排）：

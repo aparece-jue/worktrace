@@ -235,15 +235,37 @@ fn out_of_range_paging_is_rejected_by_the_read_path_and_writes_nothing() {
 /// 空状态集合不限制状态（与 `TaskFilter` 同义），上限 100 是合法的。
 #[test]
 fn an_empty_status_set_means_no_status_filter() {
-    let f = bootstrap();
-    let raw = request(&[], "\"any\"", 100, 0, &f.epoch);
+    let mut f = bootstrap();
+    let tx = f.db.connection_mut().unchecked_transaction().unwrap();
+    for (id, state) in [
+        ("t-inbox", "Inbox"),
+        ("t-waiting", "Waiting"),
+        ("t-blocked", "Blocked"),
+    ] {
+        task_repo::create_task(&tx, id, id, Some("p1"), 1000).unwrap();
+        // 查询夹具：P3 状态编排未实现，直接建立合法历史状态。
+        tx.execute("UPDATE task SET status = ?1 WHERE id = ?2", [state, id])
+            .unwrap();
+    }
+    task_repo::create_task(&tx, "other-project", "不应出现", None, 1000).unwrap();
+    tx.commit().unwrap();
+    let changes = f.total_changes();
+    let revision = f.revision();
+    // 使用 Projects 页的真实查询形状：空状态集合 + 指定项目。
+    let raw = request(&[], "{\"id\":\"p1\"}", 100, 0, &f.epoch);
     let query =
         catalog::TaskQuery::try_from(serde_json::from_str::<TaskQueryRequest>(&raw).unwrap())
             .unwrap();
     assert!(query.filter.statuses.is_empty());
 
     let result = catalog::list_tasks_filtered(&f.db, query).unwrap();
-    assert_eq!(result.total, 1, "空集合 = 整表");
+    assert_eq!(result.total, 4, "空集合不暗中退化为 Ready");
+    let mut ids: Vec<_> = result.tasks.iter().map(|task| task.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["t-blocked", "t-inbox", "t-waiting", "t1"]);
+    assert_eq!(result.data_epoch, f.epoch);
+    assert_eq!(result.revision, revision);
+    assert_eq!(f.total_changes(), changes, "查询不写库");
 }
 
 /// 旧 epoch：读路径拒绝，且**不开写事务**（这条与写命令的信封守卫同码不同路）。
