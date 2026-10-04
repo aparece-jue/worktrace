@@ -46,7 +46,7 @@
 文件：`src-tauri/src/platform/single_instance.rs`（新建）、`src-tauri/src/platform/scheduler.rs`（新建）、`src-tauri/src/platform/mod.rs`（登记两个新模块）、`src-tauri/src/storage/run_repo.rs`（新建：`application_run` 原语）、`src-tauri/src/storage/session_repo.rs`（新增按 `run_id` 过滤的查询）、`src-tauri/src/storage/mod.rs`（登记）、`src-tauri/src/services/bootstrap.rs`（新建：唯一启动入口）、`src-tauri/src/services/events.rs`（新建：事件信封与去重）、`src-tauri/src/services/mod.rs`（登记）、`src-tauri/tests/startup_order.rs`、`src-tauri/tests/periodic_sampling.rs`、`src-tauri/tests/event_protocol.rs`、`src-tauri/tests/exit.rs`（四个都新建）。
 
 - [ ] **启动顺序固定为**（01 §2 + 02 §4，不得调整）：① **单实例检查**（必须**先于**持久化初始化）→ ② 打开库并迁移 → ③ 新建 `application_run`（每次成功启动一行）→ ④ 恢复扫描（P3；未完成时见下方门禁）→ ⑤ 启动协调器（P2）与**周期采样驱动** → ⑥ 开窗口。`lib.rs` **不得**自己重排这段顺序；入口只有 `services/bootstrap.rs` 一个（P6 后续扩展同一入口）。**副作用次序用注入的探针记录并在 `tests/startup_order.rs` 断言调用次序**——不是断言"没崩"。
-- [ ] **单实例**（`platform/single_instance.rs`，`platform/` 叶子、不含业务规则）：OS 级文件锁，锁文件用既有的 `platform::paths::instance_lock_file()`（`src-tauri/src/platform/paths.rs:40`，与库同目录）。拿不到锁的进程**通知既有实例后退出**：**不打开库、不迁移、不建 `application_run`、不启动计时**（F-016）。"唤起既有主窗"是**通知**，与锁分离。**交付边界（2026-10-04 实施后订正）**：Task 0 只交付**发送侧**（`single_instance::request_activation`）与**接收原语**（`take_activation_request`）；把请求变成"抬起主窗"的消费侧需要窗口对象，归 **Task 4**——因此本任务结束时 `take_activation_request` 还没有生产调用者，这是分割点，不是遗漏。
+- [ ] **单实例**（`platform/single_instance.rs`，`platform/` 叶子、不含业务规则）：OS 级文件锁，锁文件用既有的 `platform::paths::instance_lock_file()`（`src-tauri/src/platform/paths.rs:40`，与库同目录）。拿不到锁的进程**通知既有实例后退出**：**不打开库、不迁移、不建 `application_run`、不启动计时**（F-016）。"唤起既有主窗"是**通知**，与锁分离。**交付边界（2026-10-04 实施后订正）**：Task 0 只交付**发送侧**（`single_instance::request_activation`）与**接收原语**（`take_activation_request`）；把请求变成"抬起主窗"的消费侧需要窗口对象，归 **Task 4**——因此本任务结束时 `take_activation_request` 还没有生产调用者，这是分割点，不是遗漏。**已闭环（2026-10-04 Task 4 落地）**：消费侧是 `platform::window::spawn_activation_watcher`（轮询请求文件 → `plan_activation` → 抬起/重建主窗），由 `lib.rs` 在启动成功后挂上；决策函数的断言在 `tests/shell_lifecycle.rs`，真机步骤在 `src-tauri/tests/manual-shell.md` §3。
 - [ ] **`application_run` 原语**（`storage/run_repo.rs` 新建）：表在 P1 的 schema 里就有（`src-tauri/src/storage/schema_v1.rs:28`，字段 `id`/`started_at`/`clean_exit_at`），但**全仓没有任何 storage 原语**（`src-tauri/src/storage/` 下无 `run_repo.rs`）。补最小三个：建 run、读 run、写 `clean_exit_at` 结束 run；都接受调用方的 `&Transaction`/`&Connection`，**事务由 `services/bootstrap.rs` 拥有**。
 - [ ] **显式退出（本计划建立的入口，P6 后续硬化）**：**先停定时器（不进事务）**，其余四项——结束 `running`/`paused` 会话、写 `clean_exit_at`、保存 revision、清活动阶段（V0.1 没有阶段列，这一项到 V0.2 番茄钟接入时才有实际写入）——在**同一个事务**内完成。**"停定时器"为什么不在事务里（2026-10-04 实施后订正）**：采样驱动取的是同一把 `Mutex<AppState>`，在事务里 join 采样线程会与持锁的退出路径互锁；先 `stop()`（置位 + join）再开事务既避免互锁，也保证退出事务之后不会再有一拍落进来。**`recovering` 记录保留不清**（02 §4 原文：「显式退出同事务结束 running/paused、保存 revision 与 clean_exit_at；recovering 记录保留」）。不是杀进程；长事务不得跑在 UI 回调里。Task 4 的托盘"退出"与 P8 都复用这一条入口。
 - [ ] **周期采样驱动**（`platform/scheduler.rs` 新建）：**窗口全关仍在跑**——定时器不得挂在任何窗口对象上（F-009）。每次触发走与用户命令**同一条串行边界**（同一协调器入口）；**空闲（无活动会话）时不产生任何写入**（不空转制造 revision）。
@@ -132,15 +132,15 @@
 
 ## Task 4：托盘与窗口生命周期
 
-文件：`src-tauri/src/platform/tray.rs`（新建，或等价位置）、`src-tauri/src/platform/mod.rs`（登记）、`src-tauri/Cargo.toml`（给 `tauri` 加 `features=["tray-icon"]`）、`src-tauri/tauri.conf.json`、`src-tauri/capabilities/default.json`、`src-tauri/src/commands/mod.rs`（托盘动作复用同一批命令）、`src-tauri/tests/manual-shell.md`（新建：人工验收记录模板，Task 6b 一起用）。
+文件（**2026-10-04 落地后订正为实际交付的文件**）：`src-tauri/src/platform/tray.rs`（新建：菜单装配）、`src-tauri/src/platform/window.rs`（新建：主窗生命周期与唤醒接收的消费侧）、`src-tauri/src/platform/mod.rs`（登记两个新模块）、`src-tauri/Cargo.toml`（给 `tauri` 加 `features=["tray-icon"]`）、`src-tauri/src/commands/mod.rs`（托盘动作复用同一批命令）、`src-tauri/src/lib.rs`（接线：托盘、`RunEvent::ExitRequested`、唤醒轮询）、`src-tauri/tests/shell_lifecycle.rs`（新建：能自动化的那半边）、`src-tauri/tests/manual-shell.md`（新建：人工验收记录模板，Task 6b 一起用）。**`tauri.conf.json` 与 `capabilities/default.json` 本轮未改**：托盘是 Rust 侧手工装配的（不是配置里的 `app.trayIcon`），主窗 label 仍是 `main`、本来就在权限名单里；两处的一致性由 `tests/shell_lifecycle.rs` 读文件核对。
 
-- [ ] **F-011 托盘（R4 裁决）**：P7 实际提供**四项**——当前任务、暂停、快速捕获、退出。**「完成」是预留项**：P3 的 `transition_task` 服务入口接入后**由 P8 启用**，P7 不开放尚未存在的动作（也不由前端先 finish 再改状态）。**关闭所有窗口后托盘仍可用且计时继续**——验收硬条件，须在真实环境手测。
-- [ ] **托盘 feature 的文件与离线可行性**：`src-tauri/Cargo.toml:21` 的 `tauri = { version = "2", features = [] }` 改为 `features = ["tray-icon"]`。**离线可行**（Windows 侧 cargo 缓存已有 `tray-icon-0.24.2/0.25.1`、`muda`、`tao`；`Cargo.lock` 里也已有 `tray-icon 0.25.1`/`muda 0.20.0`——可选依赖本来就在解析图里），**构建只在 Windows 侧跑**。**托盘图标用 `app.default_window_icon()`**，**不启用 `image-png`/`image-ico`**：`image` crate 不在 `Cargo.lock`，离线取不到。
-- [ ] **F-009 窗口独立性**：关闭或隐藏所有窗口时核心继续运行；重开窗口**立即拉快照**而不是等下一次通知。托盘菜单的动作与界面动作走**同一批命令**，不另开路径。
+- [ ] **F-011 托盘（R4 裁决）**：P7 实际提供**四项**——当前任务、暂停、快速捕获、退出。**「完成」是预留项**：P3 的 `transition_task` 服务入口接入后**由 P8 启用**，P7 不开放尚未存在的动作（也不由前端先 finish 再改状态）。**P7 的落法**：菜单里放一个**禁用项**「完成（P8 启用）」（id `tray.finish_reserved`，`action: None`）——菜单看得见、点了不会有动作，也不存在一条通往尚未存在服务的路径。**关闭所有窗口后托盘仍可用且计时继续**——验收硬条件，须在真实环境手测（步骤见 `src-tauri/tests/manual-shell.md` §2）。
+- [ ] **托盘 feature 的文件与离线可行性**：`src-tauri/Cargo.toml:21` 的 `tauri = { version = "2", features = [] }` 改为 `features = ["tray-icon"]`。**离线可行**（Windows 侧 cargo 缓存已有 `tray-icon-0.24.2/0.25.1`、`muda`、`tao`；`Cargo.lock` 里也已有 `tray-icon 0.25.1`/`muda 0.20.0`——可选依赖本来就在解析图里），**构建只在 Windows 侧跑**。**托盘图标用 `app.default_window_icon()`**，**不启用 `image-png`/`image-ico`**：`image` crate 不在 `Cargo.lock`，离线取不到。**实测（2026-10-04）**：`cargo test --offline` 在该 feature 下全绿，**`Cargo.lock` 逐字节未变**（可选依赖本来就在解析图里，启用 feature 不引入新包）。
+- [ ] **F-009 窗口独立性**：关闭或隐藏所有窗口时核心继续运行；重开窗口**立即拉快照**而不是等下一次通知。托盘菜单的动作与界面动作走**同一批命令**，不另开路径。**P7 的落法**：`RunEvent::ExitRequested { code: None }`（用户关掉最后一个窗口）→ `api.prevent_exit()`，于是进程与托盘留下、周期采样继续；`code: Some(_)`（程序化 `exit`，含托盘「退出」）一律放行。判定函数 `platform::window::should_prevent_exit(code)` 与唤醒决策 `plan_activation(requested, exists)` 都有断言（`tests/shell_lifecycle.rs`）。
 - [ ] 显示 HUD 的托盘项属 V0.1b，本计划**不加**该菜单项。
-- [ ] **退出流程（R6 裁决）**：托盘"退出"走 **Task 0 建立的显式退出入口**（`services/bootstrap.rs` → `storage/run_repo.rs` 写 `clean_exit_at`）：**先停定时器（不进事务）**，其余四项——结束 `running`/`paused` 会话、写 `clean_exit_at`、保存 revision、清活动阶段——在**同一个事务**内完成；**`recovering` 记录保留不清**（02 §4）。「停定时器」为什么不在事务里见 Task 0 第 4 条（2026-10-04 订正：此行原先与那里矛盾）。不是直接杀进程，也不在托盘回调里跑长事务。
-- [ ] `capabilities/default.json`：这份名单现在只有 `"windows": ["main"]`——**主窗之外的新窗口必须逐个加进来**，否则它的 JS 没有任何权限。Task 6a 的 `sync-lab` 窗口要在这里登记（见 Task 6a）。
-- [ ] 测试（能自动化的部分）：托盘动作与界面动作调用同一命令；关窗不触发退出；重开窗口触发快照。**其余必须人工验收。**
+- [ ] **退出流程（R6 裁决）**：托盘"退出"走 **Task 0 建立的显式退出入口**（`services/bootstrap.rs` → `storage/run_repo.rs` 写 `clean_exit_at`）：**先停定时器（不进事务）**，其余四项——结束 `running`/`paused` 会话、写 `clean_exit_at`、保存 revision、清活动阶段——在**同一个事务**内完成；**`recovering` 记录保留不清**（02 §4）。「停定时器」为什么不在事务里见 Task 0 第 4 条（2026-10-04 订正：此行原先与那里矛盾）。不是直接杀进程，也不在托盘回调里跑长事务。**P7 的落法**：`commands::tray_quit_impl` 内部就是 `RunningApp::shutdown()`（唯一入口），托盘只是它的第二个调用方；执行切到 `spawn_blocking`，不在 UI 回调里开事务。**退出事务失败时**（例如库里有一条结束不了的会话）记诊断并**以非零码退出**——事务已回滚、库是一致的，这一次 run 以「没有 `clean_exit_at`」结束正是恢复扫描的输入（F-015），把用户困在没有窗口的托盘里更糟。
+- [ ] `capabilities/default.json`：这份名单现在只有 `"windows": ["main"]`——**主窗之外的新窗口必须逐个加进来**，否则它的 JS 没有任何权限。Task 6a 的 `sync-lab` 窗口要在这里登记（见 Task 6a）。**主窗重建后 label 不变**（`platform::window::MAIN_WINDOW_LABEL`），所以重建出来的窗口照样在这份名单里；「label 与配置/权限名单一致」由 `tests/shell_lifecycle.rs` 读两个文件核对。
+- [ ] 测试（能自动化的部分）：托盘动作与界面动作调用同一命令；关窗不触发退出；重开窗口触发快照。**其余必须人工验收。****P7 实际钉住的**（`tests/shell_lifecycle.rs`，11 条）：菜单四项 + 预留禁用项 + id↔动作一一对应；`should_prevent_exit` 两个分支；`plan_activation` 四格真值表；主窗 label 与 `tauri.conf.json`/`capabilities` 一致；托盘暂停与 IPC 暂停**效果逐项相等**、没有会话/已暂停时零写入零广播；托盘退出走显式退出入口（`clean_exit_at` 落库、`recovering` 保留、先停定时器）；没有窗口对象时采样照跑。「重开窗口立即拉快照」的 Rust 半边 = `Rebuild` 分支（全新页面加载 ⇒ 前端挂载时先握手再拉快照），前端那一半在 Task 2。
 - [ ] **本阶段不做（依赖 P3/P5/P6）**：托盘"完成"的启用与 F-003 完整联动（P8，依赖 P3）；维护态下的托盘禁用（P6）。
 
 ## Task 5：Projects 与轻量 GTD 列表
@@ -351,8 +351,33 @@
   它们是 `RevisionGate` 的逐条镜像，为的是四条规则在 TS 侧一处分叉都不少；页面（Task 3/5）
   应用自己的带 epoch 查询响应时会用上它们，在那之前只被用例驱动。
 
+## Task 4 的落地（2026-10-04）
+
+**状态**：代码与测试已落地（`b0290c3` 平台半边 + `dabb79e` 接线），门禁 `449 passed / 0 failed`、`clippy --all-targets -D warnings` 0、`check-layers.ps1` 六条规则 PASSED、`Cargo.lock` 未变（**零新增 crate**，只是启用了 `tauri` 的 `tray-icon` feature）。**实机验收结论为空**（见上面「仍待与归属」第 1 条）。
+
+**分层选择（本轮最容易踩的坑，先说结论）**：`platform` 不得引用 `services`/`storage`/`commands`（`check-layers.ps1` 第六条），而 F-011 又要求托盘动作复用同一批命令。于是**把「点到了什么」与「点了之后干什么」切开**：
+
+| 位置 | 职责 | 为什么不放到对面 |
+| --- | --- | --- |
+| `platform/tray.rs` | `TrayAction`（四项）、`MENU_ITEMS`（四项 + 预留禁用项）、`action_for`、`build`（图标 + 菜单 + 事件回调） | 一个业务字都不出现；菜单事件只把 `TrayAction` 交给回调 |
+| `platform/window.rs` | `MAIN_WINDOW_LABEL`、`plan_activation`、`apply_activation`、`raise_or_rebuild_main`、`should_prevent_exit`、`spawn_activation_watcher` | 都是窗口/请求文件的事；重建走 `tauri.conf.json` 那一份配置 |
+| `commands/mod.rs` | `tray_pause_impl`（→ `pause_timer_impl`）、`tray_quit_impl`（→ `RunningApp::shutdown`）、`spawn_tray_pause`/`spawn_tray_quit`（阻塞线程 + 同一把锁） | 「动作 → 命令体」是命令层的事，放这里才叫**复用**；放 `platform` 就违门禁，放 `lib.rs` 就是业务逻辑散在组合根 |
+| `lib.rs` | `on_tray_action`：窗口动作 → `platform::window`，服务动作 → `commands::spawn_tray_*` | 组合根只接线，不判断业务 |
+
+**行为变化（真机可见）**：关掉最后一个窗口**不再结束进程**——`Builder::run(context)` 改成 `build(context)?.run(cb)`，回调里 `RunEvent::ExitRequested { code: None }` ⇒ `api.prevent_exit()`；`code: Some(_)`（托盘「退出」、第二次启动的自己退出）照旧放行。
+
+**签名放宽（两处，理由写进了代码注释）**：`RunningApp::shutdown` 与 `Scheduler::stop` 由 `&mut self` 改为 `&self`。托盘「退出」在组合根里只拿得到 `&RunningApp`（Tauri 托管状态给的就是共享引用），要它走**唯一那条**显式退出入口就不能另开 `&mut` 通道；内部可变性收在 `Scheduler`（`AtomicBool` + `Mutex<Option<JoinHandle>>`），语义不变、`stop` 仍幂等。连带 `tests/exit.rs` 去掉 4 个不再需要的 `mut`。
+
+**异常路径**：托盘「退出」的事务失败（例如库里有一条结束不了的会话）⇒ 记诊断并**以非零码退出**。此时事务已回滚、库是一致的，这一次 run 以「没有 `clean_exit_at`」结束正是恢复扫描的输入（F-015）；把用户困在一个没有窗口的托盘里更糟。**不做**：退出失败的用户可见提示（P6/P8）、托盘在维护态下的禁用（P6）、菜单里的「完成」（P8，依赖 P3）、把当前任务标题做成动态菜单项与视图跳转（需要前端的视图/路由，P8）。
+
 ## 仍待与归属（2026-10-04 登记）
 
+- **F-009 / F-011 / F-016 的实机验收**（2026-10-04 Task 4 登记）：**步骤已就位**——`src-tauri/tests/manual-shell.md`（Task 4 建立，Task 6b 一起用），分三节：
+  1. **F-011 托盘**：右键托盘图标，确认可点项恰好四项（当前任务 / 暂停 / 快速捕获 / 退出）+ 一个禁用项「完成（P8 启用）」；「暂停」在计时中把会话置 `paused` 且 `revision` +1，没有计时时**零写入**；
+  2. **F-009 关掉全部窗口**：关窗后进程与托盘仍在、`clean_exit_at` 仍为 NULL、开放区间仍在；**等 60 秒**后从托盘重开窗口，计时**继续走了这 60 秒**且界面**立即**有数据（不是等下一次 tick）；再从托盘「退出」：进程结束且 `clean_exit_at` 已写、会话 `finished`、开放区间闭合；
+  3. **F-016 单实例唤起**：主窗关掉后再启动第二个实例 ⇒ 第二个进程自己退出、`application_run` 不增加、既有实例把主窗**重建**出来；主窗开着时 ⇒ 被**抬起**（不重建）。
+
+  **为什么不能用单元测试代替**：集成测试进程里没有事件循环，也就没有窗口与托盘（`tauri::test` 的 mock 运行时本轮没有启用）。`tests/shell_lifecycle.rs` 钉住的是**决策函数与命令路径**（菜单映射、`should_prevent_exit`、`plan_activation`、托盘暂停/退出的库内证据、label 与配置一致性），钉不住「真实托盘图标/菜单交互」与「关窗后仍在计时」。**这一步的结论目前为空**，P8 复核。
 - **平台事件实机验收**（锁屏 / 休眠 / 唤醒 / 改时 / 关窗后采样 / 事件到达延迟）目前**无归属**：登记为「**P7 实机步骤 + P8 复核**」。`docs/validation/p2-clock-mapping.md` §6/§7（`:156`–`:172`）已声明这些**未验证、不得当成已验证**：探针是前台进程，证明不了关窗后仍采样，也证明不了系统事件的可靠性与到达延迟。
 - **「多入口开发/打包路径」与 Windows 打包验证**（`00-architecture.zh.md` §7 的待验证项）同样**无归属**：登记到 P8，与 R-04 的发布产物门禁一起做。
 - **`@mui/material` 与 `@emotion/*` 是模板遗留死依赖**（`src/App.tsx` 未使用，`package.json` 里仍在）：**只登记，不在 P7 删**——删依赖属清理任务且需用户确认。
