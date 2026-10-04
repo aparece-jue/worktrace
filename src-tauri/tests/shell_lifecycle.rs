@@ -16,7 +16,7 @@
 //! 没有启用）。步骤与记录表见 `tests/manual-shell.md`。
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use worktrace_lib::commands::{self, StartTimerRequest, TrayPause};
@@ -25,13 +25,14 @@ use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::platform::tray::{self, MenuItemSpec, TrayAction};
 use worktrace_lib::platform::window::{self, ActivationPlan};
 use worktrace_lib::services::bootstrap::{
-    lock_app, startup, AppState, NoProbe, RunningApp, Startup, StartupConfig,
+    lock_app, startup, AppGuard, AppState, NoProbe, RunningApp, Startup, StartupConfig,
 };
 use worktrace_lib::services::events::{EventEnvelope, EventSink};
 use worktrace_lib::services::timer::coordinator::SessionRequest;
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
 use worktrace_lib::storage::migrations::migrate;
+use worktrace_lib::{tray_dispatch, TrayDispatch};
 
 fn item(id: &str) -> &'static MenuItemSpec {
     tray::MENU_ITEMS
@@ -133,6 +134,45 @@ fn a_menu_id_maps_back_to_its_own_action() {
     }
     assert_eq!(tray::action_for("tray.nonexistent"), None);
     assert_eq!(tray::action_for(""), None);
+}
+
+/// **动作 → 入口的路由表**（fix round 1，评审 I2）：`on_tray_action` 只 match
+/// `tray_dispatch`，所以这张表就是「托盘动作与界面动作走同一批命令」那条要求的接缝。
+/// 把 `Pause` 接到 `Quit` 上（一次粘贴错误）必须在这里红——原先它谁都不会吵醒。
+#[test]
+fn each_tray_action_is_dispatched_to_its_own_entry() {
+    assert_eq!(
+        tray_dispatch(TrayAction::CurrentTask),
+        TrayDispatch::Window,
+        "当前任务：抬起主窗（P7 的落点），不是命令"
+    );
+    assert_eq!(
+        tray_dispatch(TrayAction::QuickCapture),
+        TrayDispatch::Window,
+        "快速捕获：同样只抬窗（跳转输入框归 P8）"
+    );
+    assert_eq!(
+        tray_dispatch(TrayAction::Pause),
+        TrayDispatch::Pause,
+        "暂停 → commands::tray_pause_impl（→ pause_timer_impl）"
+    );
+    assert_eq!(
+        tray_dispatch(TrayAction::Quit),
+        TrayDispatch::Quit,
+        "退出 → commands::tray_quit_impl（→ 显式退出入口）"
+    );
+
+    // 服务动作恰好两个，而且顺序固定：新增第四条动作时这里会提醒补路由。
+    let service: Vec<TrayDispatch> = TrayAction::ALL
+        .iter()
+        .map(|action| tray_dispatch(*action))
+        .filter(|dispatch| *dispatch != TrayDispatch::Window)
+        .collect();
+    assert_eq!(
+        service,
+        vec![TrayDispatch::Pause, TrayDispatch::Quit],
+        "只有暂停与退出是服务动作（其余只碰窗口）"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,7 +341,7 @@ fn launch_with_interval(sampling_interval_ms: u64) -> Rig {
 
 impl Rig {
     /// 取串行边界。**同一个测试里只能取一次**（`Mutex` 不可重入）。
-    fn state(&self) -> MutexGuard<'_, AppState> {
+    fn state(&self) -> AppGuard<'_> {
         lock_app(self.running.app())
     }
 
@@ -638,4 +678,59 @@ fn the_core_keeps_running_with_no_window_at_all() {
         window::should_prevent_exit(None),
         "而且这一刻的关窗事件（code=None）必须被拦下，否则进程会跟着最后一个窗口一起走"
     );
+}
+
+/// **自死锁防线**（fix round 1，评审 I1）：`RunningApp::shutdown` 放宽到 `&self` 之后，
+/// 「先取锁、再调退出」也能编译；但退出要先 `join` 采样线程，而采样线程每一拍都要取
+/// 那把锁 ⇒ 调用者自己持锁时 join 永远等不到头。
+///
+/// 这条用例就是那个环的**反向验证**：拆掉 `holds_app_lock` 那道检查，它会**卡死**
+/// （不是变红——死锁不抛错），所以下面用 10ms 的采样节拍让采样线程很快堵在锁上。
+#[test]
+fn shutdown_refuses_to_run_on_the_thread_that_holds_the_lock() {
+    let rig = launch_with_interval(10);
+
+    // 先让采样真的跑起来（**必须在取锁之前**：取锁之后采样永远拿不到锁，
+    // `sampling_ticks` 就不会再动，等待会变成必然超时）。
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.running.sampling_ticks() < 1 {
+        assert!(Instant::now() < deadline, "采样驱动没有跑起来");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // 现在取锁，并留一拍的时间让采样线程真的堵在这把锁上（没有这一步，反向验证
+    // 就没有判别力：采样可能正好在睡觉，拆掉防线也不会卡死）。
+    let guard = rig.state();
+    std::thread::sleep(Duration::from_millis(50));
+
+    let error = rig
+        .running
+        .shutdown()
+        .expect_err("持锁调用退出必须被拒（否则与采样线程互锁）");
+    assert_eq!(error.code(), "STORAGE_ERROR");
+    // `Storage` 的 `message()` 是固定的用户文案，细节在 `detail()` 里（P4 Task 6 的口径）：
+    // 这条断言因此读 `detail()`，而托盘把它连同 `message()` 一起写进诊断。
+    let detail = error.detail().unwrap_or_default();
+    assert!(
+        detail.contains("串行边界"),
+        "诊断要说清是调用姿势的问题，实际：{detail}"
+    );
+
+    // 拒绝是**干净**的：采样没被停、没有事务、没有半退出状态。
+    // （持锁期间采样本来就堵在锁上，所以「它还在跑」只能在放开锁之后观察。）
+    drop(guard);
+    let ticks_after_refusal = rig.running.sampling_ticks();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while rig.running.sampling_ticks() < ticks_after_refusal + 2 {
+        assert!(
+            Instant::now() < deadline,
+            "被拒的退出必须什么都没碰：采样还得在跑"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // 放开锁之后照常退出（不是「拒过一次就永久拒」）。
+    let report = rig.running.shutdown().expect("放开锁之后退出应当成功");
+    assert_eq!(report.run_id, rig.running.run_id());
+    assert!(report.clean_exit_recorded);
 }

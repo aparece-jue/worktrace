@@ -1114,6 +1114,18 @@ pub fn tray_quit_impl(running: &RunningApp) -> Result<ExitReport, AppError> {
     running.shutdown()
 }
 
+/// 托盘的诊断行：`message()`（用户文案）+ `detail()`（内部细节，只有它有诊断价值）。
+///
+/// 为什么要拼起来：`AppError::Storage` 的 `message()` 是固定的一句「存储暂时不可用…」，
+/// 真正能定位问题的东西在 `detail()` 里（例如「显式退出不能在持有串行边界的线程上调用」）。
+/// **只在诊断出口**这么写：IPC 的错误载荷仍然只送 `message()`（P4 Task 6 的口径）。
+fn diagnostic(error: &AppError) -> String {
+    match error.detail() {
+        Some(detail) => format!("{}（{}）", error.message(), detail),
+        None => error.message(),
+    }
+}
+
 /// 托盘「暂停」：在**阻塞线程**上、**串行边界内**执行（与 [`run_command`] 同一条骨架）。
 pub fn spawn_tray_pause(app: &AppHandle) {
     let handle = app.clone();
@@ -1132,7 +1144,7 @@ pub fn spawn_tray_pause(app: &AppHandle) {
             }
             Err(error) => eprintln!(
                 "[worktrace] tray: 暂停失败：{}（{}）",
-                error.message(),
+                diagnostic(&error),
                 error.code()
             ),
         }
@@ -1164,7 +1176,7 @@ pub fn spawn_tray_quit(app: &AppHandle) {
             Err(error) => {
                 eprintln!(
                     "[worktrace] tray: 退出失败：{}（{}）",
-                    error.message(),
+                    diagnostic(&error),
                     error.code()
                 );
                 handle.exit(1);

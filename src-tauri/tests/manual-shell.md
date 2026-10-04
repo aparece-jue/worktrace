@@ -20,6 +20,17 @@
 
 读库用另一条连接（应用运行中也能读）：`sqlite3 "%APPDATA%\com.worktrace.desktop\worktrace.db"`。
 
+**先取一次本次 run 的 id**（下面各节都用它，别写字面量 `<当前 run>`）：
+
+```sql
+SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
+```
+
+**看诊断输出**（fix round 1，评审 M2）：本轮所有诊断都走 `println!`/`eprintln!`（启动六步、
+托盘动作、唤醒接收、退出结果），而 release 的 Windows 子系统没有控制台
+（`src/main.rs` 的 `windows_subsystem = "windows"`），输出会被**丢弃**。所以验收用
+`pnpm tauri dev`，或者把二进制重定向：`worktrace.exe > log.txt 2>&1`。正式诊断日志归 P6。
+
 ## 1. F-011 托盘：四项 + 一个预留项
 
 1. 启动应用，**右键**托盘图标展开菜单：
@@ -30,10 +41,10 @@
 3. 点「快速捕获」：主窗被抬起（P7 只保证抬窗；跳转到捕获输入框属 P8）→ 现象：
 4. **没有计时**时点「暂停」：
    - [ ] 界面无变化；`SELECT revision FROM app_meta WHERE singleton=1` 不变 →
-   - [ ] `SELECT COUNT(*) FROM work_session WHERE run_id = '<当前 run>'` 不变 →
+   - [ ] `SELECT COUNT(*) FROM work_session WHERE run_id = '<上面取到的 run id>'` 不变 →
 5. 开始一次计时，**记下界面上的秒数**，再点「暂停」：
    - [ ] 界面在下一拍（≤ 1 秒）变成已暂停，暂停值冻结 →
-   - [ ] `SELECT state FROM work_session WHERE run_id = '<当前 run>'` = `paused`
+   - [ ] `SELECT state FROM work_session WHERE run_id = '<上面取到的 run id>'` = `paused`
    - [ ] `revision` 恰好 +1
    - 现象：
 6. 再点一次「暂停」：
@@ -49,8 +60,32 @@
    - 现象：
 2. 关窗后**等 60 秒**，从托盘点「当前任务」重开窗口：
    - [ ] 展示的计时**继续走了这 60 秒**（不是停在关窗那一刻）
-   - [ ] 窗口内容是**立即**出现的（不是等下一次 tick / 30 秒校验才有数据）
-   - [ ] 期间 `revision` 只按心跳（约 30 秒一次检查点）前进，没有空转写入
+   - [ ] **核心判据——检查点在前进**（采样真的还在跑）。⚠️ 界面那个秒数是从
+     `started_at` 算出来的：**采样线程就算死了，它照样「继续走」**，所以秒数本身证明不了
+     关窗后还在采样。真正的证据在 `interval_checkpoint`，而且它**以 `interval_id` 为主键
+     做 upsert**（`src/storage/schema_v1.rs:129`）——**行数不会涨，必须读列值**：
+     关窗前记一次，60 秒后再查一次，比列值：
+
+     ```sql
+     SELECT wall_at, attribution_at, elapsed_ms FROM interval_checkpoint
+      WHERE interval_id = (SELECT id FROM work_interval
+                            WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1);
+     ```
+
+     - [ ] `wall_at` 与 `elapsed_ms` 都**前进**，前进量 **≥ 20 秒**（心跳周期 30 秒、
+       采样每秒一拍 ⇒ 正常情况下观察到 30–60 秒；**< 20 秒判不通过**：采样没在跑，
+       或心跳没写）。两次读到的值写进现象栏。
+   - [ ] `revision` **不变**——心跳有自己的短事务、**不加 revision**
+     （原文见 `src/services/timer/coordinator.rs` 的 `heartbeat`：「心跳有自己的短事务，
+     且**不加 revision**」；`services/bootstrap.rs` 的 `sample_tick` 说明同）。所以这一栏
+     看到 revision 不动是**正确**的，不要把它当成「没有活动」。
+   - [ ] **窗口一出现就是对的**：devtools（`F12`）里新窗口先完成握手/拉快照、再收到事件
+     通知（Task 2 的启动顺序：先监听再拉一致快照）；**可操作判据**：关窗前先把计时
+     **暂停**，重开窗口后**第一眼**就应当是 paused（不是先空着/显示运行中、等下一拍通知
+     才纠正）。⚠️ 「秒数马上就是对的」**没有判别力**：有会话时采样每秒广播一次，
+     「等下一次通知」的实现看起来一模一样。
+     （Rust 半边 = `platform::window` 的 `Rebuild` 分支，已由 `tests/shell_lifecycle.rs`
+     钉住；前端半边归 Task 2 的单测。）
    - 现象：
 3. **再关掉全部窗口**，从托盘点「退出」：
    - [ ] 进程结束，托盘图标消失
@@ -70,6 +105,9 @@
    - 现象：
 3. 把主窗最小化后启动第二个实例：
    - [ ] 主窗被还原并聚焦 → 现象：
+4. **重新核一遍 `clean_exit_at`**：关掉主窗（不退出）之后启动第二个实例，第二个进程
+   **不得**给本次 run 写下 `clean_exit_at`（它连库都不打开）：
+   `SELECT clean_exit_at FROM application_run WHERE id = '<上面取到的 run id>'` 仍为 NULL → 现象：
 
 ## 4. 结论
 

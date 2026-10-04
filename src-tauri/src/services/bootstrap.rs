@@ -37,6 +37,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::ThreadId;
 
 use rusqlite::Connection;
 
@@ -247,7 +248,24 @@ impl RunningApp {
     /// 而要它走**这一条**入口就不能另开一条 `&mut` 通道——那等于把退出拆成两份实现。
     /// 内部可变性收在 `Scheduler`（停止位 + `Mutex<Option<JoinHandle>>`）与 `AppState`
     /// 那把锁里，本类型自身仍然没有可被外部摆布的状态。
+    ///
+    /// **持锁调用会被拒**（fix round 1，评审 I1）：`&self` 让「先取锁再调退出」也能编译，
+    /// 而那条路必然与采样线程互锁。防线是 [`holds_app_lock`]，失败是
+    /// `STORAGE_ERROR`（接线缺陷，不是用户操作错误）：**拒绝时不碰任何东西**——
+    /// 采样没停、没有事务、没有半退出状态。
     pub fn shutdown(&self) -> Result<ExitReport, AppError> {
+        // **自死锁防线**（P7 Task 4 fix round 1，评审 I1）：退出要先 `join` 采样线程，
+        // 而采样线程每一拍都要取这把锁。调用者自己正持着锁时，那次 join 永远等不到
+        // 头——进程会静默卡死（放宽到 `&self` 之后，这个环从「编译错误」变成了
+        // 「可以写出来的代码」，所以必须在这里拦住）。这是**接线缺陷**，不是用户错误：
+        // 明确失败，并说清正确姿势。
+        if holds_app_lock(&self.app) {
+            return Err(AppError::Storage {
+                detail: "显式退出不能在持有串行边界的线程上调用（会与采样线程互锁）：请在锁外调用"
+                    .to_string(),
+            });
+        }
+
         self.sampling.stop();
 
         let at = {
@@ -326,12 +344,80 @@ pub struct AppState {
 }
 
 /// 命令、托盘与采样共用的句柄。
-pub type SharedApp = Arc<Mutex<AppState>>;
+///
+/// 里面除了那份 `AppState`，还记着**当前持锁线程**——见 [`AppBoundary`] 与
+/// [`AppGuard`] 的说明。
+pub type SharedApp = Arc<AppBoundary>;
+
+/// 串行边界：唯一那份 [`AppState`] + **当前持锁线程**。
+///
+/// 为什么要多记一个线程 id（P7 Task 4 fix round 1，评审 I1）：显式退出会先 `join`
+/// 采样线程，而采样线程**每一拍都要取这把锁**。「调用者自己正持着锁」时那次 `join`
+/// 必然互锁——采样线程等锁、调用者等采样线程，进程静默卡死。
+/// 记下持锁线程，「持锁调用退出」就能在进入死锁之前被明确拒绝
+/// （[`RunningApp::shutdown`]）。这个 id 只用来回答一个问题：
+/// **本线程是不是正持着这把锁**——它不是第二把业务锁，也不参与任何串行决策。
+pub struct AppBoundary {
+    state: Mutex<AppState>,
+    holder: Mutex<Option<ThreadId>>,
+}
+
+/// 串行边界的 guard：持锁期间登记持锁线程，`Drop` 清位。
+///
+/// `Deref`/`DerefMut` 到 [`AppState`]，所以既有调用点（`lock_app(&app).db()`、
+/// `body(&mut guard)` 等）不需要改写法。
+pub struct AppGuard<'a> {
+    state: MutexGuard<'a, AppState>,
+    boundary: &'a AppBoundary,
+}
+
+impl std::ops::Deref for AppGuard<'_> {
+    type Target = AppState;
+
+    fn deref(&self) -> &AppState {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for AppGuard<'_> {
+    fn deref_mut(&mut self) -> &mut AppState {
+        &mut self.state
+    }
+}
+
+impl Drop for AppGuard<'_> {
+    fn drop(&mut self) {
+        *lock_holder(self.boundary) = None;
+    }
+}
 
 /// 取锁。**中毒不 panic**：持锁线程 panic 时事务已经回滚，继续用剩下的状态
 /// 比让整个进程崩掉更合理（P6 的诊断接管之前）。
-pub fn lock_app(shared: &SharedApp) -> MutexGuard<'_, AppState> {
-    shared.lock().unwrap_or_else(|e| e.into_inner())
+///
+/// 拿到的 [`AppGuard`] 会登记「本线程正持锁」，直到它被丢弃。
+pub fn lock_app(shared: &SharedApp) -> AppGuard<'_> {
+    let state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    *lock_holder(shared) = Some(std::thread::current().id());
+    AppGuard {
+        state,
+        boundary: shared,
+    }
+}
+
+/// **本线程**是否正持着这把锁。
+///
+/// 唯一的生产用途是 [`RunningApp::shutdown`] 的自死锁防线；用例也用它钉住那条防线
+/// （`tests/shell_lifecycle.rs`）。**不要**拿它当业务分支：它描述的是调用姿势，不是状态。
+pub fn holds_app_lock(shared: &SharedApp) -> bool {
+    *lock_holder(shared) == Some(std::thread::current().id())
+}
+
+/// 取持锁线程登记（中毒同样不 panic，理由与 [`lock_app`] 相同）。
+fn lock_holder(boundary: &AppBoundary) -> MutexGuard<'_, Option<ThreadId>> {
+    boundary
+        .holder
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 impl AppState {
@@ -618,11 +704,14 @@ pub fn startup(
     coordinator.establish_anchor(sample);
     probe.step(StartupStep::CoordinatorStarted);
 
-    let app: SharedApp = Arc::new(Mutex::new(AppState {
-        db,
-        coordinator,
-        recovery: recovery.clone(),
-    }));
+    let app: SharedApp = Arc::new(AppBoundary {
+        state: Mutex::new(AppState {
+            db,
+            coordinator,
+            recovery: recovery.clone(),
+        }),
+        holder: Mutex::new(None),
+    });
     let broadcaster = Arc::new(Broadcaster::new(sink));
     let sampling_errors = Arc::new(AtomicU64::new(0));
     let sampling = Scheduler::spawn(config.sampling_interval_ms, {

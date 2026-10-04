@@ -20,8 +20,12 @@
 //!
 //! `stop` 取 **`&self`**：显式退出的调用方（`RunningApp::shutdown`）在组合根里只拿得到
 //! 共享引用——Tauri 托管状态给出的就是 `&RunningApp`，而托盘的「退出」必须走那一条入口
-//! （不能另开一条 `&mut` 通道，那等于把退出拆成两份实现）。停止位与 `join` 句柄因此
-//! 都用内部可变性：`AtomicBool` + `Mutex<Option<JoinHandle>>`。`stop` 依旧幂等。
+//! （不能另开一条 `&mut` 通道，那等于把退出拆成两份实现）。停止位、`join` 句柄与完成位
+//! 因此都用内部可变性：`AtomicBool` + `Mutex<Option<JoinHandle>>` + 完成位。`stop` 依旧幂等。
+//!
+//! **并发调用 `stop` 也保证「返回 ⇒ 线程已退出」**（fix round 1，评审 M1）：句柄只能被
+//! 取走一次，第二个调用者拿不到句柄，于是它等的是**线程自己在退出前置的完成位**（panic
+//! 展开也置位）。停一次的标志仍由停止位保证：置位之后不会再有新的一拍。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,8 +40,23 @@ const MAX_SLEEP_SLICE: Duration = Duration::from_millis(50);
 pub struct Scheduler {
     stop: Arc<AtomicBool>,
     handle: Mutex<Option<JoinHandle<()>>>,
+    /// 线程**已退出**（正常返回或 panic 展开都会置位）。
+    ///
+    /// 为什么需要它：`JoinHandle` 只能被取走一次，第二个 `stop()` 调用者拿不到句柄，
+    /// 只凭「取不到句柄」就返回会让「返回 ⇒ 线程已退出」这句话不成立（M1）。
+    done: Arc<AtomicBool>,
     /// 已完成的触发次数。只用于诊断与测试，不参与任何业务判断。
     ticks: Arc<AtomicU64>,
+}
+
+/// 线程退出前置完成位。**panic 也置位**：否则并发的第二个 `stop()` 会等一个
+/// 永远不会到来的信号（`on_tick` panic 时线程直接结束，不走正常返回路径）。
+struct DoneOnDrop(Arc<AtomicBool>);
+
+impl Drop for DoneOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
 }
 
 impl Scheduler {
@@ -55,14 +74,18 @@ impl Scheduler {
     {
         let interval = Duration::from_millis(interval_ms.max(1));
         let stop = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
         let ticks = Arc::new(AtomicU64::new(0));
 
         let handle = {
             let stop = Arc::clone(&stop);
             let ticks = Arc::clone(&ticks);
+            let done = Arc::clone(&done);
             thread::Builder::new()
                 .name("worktrace-sampler".to_string())
                 .spawn(move || {
+                    // 线程退出（含 panic 展开）时置完成位，供并发的第二个 `stop()` 等待。
+                    let _done = DoneOnDrop(done);
                     while !stop.load(Ordering::SeqCst) {
                         if !sleep_in_slices(interval, &stop) {
                             break;
@@ -80,6 +103,7 @@ impl Scheduler {
         Self {
             stop,
             handle: Mutex::new(Some(handle)),
+            done,
             ticks,
         }
     }
@@ -90,17 +114,32 @@ impl Scheduler {
     }
 
     /// 停止并等待线程退出。可重复调用，且**只要共享引用就能调**（见模块头「停」）。
+    ///
+    /// **返回 ⇒ 线程已退出**，并发调用也成立（M1）：
+    ///
+    /// - 拿到句柄的那个调用者 `join` 线程；
+    /// - 没拿到句柄的（句柄已被别人取走）等的是**完成位**——它由线程自己在退出前置位，
+    ///   所以不会早于线程真正结束而返回。
+    ///
+    /// `join` 与等待完成位都在**放开那把 `Mutex` 之后**进行：不让别人为了一把已经
+    /// 没用的锁排队。
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
-        // 先取出句柄、**放开那把 `Mutex`**，再 `join`：join 期间不让别人为了一把已经
-        // 没用的锁排队（`stop` 是幂等的，第二个调用者拿到 `None` 直接返回）。
         let handle = self
             .handle
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .take();
-        if let Some(handle) = handle {
-            let _ = handle.join();
+
+        match handle {
+            Some(handle) => {
+                let _ = handle.join();
+            }
+            None => {
+                while !self.done.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
         }
     }
 }
@@ -190,5 +229,62 @@ mod tests {
             "长周期下 stop 也应在 1 秒内返回，实际 {:?}",
             started.elapsed()
         );
+    }
+
+    /// **并发调用 `stop` 也保证「返回 ⇒ 线程已退出」**（fix round 1，评审 M1）。
+    ///
+    /// 做法是让线程**卡在 `on_tick` 里**（barrier）：这时句柄已经被第一个调用者取走，
+    /// 第二个调用者只能等完成位。若第二个调用者「拿不到句柄就返回」，它会在闸门放开之前
+    /// 就返回 —— 下面那条 `returned == 0` 会红。
+    #[test]
+    fn every_concurrent_stop_waits_until_the_thread_has_finished() {
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let started = Arc::new(AtomicBool::new(false));
+        let returned = Arc::new(AtomicUsize::new(0));
+
+        let scheduler = Arc::new({
+            let gate = Arc::clone(&gate);
+            let started = Arc::clone(&started);
+            Scheduler::spawn(5, move || {
+                if !started.swap(true, Ordering::SeqCst) {
+                    // 只在第一拍卡住：让线程停在 `on_tick` 内部，join 必须等它。
+                    gate.wait();
+                }
+            })
+        });
+
+        // 等线程真的进了 `on_tick`（否则它可能还在睡，stop 会走另一条路）。
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !started.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "采样线程没有跑起来");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let scheduler = Arc::clone(&scheduler);
+                let returned = Arc::clone(&returned);
+                scope.spawn(move || {
+                    scheduler.stop();
+                    returned.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+
+            // 两个 stop 都还没返回：一个在 join，另一个在等完成位。
+            thread::sleep(Duration::from_millis(100));
+            assert_eq!(
+                returned.load(Ordering::SeqCst),
+                0,
+                "线程还卡在 on_tick 里，两个 stop 都不该已经返回"
+            );
+
+            // 放闸：线程走完这一拍 → 看到停止位 → 退出 → 完成位置位 → 两个 stop 返回。
+            gate.wait();
+        });
+
+        assert_eq!(returned.load(Ordering::SeqCst), 2, "两个 stop 都该返回");
+        let after = scheduler.ticks();
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(scheduler.ticks(), after, "两个 stop 返回之后不得再有触发");
     }
 }

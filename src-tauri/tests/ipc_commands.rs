@@ -28,7 +28,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use worktrace_lib::commands::{
     self, ArchiveProjectRequest, ClarifyReadyRequest, CreateProjectRequest, CreateTagRequest,
@@ -40,7 +40,7 @@ use worktrace_lib::domain::session::SessionState;
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::services::bootstrap::{
-    lock_app, startup, AppState, NoProbe, RunningApp, Startup, StartupConfig,
+    lock_app, startup, AppGuard, AppState, NoProbe, RunningApp, Startup, StartupConfig,
 };
 use worktrace_lib::services::catalog::{ProjectSelector, TaskQueryRequest};
 use worktrace_lib::services::daily_plan::DailyPlanQuery;
@@ -171,7 +171,7 @@ fn launch_with(sink: Arc<dyn EventSink>) -> (tempfile::TempDir, Box<RunningApp>)
 
 impl Shell {
     /// 取串行边界。**同一个测试里只能取一次**（`Mutex` 不可重入）。
-    fn state(&self) -> MutexGuard<'_, AppState> {
+    fn state(&self) -> AppGuard<'_> {
         lock_app(self.running.app())
     }
 

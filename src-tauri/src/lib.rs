@@ -149,6 +149,12 @@ pub fn run() {
                 api.prevent_exit();
             }
         }
+        // ⚠️ 这里**不**兜底再调一次显式退出（fix round 1，评审 M4）：`App::run` 最后
+        // 直接 `std::process::exit`，`RunningApp` 的 `Drop` 不会跑，所以
+        // **写 `clean_exit_at` 只发生在显式退出（托盘「退出」）那条路径上**——它自己
+        // 已经做过了。P8 若新增退出入口，必须显式调 `RunningApp::shutdown()`，
+        // 否则那一次 run 会以「没有 `clean_exit_at`」结束；那是给崩溃/强杀准备的
+        // 恢复输入（F-015），不该成为正常退出的常态。
         RunEvent::Exit => alive.store(false, Ordering::SeqCst),
         _ => {}
     });
@@ -210,22 +216,48 @@ fn setup(app: &mut tauri::App, alive: &Arc<AtomicBool>) -> Result<(), Box<dyn st
     }
 }
 
-/// 托盘动作 → 入口（Task 4 的接线点）。
+/// 托盘动作去往哪一类入口（Task 4）。
+///
+/// 与 [`tray_dispatch`] 一起构成「动作 → 入口」的**唯一**一张表：`on_tray_action`
+/// 只 match 它，用例断言它。为什么单列一张表（fix round 1，评审 I2）：这段路由原先
+/// 直接写在 `on_tray_action` 的 match 里，把 `Pause` 接到 `Quit` 上不会有任何用例变红——
+/// 而「托盘动作与界面动作走同一批命令」这条要求，接缝正是这几行。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayDispatch {
+    /// 窗口动作：抬起主窗（已关则按配置重建）。**不是**命令。
+    Window,
+    /// 复用 `commands::tray_pause_impl`（内部就是 `pause_timer_impl`）。
+    Pause,
+    /// 复用 `commands::tray_quit_impl`（内部就是 Task 0 的显式退出入口）。
+    Quit,
+}
+
+/// 动作 → 去向。**只有这一处**决定托盘动作往哪走。
+///
+/// 注意它只分类、不执行：真正落到命令体上的映射在 `commands::`（`tray_pause_impl` /
+/// `tray_quit_impl`），所以托盘与 IPC 走的是同一批入口。
+pub fn tray_dispatch(action: TrayAction) -> TrayDispatch {
+    match action {
+        TrayAction::CurrentTask | TrayAction::QuickCapture => TrayDispatch::Window,
+        TrayAction::Pause => TrayDispatch::Pause,
+        TrayAction::Quit => TrayDispatch::Quit,
+    }
+}
+
+/// 托盘动作 → 入口（Task 4 的接线点）：按 [`tray_dispatch`] 分派。
 ///
 /// - **窗口动作**（当前任务 / 快速捕获）：抬起主窗（已关则重建）；
 /// - **服务动作**（暂停 / 退出）：交给 `commands::` 那一侧——与 IPC 同一批入口，
 ///   托盘不另写业务逻辑。
 fn on_tray_action(app: &AppHandle, action: TrayAction) {
-    match action {
+    match tray_dispatch(action) {
         // P7 的落点是「把主窗抬起来」：视图跳转（定位到当前任务 / 聚焦捕获输入框）
         // 依赖前端的视图与路由，而 P7 是固定布局、没有路由——登记为 P8。
-        TrayAction::CurrentTask | TrayAction::QuickCapture => {
-            match window::raise_or_rebuild_main(app) {
-                Ok(plan) => println!("[worktrace] tray: {} -> {plan:?}", action.menu_id()),
-                Err(error) => eprintln!("[worktrace] tray: {} failed: {error}", action.menu_id()),
-            }
-        }
-        TrayAction::Pause => commands::spawn_tray_pause(app),
-        TrayAction::Quit => commands::spawn_tray_quit(app),
+        TrayDispatch::Window => match window::raise_or_rebuild_main(app) {
+            Ok(plan) => println!("[worktrace] tray: {} -> {plan:?}", action.menu_id()),
+            Err(error) => eprintln!("[worktrace] tray: {} failed: {error}", action.menu_id()),
+        },
+        TrayDispatch::Pause => commands::spawn_tray_pause(app),
+        TrayDispatch::Quit => commands::spawn_tray_quit(app),
     }
 }
