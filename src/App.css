@@ -17,3 +17,19 @@ body { margin: 0; background: #f5f7fa; color: #172235; font-family: "Segoe UI", 
 .inbox-item:last-child { border-bottom: none; }
 .inbox-title { flex: 1; word-break: break-word; }
 .inbox-status { margin: 0; }
+
+/* 任务列表（P7 Task 5）：GTD 三个列表与项目详情共用的行样式。 */
+.task-list { list-style: none; margin: 0; padding: 0; background: #ffffff; border: 1px solid #e5e9f0; border-radius: 8px; }
+.task-item { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid #f0f2f5; }
+.task-item:last-child { border-bottom: none; }
+.task-title { flex: 1; word-break: break-word; }
+.task-status { margin: 0; }
+
+/* 项目列表（P7 Task 5）：每行「名称 | 状态 | 改名 / 归档」。 */
+.project-list { list-style: none; margin: 0; padding: 0; background: #ffffff; border: 1px solid #e5e9f0; border-radius: 8px; }
+.project-item { display: flex; align-items: center; gap: 12px; padding: 8px 16px; border-bottom: 1px solid #f0f2f5; }
+.project-item:last-child { border-bottom: none; }
+.project-name { flex: 1; padding: 0; text-align: left; height: auto; }
+.project-status { margin: 0; }
+.project-rename-input { flex: 1; }
+.project-detail { background: #ffffff; border: 1px solid #e5e9f0; border-radius: 8px; padding: 16px; }
