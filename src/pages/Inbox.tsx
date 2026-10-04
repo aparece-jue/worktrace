@@ -23,6 +23,13 @@
  * 另有一条与状态表无关的禁用：**正在计时的那条任务**上不给「开始」（再点必败，见
  * `runningTaskId`）。
  *
+ * **判旧用本视图水位，不用全局那把**（fix round 2，整分支评审点名）：收件箱列表是
+ * **过滤 + 分页后的局部视图**（`statuses: [...]`、`limit`/`offset`），而全局水位的前提是
+ * 「已应用的是**权威快照**（全量、含所有状态）」——拿局部视图去比全局水位，会把一条合法
+ * 响应按"比水位旧"静默丢掉（例如刚 `create_task` 完、30 秒校验把水位推到新版之后回来的
+ * 那次读），两次重叠的 `load()` 乱序时旧响应还可能覆盖新列表。所以本页有自己的
+ * `watermark`（`src/components/viewWatermark.ts`），并且**不推**全局水位。
+ *
  * 本页**不自己订阅事件**：状态从 `src/state/hooks.ts` 读，事件只通过 `invalidated`
  * 让这里的 `useEffect` 重拉一次数据。
  */
@@ -40,7 +47,7 @@ import {
 } from "../ipc";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { reportCommandError } from "../components/commandError";
-import { domainState } from "../state/domainState";
+import { createViewWatermark } from "../components/viewWatermark";
 import { useDataEpoch, useInvalidation, useRunningTaskId } from "../state/hooks";
 import type { ProjectRow, TaskRow, TaskStatus } from "../types/ipc";
 
@@ -98,10 +105,21 @@ export function Inbox() {
   const [busy, setBusy] = useState(false);
 
   /**
+   * **本页这一次读**的视图水位（fix round 2）：收件箱列表是一份视图（两条查询在
+   * `Promise.all` 里一起取、一起上屏），所以共用一份水位。
+   *
+   * `useState(createViewWatermark)` 只借它拿一个**稳定实例**（工厂只跑一次），
+   * 它本身不是会变的状态、也不触发重渲染。
+   */
+  const [watermark] = useState(createViewWatermark);
+
+  /**
    * 重拉本页的两条查询。
    *
-   * 响应先过闸门（00 §5 规则 3 的读侧）：`isStaleResponse` 为真说明它回答的不是我们现在
-   * 问的那个世界（换过库 / 比已应用水位旧），**丢弃，不覆盖已经上屏的新状态**。
+   * 响应先过**本视图**水位（判据与任务页/项目页同一套，见
+   * `src/components/viewWatermark.ts` 的模块头）：换过库（epoch 不同）或比**这一页**
+   * 已上屏的那一份旧 ⇒ **丢弃，不覆盖已经上屏的新状态**。比的是本页自己的水位，不是
+   * 全局那把——收件箱是过滤视图，去比全局快照的水位会把合法响应丢掉（见文件头）。
    *
    * 查询失败**只提示、不刷新**：这里调 `refresh()` 会自己触发自己（失效 ⇒ 重拉 ⇒ 又失败）。
    * 所以查询路径用 `toIpcError(cause).message`，命令路径才走 `reportCommandError`。
@@ -119,14 +137,17 @@ export function Inbox() {
         }),
         listSelectableProjects({ expected_data_epoch: epoch }),
       ]);
-      if (domainState.isStaleResponse(found, epoch)) return;
-      if (domainState.isStaleResponse(selectable, epoch)) return;
+      if (watermark.isStale(found, epoch)) return;
+      if (watermark.isStale(selectable, epoch)) return;
+      // 「收到」≠「用上」：真的上屏之后才推进本视图水位（只前进，取两条里较新的那一版）。
+      watermark.applied(found);
+      watermark.applied(selectable);
       setTasks(found.tasks);
       setProjects(selectable.items);
     } catch (cause) {
       setError(toIpcError(cause).message);
     }
-  }, [epoch]);
+  }, [epoch, watermark]);
 
   // 事件只作缓存失效：`invalidated` 一变就重拉（挂载时也跑一次）。
   useEffect(() => {

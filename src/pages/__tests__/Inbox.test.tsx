@@ -37,7 +37,9 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 
 import { Inbox } from "../Inbox";
 import { domainState } from "../../state/domainState";
+import { EVENT_DOMAIN_CHANGED, type TaskQueryResult } from "../../types/ipc";
 import {
+  AT,
   EPOCH,
   createBackend,
   failure,
@@ -56,6 +58,19 @@ async function mountInbox(): Promise<void> {
     await domainState.start();
   });
   await waitFor(() => expect(backend.count("list_tasks")).toBeGreaterThan(0));
+}
+
+/** 一条 `domain.changed`（同 epoch 的下一版 ⇒ 闸门判 `apply`，页面只当作失效）。 */
+async function changed(revision: number): Promise<void> {
+  await act(async () => {
+    events.emit({
+      data_epoch: EPOCH,
+      event: EVENT_DOMAIN_CHANGED,
+      revision,
+      at: AT,
+      payload: {},
+    });
+  });
 }
 
 /** 在捕获输入框里敲一句话并回车。 */
@@ -297,6 +312,69 @@ describe("收件箱：F-002 任务理清", () => {
     fireEvent.click(within(row).getByTestId("clarify-t-1"));
 
     expect((await screen.findByRole("alert")).textContent).toBe("任务已被别处改动，请刷新后重试。");
+    await waitFor(() => expect(backend.count("list_tasks")).toBe(before + 1));
+  });
+});
+
+describe("收件箱：旧响应与水位（fix round 2）", () => {
+  it("旧响应（同 epoch、revision 更旧）不得覆盖已经上屏的收件箱列表", async () => {
+    // 反向验证：把 `load()` 改回全局 `domainState.isStaleResponse` ⇒ 全局水位没人推，
+    // 那条第 5 版的迟到响应**判不出旧**、直接覆盖屏幕上的第 6 版 ⇒ 后两句红。
+    //
+    // 两个响应的"问题"完全相同（同一组条件、同一页），所以只有版本判据能区分它们——
+    // 这正是本页要用**本视图**水位的原因（收件箱是过滤视图，不能拿全局快照的水位比）。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-old", title: "旧列表", status: "Inbox" })];
+    const first = backend.holdNext<TaskQueryResult>("list_tasks");
+    await mountInbox();
+
+    // 一条通知 ⇒ 缓存失效 ⇒ 同一条件重拉；这一次服务端已经到了第 6 版
+    backend.revision = 6;
+    backend.tasks = [task({ id: "t-new", title: "新列表", status: "Inbox" })];
+    await changed(6);
+    expect(await screen.findByText("新列表")).not.toBeNull();
+
+    // 旧响应现在才回来（第 5 版、旧内容）
+    await act(async () => {
+      first.resolve({
+        tasks: [task({ id: "t-old", title: "旧列表", status: "Inbox" })],
+        total: 1,
+        data_epoch: EPOCH,
+        revision: 5,
+      });
+    });
+
+    expect(screen.queryByText("旧列表")).toBeNull();
+    expect(screen.getByText("新列表")).not.toBeNull();
+  });
+
+  it("收件箱的响应**不推全局水位**——同 revision 的通知仍必须让它重拉", async () => {
+    // 反向验证（与 Task 5 的 I1-A 同型）：把 `load()` 改成"全局判旧 + `markApplied`"
+    // ⇒ 全局水位被这条**过滤视图**推到第 6 版 ⇒ 下面那条同 revision(6) 的通知被判
+    // "快照已包含"而 drop ⇒ 三句断言全红（水位被推走、失效计数不动、不再重拉）。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-1", title: "第一版", status: "Inbox" })];
+    const first = backend.holdNext<TaskQueryResult>("list_tasks");
+    await mountInbox();
+
+    backend.revision = 6;
+    await act(async () => {
+      first.resolve({
+        tasks: [task({ id: "t-1", title: "第一版", status: "Inbox" })],
+        total: 1,
+        data_epoch: EPOCH,
+        revision: 6,
+      });
+    });
+    expect(await screen.findByText("第一版")).not.toBeNull();
+    // 镜像那把水位是**权威快照**的水位：仍是握手时的第 5 版，收件箱的读推不动它
+    expect(domainState.getView().revision).toBe(5);
+
+    const before = backend.count("list_tasks");
+    const invalidated = domainState.getView().invalidated;
+    await changed(6);
+
+    expect(domainState.getView().invalidated).toBe(invalidated + 1);
     await waitFor(() => expect(backend.count("list_tasks")).toBe(before + 1));
   });
 });

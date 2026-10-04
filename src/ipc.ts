@@ -379,8 +379,12 @@ export interface FreshnessGate {
    * 把它拉回去；换 epoch 则重新起算；应用一份到第 N 版的快照也会把缺口标记清掉
    * （`events.rs`：「一份权威快照就是重新同步本身」）。
    *
-   * ⚠️ **本阶段没有生产调用者**（登记在计划的「遗留与边界」）：页面（Task 3/5）应用
-   * 自己那份带 epoch 的查询响应时会用它；在那之前它与 `onQueryResponse` 一样只被用例驱动。
+   * ⚠️ **当前没有生产调用者**：页面（`Inbox` / `Tasks` / `Projects`）应用自己那份带 epoch 的
+   * **过滤 / 分页视图**时**不能**用它——那会把全局水位推平（同 `revision` 的
+   * `domain.changed` 被判"快照已包含"而丢弃、30 秒校验的 `seenRevision` 失去判据），
+   * 页面用的是 `src/components/viewWatermark.ts` 的本视图水位（P7 Task 5 fix round 1
+   * 的评审 I1）。它与 `onQueryResponse` 一样目前只被用例驱动，**登记**：留给将来真的
+   * "全量快照型"视图，或在下一次清理时删除。
    */
   markApplied(stamp: VersionStamp): void;
   /**
@@ -530,6 +534,11 @@ export function createFreshnessGate(): FreshnessGate {
  *
  * 只判断、不改水位：水位由调用方在**真的把响应应用进镜像**之后
  * {@link FreshnessGate.markApplied}。两者分开是刻意的——"收到了"不等于"用上了"。
+ *
+ * ⚠️ **当前只有测试在用**（`src/__tests__/ipc.test.ts`，生产零调用）：页面这一层改用
+ * `src/components/viewWatermark.ts` 的本视图水位之后，它没有生产调用方了（验收记录把它
+ * 列在「P8 可复用面」里）。**登记、不删**——它的语义（"发一次请求、旧了就交回 `null`"）
+ * 仍是对的，只是眼下没有合适的调用方。
  *
  * 失败照常抛出 {@link IpcError}（迟到判定不吞错误）。
  */

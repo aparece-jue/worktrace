@@ -159,9 +159,10 @@ export interface DomainState {
    * 的投影。除此之外不动任何状态：换 epoch 的整体失效仍由 {@link verify} 那条路走，
    * 调用方不该也不能用这个入口改库身份。
    *
-   * 当前**生产调用者为 0**（镜像自己的快照走 `applyStamp`）；调用它的是 Task 6a 的
-   * 双窗口实验替身（`src/state/__tests__/syncLab.ts` 的 `createScreen`，它的收敛断言
-   * 依赖"读回推进全局水位"这条旧口径，登记给 6a/P8 一起对齐）。
+   * 当前**调用者为 0**：镜像自己的快照走 `applyStamp`；三个页面用各自的视图水位；
+   * Task 6a 的实验替身自 `684d495` 起也改用 `createViewWatermark`。只剩
+   * `src/state/__tests__/domainState.test.ts` 里一条用例在驱动它。**登记**（不删）：
+   * 留给将来真的"全量快照型"视图；在那之前它是一条没有生产调用方的公开接口。
    */
   markApplied(stamp: VersionStamp): void;
 }
