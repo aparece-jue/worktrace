@@ -43,27 +43,41 @@
 
 ## Task 0：平台接线与启动顺序
 
+> **落地状态（2026-10-04，Task 6b 核对：9/10 勾选）**：提交 `08be12b`（原语、启动顺序、
+> 单实例、显式退出）+ `38094fc`（周期采样与事件协议），fix round 1 `d64caa9`，计划 `4845d51`；
+> 门禁 357 → **393 → 394 passed / 0 failed**，六条分层规则见 Task 1（platform 与入口点两条
+> 正是本任务加的）。**唯一未勾**：平台事件适配——V0.1 里**没有任何平台事件源**（锁屏/休眠/
+> 唤醒/改时的监听器不存在），本任务只登记了实机步骤，**结论为空**，归 P8 复核。
+
 文件：`src-tauri/src/platform/single_instance.rs`（新建）、`src-tauri/src/platform/scheduler.rs`（新建）、`src-tauri/src/platform/mod.rs`（登记两个新模块）、`src-tauri/src/storage/run_repo.rs`（新建：`application_run` 原语）、`src-tauri/src/storage/session_repo.rs`（新增按 `run_id` 过滤的查询）、`src-tauri/src/storage/mod.rs`（登记）、`src-tauri/src/services/bootstrap.rs`（新建：唯一启动入口）、`src-tauri/src/services/events.rs`（新建：事件信封与去重）、`src-tauri/src/services/mod.rs`（登记）、`src-tauri/tests/startup_order.rs`、`src-tauri/tests/periodic_sampling.rs`、`src-tauri/tests/event_protocol.rs`、`src-tauri/tests/exit.rs`（四个都新建）。
 
-- [ ] **启动顺序固定为**（01 §2 + 02 §4，不得调整）：① **单实例检查**（必须**先于**持久化初始化）→ ② 打开库并迁移 → ③ 新建 `application_run`（每次成功启动一行）→ ④ 恢复扫描（P3；未完成时见下方门禁）→ ⑤ 启动协调器（P2）与**周期采样驱动** → ⑥ 开窗口。`lib.rs` **不得**自己重排这段顺序；入口只有 `services/bootstrap.rs` 一个（P6 后续扩展同一入口）。**副作用次序用注入的探针记录并在 `tests/startup_order.rs` 断言调用次序**——不是断言"没崩"。
-- [ ] **单实例**（`platform/single_instance.rs`，`platform/` 叶子、不含业务规则）：OS 级文件锁，锁文件用既有的 `platform::paths::instance_lock_file()`（`src-tauri/src/platform/paths.rs:40`，与库同目录）。拿不到锁的进程**通知既有实例后退出**：**不打开库、不迁移、不建 `application_run`、不启动计时**（F-016）。"唤起既有主窗"是**通知**，与锁分离。**交付边界（2026-10-04 实施后订正）**：Task 0 只交付**发送侧**（`single_instance::request_activation`）与**接收原语**（`take_activation_request`）；把请求变成"抬起主窗"的消费侧需要窗口对象，归 **Task 4**——因此本任务结束时 `take_activation_request` 还没有生产调用者，这是分割点，不是遗漏。**已闭环（2026-10-04 Task 4 落地）**：消费侧是 `platform::window::spawn_activation_watcher`（轮询请求文件 → `plan_activation` → 抬起/重建主窗），由 `lib.rs` 在启动成功后挂上；决策函数的断言在 `tests/shell_lifecycle.rs`，真机步骤在 `src-tauri/tests/manual-shell.md` §3。
-- [ ] **`application_run` 原语**（`storage/run_repo.rs` 新建）：表在 P1 的 schema 里就有（`src-tauri/src/storage/schema_v1.rs:28`，字段 `id`/`started_at`/`clean_exit_at`），但**全仓没有任何 storage 原语**（`src-tauri/src/storage/` 下无 `run_repo.rs`）。补最小三个：建 run、读 run、写 `clean_exit_at` 结束 run；都接受调用方的 `&Transaction`/`&Connection`，**事务由 `services/bootstrap.rs` 拥有**。
-- [ ] **显式退出（本计划建立的入口，P6 后续硬化）**：**先停定时器（不进事务）**，其余四项——结束 `running`/`paused` 会话、写 `clean_exit_at`、保存 revision、清活动阶段（V0.1 没有阶段列，这一项到 V0.2 番茄钟接入时才有实际写入）——在**同一个事务**内完成。**"停定时器"为什么不在事务里（2026-10-04 实施后订正）**：采样驱动取的是同一把 `Mutex<AppState>`，在事务里 join 采样线程会与持锁的退出路径互锁；先 `stop()`（置位 + join）再开事务既避免互锁，也保证退出事务之后不会再有一拍落进来。**`recovering` 记录保留不清**（02 §4 原文：「显式退出同事务结束 running/paused、保存 revision 与 clean_exit_at；recovering 记录保留」）。不是杀进程；长事务不得跑在 UI 回调里。Task 4 的托盘"退出"与 P8 都复用这一条入口。
-- [ ] **周期采样驱动**（`platform/scheduler.rs` 新建）：**窗口全关仍在跑**——定时器不得挂在任何窗口对象上（F-009）。每次触发走与用户命令**同一条串行边界**（同一协调器入口）；**空闲（无活动会话）时不产生任何写入**（不空转制造 revision）。
-- [ ] **串行执行边界（D6 裁决，写死）**：单一 `Mutex<AppState{ db, coordinator }>`，或等价的**专用工作线程 + channel**——**二选一由实施者在 Task 0 定稿，并把选择理由写进 `src-tauri/IMPLEMENTATION-NOTES.md`**（那里已有 P1 的实测对照：两种边界同量级，差别在阻塞落在谁的线程上）。硬约束与选型无关：命令一律 `async`；**不得在 UI 回调里跑长事务**；**`Connection` 不得跨 `await` 持有**（依据 `src-tauri/IMPLEMENTATION-NOTES.md` §2）。
-- [ ] **事件信封与四条去重规则**（`services/events.rs` 新建）：信封字段固定 `data_epoch`、`event`、`revision`、`at`（Unix 毫秒）、`payload`（00 §5）；**广播按提交顺序**；广播失败只记诊断、不回滚已提交业务。四条规则各一条断言：① 新 `data_epoch` 的权威快照使**全部**业务/计时缓存失效，**未知 epoch 的通知只触发重新握手**；② 应用快照后丢弃**同 epoch 且 `revision <=` 快照版本**的通知；③ 查询响应比已应用/所需版本旧时**不得覆盖**；④ 序号跳号/乱序无法证明一致时**取新快照**。P6 沿用同一协议补故障路径（P6 Task 3），**不新建第二套**。
-- [ ] **P3 未完成时的开发验证库门禁（具体化）**：只在独立开发验证库演示；启动时按 **`run_id <> 当前 run`** 查三件事——未结束会话、待确认区间、不变量损坏——**命中任一 ⇒ 拒绝业务计时并提示需完成恢复**，不自动修复、不忽略历史。⚠️ **现有 `session_repo::running_foreground`（`src-tauri/src/storage/session_repo.rs:413`）不带 `run_id`**，需要一条按 `run_id <> ?` 过滤的新查询（本任务在 `storage/session_repo.rs` 新增，`tests/startup_order.rs` 覆盖）；待确认区间/不变量损坏所需的查询同样按现有仓储补齐。P3 完成后在**同一 bootstrap** 接入真实扫描（四类判定归 P3）。
-- [ ] **平台事件适配**（正式锁屏/休眠/唤醒/时钟变更）：事件通知进入 P2 **同一串行入口**；晚到或边界不可信按 P2 恢复规则处理，**不另写一套判断**。到达延迟与"关窗后事件仍可达"属**实机步骤**（见文末「仍待与归属」），不在本任务用单元测试冒充。
-- [ ] **测试**（`tests/{startup_order,periodic_sampling,event_protocol,exit}.rs`）：启动副作用次序（探针）；第二次启动**不打开库、不迁移、不建 `application_run`**；锁持有者被强杀后新进程能拿到锁；**无窗口引用时周期采样仍被驱动**且空闲不写库；事件四条去重规则各一例；显式退出事务结束 `running`/`paused` 且写 `clean_exit_at`，**`recovering` 行仍在**。
-- [ ] **本阶段不做（依赖 P3/P5/P6）**：正式恢复扫描与四类判定（P3）；单实例/启动的故障路径硬化与锁异常释放（P6 Task 1）；维护态隔离与 P6 新增的维护态错误码（P6 Task 2/4）；备份与恢复（P6 Task 4）；平台事件实机验收（本文末登记，P8 复核）。
+- [x] **启动顺序固定为**（01 §2 + 02 §4，不得调整）：① **单实例检查**（必须**先于**持久化初始化）→ ② 打开库并迁移 → ③ 新建 `application_run`（每次成功启动一行）→ ④ 恢复扫描（P3；未完成时见下方门禁）→ ⑤ 启动协调器（P2）与**周期采样驱动** → ⑥ 开窗口。`lib.rs` **不得**自己重排这段顺序；入口只有 `services/bootstrap.rs` 一个（P6 后续扩展同一入口）。**副作用次序用注入的探针记录并在 `tests/startup_order.rs` 断言调用次序**——不是断言"没崩"。
+- [x] **单实例**（`platform/single_instance.rs`，`platform/` 叶子、不含业务规则）：OS 级文件锁，锁文件用既有的 `platform::paths::instance_lock_file()`（`src-tauri/src/platform/paths.rs:40`，与库同目录）。拿不到锁的进程**通知既有实例后退出**：**不打开库、不迁移、不建 `application_run`、不启动计时**（F-016）。"唤起既有主窗"是**通知**，与锁分离。**交付边界（2026-10-04 实施后订正）**：Task 0 只交付**发送侧**（`single_instance::request_activation`）与**接收原语**（`take_activation_request`）；把请求变成"抬起主窗"的消费侧需要窗口对象，归 **Task 4**——因此本任务结束时 `take_activation_request` 还没有生产调用者，这是分割点，不是遗漏。**已闭环（2026-10-04 Task 4 落地）**：消费侧是 `platform::window::spawn_activation_watcher`（轮询请求文件 → `plan_activation` → 抬起/重建主窗），由 `lib.rs` 在启动成功后挂上；决策函数的断言在 `tests/shell_lifecycle.rs`，真机步骤在 `src-tauri/tests/manual-shell.md` §3。
+- [x] **`application_run` 原语**（`storage/run_repo.rs` 新建）：表在 P1 的 schema 里就有（`src-tauri/src/storage/schema_v1.rs:28`，字段 `id`/`started_at`/`clean_exit_at`），但**全仓没有任何 storage 原语**（`src-tauri/src/storage/` 下无 `run_repo.rs`）。补最小三个：建 run、读 run、写 `clean_exit_at` 结束 run；都接受调用方的 `&Transaction`/`&Connection`，**事务由 `services/bootstrap.rs` 拥有**。
+- [x] **显式退出（本计划建立的入口，P6 后续硬化）**：**先停定时器（不进事务）**，其余四项——结束 `running`/`paused` 会话、写 `clean_exit_at`、保存 revision、清活动阶段（V0.1 没有阶段列，这一项到 V0.2 番茄钟接入时才有实际写入）——在**同一个事务**内完成。**"停定时器"为什么不在事务里（2026-10-04 实施后订正）**：采样驱动取的是同一把 `Mutex<AppState>`，在事务里 join 采样线程会与持锁的退出路径互锁；先 `stop()`（置位 + join）再开事务既避免互锁，也保证退出事务之后不会再有一拍落进来。**`recovering` 记录保留不清**（02 §4 原文：「显式退出同事务结束 running/paused、保存 revision 与 clean_exit_at；recovering 记录保留」）。不是杀进程；长事务不得跑在 UI 回调里。Task 4 的托盘"退出"与 P8 都复用这一条入口。
+- [x] **周期采样驱动**（`platform/scheduler.rs` 新建）：**窗口全关仍在跑**——定时器不得挂在任何窗口对象上（F-009）。每次触发走与用户命令**同一条串行边界**（同一协调器入口）；**空闲（无活动会话）时不产生任何写入**（不空转制造 revision）。
+- [x] **串行执行边界（D6 裁决，写死）**：单一 `Mutex<AppState{ db, coordinator }>`，或等价的**专用工作线程 + channel**——**二选一由实施者在 Task 0 定稿，并把选择理由写进 `src-tauri/IMPLEMENTATION-NOTES.md`**（那里已有 P1 的实测对照：两种边界同量级，差别在阻塞落在谁的线程上）。硬约束与选型无关：命令一律 `async`；**不得在 UI 回调里跑长事务**；**`Connection` 不得跨 `await` 持有**（依据 `src-tauri/IMPLEMENTATION-NOTES.md` §2）。
+- [x] **事件信封与四条去重规则**（`services/events.rs` 新建）：信封字段固定 `data_epoch`、`event`、`revision`、`at`（Unix 毫秒）、`payload`（00 §5）；**广播按提交顺序**；广播失败只记诊断、不回滚已提交业务。四条规则各一条断言：① 新 `data_epoch` 的权威快照使**全部**业务/计时缓存失效，**未知 epoch 的通知只触发重新握手**；② 应用快照后丢弃**同 epoch 且 `revision <=` 快照版本**的通知；③ 查询响应比已应用/所需版本旧时**不得覆盖**；④ 序号跳号/乱序无法证明一致时**取新快照**。P6 沿用同一协议补故障路径（P6 Task 3），**不新建第二套**。
+- [x] **P3 未完成时的开发验证库门禁（具体化）**：只在独立开发验证库演示；启动时按 **`run_id <> 当前 run`** 查三件事——未结束会话、待确认区间、不变量损坏——**命中任一 ⇒ 拒绝业务计时并提示需完成恢复**，不自动修复、不忽略历史。⚠️ **现有 `session_repo::running_foreground`（`src-tauri/src/storage/session_repo.rs:413`）不带 `run_id`**，需要一条按 `run_id <> ?` 过滤的新查询（本任务在 `storage/session_repo.rs` 新增，`tests/startup_order.rs` 覆盖）；待确认区间/不变量损坏所需的查询同样按现有仓储补齐。P3 完成后在**同一 bootstrap** 接入真实扫描（四类判定归 P3）。
+- [ ] **平台事件适配（未达成，见上方落地状态）**（正式锁屏/休眠/唤醒/时钟变更）：事件通知进入 P2 **同一串行入口**；晚到或边界不可信按 P2 恢复规则处理，**不另写一套判断**。到达延迟与"关窗后事件仍可达"属**实机步骤**（见文末「仍待与归属」），不在本任务用单元测试冒充。
+- [x] **测试**（`tests/{startup_order,periodic_sampling,event_protocol,exit}.rs`）：启动副作用次序（探针）；第二次启动**不打开库、不迁移、不建 `application_run`**；锁持有者被强杀后新进程能拿到锁；**无窗口引用时周期采样仍被驱动**且空闲不写库；事件四条去重规则各一例；显式退出事务结束 `running`/`paused` 且写 `clean_exit_at`，**`recovering` 行仍在**。
+- [x] **本阶段不做（依赖 P3/P5/P6）**：正式恢复扫描与四类判定（P3）；单实例/启动的故障路径硬化与锁异常释放（P6 Task 1）；维护态隔离与 P6 新增的维护态错误码（P6 Task 2/4）；备份与恢复（P6 Task 4）；平台事件实机验收（本文末登记，P8 复核）。
 
 ## Task 1：Tauri 命令接线与 DTO 形状
 
+> **落地状态（2026-10-04，Task 6b 核对：全部勾选）**：Rust 半边 `580b4b5`（serde 形状 +
+> `TaskQueryRequest` + 15 份快照）/ `12f0453`（24 条命令 + `lib.rs` 组合根 + `identifier`）/
+> `3669b0e` / fix round 1 `695cd57`（命令体抽 `*_impl`，24 条逐条覆盖）/ `874d9b2`
+> （`domain.changed` 发送侧）/ `fc1f2f9`（分层门禁裸词化）；前端半边 `2fc8a41` / `b5ac956` /
+> `7d8f3eb` / `865b2f4` / fix round 1 `428e639` / `e0912b0`。门禁 404 → **431** → **437**
+> passed / 0 failed；前端 3 → **18** 条。**两处计划自身的口径已在 fix round 订正**（枚举
+> JSON 大小写、`StartRequest` 的 `Deserialize`），照原文写会产出永远不命中的 TS 联合类型。
+
 文件：`src-tauri/src/commands/mod.rs`（加 IPC 命令与入参 DTO；**先集中在一个文件**，超出可读规模再按域拆）、`src-tauri/src/lib.rs`（注册真实 handler、删 `greet`、`setup` 只调 bootstrap）、`src-tauri/src/services/catalog.rs`（**D3 的 IPC 请求 DTO** + serde）、`src-tauri/src/services/timer/snapshot.rs`、`src-tauri/src/services/timer/coordinator.rs`、`src-tauri/src/services/daily_plan.rs`（以上三个加 serde）、`src-tauri/src/services/handshake.rs`（核对：`RevisionSnapshot` 已有 `Serialize`）、`src-tauri/src/storage/project_repo.rs`、`src-tauri/src/storage/tag_repo.rs`、`src-tauri/src/storage/task_repo.rs`（行类型加 serde）、`src-tauri/src/domain/task.rs`、`src-tauri/src/domain/project.rs`、`src-tauri/src/domain/tag.rs`、`src-tauri/src/domain/session.rs`（枚举的 `Serialize` 实现）、`src-tauri/src/error.rs`（核对：`ErrorResponse`/`ErrorAuthority`/`RecordVersion` 已有 `Serialize`，`AuthorityTarget` 已有 `Deserialize`）、`src-tauri/tests/ipc_snapshots.rs`（新建）、`src-tauri/tauri.conf.json`（D4 的 `identifier`）、仓库根前端 `src/ipc.ts`（**新建**：命令转发、错误规范化与迟到响应丢弃）、`src/types/ipc.ts`（**新建、手写**）、`src/types/__snapshots__/*.json`（新建）、`src/App.tsx`、`src/main.tsx`、`index.html`。
 
-- [ ] `commands/` 层**不接受 `Connection`**（总纲 §9）：它只做参数反序列化、调用 `services::*`、把 `Result<T, AppError>` 映射成前端可用的形状。事务与 epoch/version 校验由服务与 `storage::guards` 负责。命令层只 `import` `services::*` + `crate::envelope` + `crate::error`（分层门禁 `commands 禁 storage::`）。
-- [ ] 启动只调 **Task 0 建立的 `services/bootstrap.rs`** 一个入口；`lib.rs` 不得自己重排"单实例 → 库 → run → 扫描 → 协调器 → 窗口"的顺序。
-- [ ] **DTO 形状（D1 裁决，取代原先的「生成器」口径）**：**不上 DTO 生成器**——`ts-rs`/`specta`/`typeshare` 在本机**两侧 cargo 缓存都是 0 命中**（离线取不到），引入需联网并**经用户确认**。改为：
+- [x] `commands/` 层**不接受 `Connection`**（总纲 §9）：它只做参数反序列化、调用 `services::*`、把 `Result<T, AppError>` 映射成前端可用的形状。事务与 epoch/version 校验由服务与 `storage::guards` 负责。命令层只 `import` `services::*` + `crate::envelope` + `crate::error`（分层门禁 `commands 禁 storage::`）。
+- [x] 启动只调 **Task 0 建立的 `services/bootstrap.rs`** 一个入口；`lib.rs` 不得自己重排"单实例 → 库 → run → 扫描 → 协调器 → 窗口"的顺序。
+- [x] **DTO 形状（D1 裁决，取代原先的「生成器」口径）**：**不上 DTO 生成器**——`ts-rs`/`specta`/`typeshare` 在本机**两侧 cargo 缓存都是 0 命中**（离线取不到），引入需联网并**经用户确认**。改为：
   - **命令层显式声明 serde DTO**：请求 `Deserialize`、响应 `Serialize`；
   - **服务结果类型加 `Serialize`**：`ProjectList`/`TagList`（`services/catalog.rs:233`/`:245`）、`TaskQueryResult`（`:616`）、`DailyPlanView`（`services/daily_plan.rs:137`）、`TimerSnapshot`（`services/timer/snapshot.rs:14`）、`CommandOutcome`（`services/timer/coordinator.rs:70`），以及写命令返回的 Change 家族（`ProjectChange`/`TaskProjectChange`/`TaskChange`/`TagChange`/`TaskTagsChange`/`DailyPlanChange`）；
   - **请求类型加 `Deserialize`**：`SessionRequest`/`ResumeRequest`（`services/timer/coordinator.rs:52`/`:60`）、`DailyPlanQuery`（`services/daily_plan.rs:129`）、`ProjectTarget`/`ProjectSelector`/`TaskQueryRequest`（`services/catalog.rs`）。**`StartRequest` 不加**（2026-10-04 实施后订正，见计划末尾「Task 1 的 Rust 半边已实现」一节）：它的 IPC 形状是「`mode`/`timer_kind` 为字符串」，给它加 `Deserialize` 就得给这两个枚举派生反序列化，而那条路径拿不到 `ErrorResponse.code`（见下面「非法参数」那条）；本仓又不留「定义了没人调」的 API，所以不造这份死面——IPC 侧收的是 `commands::StartTimerRequest`（字符串字段），命令体解析后再构造 `StartRequest`；
@@ -72,76 +86,98 @@
   - **前端类型手写** `src/types/ipc.ts`（不手写第二份业务规则）；
   - **一致性由一条 Rust 集成用例钉住**：`tests/ipc_snapshots.rs` 把每个响应 DTO 序列化成 JSON，与 `src/types/__snapshots__/*.json` **逐字节比对**（`serde_json` 已在依赖里，**零新增依赖**）。改了 Rust 类型忘了改前端类型或快照 ⇒ 红灯。**替代物是这条用例，不是生成器。** 快照按 LF 存放（仓库根 `.gitattributes` 钉了 `text eol=lf`——本仓库 `core.autocrlf=true`，不钉的话换台机器 checkout 出 CRLF 会让逐字节比对在没改任何类型的情况下变红）；
   - **Task 1b 的验收项（这条一致性承诺的另一半，2026-10-04 登记）**：快照只钉住 **Rust ↔ JSON**，手写的 `src/types/ipc.ts` 与快照之间**没有机械联系**。Task 1b 必须补一条 vitest 用例：读 `src/types/__snapshots__/*.json`，对每个类型做**键集合 + 字面量联合**的类型级断言（例如状态联合类型必须与快照里出现过的取值集合一致）。没有这条，「改了 Rust 类型忘了改前端类型」仍然只能靠人记得。
-- [ ] **`TaskQuery` 的 IPC 口（D3 裁决）**：`TaskQuery` 的字段是 `TaskFilter`/`Page`（`src-tauri/src/storage/task_repo.rs:151`/`:163`/`:175`），命令层构造它必踩 `commands 禁 storage::`。在 `services::catalog` 新增 IPC 友好的请求 DTO **`TaskQueryRequest`**：
+- [x] **`TaskQuery` 的 IPC 口（D3 裁决）**：`TaskQuery` 的字段是 `TaskFilter`/`Page`（`src-tauri/src/storage/task_repo.rs:151`/`:163`/`:175`），命令层构造它必踩 `commands 禁 storage::`。在 `services::catalog` 新增 IPC 友好的请求 DTO **`TaskQueryRequest`**：
   - `statuses: Vec<String>`——每个值过 `TaskStatus::parse`（`src-tauri/src/domain/task.rs:51`）校验，非法值 ⇒ 稳定错误码；
   - `project: ProjectSelector`——三值，对应 `task_repo::ProjectFilter`（`Any` / `None` / `Id(String)`）；JSON 形状固定 `"any"` / `"none"` / `{"id":"<project_id>"}`；
   - `context_tag_id: Option<String>`（必须是 `Context` 类标签，那条拒绝留在服务入口）；
   - `limit: i64`、`offset: i64`（1..=100 / >=0，越界由既有的 `Page` 校验拒绝）；
   - `expected_data_epoch: String`。
   并实现 `impl TryFrom<TaskQueryRequest> for TaskQuery`，内部构造 `TaskQuery` 后仍走**唯一那条读路径** `catalog::list_tasks_filtered`（`services/catalog.rs:636`）——不新增第二条查询实现。**读路径的项目状态用 `ProjectStatus::parse`**（`src-tauri/src/domain/project.rs:41`），**不是**写路径的 `catalog::parse_project_status`（`services/catalog.rs:76`，它额外拒绝 V0.1 不写的 `done`）。
-- [ ] 命令**按意图命名、一次完成业务事务**（00 §4）；Today 等聚合视图一次返回，列表避免 N+1。**Today 只由两条命令组合**：`plan_for` + `Coordinator::snapshot`（见「边界」节），不在前端或命令层另做聚合。
-- [ ] 所有修改类命令都带 `expected_data_epoch`，更新既有对象带 `expected_row_version`；`WriteEnvelope` 从 **`crate::envelope`** 引用（权威路径在 crate 根，`commands::envelope` 的转发路径已删），命令层用 `for_create`/`for_update` 构造——`src/envelope.rs` 的注释把 IPC 定为**规范构造点**。
-- [ ] **错误透传（R3 裁决）**：现存**五**个码 `RECOVERY_REQUIRED` / `DATA_EPOCH_MISMATCH` / `VERSION_CONFLICT` / `DOMAIN_ERROR` / `STORAGE_ERROR`（`src-tauri/src/error.rs:41`–`:45`）原样透传到前端，载荷遵循共享 `ErrorResponse{code,message,authority,requires_handshake}`（`src/error.rs:189`）。失败响应统一走 `services::error_response::capture_error_response`（`src-tauri/src/services/error_response.rs:29`），在**原事务结束后、同一串行边界内**捕获，不另调 `timer.snapshot` 补版本（总纲 §10 门禁第 4 项）。**`DATA_RESTORE_IN_PROGRESS` 由 P6 加入后再登记为透传项**（P6 Task 4；P7 不实现、不声称）。
-- [ ] **前端外壳与 `greet` 的去留（R2）**：`greet` 命令（`src-tauri/src/lib.rs:22`，注册在 `:30`）与 `App.tsx` 的模板连接页（仓库根 `src/App.tsx:15` 调 `invoke("greet")`）**在 P7 一并替换**：`lib.rs` 只注册真实命令、删掉 `greet`；`src/App.tsx` 改为真实首页外壳（固定布局 + 页面挂载）；`src/main.tsx`（antd `ConfigProvider`）与 `index.html`（标题/挂载点）按真实首页调整，保留这两个文件的现有职责。总纲 §5 第 7 条写的"既有前端文件与 `greet` 命令保留不动，**直到 P7 明确处理**"——本计划就是那次明确处理。
-- [ ] **`APP_ID` 与 `identifier` 统一（D4 裁决）**：`src-tauri/tauri.conf.json:5` 的 `identifier` 由 `com.worktrace.app` 改为 **`com.worktrace.desktop`**，与 `platform::paths::APP_ID`（`src-tauri/src/platform/paths.rs:9`）一致。**库路径不动**：数据目录仍是 `%APPDATA%\com.worktrace.desktop\`，`worktrace.db`（`paths.rs:33`）与同目录的 `instance.lock`（`paths.rs:40`）保持现状；P6 的备份/日志目录沿用同一个 `app_data_dir()`，**不因改名迁移任何数据**（P7 是首次接线，没有待迁移的旧库）。
-- [ ] **非法参数必须拿到稳定错误码**：IPC 形状里 `mode`/`timer_kind`/`statuses` 一律是**字符串**，在命令体内用 `SessionMode::parse`/`TimerKind::parse`（`src-tauri/src/domain/session.rs:82`/`:107`）、`TaskStatus::parse` 校验后再构造服务请求——**不要**依赖 serde 的枚举反序列化：它的错误拿不到 `ErrorResponse` 的 `code`，非法取值会退化成 Tauri 的反序列化错误。请求类型上的 `Deserialize` 因此只用于**已是强类型**的入参（测试与内部复用），IPC 路径不依赖它。
-- [ ] 测试：命令层不直接引用 `rusqlite`/`storage::`（`src-tauri/scripts/check-layers.ps1` + grep 自查）；未知/非法参数返回稳定错误码而不是 panic；每个响应 DTO 的 JSON 快照与 `src/types/__snapshots__/*.json` 一致；`TaskQueryRequest` 的非法状态串与越界分页 ⇒ 领域/校验错误且**零写入**。
-- [ ] **写命令广播 `domain.changed`（2026-10-04 实施，fix round 1 裁决）**：00 §5 的「同一 epoch 内一次业务写对应一条 `domain.changed`」。落点是命令层：拿到写结果后、**释放锁之前**（同一临界区，所以「广播顺序 = 提交顺序」）广播一条，**载荷就是该命令的响应 DTO**。**仅 `Changed` 才广播**——`Unchanged`（改同名、重复打标、重复加入计划）没有 revision 变化，也就没有缓存要失效；判据是 `storage::WriteOutcome::into_parts()` 的第二个返回值。**响应形状不变**：不加 `{changed, value}` 信封（那会改 15 份快照，而且规格没给它位置），这一位只用于「要不要广播」这个内部判断。广播失败只记诊断，不影响命令结果、不回滚已提交业务。计时命令（`start`/`pause`/`resume`/`finish`）没有幂等重复这一支，能走到广播就说明跃迁真的提交了。
-- [ ] **本阶段不做（依赖 P3/P5/P6）**：恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；维护态分流（错误码由 P6 引入、展示由 P8 做）。
+- [x] 命令**按意图命名、一次完成业务事务**（00 §4）；Today 等聚合视图一次返回，列表避免 N+1。**Today 只由两条命令组合**：`plan_for` + `Coordinator::snapshot`（见「边界」节），不在前端或命令层另做聚合。
+- [x] 所有修改类命令都带 `expected_data_epoch`，更新既有对象带 `expected_row_version`；`WriteEnvelope` 从 **`crate::envelope`** 引用（权威路径在 crate 根，`commands::envelope` 的转发路径已删），命令层用 `for_create`/`for_update` 构造——`src/envelope.rs` 的注释把 IPC 定为**规范构造点**。
+- [x] **错误透传（R3 裁决）**：现存**五**个码 `RECOVERY_REQUIRED` / `DATA_EPOCH_MISMATCH` / `VERSION_CONFLICT` / `DOMAIN_ERROR` / `STORAGE_ERROR`（`src-tauri/src/error.rs:41`–`:45`）原样透传到前端，载荷遵循共享 `ErrorResponse{code,message,authority,requires_handshake}`（`src/error.rs:189`）。失败响应统一走 `services::error_response::capture_error_response`（`src-tauri/src/services/error_response.rs:29`），在**原事务结束后、同一串行边界内**捕获，不另调 `timer.snapshot` 补版本（总纲 §10 门禁第 4 项）。**`DATA_RESTORE_IN_PROGRESS` 由 P6 加入后再登记为透传项**（P6 Task 4；P7 不实现、不声称）。
+- [x] **前端外壳与 `greet` 的去留（R2）**：`greet` 命令（`src-tauri/src/lib.rs:22`，注册在 `:30`）与 `App.tsx` 的模板连接页（仓库根 `src/App.tsx:15` 调 `invoke("greet")`）**在 P7 一并替换**：`lib.rs` 只注册真实命令、删掉 `greet`；`src/App.tsx` 改为真实首页外壳（固定布局 + 页面挂载）；`src/main.tsx`（antd `ConfigProvider`）与 `index.html`（标题/挂载点）按真实首页调整，保留这两个文件的现有职责。总纲 §5 第 7 条写的"既有前端文件与 `greet` 命令保留不动，**直到 P7 明确处理**"——本计划就是那次明确处理。
+- [x] **`APP_ID` 与 `identifier` 统一（D4 裁决）**：`src-tauri/tauri.conf.json:5` 的 `identifier` 由 `com.worktrace.app` 改为 **`com.worktrace.desktop`**，与 `platform::paths::APP_ID`（`src-tauri/src/platform/paths.rs:9`）一致。**库路径不动**：数据目录仍是 `%APPDATA%\com.worktrace.desktop\`，`worktrace.db`（`paths.rs:33`）与同目录的 `instance.lock`（`paths.rs:40`）保持现状；P6 的备份/日志目录沿用同一个 `app_data_dir()`，**不因改名迁移任何数据**（P7 是首次接线，没有待迁移的旧库）。
+- [x] **非法参数必须拿到稳定错误码**：IPC 形状里 `mode`/`timer_kind`/`statuses` 一律是**字符串**，在命令体内用 `SessionMode::parse`/`TimerKind::parse`（`src-tauri/src/domain/session.rs:82`/`:107`）、`TaskStatus::parse` 校验后再构造服务请求——**不要**依赖 serde 的枚举反序列化：它的错误拿不到 `ErrorResponse` 的 `code`，非法取值会退化成 Tauri 的反序列化错误。请求类型上的 `Deserialize` 因此只用于**已是强类型**的入参（测试与内部复用），IPC 路径不依赖它。
+- [x] 测试：命令层不直接引用 `rusqlite`/`storage::`（`src-tauri/scripts/check-layers.ps1` + grep 自查）；未知/非法参数返回稳定错误码而不是 panic；每个响应 DTO 的 JSON 快照与 `src/types/__snapshots__/*.json` 一致；`TaskQueryRequest` 的非法状态串与越界分页 ⇒ 领域/校验错误且**零写入**。
+- [x] **写命令广播 `domain.changed`（2026-10-04 实施，fix round 1 裁决）**：00 §5 的「同一 epoch 内一次业务写对应一条 `domain.changed`」。落点是命令层：拿到写结果后、**释放锁之前**（同一临界区，所以「广播顺序 = 提交顺序」）广播一条，**载荷就是该命令的响应 DTO**。**仅 `Changed` 才广播**——`Unchanged`（改同名、重复打标、重复加入计划）没有 revision 变化，也就没有缓存要失效；判据是 `storage::WriteOutcome::into_parts()` 的第二个返回值。**响应形状不变**：不加 `{changed, value}` 信封（那会改 15 份快照，而且规格没给它位置），这一位只用于「要不要广播」这个内部判断。广播失败只记诊断，不影响命令结果、不回滚已提交业务。计时命令（`start`/`pause`/`resume`/`finish`）没有幂等重复这一支，能走到广播就说明跃迁真的提交了。
+- [x] **本阶段不做（依赖 P3/P5/P6）**：恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；维护态分流（错误码由 P6 引入、展示由 P8 做）。
 
 ## 前置任务：前端测试基建（Task 2 开工前，Windows 侧）
 
+> **落地状态（2026-10-04，Task 6b 核对：全部勾选）**：`2fc8a41`。**离线安装必须钉版本**
+> （`vitest@5.0.1 jsdom@30.1.1 @testing-library/react@16.3.3`）：留给 pnpm 自己解析会拿到
+> 缓存里没有 tarball 的 `vitest 5.0.3` ⇒ `ERR_PNPM_NO_OFFLINE_TARBALL`。
+
 文件：`package.json`（scripts 与 devDependencies）、`vitest.config.ts`（新建）、`src/state/__tests__/`（Task 2 起使用）、`tsconfig.json`（仅在选用全局 API 时改）。
 
-- [ ] 仓库当前**没有** vitest/jsdom。在 **Windows 侧**（不是 WSL）离线安装：`pnpm add -D vitest jsdom @testing-library/react @vitejs/plugin-react`。实测 `D:\.pnpm-store\v11` 的 `index.db` 里有这四个包的完整条目（`vitest@5.0.1`、`jsdom@30.1.1`、`@testing-library/react@16.3.3`、`@vitejs/plugin-react@6.1.1`）。
-- [ ] **不引入 `@testing-library/jest-dom`**：断言用原生 DOM 属性（`textContent` / `getAttribute` / `disabled` / `value`），不为断言再引第二个库。
-- [ ] **不引入路由或状态库**：`react-router`/`zustand`/`jotai`/`redux`/`@tanstack/*` 在该 store 里 **0 条目**（离线取不到）⇒ 固定布局 + `useLocalState`/`useSyncExternalStore` 的既定路线不变。
-- [ ] `vitest.config.ts`：`environment: "jsdom"`，并复用 `@vitejs/plugin-react`（`vite.config.ts` 已在用它）。
-- [ ] `package.json` 增加脚本 `"test": "vitest run"`（`build` 保持 `tsc && vite build`）。
-- [ ] **`tsconfig` 与测试全局**：`tsc && vite build` 会类型检查 `src/**`（`tsconfig.json` 的 `include: ["src"]`），所以测试文件**显式 `import { describe, it, expect } from "vitest"`**（首选，不动 `tsconfig`）；若坚持全局 API，则必须在 `tsconfig.json` 加 `"types": ["vitest/globals"]`，否则 `tsc` 会拒绝测试全局、`pnpm build` 直接失败。
-- [ ] 装完先跑一条 smoke 用例（`pnpm test` 至少一条断言通过）再写真正的测试；**装不上（离线缺包 / peer 冲突）就停下来回报**，不要绕路换测试框架。
+- [x] 仓库当前**没有** vitest/jsdom。在 **Windows 侧**（不是 WSL）离线安装：`pnpm add -D vitest jsdom @testing-library/react @vitejs/plugin-react`。实测 `D:\.pnpm-store\v11` 的 `index.db` 里有这四个包的完整条目（`vitest@5.0.1`、`jsdom@30.1.1`、`@testing-library/react@16.3.3`、`@vitejs/plugin-react@6.1.1`）。
+- [x] **不引入 `@testing-library/jest-dom`**：断言用原生 DOM 属性（`textContent` / `getAttribute` / `disabled` / `value`），不为断言再引第二个库。
+- [x] **不引入路由或状态库**：`react-router`/`zustand`/`jotai`/`redux`/`@tanstack/*` 在该 store 里 **0 条目**（离线取不到）⇒ 固定布局 + `useLocalState`/`useSyncExternalStore` 的既定路线不变。
+- [x] `vitest.config.ts`：`environment: "jsdom"`，并复用 `@vitejs/plugin-react`（`vite.config.ts` 已在用它）。
+- [x] `package.json` 增加脚本 `"test": "vitest run"`（`build` 保持 `tsc && vite build`）。
+- [x] **`tsconfig` 与测试全局**：`tsc && vite build` 会类型检查 `src/**`（`tsconfig.json` 的 `include: ["src"]`），所以测试文件**显式 `import { describe, it, expect } from "vitest"`**（首选，不动 `tsconfig`）；若坚持全局 API，则必须在 `tsconfig.json` 加 `"types": ["vitest/globals"]`，否则 `tsc` 会拒绝测试全局、`pnpm build` 直接失败。
+- [x] 装完先跑一条 smoke 用例（`pnpm test` 至少一条断言通过）再写真正的测试；**装不上（离线缺包 / peer 冲突）就停下来回报**，不要绕路换测试框架。
 
 ## Task 2：前端状态镜像
 
+> **落地状态（2026-10-04，Task 6b 核对：全部勾选）**：`e02401a`（两侧共读的 41 步协议向量）+
+> `32bb3e8`（镜像、hooks、25 条用例），fix round 1 `d72d600`、fix round 2 `49beb41`。
+> 前端 42 → **51 → 61** 条 EXIT 0；本轮**没动 Rust**（门禁停在 437）。
+> 评审做了 **26 处独立变异（20 杀 6 存活）**；两条 Important 的根因与修法见计划下文。
+
 文件：`src/state/domainState.ts`（新建）、`src/state/hooks.ts`（新建）、`src/state/__tests__/`（新建）、`src/types/ipc.ts`（Task 1 新建，这里是消费方）、`src/ipc.ts`（Task 1 建立的命令转发层）。
 
-- [ ] **每个 JS 上下文只有一个 `domainState` 订阅入口**（00 §6 原文）；页面通过 hooks 读取，卸载时清理监听。多窗口各自一个上下文，互不共享内存。
-- [ ] 事件只作**缓存失效**，计时 tick 只更新**展示值**（00 §6）；两者都不触发业务判断。
-- [ ] 窗口启动顺序：**先监听并暂存通知，再拉一致快照**（00 §5 规则 1），避免快照与通知之间丢事件。首次握手用 `services::handshake::get_revision`（`src-tauri/src/services/handshake.rs:25`，不要求已知 epoch），拿到 epoch 后再拉业务快照。
-- [ ] 收到快照后丢弃**同 epoch 且 `revision <=` 快照版本**的通知；未知 epoch 的通知**只触发重新握手**，不直接接纳（规则 2）。
-- [ ] 可见窗口**至多每 30 秒**校验 `get_revision`（返回 epoch+revision）；隐藏窗口在显示前校验（规则 4）。末次通知丢失仍要能收敛。**此 30 秒是前端校验 `get_revision` 的周期**，与 `Coordinator` 的 `HEARTBEAT_INTERVAL_MS = 30_000`（`src-tauri/src/services/timer/coordinator.rs:368`，**检查点**频率）**无关**：数字相同纯属巧合，改一个不影响另一个。
-- [ ] 计时状态的前端判断顺序：先查 `data_epoch`、`run_id`、`session_version`，再比 `tick_seq`；**旧状态生成的 tick 即使序号较新也不能覆盖**暂停/切换后的展示（00 §5）。较新 `session_version` 的未知 tick 先触发计时快照，**不自行推导状态跃迁**。
-- [ ] **TS 侧逐条引用 `services/events.rs` 的四条规则，并以 Rust 侧为规范文本**（`RevisionGate` 是那套规则的唯一规范实现，前端镜像不得自行解释或增删分支）；本阶段 Rust 侧只有测试在用 `RevisionGate`，**两侧的交叉校验机制归本任务**（评审 M2 的另一半）：至少要做到「改一条规则必须同时改两侧」，而不是靠人记得。
-- [ ] 先用 `useSyncExternalStore` 等简单方案（00 §6）；**不得**把"不使用状态库"当成领域权威的必要条件——以后允许评估状态库，但业务规则不得因此搬到前端。
-- [ ] 测试（**前置任务必须先做完**）：乱序通知不改变展示；旧 tick 不覆盖新状态；快照版本旧于已应用时不覆盖；监听先于快照的时序正确；卸载后不再有监听泄漏。
-- [ ] **本阶段不做（依赖 P3/P5/P6）**：恢复/统计相关的状态展示（P8）。
+- [x] **每个 JS 上下文只有一个 `domainState` 订阅入口**（00 §6 原文）；页面通过 hooks 读取，卸载时清理监听。多窗口各自一个上下文，互不共享内存。
+- [x] 事件只作**缓存失效**，计时 tick 只更新**展示值**（00 §6）；两者都不触发业务判断。
+- [x] 窗口启动顺序：**先监听并暂存通知，再拉一致快照**（00 §5 规则 1），避免快照与通知之间丢事件。首次握手用 `services::handshake::get_revision`（`src-tauri/src/services/handshake.rs:25`，不要求已知 epoch），拿到 epoch 后再拉业务快照。
+- [x] 收到快照后丢弃**同 epoch 且 `revision <=` 快照版本**的通知；未知 epoch 的通知**只触发重新握手**，不直接接纳（规则 2）。
+- [x] 可见窗口**至多每 30 秒**校验 `get_revision`（返回 epoch+revision）；隐藏窗口在显示前校验（规则 4）。末次通知丢失仍要能收敛。**此 30 秒是前端校验 `get_revision` 的周期**，与 `Coordinator` 的 `HEARTBEAT_INTERVAL_MS = 30_000`（`src-tauri/src/services/timer/coordinator.rs:368`，**检查点**频率）**无关**：数字相同纯属巧合，改一个不影响另一个。
+- [x] 计时状态的前端判断顺序：先查 `data_epoch`、`run_id`、`session_version`，再比 `tick_seq`；**旧状态生成的 tick 即使序号较新也不能覆盖**暂停/切换后的展示（00 §5）。较新 `session_version` 的未知 tick 先触发计时快照，**不自行推导状态跃迁**。
+- [x] **TS 侧逐条引用 `services/events.rs` 的四条规则，并以 Rust 侧为规范文本**（`RevisionGate` 是那套规则的唯一规范实现，前端镜像不得自行解释或增删分支）；本阶段 Rust 侧只有测试在用 `RevisionGate`，**两侧的交叉校验机制归本任务**（评审 M2 的另一半）：至少要做到「改一条规则必须同时改两侧」，而不是靠人记得。
+- [x] 先用 `useSyncExternalStore` 等简单方案（00 §6）；**不得**把"不使用状态库"当成领域权威的必要条件——以后允许评估状态库，但业务规则不得因此搬到前端。
+- [x] 测试（**前置任务必须先做完**）：乱序通知不改变展示；旧 tick 不覆盖新状态；快照版本旧于已应用时不覆盖；监听先于快照的时序正确；卸载后不再有监听泄漏。
+- [x] **本阶段不做（依赖 P3/P5/P6）**：恢复/统计相关的状态展示（P8）。
 
 ## Task 3：捕获、理清与计时控制
 
+> **落地状态（2026-10-04，Task 6b 核对：全部勾选）**：`57d3fb8`（镜像代次过滤/重新握手/
+> 查询判旧）/ `7574f6c`（R8 + 收件箱页）/ `17b6835`（计时页）/ `d0abc6e`（接进外壳）；
+> 契约补口 `a0db688` + `1f15b6b`，接线 `94aa875`。前端 65/76/83/**84** 逐提交 EXIT 0 →
+> 接线后 **92**；Rust 契约 **456 passed**。**F-003 的完整联动仍无入口可验**（`transition_task`
+> 尚不存在），那一条按 R13 裁决归 P8。
+
 文件：`src/pages/Inbox.tsx`（新建）、`src/pages/Timer.tsx`（新建）、`src/components/`（按需新建）、`src/state/domainState.ts`、`src/state/hooks.ts`、`src/pages/__tests__/`（组件测试，新建）、`src/ipc.ts`（Task 1 建立）。
 
-- [ ] **F-001 快速捕获**：主窗内输入一句话回车即创建并**立即可见**；不要求项目/标签/日期；空标题拒绝并给出可理解提示。全局快捷键属 V0.1b，不做。
-- [ ] **F-002 任务理清**：Inbox 可直接置 Ready；项目/标签可选，**无强制表单**；`start` 可在同一命令内原子理清并启动（`Coordinator::start` 在**一个事务**里走 `Inbox → Ready → Doing` 两步，`src-tauri/src/services/timer/coordinator.rs:391`——前端只发一次命令，不自己拆成两步）。
-- [ ] 任务状态联动与托盘"完成"在 P3 服务接入后由 P8 启用；P7 不开放尚未存在的动作，不能由前端先 finish 再改状态；历史 correct 发送 session.expected_row_version，不发送不存在的 interval 版本。
-- [ ] **F-003 状态机（R13 裁决）**：**P7 只在三处展示状态——捕获、理清 Ready、开始计时**，入口形状由 02 §5 允许的跃迁决定；**完整 F-003（完成/取消/Blocked/Waiting/reopen）归 P8**（P3 的 `transition_task` 接入后）。「**即使出现也要被 Rust 拒绝**」这条要求**保留**，但 **P7 无对应入口可验**（`transition_task` 尚不存在），该项验收由 P8 执行；显式 reopen 同理。
-- [ ] **计时控制**：开始/暂停/继续/结束四个动作各对应一条命令，不做本地状态机；暂停值冻结、到点只提示不自动完成，均由 P2 的 DTO 驱动展示。
-- [ ] 归档项目不出现在新建任务的选择列表；**即使前端漏过滤，服务也会拒绝**（P4 的保证），前端要正确显示该错误。
-- [ ] **错误文案（R8 裁决）**：用户文案**由 Rust 的 `ErrorResponse.message` 提供**（`src-tauri/src/error.rs:50`–`:57`，已全中文；`AppError::Domain{detail}` 的 detail 本身就是用户文案）。前端**只按 `code` 决定行为**——提示 / 重新握手（`requires_handshake`）/ 冲突刷新——**不维护第二份「码 → 文案」表**；**未知 `code` 直接展示 `message`**（不是"未知错误"）。`authority.records` **按 `kind` + `id` 匹配，不按下标**（白名单顺序 ≠ 请求顺序，见 `src/error.rs` 的 `AuthorityTarget`/`RecordVersion`）。
-- [ ] 测试：空标题被拒；回车创建后列表立即可见；start 只发一次 IPC；非法跃迁不产生请求（且服务拒绝时提示正确）；**提示文案取自 Rust 的 `message`**（前端没有「码 → 文案」表可测）；未知 `code` 展示 `message` 而不是"未知错误"。
-- [ ] **本阶段不做（依赖 P3/P5/P6）**：完成/取消/Blocked/Waiting/reopen 的入口与联动（P8，依赖 P3）；恢复确认页与待确认区间展示（P8/P5）；HUD 与全局热键（V0.1b）。
+- [x] **F-001 快速捕获**：主窗内输入一句话回车即创建并**立即可见**；不要求项目/标签/日期；空标题拒绝并给出可理解提示。全局快捷键属 V0.1b，不做。
+- [x] **F-002 任务理清**：Inbox 可直接置 Ready；项目/标签可选，**无强制表单**；`start` 可在同一命令内原子理清并启动（`Coordinator::start` 在**一个事务**里走 `Inbox → Ready → Doing` 两步，`src-tauri/src/services/timer/coordinator.rs:391`——前端只发一次命令，不自己拆成两步）。
+- [x] 任务状态联动与托盘"完成"在 P3 服务接入后由 P8 启用；P7 不开放尚未存在的动作，不能由前端先 finish 再改状态；历史 correct 发送 session.expected_row_version，不发送不存在的 interval 版本。
+- [x] **F-003 状态机（R13 裁决）**：**P7 只在三处展示状态——捕获、理清 Ready、开始计时**，入口形状由 02 §5 允许的跃迁决定；**完整 F-003（完成/取消/Blocked/Waiting/reopen）归 P8**（P3 的 `transition_task` 接入后）。「**即使出现也要被 Rust 拒绝**」这条要求**保留**，但 **P7 无对应入口可验**（`transition_task` 尚不存在），该项验收由 P8 执行；显式 reopen 同理。
+- [x] **计时控制**：开始/暂停/继续/结束四个动作各对应一条命令，不做本地状态机；暂停值冻结、到点只提示不自动完成，均由 P2 的 DTO 驱动展示。
+- [x] 归档项目不出现在新建任务的选择列表；**即使前端漏过滤，服务也会拒绝**（P4 的保证），前端要正确显示该错误。
+- [x] **错误文案（R8 裁决）**：用户文案**由 Rust 的 `ErrorResponse.message` 提供**（`src-tauri/src/error.rs:50`–`:57`，已全中文；`AppError::Domain{detail}` 的 detail 本身就是用户文案）。前端**只按 `code` 决定行为**——提示 / 重新握手（`requires_handshake`）/ 冲突刷新——**不维护第二份「码 → 文案」表**；**未知 `code` 直接展示 `message`**（不是"未知错误"）。`authority.records` **按 `kind` + `id` 匹配，不按下标**（白名单顺序 ≠ 请求顺序，见 `src/error.rs` 的 `AuthorityTarget`/`RecordVersion`）。
+- [x] 测试：空标题被拒；回车创建后列表立即可见；start 只发一次 IPC；非法跃迁不产生请求（且服务拒绝时提示正确）；**提示文案取自 Rust 的 `message`**（前端没有「码 → 文案」表可测）；未知 `code` 展示 `message` 而不是"未知错误"。
+- [x] **本阶段不做（依赖 P3/P5/P6）**：完成/取消/Blocked/Waiting/reopen 的入口与联动（P8，依赖 P3）；恢复确认页与待确认区间展示（P8/P5）；HUD 与全局热键（V0.1b）。
 
 ## Task 4：托盘与窗口生命周期
 
+> **落地状态（2026-10-04，Task 6b 核对：9/10 勾选）**：`b0290c3`（平台半边）+
+> `dabb79e`（接线），fix round 1 `4050c8f` + `fcb4d93`，复评收尾 `86c75c0`；
+> 门禁 449 → **452 passed / 0 failed**，`Cargo.lock` 逐字节未变（只是启用了 `tray-icon`
+> feature）。**唯一未勾**：F-011 那条「关掉全部窗口后托盘仍可用且计时继续」是**实机硬条件**，
+> 步骤与判据在 `src-tauri/tests/manual-shell.md` §2A，**结论为空**，归 P8。
+> 本任务的 fs 判据被评审改过两轮（C1 会**假通过**、N1 会**假不通过**），见计划下文。
+
 文件（**2026-10-04 落地后订正为实际交付的文件**）：`src-tauri/src/platform/tray.rs`（新建：菜单装配）、`src-tauri/src/platform/window.rs`（新建：主窗生命周期与唤醒接收的消费侧）、`src-tauri/src/platform/mod.rs`（登记两个新模块）、`src-tauri/Cargo.toml`（给 `tauri` 加 `features=["tray-icon"]`）、`src-tauri/src/commands/mod.rs`（托盘动作复用同一批命令）、`src-tauri/src/lib.rs`（接线：托盘、`RunEvent::ExitRequested`、唤醒轮询）、`src-tauri/tests/shell_lifecycle.rs`（新建：能自动化的那半边）、`src-tauri/tests/manual-shell.md`（新建：人工验收记录模板，Task 6b 一起用）。**`tauri.conf.json` 与 `capabilities/default.json` 本轮未改**：托盘是 Rust 侧手工装配的（不是配置里的 `app.trayIcon`），主窗 label 仍是 `main`、本来就在权限名单里；两处的一致性由 `tests/shell_lifecycle.rs` 读文件核对。
 
-- [ ] **F-011 托盘（R4 裁决）**：P7 实际提供**四项**——当前任务、暂停、快速捕获、退出。**「完成」是预留项**：P3 的 `transition_task` 服务入口接入后**由 P8 启用**，P7 不开放尚未存在的动作（也不由前端先 finish 再改状态）。**P7 的落法**：菜单里放一个**禁用项**「完成（P8 启用）」（id `tray.finish_reserved`，`action: None`）——菜单看得见、点了不会有动作，也不存在一条通往尚未存在服务的路径。**关闭所有窗口后托盘仍可用且计时继续**——验收硬条件，须在真实环境手测（步骤见 `src-tauri/tests/manual-shell.md` §2）。
-- [ ] **托盘 feature 的文件与离线可行性**：`src-tauri/Cargo.toml:21` 的 `tauri = { version = "2", features = [] }` 改为 `features = ["tray-icon"]`。**离线可行**（Windows 侧 cargo 缓存已有 `tray-icon-0.24.2/0.25.1`、`muda`、`tao`；`Cargo.lock` 里也已有 `tray-icon 0.25.1`/`muda 0.20.0`——可选依赖本来就在解析图里），**构建只在 Windows 侧跑**。**托盘图标用 `app.default_window_icon()`**，**不启用 `image-png`/`image-ico`**：`image` crate 不在 `Cargo.lock`，离线取不到。**实测（2026-10-04）**：`cargo test --offline` 在该 feature 下全绿，**`Cargo.lock` 逐字节未变**（可选依赖本来就在解析图里，启用 feature 不引入新包）。
-- [ ] **F-009 窗口独立性**：关闭或隐藏所有窗口时核心继续运行；重开窗口**立即拉快照**而不是等下一次通知。托盘菜单的动作与界面动作走**同一批命令**，不另开路径。**P7 的落法**：`RunEvent::ExitRequested { code: None }`（用户关掉最后一个窗口）→ `api.prevent_exit()`，于是进程与托盘留下、周期采样继续；`code: Some(_)`（程序化 `exit`，含托盘「退出」）一律放行。判定函数 `platform::window::should_prevent_exit(code)` 与唤醒决策 `plan_activation(requested, exists)` 都有断言（`tests/shell_lifecycle.rs`）。
-- [ ] 显示 HUD 的托盘项属 V0.1b，本计划**不加**该菜单项。
-- [ ] **退出流程（R6 裁决）**：托盘"退出"走 **Task 0 建立的显式退出入口**（`services/bootstrap.rs` → `storage/run_repo.rs` 写 `clean_exit_at`）：**先停定时器（不进事务）**，其余四项——结束 `running`/`paused` 会话、写 `clean_exit_at`、保存 revision、清活动阶段——在**同一个事务**内完成；**`recovering` 记录保留不清**（02 §4）。「停定时器」为什么不在事务里见 Task 0 第 4 条（2026-10-04 订正：此行原先与那里矛盾）。不是直接杀进程，也不在托盘回调里跑长事务。**P7 的落法**：`commands::tray_quit_impl` 内部就是 `RunningApp::shutdown()`（唯一入口），托盘只是它的第二个调用方；执行切到 `spawn_blocking`，不在 UI 回调里开事务。**退出事务失败时**（例如库里有一条结束不了的会话）记诊断并**以非零码退出**——事务已回滚、库是一致的，这一次 run 以「没有 `clean_exit_at`」结束正是恢复扫描的输入（F-015），把用户困在没有窗口的托盘里更糟。
-- [ ] `capabilities/default.json`：这份名单现在只有 `"windows": ["main"]`——**主窗之外的新窗口必须逐个加进来**，否则它的 JS 没有任何权限。Task 6a 的 `sync-lab` 窗口要在这里登记（见 Task 6a）。**主窗重建后 label 不变**（`platform::window::MAIN_WINDOW_LABEL`），所以重建出来的窗口照样在这份名单里；「label 与配置/权限名单一致」由 `tests/shell_lifecycle.rs` 读两个文件核对。
-- [ ] 测试（能自动化的部分）：托盘动作与界面动作调用同一命令；关窗不触发退出；重开窗口触发快照。**其余必须人工验收。****P7 实际钉住的**（`tests/shell_lifecycle.rs`，11 条）：菜单四项 + 预留禁用项 + id↔动作一一对应；`should_prevent_exit` 两个分支；`plan_activation` 四格真值表；主窗 label 与 `tauri.conf.json`/`capabilities` 一致；托盘暂停与 IPC 暂停**效果逐项相等**、没有会话/已暂停时零写入零广播；托盘退出走显式退出入口（`clean_exit_at` 落库、`recovering` 保留、先停定时器）；没有窗口对象时采样照跑。「重开窗口立即拉快照」的 Rust 半边 = `Rebuild` 分支（全新页面加载 ⇒ 前端挂载时先握手再拉快照），前端那一半在 Task 2。
-- [ ] **本阶段不做（依赖 P3/P5/P6）**：托盘"完成"的启用与 F-003 完整联动（P8，依赖 P3）；维护态下的托盘禁用（P6）。
+- [ ] **F-011 托盘（R4 裁决，交付已完成、实机硬条件未验）**：P7 实际提供**四项**——当前任务、暂停、快速捕获、退出。**「完成」是预留项**：P3 的 `transition_task` 服务入口接入后**由 P8 启用**，P7 不开放尚未存在的动作（也不由前端先 finish 再改状态）。**P7 的落法**：菜单里放一个**禁用项**「完成（P8 启用）」（id `tray.finish_reserved`，`action: None`）——菜单看得见、点了不会有动作，也不存在一条通往尚未存在服务的路径。**关闭所有窗口后托盘仍可用且计时继续**——验收硬条件，须在真实环境手测（步骤见 `src-tauri/tests/manual-shell.md` §2）。
+- [x] **托盘 feature 的文件与离线可行性**：`src-tauri/Cargo.toml:21` 的 `tauri = { version = "2", features = [] }` 改为 `features = ["tray-icon"]`。**离线可行**（Windows 侧 cargo 缓存已有 `tray-icon-0.24.2/0.25.1`、`muda`、`tao`；`Cargo.lock` 里也已有 `tray-icon 0.25.1`/`muda 0.20.0`——可选依赖本来就在解析图里），**构建只在 Windows 侧跑**。**托盘图标用 `app.default_window_icon()`**，**不启用 `image-png`/`image-ico`**：`image` crate 不在 `Cargo.lock`，离线取不到。**实测（2026-10-04）**：`cargo test --offline` 在该 feature 下全绿，**`Cargo.lock` 逐字节未变**（可选依赖本来就在解析图里，启用 feature 不引入新包）。
+- [x] **F-009 窗口独立性**：关闭或隐藏所有窗口时核心继续运行；重开窗口**立即拉快照**而不是等下一次通知。托盘菜单的动作与界面动作走**同一批命令**，不另开路径。**P7 的落法**：`RunEvent::ExitRequested { code: None }`（用户关掉最后一个窗口）→ `api.prevent_exit()`，于是进程与托盘留下、周期采样继续；`code: Some(_)`（程序化 `exit`，含托盘「退出」）一律放行。判定函数 `platform::window::should_prevent_exit(code)` 与唤醒决策 `plan_activation(requested, exists)` 都有断言（`tests/shell_lifecycle.rs`）。
+- [x] 显示 HUD 的托盘项属 V0.1b，本计划**不加**该菜单项。
+- [x] **退出流程（R6 裁决）**：托盘"退出"走 **Task 0 建立的显式退出入口**（`services/bootstrap.rs` → `storage/run_repo.rs` 写 `clean_exit_at`）：**先停定时器（不进事务）**，其余四项——结束 `running`/`paused` 会话、写 `clean_exit_at`、保存 revision、清活动阶段——在**同一个事务**内完成；**`recovering` 记录保留不清**（02 §4）。「停定时器」为什么不在事务里见 Task 0 第 4 条（2026-10-04 订正：此行原先与那里矛盾）。不是直接杀进程，也不在托盘回调里跑长事务。**P7 的落法**：`commands::tray_quit_impl` 内部就是 `RunningApp::shutdown()`（唯一入口），托盘只是它的第二个调用方；执行切到 `spawn_blocking`，不在 UI 回调里开事务。**退出事务失败时**（例如库里有一条结束不了的会话）记诊断并**以非零码退出**——事务已回滚、库是一致的，这一次 run 以「没有 `clean_exit_at`」结束正是恢复扫描的输入（F-015），把用户困在没有窗口的托盘里更糟。
+- [x] `capabilities/default.json`：这份名单现在只有 `"windows": ["main"]`——**主窗之外的新窗口必须逐个加进来**，否则它的 JS 没有任何权限。Task 6a 的 `sync-lab` 窗口要在这里登记（见 Task 6a）。**主窗重建后 label 不变**（`platform::window::MAIN_WINDOW_LABEL`），所以重建出来的窗口照样在这份名单里；「label 与配置/权限名单一致」由 `tests/shell_lifecycle.rs` 读两个文件核对。
+- [x] 测试（能自动化的部分）：托盘动作与界面动作调用同一命令；关窗不触发退出；重开窗口触发快照。**其余必须人工验收。****P7 实际钉住的**（`tests/shell_lifecycle.rs`，11 条）：菜单四项 + 预留禁用项 + id↔动作一一对应；`should_prevent_exit` 两个分支；`plan_activation` 四格真值表；主窗 label 与 `tauri.conf.json`/`capabilities` 一致；托盘暂停与 IPC 暂停**效果逐项相等**、没有会话/已暂停时零写入零广播；托盘退出走显式退出入口（`clean_exit_at` 落库、`recovering` 保留、先停定时器）；没有窗口对象时采样照跑。「重开窗口立即拉快照」的 Rust 半边 = `Rebuild` 分支（全新页面加载 ⇒ 前端挂载时先握手再拉快照），前端那一半在 Task 2。
+- [x] **本阶段不做（依赖 P3/P5/P6）**：托盘"完成"的启用与 F-003 完整联动（P8，依赖 P3）；维护态下的托盘禁用（P6）。
 
 ## Task 5：Projects 与轻量 GTD 列表
 
@@ -172,22 +208,24 @@
 > **（2026-10-04 已落地**：`c22eb8e` / `2660303` / `34d84e5`，门禁 **464 passed / 0 failed**；
 > 上面那句「只能读、不能跑」已经解除，§2 七步现在都能做——见文末「Task 6a 前置件的落地」。）**
 
-- [ ] **第二个窗口**：label **`sync-lab`**，由 Rust 侧用 `WebviewWindowBuilder` 创建（实验时开，不做成 `tauri.conf.json` 的静态窗口）；**`src-tauri/capabilities/default.json` 的 `windows` 必须包含 `sync-lab`**，否则该窗口的 JS 无权限调命令（现在只有 `"main"`）。
-- [ ] 验证"先监听后快照"。三种竞态**用明确的注入手段造**（不能只写"人为制造"）：
+- [x] **第二个窗口**：label **`sync-lab`**（`c22eb8e`；门禁 458 passed），由 Rust 侧用 `WebviewWindowBuilder` 创建（实验时开，不做成 `tauri.conf.json` 的静态窗口）；**`src-tauri/capabilities/default.json` 的 `windows` 必须包含 `sync-lab`**，否则该窗口的 JS 无权限调命令（现在只有 `"main"`）。
+- [ ] 验证"先监听后快照"（**注入手段已落地、实机未跑**）。三种竞态**用明确的注入手段造**（不能只写"人为制造"）：
   - **(a) 末次事件丢失**：`services/events.rs` 的广播出口加 `#[cfg(debug_assertions)]` 丢弃开关（dev 命令 `__p7_drop_next_event`），丢一次通知后确认展示在 30 秒 `get_revision` 周期内仍收敛；
   - **(b) 旧响应晚到**：dev 命令 `__p7_delay_next_query_ms(ms)` 让窗口 B 的下一次查询延迟返回（**先取数据再 `sleep`，绝不跨 `await` 持 `Connection`**），A 窗口在延迟窗口内先暂停再继续，B 的旧响应必须被丢弃、不覆盖新状态；
   - **(c) 乱序通知**：dev 命令 `__p7_replay_event(seq)` 用旧 `event_seq` 重播一条通知，验证同 epoch 且 `revision <=` 已应用版本的通知被丢弃。
   三条注入**只在 debug 构建编译**（`#[cfg(debug_assertions)]`），并加一条测试断言发布 handler 列表里没有它们。
-- [ ] 记录机器/系统版本与观察结果到 `src-tauri/tests/manual-shell.md`。
+- [ ] 记录机器/系统版本与观察结果到 `src-tauri/tests/manual-shell.md`（**未做**：无实机记录；记录模板在 `manual-sync.md` §0/§3）。
 
 ### 6b 时序验证、外壳人工验收与完成门槛
 
-- [ ] **时序验证**：窗口 A 暂停 → 窗口 B 的展示在 30 秒内收敛（规则 4 的 `get_revision` 校验）；窗口 B 在隐藏后重新显示时先校验再展示。
-- [ ] **外壳人工验收**（不能用单元测试代替，08 §6）：F-001/F-002（捕获、理清、计时非法请求）；F-003/F-011 完整联动由 P8 验收；F-009（关掉全部窗口后托盘可用、计时继续；重开立即拉快照）；F-020 的界面侧（多窗口一致性）。
-- [ ] 对照 [总纲](2026-10-03-v01-plan-index.md) §5 第 9 条的权威清单逐条确认与本计划相关的条目，并在验收记录里写明「已核对 / 不适用」。
-- [ ] 完成门槛：`cargo fmt --check`、`cargo test`、`cargo clippy --all-targets` 全绿；前端 `tsc`、`pnpm build` 与 `pnpm test` 通过；分层检查 **`src-tauri/scripts/check-layers.ps1`** 通过（现查**六条**规则：commands 禁 `storage::|rusqlite|Connection`、domain 禁 `rusqlite|std::fs|platform::|storage::|commands::|services::`、storage 禁 `platform::|commands::|services::`、services 禁 `std::time|SystemTime|Instant::now|commands::`（含 `services/` 不得直接取时间）、**platform 禁 `crate::services::|crate::storage::|crate::commands::`**（P7 Task 0 加的第五条：托盘"复用同一批命令"正是 platform→services 反向边的入口）、以及**入口点规则**：`lib.rs`/`main.rs` 禁 `Db::open|migrate(|run_repo::`（把"唯一启动入口"从约定变成机器检查））；**P1/P2/P4 测试无回归**。
-- [ ] **不得把仓储/服务层测试标为"UI 已验收"**（P4 的约定）。人工验收记录要能对上具体版本与机器。
-- [ ] **本阶段不做（依赖 P3/P5/P6）**：F-003/F-011 的完整联动（P8）；平台事件的实机验收——P7 只登记步骤，结论由实机跑出、P8 复核（见文末）；「多入口开发/打包路径」与 Windows 打包验证（00 §7，登记在文末）；维护态验收（P6）。
+- [ ] **时序验证（实机未跑）**：窗口 A 暂停 → 窗口 B 的展示在 30 秒内收敛（规则 4 的 `get_revision` 校验）；窗口 B 在隐藏后重新显示时先校验再展示。
+- [ ] **外壳人工验收（实机未跑）**（不能用单元测试代替，08 §6）：F-001/F-002（捕获、理清、计时非法请求）；F-003/F-011 完整联动由 P8 验收；F-009（关掉全部窗口后托盘可用、计时继续；重开立即拉快照）；F-020 的界面侧（多窗口一致性）。
+- [x] 对照 [总纲](2026-10-03-v01-plan-index.md) §5 第 9 条的权威清单逐条确认与本计划相关的条目，并在验收记录里写明「已核对 / 不适用」。
+- [x] 完成门槛：`cargo fmt --check`、`cargo test`、`cargo clippy --all-targets` 全绿；前端 `tsc`、`pnpm build` 与 `pnpm test` 通过；分层检查 **`src-tauri/scripts/check-layers.ps1`** 通过（现查**六条**规则：commands 禁 `storage::|rusqlite|Connection`、domain 禁 `rusqlite|std::fs|platform::|storage::|commands::|services::`、storage 禁 `platform::|commands::|services::`、services 禁 `std::time|SystemTime|Instant::now|commands::`（含 `services/` 不得直接取时间）、**platform 禁 `crate::services::|crate::storage::|crate::commands::`**（P7 Task 0 加的第五条：托盘"复用同一批命令"正是 platform→services 反向边的入口）、以及**入口点规则**：`lib.rs`/`main.rs` 禁 `Db::open|migrate(|run_repo::`（把"唯一启动入口"从约定变成机器检查））；**P1/P2/P4 测试无回归**。
+- [ ] **不得把仓储/服务层测试标为"UI 已验收"**（P4 的约定，**前半已落实、后半未达成**）。
+  验收记录已把「自动测试证明了什么」与「实机才能验什么」逐条分开（`docs/validation/p7-acceptance.md` §5.3），
+  **但「人工验收记录能对上具体版本与机器」要等实机跑完才有**——当前实机结论为空，归 P8。
+- [x] **本阶段不做（依赖 P3/P5/P6）**：F-003/F-011 的完整联动（P8）；平台事件的实机验收——P7 只登记步骤，结论由实机跑出、P8 复核（见文末）；「多入口开发/打包路径」与 Windows 打包验证（00 §7，登记在文末）；维护态验收（P6）。
 
 ---
 
@@ -198,10 +236,15 @@
 
 ## 评审补充：恢复提示与时钟校正
 
-- [ ] 展示独立全局待确认数量/入口，来自 P3 查询；不使用当前快照 pending_ms/needs_attention() 代替。P3 未接入前注明接口依赖，不能宣称旧记录提醒已完成。
-- [ ] 系统事件实测验证历史 boundary 不推进采样 last，当前样本检测一次；可信离开边界与同时发生的改时/单调钟故障不能互相覆盖。
+> **Task 6b 核对（2026-10-04）**：本节三条里，**第 3 条已完成**（Task 1 的 `run_command` 就是
+> 那个唯一落点，五个码原样透传、权威捕获在原事务结束之后同一串行边界内）；
+> **前两条都没有做，也不是 P7 的范围**——它们依赖 P3（待确认数量的查询）与平台事件源
+> （V0.1 里根本没有锁屏/休眠/改时的监听器）。第八节记录了这两条为什么被**有意**留着。
 
-- [ ] IPC 失败响应接入 services/error_response::capture_error_response 与 ErrorResponse：读取提交后的 epoch/revision 和请求对象版本；在同一串行边界且原事务结束后捕获，不另调 timer.snapshot。requires_handshake 时先重新握手，不自动重试非幂等命令。
+- [ ] 展示独立全局待确认数量/入口，来自 P3 查询；不使用当前快照 pending_ms/needs_attention() 代替。P3 未接入前注明接口依赖，不能宣称旧记录提醒已完成。**（未达成：无入口、无 P3 查询；归 P8）**
+- [ ] 系统事件实测验证历史 boundary 不推进采样 last，当前样本检测一次；可信离开边界与同时发生的改时/单调钟故障不能互相覆盖。**（未达成：无平台事件源、无实机；登记为「P7 实机步骤 + P8 复核」，见文末「仍待与归属」）**
+
+- [x] IPC 失败响应接入 services/error_response::capture_error_response 与 ErrorResponse：读取提交后的 epoch/revision 和请求对象版本；在同一串行边界且原事务结束后捕获，不另调 timer.snapshot。requires_handshake 时先重新握手，不自动重试非幂等命令。**（`12f0453` 的命令骨架 + `tests/ipc_commands.rs` 逐条覆盖；门禁 431）**
 
 ## P1～P4 兼容接入前置门禁
 
