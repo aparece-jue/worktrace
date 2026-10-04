@@ -20,7 +20,7 @@
 | FOLLOW-01 | P7 统一接入 capture_error_response | 服务已实现，生产 IPC 尚未接入。在原事务结束后、同一串行边界捕获；按 kind/id 匹配 records，不按请求下标；读取失败要求整份重新握手，不用 timer.snapshot 补错误版本 |
 | FOLLOW-02 | error_response.rs 的返回顺序注释 | 文件开头仍写“按同一份顺序逐条返回”，实际按 kind 白名单分组、组内保持请求顺序。实际实现符合 P4 计划；2026-10-04 已修正注释，返回顺序未改变 |
 | FOLLOW-03 | P3 扫描版本与审计规则 | 文档已明确：扫描查询零写；实际修改 session 状态/run_id/区间事实时修改对象版本，并在同一批事务增加一次 revision、记审计。paused 重绑定适用；recovering 保持原恢复归属直至 reconcile。P3 尚未实施，后续按真实扫描测试验证 |
-| FOLLOW-04 | 中文错误提示一致性 | 已修复（2026-10-04，提交 **a8c4376**，门禁 355 passed / 0 failed）：`DomainError` 新增 `UnknownSession`/`UnknownInterval`（变体清单 26 → 28），`task_repo`/`session_repo`/`checkpoint_repo`/`coordinator` 的列名与英文文案全部改成中文领域变体，会话状态补 `zh_session_state`，零调用的 `guard_row_version_of` 删除；「用户可见文案必须是中文」已变成三条机器门禁（变体级 / 构造点级 / 禁用子串）并经三处篡改反向验证。Storage.detail 仅诊断（保留英文），Domain.detail 会进入用户 message，不能混用 |
+| FOLLOW-04 | 中文错误提示一致性 | 已修复（2026-10-04，提交 **a8c4376**，复评 fix round 提交 **5181cd9**，门禁 **357 passed / 0 failed**）：`DomainError` 新增 `UnknownSession`/`UnknownInterval`（变体清单 26 → 28），`task_repo`/`session_repo`/`checkpoint_repo`/`coordinator` 的列名与英文文案全部改成中文领域变体，会话状态补 `zh_session_state`，零调用的 `guard_row_version_of` 删除；「用户可见文案必须是中文」已变成三条机器门禁（变体级 / 构造点级 / 禁用子串），复评 I1 又补上**变体清单的编译期证人**（穷尽 match）与三张映射表的 ALL 循环覆盖，共 7 处篡改反向验证。Storage.detail 仅诊断（保留英文），Domain.detail 会进入用户 message，不能混用 |
 | FOLLOW-05 | 平台验收 | 正式系统事件、锁屏/休眠/改时、多窗口/托盘、备份恢复及跨机器容差验证由 P6/P7/P8 承接；自动测试不能替代实机验收 |
 | FOLLOW-06 | P2 提交后重建的一致读 | 已修复（2026-10-04）：rebuild_from_committed 在提交后开启一个读事务，session、区间、前台会话、快照元数据和 task_version 均在同一读快照内取得；CommandOutcome.revision 复用 snapshot.revision，不再另读。保留同次采样及提交后失败进入 RECOVERY_REQUIRED 的原规则。这是计时结果的明确例外：提交后应用内存/重建响应，不要求在业务写事务内生成最终展示快照。 |
 | FOLLOW-07 | commands 分层门禁 | 已修复（2026-10-04）：check-layers.ps1 增加 src/commands 对 storage::、rusqlite、Connection 的检查；正常通过，并须执行反向注入验证。命令层继续只调用服务，不接受连接。 |
@@ -103,7 +103,7 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 
 ## FOLLOW-04 收口（2026-10-04，提交 a8c4376）
 
-**交付**：用户可见错误文案全部中文化，且从此由**测试门禁**守着，不再是约定。门禁数字：`cargo test --offline` **355 passed / 0 failed**、`cargo fmt --check` EXIT 0、`cargo clippy --all-targets --offline -- -D warnings` 无告警、`scripts/check-layers.ps1` PASSED（在提交 `a8c4376` 上实跑）。
+**交付**：用户可见错误文案全部中文化，且从此由**测试门禁**守着，不再是约定。门禁数字：`cargo test --offline` **357 passed / 0 failed**、`cargo fmt --check` EXIT 0、`cargo clippy --all-targets --offline -- -D warnings` 无告警、`scripts/check-layers.ps1` PASSED（`a8c4376` 收口时为 355，复评 fix round `5181cd9` 补两条映射表覆盖用例后为 357）。
 
 **改动的点位**（行号为提交后位置；`file:line` 均在 `src-tauri/` 下）：
 
@@ -133,5 +133,13 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 
 另有一次「整句英文」的对照篡改（`UnknownSession` → `"no such session."`）同时打红变体级 ①（CJK）与禁用子串两条，说明两道网都在工作。
 
-**仍未做**（按边界）：P7 的 IPC 接线与前端时序、`capture_error_response` 接线不在本轮（FOLLOW-01）；`tests/` 里仍有两处**手造**的英文 detail 夹具（`error_contract.rs` 的 `"no such task"`/`"illegal transition"`，用途是证明两个 detail 可辨）与一句注释，扫描范围本就只覆盖 `src/**/*.rs`，未动。
+**复评 fix round 1（2026-10-04，提交 `5181cd9`，门禁 357 passed / 0 failed）**：复评判「七处漏点全部真收口、两处清单外发现处理正确、4 处反向验证可信」，剩 1 条 Important（门禁完整性）与 3 条 Minor，已全部收掉——只改 `src-tauri/tests/error_contract.rs`，生产代码一字未动。
+
+- **I1 变体清单的编译期证人**：`cases.len() == 28` 不会因为「加了新变体却没登记」而红（`Display` 有编译期强制，用例清单没有）。现在 `domain_error_variants!` 从一份标签清单展开出 `Variant`/`Variant::ALL`/`variant_of`，后者的 `match` **没有通配 arm** ⇒ 新增变体不补一行就**编译失败**（E0004）；用例清单 `representative_cases()` 仍是显式清单，由覆盖率断言与证人对齐——重复登记 ⇒ 第一条断言红，漏登记 ⇒ 第二条断言红并点名。三条「从真实跃迁入口造出来」的用例拆到 `entry_point_cases()` 接在后面跑。
+- **Minor ①** 构造点级扫描改为**逐模式自证**（`EmptyText`/`NotInThisVersion`/`AppError::Domain` 各自 > 0；当前真实分布 10 / 6 / 26 写在注释里）。
+- **Minor ②** `UnknownEnumValue` 的豁免理由写全：另有 6 处**英文列名**构造点（`task.status`/`project.status`/`work_session.mode|state|timer_kind`/`tag.kind`），它们安全的原因是经 `enum_error` → `FromSqlConversionFailure` → `map_sqlite` 降级成 **Storage** 的 detail、永不进用户文案，不是「列名是中文」。
+- **Minor ③** 「映射表漏一个就红」变成真的：新增 `TaskStatus::ALL`（10 个取值 × 5 个携带状态名的变体）与 `TagKind::ALL`（4 个取值 × 2 个变体）两条 ALL 循环用例——此前 `Clarifying` 从未被任何用例渲染过。
+- **反向验证**（逐字还原、SHA-256 对照）：新增变体不补证人 ⇒ 编译失败 `error[E0004]`（指向 `error_contract.rs:174` 的 match）；重复登记 ⇒「同一个变体在清单里登记了两次」（left 25 / right 26）；漏登记 ⇒「代表清单与变体清单不一致：缺 [UnknownTask]」。
+
+**仍未做**（按边界）：P7 的 IPC 接线与前端时序、`capture_error_response` 接线不在本轮（FOLLOW-01）；`tests/` 里仍有两处**手造**的英文 detail 夹具（`error_contract.rs` 的 `"no such task"`/`"illegal transition"`，用途是证明两个 detail 可辨）与一句注释，扫描范围本就只覆盖 `src/**/*.rs`，未动。复评同意留后续、已在报告登记的 4 项：退役子串表是**文件级**（可能误伤将来合法的英文 Storage 诊断，如 `no such table`）；加进 message 侧禁用表的 4 个词在常量 fixture 下打不响（不是第二道网）；扫描器「token 后 400 字符取第一个 anchor」在「Domain detail 变表达式 + 紧邻 Storage 字面量」时会误报（今天不发生）；`IllegalTransition` 渲染仍写「任务不能从…」（用于区间时措辞不贴）。
 

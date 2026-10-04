@@ -23,12 +23,15 @@
 - **整体评审（whole-branch review）已完成**：终评结论「**无 Critical，服务层可验收可合并**」，
   并在合并前处理掉 3 条 Important（一条计划点名的用例抓不住目标、一类「拿被测函数当 oracle」的
   漏传播、一处与事实相反的登记）与 5 条顺手项；triage 见第十一节。
-- **已知缺陷（P1/P2 遗留，P4 未修，见第九节）**：用户可见文案仍有一批半英文/英文
+- **已知缺陷（P1/P2 遗留，P4 当时未修，见第九节）**：用户可见文案仍有一批半英文/英文
   （`EmptyText` 的列名与 `"session"`/`"interval"`、`guard_row_version_of` 的 `no such {table}`、
   `coordinator.rs` 的 `"no such session"`），以及 `create_task` 对 `done` 项目放行与新入口拒绝的不一致。
   **这些不是 P4 引入的**，按总纲 §5 第 7 条「只碰计划列出的文件」与工作区约定
   （发现无关问题要说出来、不顺手改）报给用户裁定；其中**唯一还活着的内部标识泄漏路径**
   （`NotInThisVersion`）已在最终修复波修掉。
+  **上述文案项当时为遗留，2026-10-04 已收口**（FOLLOW-04，提交 `a8c4376`，复评 fix round
+  提交 `5181cd9`，门禁 357 passed / 0 failed，见文末「2026-10-04 FOLLOW-04 收口」）；
+  `create_task` 对 `done` 放行的不一致由更早的 `9e7a89a` 收口。
 
 ## 二、02 §8 M01/M05 必测案例（14 条）中与 P4 相关的条目
 
@@ -128,7 +131,7 @@ P4 **不涉及**这四项（DB 执行边界与单调/墙钟映射已由 P1/P2 �
   Task 4 去掉 `, task.id` ⇒ 1 红；Task 5 三处篡改各 1 红；Task 6 五处篡改 + 分层注入 + 骨架篡改）。
   空测试与恒真断言是本轮抓到的**真实缺陷**（三次），不是形式。
 - **已知缺陷（P1/P2 遗留，未修）**——下列 1、3、4 条**当时为遗留，2026-10-04 已收口**
-  （提交 `a8c4376`，门禁 355 passed / 0 failed，见文末「2026-10-04 FOLLOW-04 收口」）：
+  （提交 `a8c4376`，复评 fix round `5181cd9`，门禁 **357 passed / 0 failed**，见文末「2026-10-04 FOLLOW-04 收口」）：
   1. `task_repo.rs` 的 `EmptyText { field: "task.title" }` / `"task"`（`transition_task`、
      `freeze_baseline_estimate` 两处）⇒ 用户看到「「task.title」不能为空。」这类半英文文案；
      `session_repo.rs`（`"session"`/`"interval"`）与 `checkpoint_repo.rs`（`"interval"`）同属一类；
@@ -141,7 +144,7 @@ P4 **不涉及**这四项（DB 执行边界与单调/墙钟映射已由 P1/P2 �
   3. `storage/guards.rs` 的 `guard_row_version_of` ⇒ `AppError::Domain { detail: "no such {table}" }`（整句英文）；
      **2026-10-04 已收口**：函数删除（零生产调用），测试改走 `task_repo::get_task` + `guard_row_version`。
   4. `services/timer/coordinator.rs` 的 `AppError::Domain { detail: "no such session" }`（整句英文，
-     P2 遗留、当前不可达）；**2026-10-04 已收口**：改用 `DomainError::UnknownSession`。
+     P2 遗留、当时不可达）；**2026-10-04 已收口**：改用 `DomainError::UnknownSession`。
      同批还收掉两处同类漏点：`checkpoint_repo.rs` 三条英文 **`Domain`** detail（原先被登记成
      Storage 诊断，实际会进用户文案），以及 `IntervalOpenInWrongState` 把**会话**状态拿去查
      **任务**状态映射表，导致 `running`/`recovering` 等原样进句子（新增 `zh_session_state`）。
@@ -157,6 +160,9 @@ P4 **不涉及**这四项（DB 执行边界与单调/墙钟映射已由 P1/P2 �
    而 04 F-005 与 P4 计划的筛选条款写「情境」。若最终选「情境」，`domain/error.rs` 的 `zh_kind`
    与 `tests/error_contract.rs` 的逐字断言/禁用词表、`tests/tags.rs` 的两条 needle 共 **5 处**一起改。
 2. **第九节的 5 条 P1/P2 遗留缺陷**：是否现在收掉（各约 1–3 行）还是并入 V0.2 前的清理任务。
+   **已决并已办**（2026-10-04）：第 1、3、4 条（文案）由 FOLLOW-04 收口（提交 `a8c4376`，
+   复评 fix round `5181cd9`，门禁 357 passed / 0 failed），第 2 条由更早的终评修复波收口，
+   第 5 条由 `9e7a89a` 收口——5 条全部关闭，不再待用户裁定。
 3. **推送状态（已核实，不再是待办）**：P4 的全部提交与 README 那处修订都已推送到 `origin/dev`；
    推送后 `git fetch` 复核过 `local == remote == c981590`，工作树干净。
 
@@ -185,7 +191,7 @@ SQL 全参数化（含分页）；FK 的 `ON DELETE RESTRICT` 未被破坏；`se
    `"session"`/`"interval"`）、`guards.rs` 的 `no such {table}`、`coordinator.rs` 的 `"no such session"`；
    同批处理 `create_task` 对 `done` 项目放行（`task_repo.rs` 的 `Some(_) => {}`）与
    `require_active_project` 把 `done` 说成「已归档」。
-   **已收口**（2026-10-04）：文案部分提交 `a8c4376`（门禁 355 passed / 0 failed）——列名与
+   **已收口**（2026-10-04）：文案部分提交 `a8c4376`（复评 fix round `5181cd9`；门禁 357 passed / 0 failed）——列名与
    英文 detail 全部改成中文领域变体（新增 `UnknownSession`/`UnknownInterval`，变体清单
    26 → 28），`guard_row_version_of` 删除；`done` 那两项由提交 `9e7a89a` 先行处理。本条目关闭。
 2. **口径已定、代码已补全（P7 前门禁，2026-10-04 收口）**：所有对外写结果都回 `data_epoch`/`revision`（P2 计时快照早已回、P4 的 11 个写入口由提交 `27f8a7a` 补齐）；
@@ -232,14 +238,22 @@ P4 核心验收结论保留；完整响应信封、完整项目列表服务以�
 
 **仍未完成**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃、前端握手时序）与 UI 不在本轮范围；`create_task` 的 `Option<&str>` 与 `set_task_project` 的 `ProjectTarget` 两种入参形状仍并存。**FOLLOW-06 已收口**（提交 `6f29c92`）：计时命令必须先提交再应用内存，因此 `rebuild_from_committed` 改为在**同一个提交后读事务**内取齐 session / 前台会话 / 快照（含其 `revision`）/ `task_version`，`CommandOutcome.revision` 直接复用 `snapshot.revision`，不再另读；这条「提交后同一串行边界内重建」的例外已写进 00 §5 与总纲 §10，而不是让 P2 悄悄偏离统一口径。
 
-## 2026-10-04 FOLLOW-04 收口：用户可见文案全中文 + 三条机器门禁（提交 a8c4376）
+## 2026-10-04 FOLLOW-04 收口：用户可见文案全中文 + 三条机器门禁（提交 a8c4376，复评 fix round 5181cd9）
 
-第九节「已知缺陷」第 1、3、4 条与第十一节 triage 第 1 条涉及的文案问题，在本轮全部收口；第九节第 2 条（`NotInThisVersion` 印内部状态名）在更早的终评修复波已修，第 5 条（`create_task` 对 `done` 放行）由 `9e7a89a` 修。**门禁数字（提交 `a8c4376` 上实跑）**：`cargo test --offline` **355 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED（352 → 355：本轮新增 3 条门禁用例）。
+第九节「已知缺陷」第 1、3、4 条与第十一节 triage 第 1 条涉及的文案问题，在本轮全部收口；第九节第 2 条（`NotInThisVersion` 印内部状态名）在更早的终评修复波已修，第 5 条（`create_task` 对 `done` 放行）由 `9e7a89a` 修。**门禁数字（复评 fix round 提交 `5181cd9` 上实跑）**：`cargo test --offline` **357 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED（352 → 357：`a8c4376` 新增 3 条门禁用例后为 355，`5181cd9` 再补 2 条映射表全覆盖用例）。
 
 **改了哪些点位**：`coordinator.rs` 的 `AppError::Domain { detail: "no such session" }` → `UnknownSession`；`task_repo.rs` 的 `EmptyText { field: "task.title" }` → 「任务标题」、两处 `EmptyText { field: "task" }` → `UnknownTask`；`session_repo.rs` 的 `"session"`/`"interval"` 与 `checkpoint_repo.rs` 的 `"interval"` → 新增的 `DomainError::UnknownSession`/`UnknownInterval`（**变体清单 26 → 28**）；`session_repo.rs` 的 `NotInThisVersion { what: "stopwatch with a budget" }` → 「给正计时设预算」；`storage/guards.rs` 的 `guard_row_version_of` 删除（零生产调用，测试改走 `task_repo::get_task` + `guard_row_version`，未知记录/版本冲突的区分断言不削弱）。
 
 **两处原清单之外的漏点**（顺带审计发现）：① `checkpoint_repo.rs` 三条英文不变量文案用的是 `AppError::Domain` 而不是 Storage，会原样进用户句子（「操作不被允许：checkpoint must not move backwards.」）⇒ 改中文；`AppError::Storage` 的内部诊断按契约保留英文、未动。② `IntervalOpenInWrongState` 走的是**任务**状态映射表，而 `state` 来自 `SessionState::as_str()`，五个会话状态整句漏成英文 ⇒ 新增 `zh_session_state`（运行中/已暂停/待确认/已结束/已作废）；`close_interval` 里借用 `IllegalTransition { from: "closed", to: "closed" }` 的分支改回 `NoOpenInterval`。
 
-**门禁**（`tests/error_contract.rs`）：变体级（除 `UnknownEnumValue` 外，用户文案不得含 ASCII 字母；豁免理由写在断言处，另补会话状态五个取值逐一核对）、构造点级（扫 `src/**/*.rs`，内联字面量的 `EmptyText{field}`/`NotInThisVersion{what}`/`AppError::Domain{detail}` 必须含 CJK）、禁用子串（`no such`/`task.title`/`stopwatch with a budget`/checkpoint 三句不得回到 `src`）。**反向验证**：三处篡改分别打红对应规则（变体级在 `error_contract.rs:311`、构造点级在 `:468`、禁用子串在 `:503`），逐字还原后与备份 SHA-256 一致。详细交付与原始输出见[待评审清单的 FOLLOW-04 小节](p1-p4-review-backlog.md)。
+**门禁**（`tests/error_contract.rs`）：变体级（除 `UnknownEnumValue` 外，用户文案不得含 ASCII 字母；豁免理由写在断言处，另补会话状态五个取值逐一核对）、构造点级（扫 `src/**/*.rs`，内联字面量的 `EmptyText{field}`/`NotInThisVersion{what}`/`AppError::Domain{detail}` 必须含 CJK）、禁用子串（`no such`/`task.title`/`stopwatch with a budget`/checkpoint 三句不得回到 `src`）。**反向验证**：本批三处篡改分别打红对应规则（变体级在 `error_contract.rs:311`、构造点级在 `:468`、禁用子串在 `:503`），逐字还原后与备份 SHA-256 一致；复评 fix round 另做三处（见下）。含首轮的对照篡改共 7 处。详细交付与原始输出见[待评审清单的 FOLLOW-04 小节](p1-p4-review-backlog.md)。
 
 **仍未做**（按边界）：P7 的 IPC 接线与前端时序、`capture_error_response` 接线（FOLLOW-01 仍归 P7）；`tests/` 里两处**手造**的英文 detail 夹具保留（用途是证明两个 detail 可辨，扫描范围只覆盖 `src/**/*.rs`）。
+
+**复评与 fix round 1（提交 `5181cd9`，2026-10-04）**：独立复评结论「无 Critical，七处漏点全部真收口，两处清单外发现处理正确，4 处反向验证可信」，剩 1 条 Important + 3 条 Minor，已全部收掉（**只改 `tests/error_contract.rs`，生产代码一字未动**）：
+
+- **I1（门禁完整性）**：原先「用例清单漏登记某个变体」不会红。现在 `domain_error_variants!` 从一份标签清单展开出 `Variant`/`Variant::ALL` 与 `variant_of`（对 `DomainError` 的**穷尽 `match`、无通配 arm**）⇒ 新增变体不补证人**编译失败**（E0004）；显式的 `representative_cases()` 由覆盖率断言与证人对齐——重复登记、漏登记分别打红两条断言。
+- **Minor ①** 构造点级扫描逐模式自证（三个模式各自 > 0；当前分布 10 / 6 / 26）。
+- **Minor ②** `UnknownEnumValue` 的豁免理由写全：6 处**英文列名**构造点安全的原因是降级成 Storage 的 detail、永不进用户文案，而不是「列名是中文」。
+- **Minor ③** 新增 `TaskStatus::ALL`（10 个取值 × 5 个变体）与 `TagKind::ALL`（4 个取值 × 2 个变体）两条 ALL 循环用例——此前 `Clarifying` 从未被任何用例渲染过。
+- **反向验证**：新增变体不补证人 ⇒ 编译失败（`error[E0004]`，指向 `error_contract.rs:174` 的 match）；重复登记 ⇒「同一个变体在清单里登记了两次」；漏登记 ⇒「代表清单与变体清单不一致：缺 [UnknownTask]」；三处逐字还原后与备份 SHA-256 一致。
