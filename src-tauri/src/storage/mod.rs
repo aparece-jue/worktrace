@@ -63,18 +63,22 @@ impl<T> WriteOutcome<T> {
         }
     }
 
-    /// 取出载荷，丢弃「变了 / 没变」这一位。
+    /// 取出载荷与「真的改了库吗」这一位。
     ///
     /// **这是给命令层（IPC）用的**（P7 Task 1）：`commands` 不得出现 `storage::` 的名字
     /// （分层门禁），所以它写不出 `match WriteOutcome::Changed(…)`；而方法调用不需要
-    /// 在调用点写出类型名。命令层据此把写结果原样交给前端。
+    /// 在调用点写出类型名。
     ///
-    /// 丢掉的那一位在 IPC 形状里**没有单独字段**：规格没给它位置，响应里的 `revision`
-    /// 仍然是提交后的权威值，客户端据此使缓存失效。要恢复这一位就得给响应加层信封，
-    /// 那属于契约变更，不在 Task 1 里做。
-    pub fn into_value(self) -> T {
+    /// 为什么要把这一位一起交出去（P7 Task 1 fix round 1，评审 I1）：命令层要在写完之后
+    /// 决定**是否广播** `domain.changed`——`Unchanged` 没有 revision 变化，也就没有缓存
+    /// 要失效。原先只有 `into_value()`，那一位在命令层拿不到，「仅 Changed 时广播」就写不出来。
+    ///
+    /// **IPC 响应形状不变**：命令层返回的仍然是 Change 家族本身（不带 `{changed, value}`
+    /// 信封），这一位只用于「要不要广播」这个内部判断。
+    pub fn into_parts(self) -> (T, bool) {
         match self {
-            Self::Changed(value) | Self::Unchanged(value) => value,
+            Self::Changed(value) => (value, true),
+            Self::Unchanged(value) => (value, false),
         }
     }
 }

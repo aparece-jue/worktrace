@@ -250,12 +250,13 @@ fn a_stale_epoch_is_rejected_by_the_query_guard() {
     assert_eq!(error.code(), "DATA_EPOCH_MISMATCH");
 }
 
-/// `WriteOutcome` 的两个分支给命令层同一个载荷（`into_value`）。
+/// `WriteOutcome::into_parts` 把载荷与「真的改了库吗」这一位一起交给命令层。
 ///
-/// 命令层不能写出 `storage::` 的名字（分层门禁），所以它只能这样取值；
-/// 这条顺带钉住「两个分支都不 panic、都给出那份值」。
+/// 命令层不能写出 `storage::` 的名字（分层门禁），所以它只能靠方法取值；
+/// **两个分支都要钉住**：第二个返回值就是命令层的广播条件（评审 I1）——
+/// `Changed` 才发 `domain.changed`，`Unchanged` 不发。
 #[test]
-fn write_outcome_hands_the_payload_to_the_command_layer() {
-    assert_eq!(WriteOutcome::Changed(7).into_value(), 7);
-    assert_eq!(WriteOutcome::Unchanged(7).into_value(), 7);
+fn write_outcome_hands_the_payload_and_the_changed_flag_to_the_command_layer() {
+    assert_eq!(WriteOutcome::Changed(7).into_parts(), (7, true));
+    assert_eq!(WriteOutcome::Unchanged(7).into_parts(), (7, false));
 }

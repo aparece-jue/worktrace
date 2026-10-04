@@ -46,11 +46,25 @@
 //! 每个命令只收**一个** `request` 参数（请求 DTO 见下）：这样 IPC 的参数名不受
 //! Tauri 的 `camelCase` 参数重命名影响，字段名就是本文件里写的那套 snake_case。
 //!
+//! # 写命令广播 `domain.changed`（P7 Task 1 fix round 1）
+//!
+//! 00 §5：**同一 epoch 内一次业务写对应一条 `domain.changed`**。落点在这里——
+//! 命令体拿到写结果后、**释放锁之前**调 [`announce`]：
+//!
+//! - **仅 `Changed` 才广播**：[`crate::storage::WriteOutcome::into_parts`] 的第二个返回值；
+//!   `Unchanged`（改同名、重复打标、重复加入计划）不广播——没有 revision 变化就没有
+//!   缓存要失效；
+//! - **载荷就是该命令的响应 DTO**，不另造形状；
+//! - **响应形状不变**：不加 `{changed, value}` 信封（那会改 15 份快照，而且计划没写），
+//!   这一位只用于「要不要广播」这个内部判断；
+//! - **失败只记诊断**：`Broadcaster::emit` 不返回错误，命令照常成功、已提交业务不回滚。
+//!
+//! 计时命令（`start`/`pause`/`resume`/`finish`）没有「幂等重复」这一支：能走到广播
+//! 就说明这次状态跃迁真的提交了，所以它们的 `changed` 恒为真。
+//!
 //! # 本阶段不做
 //!
 //! 恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；维护态分流（P6）。
-//! 命令层**不发** `domain.changed`：本任务的交付边界只到「写命令返回响应」，
-//! 事件发送侧的接线归 Task 2/6a（见实施报告「遗留」一节）。
 
 use std::sync::Arc;
 
@@ -60,6 +74,7 @@ use crate::envelope::WriteEnvelope;
 use crate::error::{AppError, AuthorityKind, AuthorityTarget, ErrorResponse};
 use crate::services::bootstrap::{lock_app, AppState, RunningApp};
 use crate::services::error_response::capture_error_response;
+use crate::services::events::{Broadcaster, EventEnvelope};
 use crate::services::timer::coordinator::{
     parse_session_mode, parse_timer_kind, CommandOutcome, ResumeRequest, SessionRequest,
     StartRequest,
@@ -116,6 +131,28 @@ fn internal_failure(detail: String) -> ErrorResponse {
 /// （记录已被删除时，回显是它唯一还能对上的身份）。
 fn target(kind: AuthorityKind, id: &str) -> AuthorityTarget {
     AuthorityTarget::new(kind, id.to_string())
+}
+
+/// 提交之后广播一条 `domain.changed`，并把载荷原样交回调用方。
+///
+/// 判据、位置与失败口径见模块头「写命令广播 `domain.changed`」一节。
+/// `payload` 序列化失败**不是**业务失败：降级成 `null` 载荷，信封里的
+/// `data_epoch`/`revision` 仍然是对的——客户端使缓存失效只看那两个字段。
+fn announce<T: serde::Serialize>(
+    broadcaster: &Broadcaster,
+    changed: bool,
+    data_epoch: String,
+    revision: i64,
+    at: i64,
+    value: T,
+) -> T {
+    if changed {
+        let payload = serde_json::to_value(&value).unwrap_or(serde_json::Value::Null);
+        broadcaster.emit(EventEnvelope::domain_changed(
+            data_epoch, revision, at, payload,
+        ));
+    }
+    value
 }
 
 /// `start` 请求里 `expected_interval_ms` 的缺省值：本进程的周期采样节拍。
@@ -330,8 +367,9 @@ pub async fn create_project(
     state: State<'_, RunningApp>,
     request: CreateProjectRequest,
 ) -> Result<catalog::ProjectChange, ErrorResponse> {
+    let broadcaster = Arc::clone(state.broadcaster());
     run_command(&state, Vec::new(), move |app| {
-        create_project_impl(app, request)
+        create_project_impl(app, &broadcaster, request)
     })
     .await
 }
@@ -339,12 +377,21 @@ pub async fn create_project(
 /// [`create_project`] 的命令体（IPC 包装只做转发）。
 pub fn create_project_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: CreateProjectRequest,
 ) -> Result<catalog::ProjectChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let change = catalog::create_project(app.db_mut(), env, &request.name, now)?.into_value();
-    Ok(change)
+    let (change, changed) =
+        catalog::create_project(app.db_mut(), env, &request.name, now)?.into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 /// 重命名项目。改成同名 ⇒ 幂等：不写库、不加 `revision`，返回当前行。
@@ -354,8 +401,9 @@ pub async fn rename_project(
     request: RenameProjectRequest,
 ) -> Result<catalog::ProjectChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Project, &request.project_id)];
+    let broadcaster = Arc::clone(state.broadcaster());
     run_command(&state, targets, move |app| {
-        rename_project_impl(app, request)
+        rename_project_impl(app, &broadcaster, request)
     })
     .await
 }
@@ -363,14 +411,22 @@ pub async fn rename_project(
 /// [`rename_project`] 的命令体（IPC 包装只做转发）。
 pub fn rename_project_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: RenameProjectRequest,
 ) -> Result<catalog::ProjectChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let change =
+    let (change, changed) =
         catalog::rename_project(app.db_mut(), env, &request.project_id, &request.name, now)?
-            .into_value();
-    Ok(change)
+            .into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 /// 归档项目（F-004）。已归档 ⇒ 幂等。
@@ -380,8 +436,9 @@ pub async fn archive_project(
     request: ArchiveProjectRequest,
 ) -> Result<catalog::ProjectChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Project, &request.project_id)];
+    let broadcaster = Arc::clone(state.broadcaster());
     run_command(&state, targets, move |app| {
-        archive_project_impl(app, request)
+        archive_project_impl(app, &broadcaster, request)
     })
     .await
 }
@@ -389,13 +446,21 @@ pub async fn archive_project(
 /// [`archive_project`] 的命令体（IPC 包装只做转发）。
 pub fn archive_project_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: ArchiveProjectRequest,
 ) -> Result<catalog::ProjectChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let change =
-        catalog::archive_project(app.db_mut(), env, &request.project_id, now)?.into_value();
-    Ok(change)
+    let (change, changed) =
+        catalog::archive_project(app.db_mut(), env, &request.project_id, now)?.into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -429,17 +494,22 @@ pub async fn create_tag(
     state: State<'_, RunningApp>,
     request: CreateTagRequest,
 ) -> Result<catalog::TagChange, ErrorResponse> {
-    run_command(&state, Vec::new(), move |app| create_tag_impl(app, request)).await
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(&state, Vec::new(), move |app| {
+        create_tag_impl(app, &broadcaster, request)
+    })
+    .await
 }
 
 /// [`create_tag`] 的命令体（IPC 包装只做转发）。
 pub fn create_tag_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: CreateTagRequest,
 ) -> Result<catalog::TagChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let change = catalog::create_tag(
+    let (change, changed) = catalog::create_tag(
         app.db_mut(),
         env,
         &request.kind,
@@ -447,8 +517,15 @@ pub fn create_tag_impl(
         request.parent_id.as_deref(),
         now,
     )?
-    .into_value();
-    Ok(change)
+    .into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 /// 某个任务身上的标签。写路径（打标/去标）不用它——它们在同一个写事务里读回集合。
@@ -484,19 +561,31 @@ pub async fn tag_task(
         target(AuthorityKind::Task, &request.task_id),
         target(AuthorityKind::Tag, &request.tag_id),
     ];
-    run_command(&state, targets, move |app| tag_task_impl(app, request)).await
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(&state, targets, move |app| {
+        tag_task_impl(app, &broadcaster, request)
+    })
+    .await
 }
 
 /// [`tag_task`] 的命令体（IPC 包装只做转发）。
 pub fn tag_task_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: TaskTagRequest,
 ) -> Result<catalog::TaskTagsChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let change =
-        catalog::tag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?.into_value();
-    Ok(change)
+    let (change, changed) =
+        catalog::tag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?.into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 /// 去标。口径与 [`tag_task`] 完全对称，包括「本来就不在集合里 ⇒ 幂等」。
@@ -509,19 +598,32 @@ pub async fn untag_task(
         target(AuthorityKind::Task, &request.task_id),
         target(AuthorityKind::Tag, &request.tag_id),
     ];
-    run_command(&state, targets, move |app| untag_task_impl(app, request)).await
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(&state, targets, move |app| {
+        untag_task_impl(app, &broadcaster, request)
+    })
+    .await
 }
 
 /// [`untag_task`] 的命令体（IPC 包装只做转发）。
 pub fn untag_task_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: TaskTagRequest,
 ) -> Result<catalog::TaskTagsChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let change = catalog::untag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?
-        .into_value();
-    Ok(change)
+    let (change, changed) =
+        catalog::untag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?
+            .into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -555,8 +657,9 @@ pub async fn create_task(
     state: State<'_, RunningApp>,
     request: CreateTaskRequest,
 ) -> Result<catalog::TaskChange, ErrorResponse> {
+    let broadcaster = Arc::clone(state.broadcaster());
     run_command(&state, Vec::new(), move |app| {
-        create_task_impl(app, request)
+        create_task_impl(app, &broadcaster, request)
     })
     .await
 }
@@ -564,19 +667,27 @@ pub async fn create_task(
 /// [`create_task`] 的命令体（IPC 包装只做转发）。
 pub fn create_task_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: CreateTaskRequest,
 ) -> Result<catalog::TaskChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let change = catalog::create_task(
+    let (change, changed) = catalog::create_task(
         app.db_mut(),
         env,
         &request.title,
         request.project_id.as_deref(),
         now,
     )?
-    .into_value();
-    Ok(change)
+    .into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 /// 理清为待办（F-002）。只接受没有在计时的 `Inbox` / `Clarifying`（P3 的状态编排
@@ -587,18 +698,32 @@ pub async fn clarify_ready(
     request: ClarifyReadyRequest,
 ) -> Result<catalog::TaskChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
-    run_command(&state, targets, move |app| clarify_ready_impl(app, request)).await
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(&state, targets, move |app| {
+        clarify_ready_impl(app, &broadcaster, request)
+    })
+    .await
 }
 
 /// [`clarify_ready`] 的命令体（IPC 包装只做转发）。
 pub fn clarify_ready_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: ClarifyReadyRequest,
 ) -> Result<catalog::TaskChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
     let change = catalog::clarify_ready(app.db_mut(), env, &request.task_id, now)?;
-    Ok(change)
+    // `services::catalog::clarify_ready` 没有 `Unchanged` 分支：它只在真的跃迁时成功，
+    // 所以这一次业务写必然改了库。
+    Ok(announce(
+        broadcaster,
+        true,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 /// 改任务的归属（绑定到 active 项目 / 解除关联）。同值 ⇒ 幂等。
@@ -608,8 +733,9 @@ pub async fn set_task_project(
     request: SetTaskProjectRequest,
 ) -> Result<catalog::TaskProjectChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
+    let broadcaster = Arc::clone(state.broadcaster());
     run_command(&state, targets, move |app| {
-        set_task_project_impl(app, request)
+        set_task_project_impl(app, &broadcaster, request)
     })
     .await
 }
@@ -617,14 +743,22 @@ pub async fn set_task_project(
 /// [`set_task_project`] 的命令体（IPC 包装只做转发）。
 pub fn set_task_project_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: SetTaskProjectRequest,
 ) -> Result<catalog::TaskProjectChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let change =
+    let (change, changed) =
         catalog::set_task_project(app.db_mut(), env, &request.task_id, request.project, now)?
-            .into_value();
-    Ok(change)
+            .into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -656,17 +790,22 @@ pub async fn add_to_plan(
     request: PlanMutationRequest,
 ) -> Result<daily_plan::DailyPlanChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
-    run_command(&state, targets, move |app| add_to_plan_impl(app, request)).await
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(&state, targets, move |app| {
+        add_to_plan_impl(app, &broadcaster, request)
+    })
+    .await
 }
 
 /// [`add_to_plan`] 的命令体（IPC 包装只做转发）。
 pub fn add_to_plan_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: PlanMutationRequest,
 ) -> Result<daily_plan::DailyPlanChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let change = daily_plan::add_to_plan(
+    let (change, changed) = daily_plan::add_to_plan(
         app.db_mut(),
         env,
         &request.task_id,
@@ -674,8 +813,15 @@ pub fn add_to_plan_impl(
         &request.timezone,
         now,
     )?
-    .into_value();
-    Ok(change)
+    .into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 /// 把一个任务从今日计划里移除。口径与 [`add_to_plan`] 对称。
@@ -685,8 +831,9 @@ pub async fn remove_from_plan(
     request: PlanMutationRequest,
 ) -> Result<daily_plan::DailyPlanChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
+    let broadcaster = Arc::clone(state.broadcaster());
     run_command(&state, targets, move |app| {
-        remove_from_plan_impl(app, request)
+        remove_from_plan_impl(app, &broadcaster, request)
     })
     .await
 }
@@ -694,11 +841,12 @@ pub async fn remove_from_plan(
 /// [`remove_from_plan`] 的命令体（IPC 包装只做转发）。
 pub fn remove_from_plan_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: PlanMutationRequest,
 ) -> Result<daily_plan::DailyPlanChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let change = daily_plan::remove_from_plan(
+    let (change, changed) = daily_plan::remove_from_plan(
         app.db_mut(),
         env,
         &request.task_id,
@@ -706,8 +854,15 @@ pub fn remove_from_plan_impl(
         &request.timezone,
         now,
     )?
-    .into_value();
-    Ok(change)
+    .into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        change.data_epoch.clone(),
+        change.revision,
+        now,
+        change,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -747,12 +902,17 @@ pub async fn start_timer(
     request: StartTimerRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
-    run_command(&state, targets, move |app| start_timer_impl(app, request)).await
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(&state, targets, move |app| {
+        start_timer_impl(app, &broadcaster, request)
+    })
+    .await
 }
 
 /// [`start_timer`] 的命令体（IPC 包装只做转发）。
 pub fn start_timer_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: StartTimerRequest,
 ) -> Result<CommandOutcome, AppError> {
     let req = StartRequest {
@@ -764,7 +924,17 @@ pub fn start_timer_impl(
         target_duration_ms: request.target_duration_ms,
         expected_interval_ms: request.expected_interval_ms,
     };
-    app.start(req)
+    // 计时命令没有「幂等重复」这一支：能走到这里就说明这次状态跃迁真的提交了
+    // （被拒的命令在服务层就返回错误，不会广播）。
+    let outcome = app.start(req)?;
+    Ok(announce(
+        broadcaster,
+        true,
+        outcome.snapshot.data_epoch.clone(),
+        outcome.revision,
+        outcome.snapshot.as_of,
+        outcome,
+    ))
 }
 
 /// 暂停（会话与会话版本由快照给出）。暂停值冻结，不在前端算。
@@ -774,15 +944,30 @@ pub async fn pause_timer(
     request: SessionRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Session, &request.session_id)];
-    run_command(&state, targets, move |app| pause_timer_impl(app, request)).await
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(&state, targets, move |app| {
+        pause_timer_impl(app, &broadcaster, request)
+    })
+    .await
 }
 
 /// [`pause_timer`] 的命令体（IPC 包装只做转发）。
 pub fn pause_timer_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: SessionRequest,
 ) -> Result<CommandOutcome, AppError> {
-    app.pause(request)
+    // 计时命令没有「幂等重复」这一支：能走到这里就说明这次状态跃迁真的提交了
+    // （被拒的命令在服务层就返回错误，不会广播）。
+    let outcome = app.pause(request)?;
+    Ok(announce(
+        broadcaster,
+        true,
+        outcome.snapshot.data_epoch.clone(),
+        outcome.revision,
+        outcome.snapshot.as_of,
+        outcome,
+    ))
 }
 
 /// 继续计时。**两份版本**：任务与会话各自有自己的并发版本。
@@ -795,15 +980,30 @@ pub async fn resume_timer(
         target(AuthorityKind::Task, &request.task_id),
         target(AuthorityKind::Session, &request.session_id),
     ];
-    run_command(&state, targets, move |app| resume_timer_impl(app, request)).await
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(&state, targets, move |app| {
+        resume_timer_impl(app, &broadcaster, request)
+    })
+    .await
 }
 
 /// [`resume_timer`] 的命令体（IPC 包装只做转发）。
 pub fn resume_timer_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: ResumeRequest,
 ) -> Result<CommandOutcome, AppError> {
-    app.resume(request)
+    // 计时命令没有「幂等重复」这一支：能走到这里就说明这次状态跃迁真的提交了
+    // （被拒的命令在服务层就返回错误，不会广播）。
+    let outcome = app.resume(request)?;
+    Ok(announce(
+        broadcaster,
+        true,
+        outcome.snapshot.data_epoch.clone(),
+        outcome.revision,
+        outcome.snapshot.as_of,
+        outcome,
+    ))
 }
 
 /// 结束计时。到点只提示、不自动完成（F-003 的完整联动归 P8）。
@@ -813,13 +1013,28 @@ pub async fn finish_timer(
     request: SessionRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Session, &request.session_id)];
-    run_command(&state, targets, move |app| finish_timer_impl(app, request)).await
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(&state, targets, move |app| {
+        finish_timer_impl(app, &broadcaster, request)
+    })
+    .await
 }
 
 /// [`finish_timer`] 的命令体（IPC 包装只做转发）。
 pub fn finish_timer_impl(
     app: &mut AppState,
+    broadcaster: &Broadcaster,
     request: SessionRequest,
 ) -> Result<CommandOutcome, AppError> {
-    app.finish(request)
+    // 计时命令没有「幂等重复」这一支：能走到这里就说明这次状态跃迁真的提交了
+    // （被拒的命令在服务层就返回错误，不会广播）。
+    let outcome = app.finish(request)?;
+    Ok(announce(
+        broadcaster,
+        true,
+        outcome.snapshot.data_epoch.clone(),
+        outcome.revision,
+        outcome.snapshot.as_of,
+        outcome,
+    ))
 }

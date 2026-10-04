@@ -21,6 +21,7 @@
 //! 采样节拍设成 1 小时：本文件只测命令，不让周期采样插进来写检查点。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use worktrace_lib::commands::{
@@ -51,7 +52,7 @@ const TZ: &str = "Asia/Shanghai";
 // 出口与夹具
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 照单全收的出口（广播用例在下一轮的提交里加断言；这里先保证命令体不被出口干扰）。
+/// 照单全收的出口（`domain.changed` 发送侧的断言在文件末尾那一节）。
 #[derive(Default)]
 struct RecordingSink {
     events: Mutex<Vec<EventEnvelope>>,
@@ -70,6 +71,19 @@ impl RecordingSink {
     }
 }
 
+/// 永远失败的出口：证明**广播失败不影响命令结果**（00 §4）。
+#[derive(Default)]
+struct FailingSink {
+    calls: AtomicUsize,
+}
+
+impl EventSink for FailingSink {
+    fn broadcast(&self, _envelope: &EventEnvelope) -> Result<(), String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err("webview gone".to_string())
+    }
+}
+
 /// 起一个真应用（走 `services::bootstrap::startup`），前台放两个项目、三个任务、两个标签。
 struct Shell {
     _dir: tempfile::TempDir,
@@ -79,6 +93,19 @@ struct Shell {
 }
 
 fn launch() -> Shell {
+    let recorder = Arc::new(RecordingSink::default());
+    let (dir, running) = launch_with(Arc::clone(&recorder) as Arc<dyn EventSink>);
+    let epoch = running.data_epoch().to_string();
+    Shell {
+        _dir: dir,
+        running,
+        sink: recorder,
+        epoch,
+    }
+}
+
+/// 起一个真应用，用调用方给的出口（记录型 / 失败型都能起）。
+fn launch_with(sink: Arc<dyn EventSink>) -> (tempfile::TempDir, Box<RunningApp>) {
     let dir = tempfile::tempdir().unwrap();
     let db_path: PathBuf = dir.path().join("worktrace.db");
     let lock_path: PathBuf = dir.path().join("instance.lock");
@@ -121,11 +148,10 @@ fn launch() -> Shell {
 
     let mut config = StartupConfig::new(&db_path, &lock_path);
     config.sampling_interval_ms = 3_600_000;
-    let sink = Arc::new(RecordingSink::default());
     let running = match startup(
         config,
         Box::new(FakeClock::new(WALL, 0)),
-        Arc::clone(&sink) as Arc<dyn EventSink>,
+        sink,
         &NoProbe,
         &|| -> Result<(), AppError> { Ok(()) },
     )
@@ -134,13 +160,7 @@ fn launch() -> Shell {
         Startup::Running(running) => running,
         Startup::AlreadyRunning { .. } => panic!("测试进程应当是唯一实例"),
     };
-    let epoch = running.data_epoch().to_string();
-    Shell {
-        _dir: dir,
-        running,
-        sink,
-        epoch,
-    }
+    (dir, running)
 }
 
 impl Shell {
@@ -290,6 +310,7 @@ fn create_project_impl_trims_the_name_and_stamps_the_clock_sample() {
 
     let change = commands::create_project_impl(
         &mut state,
+        shell.running.broadcaster(),
         CreateProjectRequest {
             expected_data_epoch: shell.epoch.clone(),
             name: "  项目三  ".to_string(),
@@ -312,6 +333,7 @@ fn rename_project_impl_carries_the_expected_version_and_is_idempotent_for_the_sa
 
     let renamed = commands::rename_project_impl(
         &mut state,
+        shell.running.broadcaster(),
         RenameProjectRequest {
             expected_data_epoch: shell.epoch.clone(),
             project_id: "p1".to_string(),
@@ -327,6 +349,7 @@ fn rename_project_impl_carries_the_expected_version_and_is_idempotent_for_the_sa
     // 旧版本 ⇒ VERSION_CONFLICT：信封里的版本真的是期望值。
     let stale = commands::rename_project_impl(
         &mut state,
+        shell.running.broadcaster(),
         RenameProjectRequest {
             expected_data_epoch: shell.epoch.clone(),
             project_id: "p1".to_string(),
@@ -341,6 +364,7 @@ fn rename_project_impl_carries_the_expected_version_and_is_idempotent_for_the_sa
     let revision = revision_of(&state);
     let same = commands::rename_project_impl(
         &mut state,
+        shell.running.broadcaster(),
         RenameProjectRequest {
             expected_data_epoch: shell.epoch.clone(),
             project_id: "p1".to_string(),
@@ -362,6 +386,7 @@ fn archive_project_impl_archives_and_rejects_a_stale_epoch() {
 
     let archived = commands::archive_project_impl(
         &mut state,
+        shell.running.broadcaster(),
         ArchiveProjectRequest {
             expected_data_epoch: shell.epoch.clone(),
             project_id: "p1".to_string(),
@@ -379,6 +404,7 @@ fn archive_project_impl_archives_and_rejects_a_stale_epoch() {
 
     let stale = commands::archive_project_impl(
         &mut state,
+        shell.running.broadcaster(),
         ArchiveProjectRequest {
             expected_data_epoch: "另一个库".to_string(),
             project_id: "p2".to_string(),
@@ -438,6 +464,7 @@ fn create_tag_impl_creates_flat_tags_only() {
 
     let change = commands::create_tag_impl(
         &mut state,
+        shell.running.broadcaster(),
         CreateTagRequest {
             expected_data_epoch: shell.epoch.clone(),
             kind: "Context".to_string(),
@@ -452,6 +479,7 @@ fn create_tag_impl_creates_flat_tags_only() {
 
     let layered = commands::create_tag_impl(
         &mut state,
+        shell.running.broadcaster(),
         CreateTagRequest {
             expected_data_epoch: shell.epoch.clone(),
             kind: "Context".to_string(),
@@ -471,6 +499,7 @@ fn tag_and_untag_impl_hand_the_pair_to_the_service_and_are_idempotent() {
 
     let tagged = commands::tag_task_impl(
         &mut state,
+        shell.running.broadcaster(),
         TaskTagRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -486,6 +515,7 @@ fn tag_and_untag_impl_hand_the_pair_to_the_service_and_are_idempotent() {
     let revision = revision_of(&state);
     let again = commands::tag_task_impl(
         &mut state,
+        shell.running.broadcaster(),
         TaskTagRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -498,6 +528,7 @@ fn tag_and_untag_impl_hand_the_pair_to_the_service_and_are_idempotent() {
 
     let untagged = commands::untag_task_impl(
         &mut state,
+        shell.running.broadcaster(),
         TaskTagRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -526,6 +557,7 @@ fn tags_of_task_impl_reads_the_current_set() {
 
     commands::tag_task_impl(
         &mut state,
+        shell.running.broadcaster(),
         TaskTagRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -608,6 +640,7 @@ fn create_task_impl_captures_into_the_inbox_and_refuses_bad_input() {
 
     let change = commands::create_task_impl(
         &mut state,
+        shell.running.broadcaster(),
         CreateTaskRequest {
             expected_data_epoch: shell.epoch.clone(),
             title: "  写报告  ".to_string(),
@@ -622,6 +655,7 @@ fn create_task_impl_captures_into_the_inbox_and_refuses_bad_input() {
 
     let empty = commands::create_task_impl(
         &mut state,
+        shell.running.broadcaster(),
         CreateTaskRequest {
             expected_data_epoch: shell.epoch.clone(),
             title: "   ".to_string(),
@@ -633,6 +667,7 @@ fn create_task_impl_captures_into_the_inbox_and_refuses_bad_input() {
 
     let archived = commands::create_task_impl(
         &mut state,
+        shell.running.broadcaster(),
         CreateTaskRequest {
             expected_data_epoch: shell.epoch.clone(),
             title: "挂到归档项目".to_string(),
@@ -651,6 +686,7 @@ fn clarify_ready_impl_moves_inbox_to_ready_and_guards_the_version() {
 
     let clarified = commands::clarify_ready_impl(
         &mut state,
+        shell.running.broadcaster(),
         ClarifyReadyRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t2".to_string(),
@@ -667,6 +703,7 @@ fn clarify_ready_impl_moves_inbox_to_ready_and_guards_the_version() {
 
     let stale = commands::clarify_ready_impl(
         &mut state,
+        shell.running.broadcaster(),
         ClarifyReadyRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t2".to_string(),
@@ -679,6 +716,7 @@ fn clarify_ready_impl_moves_inbox_to_ready_and_guards_the_version() {
     // 已经是 Ready 的任务不在这个入口的接受范围里（P3 的状态编排不从这里进来）。
     let not_clarifiable = commands::clarify_ready_impl(
         &mut state,
+        shell.running.broadcaster(),
         ClarifyReadyRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -696,6 +734,7 @@ fn set_task_project_impl_binds_clears_and_refuses_archived_projects() {
 
     let bound = commands::set_task_project_impl(
         &mut state,
+        shell.running.broadcaster(),
         SetTaskProjectRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t2".to_string(),
@@ -708,6 +747,7 @@ fn set_task_project_impl_binds_clears_and_refuses_archived_projects() {
 
     let cleared = commands::set_task_project_impl(
         &mut state,
+        shell.running.broadcaster(),
         SetTaskProjectRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t2".to_string(),
@@ -720,6 +760,7 @@ fn set_task_project_impl_binds_clears_and_refuses_archived_projects() {
 
     let archived = commands::set_task_project_impl(
         &mut state,
+        shell.running.broadcaster(),
         SetTaskProjectRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t2".to_string(),
@@ -783,6 +824,7 @@ fn add_to_plan_impl_adds_and_is_idempotent_then_remove_takes_it_out() {
 
     let added = commands::add_to_plan_impl(
         &mut state,
+        shell.running.broadcaster(),
         PlanMutationRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -798,6 +840,7 @@ fn add_to_plan_impl_adds_and_is_idempotent_then_remove_takes_it_out() {
     let revision = revision_of(&state);
     let again = commands::add_to_plan_impl(
         &mut state,
+        shell.running.broadcaster(),
         PlanMutationRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -810,6 +853,7 @@ fn add_to_plan_impl_adds_and_is_idempotent_then_remove_takes_it_out() {
 
     let removed = commands::remove_from_plan_impl(
         &mut state,
+        shell.running.broadcaster(),
         PlanMutationRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -830,6 +874,7 @@ fn remove_from_plan_impl_is_idempotent_when_the_task_was_never_added() {
 
     let removed = commands::remove_from_plan_impl(
         &mut state,
+        shell.running.broadcaster(),
         PlanMutationRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t3".to_string(),
@@ -897,7 +942,12 @@ fn start_timer_impl_starts_a_foreground_stopwatch_and_validates_the_strings() {
     let mut state = shell.state();
     let before = revision_of(&state);
 
-    let started = commands::start_timer_impl(&mut state, start_request(&shell, "t1")).unwrap();
+    let started = commands::start_timer_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        start_request(&shell, "t1"),
+    )
+    .unwrap();
     let session_id = started.snapshot.session_id.clone().expect("应当有会话");
     assert_eq!(started.snapshot.state, Some(SessionState::Running));
     assert_eq!(started.snapshot.timer_kind.unwrap().as_str(), "stopwatch");
@@ -926,6 +976,7 @@ fn start_timer_impl_starts_a_foreground_stopwatch_and_validates_the_strings() {
     // 字符串枚举的非法取值：稳定错误码，而不是 Tauri 的反序列化错误。
     let bad_mode = commands::start_timer_impl(
         &mut state,
+        shell.running.broadcaster(),
         StartTimerRequest {
             mode: "FOCUS".to_string(),
             ..start_request(&shell, "t3")
@@ -936,6 +987,7 @@ fn start_timer_impl_starts_a_foreground_stopwatch_and_validates_the_strings() {
 
     let bad_kind = commands::start_timer_impl(
         &mut state,
+        shell.running.broadcaster(),
         StartTimerRequest {
             timer_kind: "pomodoro".to_string(),
             ..start_request(&shell, "t3")
@@ -950,12 +1002,18 @@ fn pause_timer_impl_pauses_the_session_instead_of_finishing_it() {
     let shell = launch();
     let mut state = shell.state();
 
-    let started = commands::start_timer_impl(&mut state, start_request(&shell, "t1")).unwrap();
+    let started = commands::start_timer_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        start_request(&shell, "t1"),
+    )
+    .unwrap();
     let session_id = started.snapshot.session_id.clone().unwrap();
     let version = started.snapshot.session_version.unwrap();
 
     let paused = commands::pause_timer_impl(
         &mut state,
+        shell.running.broadcaster(),
         SessionRequest {
             expected_data_epoch: shell.epoch.clone(),
             session_id: session_id.clone(),
@@ -986,6 +1044,7 @@ fn pause_timer_impl_pauses_the_session_instead_of_finishing_it() {
 
     let stale = commands::pause_timer_impl(
         &mut state,
+        shell.running.broadcaster(),
         SessionRequest {
             expected_data_epoch: shell.epoch.clone(),
             session_id: session_id.clone(),
@@ -1001,10 +1060,16 @@ fn resume_timer_impl_resumes_with_both_versions() {
     let shell = launch();
     let mut state = shell.state();
 
-    let started = commands::start_timer_impl(&mut state, start_request(&shell, "t1")).unwrap();
+    let started = commands::start_timer_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        start_request(&shell, "t1"),
+    )
+    .unwrap();
     let session_id = started.snapshot.session_id.clone().unwrap();
     let paused = commands::pause_timer_impl(
         &mut state,
+        shell.running.broadcaster(),
         SessionRequest {
             expected_data_epoch: shell.epoch.clone(),
             session_id: session_id.clone(),
@@ -1015,6 +1080,7 @@ fn resume_timer_impl_resumes_with_both_versions() {
 
     let resumed = commands::resume_timer_impl(
         &mut state,
+        shell.running.broadcaster(),
         ResumeRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -1035,6 +1101,7 @@ fn resume_timer_impl_resumes_with_both_versions() {
 
     let stale = commands::resume_timer_impl(
         &mut state,
+        shell.running.broadcaster(),
         ResumeRequest {
             expected_data_epoch: shell.epoch.clone(),
             task_id: "t1".to_string(),
@@ -1052,11 +1119,17 @@ fn finish_timer_impl_finishes_the_session_instead_of_pausing_it() {
     let shell = launch();
     let mut state = shell.state();
 
-    let started = commands::start_timer_impl(&mut state, start_request(&shell, "t1")).unwrap();
+    let started = commands::start_timer_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        start_request(&shell, "t1"),
+    )
+    .unwrap();
     let session_id = started.snapshot.session_id.clone().unwrap();
 
     let finished = commands::finish_timer_impl(
         &mut state,
+        shell.running.broadcaster(),
         SessionRequest {
             expected_data_epoch: shell.epoch.clone(),
             session_id: session_id.clone(),
@@ -1087,6 +1160,7 @@ fn finish_timer_impl_finishes_the_session_instead_of_pausing_it() {
 
     let stale = commands::finish_timer_impl(
         &mut state,
+        shell.running.broadcaster(),
         SessionRequest {
             expected_data_epoch: shell.epoch.clone(),
             session_id: session_id.clone(),
@@ -1095,4 +1169,138 @@ fn finish_timer_impl_finishes_the_session_instead_of_pausing_it() {
     )
     .expect_err("旧会话版本必须被拒");
     assert_code(&stale, "VERSION_CONFLICT");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `domain.changed` 的发送侧（P7 Task 1 fix round 1）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一次真的改了库的写命令 ⇒ **恰好一条** `domain.changed`，载荷就是那次响应。
+///
+/// 信封里的 `data_epoch`/`revision` 必须与响应一致（前端据此使缓存失效），
+/// `at` 来自这次命令的时钟采样。
+#[test]
+fn a_changed_write_broadcasts_exactly_one_domain_changed_with_the_response_as_payload() {
+    let shell = launch();
+    let mut state = shell.state();
+
+    let change = commands::create_project_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        CreateProjectRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            name: "项目三".to_string(),
+        },
+    )
+    .unwrap();
+
+    let events = shell.events();
+    assert_eq!(events.len(), 1, "一次业务写恰好一条通知：{events:?}");
+    let event = &events[0];
+    assert_eq!(event.event, "domain.changed");
+    assert_eq!(event.revision, change.revision);
+    assert_eq!(event.data_epoch, change.data_epoch);
+    assert_eq!(event.at, WALL, "at 来自这次命令的时钟采样");
+    assert_eq!(
+        event.payload,
+        serde_json::to_value(&change).unwrap(),
+        "载荷就是这次命令的响应 DTO"
+    );
+}
+
+/// 幂等重复（零写入、revision 不动）⇒ **一条都不发**。
+///
+/// 这是「仅 `Changed` 时广播」的对手断言：把条件写成「总是广播」，本用例必红。
+#[test]
+fn an_idempotent_write_broadcasts_nothing() {
+    let shell = launch();
+    let mut state = shell.state();
+
+    // 第一次打标：真的改了库 ⇒ 一条。
+    commands::tag_task_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        TaskTagRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            task_id: "t1".to_string(),
+            tag_id: "tag1".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(shell.events().len(), 1);
+
+    // 第二次打标（同任务、同标签）⇒ Unchanged：不写库、不加 revision、不广播。
+    let revision = revision_of(&state);
+    let again = commands::tag_task_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        TaskTagRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            task_id: "t1".to_string(),
+            tag_id: "tag1".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(again.revision, revision);
+    assert_eq!(
+        shell.events().len(),
+        1,
+        "幂等重复不得再发通知：{:?}",
+        shell.events()
+    );
+
+    // 改成同名的项目也是幂等重复。
+    let same = commands::rename_project_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        RenameProjectRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            project_id: "p1".to_string(),
+            expected_row_version: 0,
+            name: "项目一".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(same.revision, revision);
+    assert_eq!(
+        shell.events().len(),
+        1,
+        "改成同名同样不广播：{:?}",
+        shell.events()
+    );
+}
+
+/// 广播失败 ⇒ 命令仍然成功、业务已提交、诊断计数 +1（00 §4）。
+#[test]
+fn a_failed_broadcast_keeps_the_command_successful_and_counts_a_diagnostic() {
+    let failing = Arc::new(FailingSink::default());
+    let (_dir, running) = launch_with(Arc::clone(&failing) as Arc<dyn EventSink>);
+    let epoch = running.data_epoch().to_string();
+    let broadcaster = Arc::clone(running.broadcaster());
+    let mut state = lock_app(running.app());
+    let before = revision_of(&state);
+
+    let change = commands::create_project_impl(
+        &mut state,
+        running.broadcaster(),
+        CreateProjectRequest {
+            expected_data_epoch: epoch,
+            name: "项目三".to_string(),
+        },
+    )
+    .expect("广播失败不得让命令失败");
+
+    assert_eq!(change.revision, before + 1, "业务已经提交");
+    assert_eq!(
+        scalar(&state, "SELECT COUNT(*) FROM project WHERE name = '项目三'"),
+        1,
+        "已提交的业务不会被广播失败回滚"
+    );
+    assert!(failing.calls.load(Ordering::SeqCst) >= 1, "出口确实被调过");
+    assert!(
+        broadcaster.diagnostics().failed >= 1,
+        "失败被记成诊断：{:?}",
+        broadcaster.diagnostics()
+    );
+    assert_eq!(broadcaster.diagnostics().sent, 0, "这条出口一次都没成功过");
 }
