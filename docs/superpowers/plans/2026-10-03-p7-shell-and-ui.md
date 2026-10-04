@@ -160,6 +160,12 @@
 
 ### 6a 双窗口同步实验（06 §4，必须在 P8 之前跑完并记录结论）
 
+> **落地状态（2026-10-04）**：**自动化半边已完成**（提交 `b7b9250`，见文末
+> 「Task 6a 的落地」一节）；**真实双窗口待实机**——步骤、判据与记录模板在
+> `src-tauri/tests/manual-sync.md`（外壳侧互链在 `src-tauri/tests/manual-shell.md` §5）。
+> 下面两条前置（第二个窗口 `sync-lab`、三个 dev 注入开关）属 `src-tauri/` 侧，
+> **本轮未落地**：本轮硬约束是不改 `src-tauri/` 的 Rust 生产代码。
+
 - [ ] **第二个窗口**：label **`sync-lab`**，由 Rust 侧用 `WebviewWindowBuilder` 创建（实验时开，不做成 `tauri.conf.json` 的静态窗口）；**`src-tauri/capabilities/default.json` 的 `windows` 必须包含 `sync-lab`**，否则该窗口的 JS 无权限调命令（现在只有 `"main"`）。
 - [ ] 验证"先监听后快照"。三种竞态**用明确的注入手段造**（不能只写"人为制造"）：
   - **(a) 末次事件丢失**：`services/events.rs` 的广播出口加 `#[cfg(debug_assertions)]` 丢弃开关（dev 命令 `__p7_drop_next_event`），丢一次通知后确认展示在 30 秒 `get_revision` 周期内仍收敛；
@@ -553,6 +559,53 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
   `tag_task`/`untag_task` 的界面（Task 5 只做查询侧的情境筛选）；统计视图与导出（P5/P8）；
   归档/完成状态的批量操作（V0.1 无此入口）；完成/取消/Blocked/Waiting/reopen 的状态入口
   （P8，依赖 P3 的 `transition_task`）。
+
+## Task 6a 的落地（2026-10-04）：自动化半边
+
+细节、逐条反向验证与原始输出见
+`.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task6a-report.md`：
+
+- **状态**：06 §4「双窗口同步」的**自动化半边已完成**（`b7b9250`）；**真实双窗口待实机**
+  ——步骤与记录模板：`src-tauri/tests/manual-sync.md` §0–§5，外壳侧互链在
+  `src-tauri/tests/manual-shell.md` 的头部与 §5。前端 `pnpm test` 112 → **118 条**
+  （12 个文件）EXIT 0、`pnpm build` EXIT 0（提交 `b7b9250`）；**零新增依赖**；
+  `src-tauri/` 的 Rust 生产代码**一个文件都没动**（第二个提交只加了两份 markdown）。
+- **做了什么**（全在 `src/state/__tests__/`）：`syncLabBus.ts` 是**事件通道替身**
+  （Tauri `listen` 的替身：每个上下文各一条订阅 = 各一把水位），注入原语
+  `dropNext()`（(a) 丢末次事件）与 `holdNext()` + `releaseHeld()`（(c) 乱序、跳号）；
+  `syncLab.ts` 是**假后端 + 一个窗口**——假后端按 `src/types/ipc.ts` 的形状回话
+  （写命令 `revision` +1、`timer_snapshot` 报**当前**版本；`mockIPC` 挡在 IPC 边界），
+  窗口用**真实的** `createDomainState` + **真实的** `startEventSession` + 真实 IPC 转发，
+  外加一个页面同构的消费者（`invalidated` 一变就重拉、`isStaleResponse` 判过期、
+  **上屏之后**才 `markApplied`）；注入 (b) 是 `screen.holdNextRead()`——请求照发、
+  数据按**发起那一刻**取好、晚回来。
+- **六条用例**（`dualContextSync.test.ts`）：① A 写 ⇒ B 失效并重取（事件不推水位、
+  载荷不并进镜像）；② (a) 末次事件丢失 ⇒ **30 秒校验周期内**收敛（`vi.useFakeTimers`，
+  不真等 30 秒）；③ (b) 旧响应晚到 ⇒ 丢弃、不覆盖；④ (c) 跳号 ⇒ 取新快照
+  （判据是 `timerSnapshot` 调用数 1→2，屏上"重拉一次"分不开这两种实现）且迟到的补号
+  不改最终状态；⑤ 重复通知（同版本再来一条）不再失效、不再取快照；⑥ A 暂停 ⇒
+  B 的展示在 30 秒内收敛到 `paused`。
+- **注入手段为什么没进生产路径**：三条注入全在测试侧（`__tests__/` 下两个替身模块 +
+  一条只作用于该用例文件模块图的 `vi.mock("@tauri-apps/api/event")`）；
+  **生产签名一处未改**。计划里那三个 dev 命令（`__p7_drop_next_event` 等）与
+  `sync_lab.rs` **不在本轮范围**（见「本阶段不做」）。
+- **反向验证（4 处变异，逐条只红点名用例，原始输出见报告）**：① 摘掉 `verify()` 里
+  「版本比已见版本靠前 ⇒ resync」⇒ 场景 2/5 红；② `FreshnessGate.isStaleResponse`
+  恒 `false` ⇒ 场景 3 红（`expected +0 to be 1`）；③ 摘掉闸门④（跳号 ⇒ 取新快照）
+  ⇒ 场景 4 红（`expected 1 to be 2`）；④ `onDomainChanged` 的 `apply` 分支不再推失效
+  ⇒ 场景 1/3 红。变异在 `git archive HEAD` 的**导出副本**上做，工作树全程干净。
+- **真实双窗口待实机（不做假结论）**：两个前置件**尚未落地**，都属 `src-tauri/` 侧——
+  ① 第二个窗口 `sync-lab`（`WebviewWindowBuilder` 创建，且 `capabilities/default.json`
+  的 `windows` 必须加上它，现在只有 `"main"`）；② 三个 dev-only 注入开关
+  （`#[cfg(debug_assertions)]`，计划 Task 6a 原文）。步骤里记下**两处与计划原文的差异**：
+  丢弃开关**必须按事件名筛**（有活动会话时每秒一条 `timer.tick`，不筛的话"丢掉下一条"
+  会被一条无害的 tick 吃掉），重播开关的参数是**旧 `revision`**（信封里没有
+  `event_seq`）。**自动化那半边证明的是「同一套规则在两个上下文里各自成立」**；
+  **真实双 WebView 的事件广播时序仍须真机跑**（集成测试进程没有事件循环，也没有第二个
+  WebView）——这份单测不得当成实机结论（总纲 §5 第 9 条）。
+- **本阶段不做**：`src-tauri/src/platform/sync_lab.rs` 与三个 dev 注入命令（Rust 侧，
+  本轮硬约束）；「多入口开发/打包路径」与 Windows 打包验证（**仍归 P8**，见「仍待与归属」，
+  本轮未动那条登记）；维护态下的多窗口行为（P6）。
 
 ## 仍待与归属（2026-10-04 登记）
 
