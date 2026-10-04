@@ -56,6 +56,30 @@ pub(super) fn settle<T>(
     }
 }
 
+/// 一份带「权威版本位」（`revision` + `data_epoch`）的报告。
+///
+/// 实现只声明**这两个字段在哪**；怎么填由 [`settle_into`] 一处说了算。
+pub(super) trait SettledReport {
+    fn revision_mut(&mut self) -> &mut i64;
+    fn data_epoch_mut(&mut self) -> &mut String;
+}
+
+/// 把 [`settle`] 读回的权威版本位填进报告，保留「变了 / 没变」这一位。
+///
+/// P3 终审 I2b：这对赋值原先在 `recovery`（对账与作废各一处）、`history`、`tasks`、
+/// `timer::coordinator` 各写一遍——R10 的契约五份拷贝（外加 `coordinator` 那处
+/// `into_parts()` 之后的直接赋值）。收成一处之后，「报告里的 `revision`/`data_epoch`
+/// 从哪来」只有一个答案：**那次写所在的事务**。
+pub(super) fn settle_into<T: SettledReport>(
+    outcome: WriteOutcome<(T, Settled)>,
+) -> WriteOutcome<T> {
+    outcome.map(|(mut report, settled)| {
+        *report.revision_mut() = settled.revision;
+        *report.data_epoch_mut() = settled.data_epoch;
+        report
+    })
+}
+
 /// 一次写的结果版本：业务 `revision` + **库身份** `data_epoch`（裁决 R-A）。
 ///
 /// 两者都出自那次写所在的事务。`data_epoch` 在一次业务写里不会变，但同样必须

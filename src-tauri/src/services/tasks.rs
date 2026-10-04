@@ -45,7 +45,7 @@ use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
 use crate::services::timer::coordinator::Coordinator;
 use crate::services::timer::primitives::{end_session_in_tx, EndSessionFacts};
-use crate::services::tx::{settle, write_tx};
+use crate::services::tx::{settle, settle_into, write_tx, SettledReport};
 use crate::storage::db::{map_sqlite, Db};
 use crate::storage::guards::{guard_epoch, guard_row_version};
 use crate::storage::session_repo::{self, SessionRow};
@@ -79,6 +79,16 @@ pub struct TaskTransitionReport {
     pub revision: i64,
     /// 同一次写事务读回的库身份。
     pub data_epoch: String,
+}
+
+impl SettledReport for TaskTransitionReport {
+    fn revision_mut(&mut self) -> &mut i64 {
+        &mut self.revision
+    }
+
+    fn data_epoch_mut(&mut self) -> &mut String {
+        &mut self.data_epoch
+    }
 }
 
 /// 用户命令：把任务推到目标状态，并在**同一事务**里联动它的会话。
@@ -145,7 +155,7 @@ pub fn transition_task(
             data_epoch: String::new(),
         };
         // `Unchanged` 也走 `settle`：它负责在**同一个读事务**里读回权威版本，只是不加。
-        let outcome = settled(&tx, WriteOutcome::Unchanged(report))?;
+        let outcome = settle_into(settle(&tx, WriteOutcome::Unchanged(report))?);
         tx.commit().map_err(map_sqlite)?;
         // 没有会话被结束/暂停 ⇒ 不动镜像、不二次取样、不二次事务（R10）。
         return Ok(outcome);
@@ -224,7 +234,7 @@ pub fn transition_task(
         revision: 0,
         data_epoch: String::new(),
     };
-    let outcome = settled(&tx, WriteOutcome::Changed(report))?;
+    let outcome = settle_into(settle(&tx, WriteOutcome::Changed(report))?);
     tx.commit().map_err(map_sqlite)?;
 
     // ④ 提交后收尾：**只有真有会话被结束/暂停**时才重建镜像（与 P2 的 `finish` 完全
@@ -239,20 +249,6 @@ pub fn transition_task(
             .map_err(|_| AppError::RecoveryRequired)?;
     }
     Ok(outcome)
-}
-
-/// `settle` 之后把权威版本填回报告（两个分支共用，形状抄 `services::recovery`/`history`）。
-fn settled(
-    tx: &Transaction<'_>,
-    outcome: WriteOutcome<TaskTransitionReport>,
-) -> Result<WriteOutcome<TaskTransitionReport>, AppError> {
-    settle(tx, outcome).map(|outcome| {
-        outcome.map(|(mut report, settled)| {
-            report.revision = settled.revision;
-            report.data_epoch = settled.data_epoch;
-            report
-        })
-    })
 }
 
 /// 幂等判据：已经是目标状态，且这条任务没有任何 `running`/`paused` 会话。

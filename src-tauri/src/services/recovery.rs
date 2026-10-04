@@ -81,8 +81,9 @@ use crate::storage::session_repo::{
 use crate::storage::time_edit_repo::{self, TimeEdit};
 use crate::storage::WriteOutcome;
 
+use super::audit::edit_json_base;
 use super::history::HistoryEditReport;
-use super::tx::{settle, write_tx};
+use super::tx::{settle, settle_into, write_tx, SettledReport};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 扫描结论（§0.5 钉死的 DTO 形状；P8 的 IPC 包装与快照 fixture 照抄）
@@ -441,6 +442,16 @@ pub struct ReconcileReport {
     pub data_epoch: String,
 }
 
+impl SettledReport for ReconcileReport {
+    fn revision_mut(&mut self) -> &mut i64 {
+        &mut self.revision
+    }
+
+    fn data_epoch_mut(&mut self) -> &mut String {
+        &mut self.data_epoch
+    }
+}
+
 /// 用户命令：一次事务处理该会话的**全部**待确认区间。
 ///
 /// 前置与判据（Task 2）：
@@ -575,8 +586,9 @@ pub fn reconcile(
     )?;
 
     // `Changed` 是这一条命令唯一的取值（前置已经排除了「什么都不用改」的输入），
-    // 但写的形状仍然走 `settle`：它负责「恰好一次 revision」与同事务读回版本。
-    let outcome = settle(
+    // 但写的形状仍然走 `settle`：它负责「恰好一次 revision」与同事务读回版本；
+    // 版本位由 `settle_into`（R10 的唯一填法）填回报告。
+    let outcome = settle_into(settle(
         &tx,
         WriteOutcome::Changed(ReconcileReport {
             session: updated,
@@ -585,12 +597,7 @@ pub fn reconcile(
             revision: 0,
             data_epoch: String::new(),
         }),
-    )?
-    .map(|(mut report, settled)| {
-        report.revision = settled.revision;
-        report.data_epoch = settled.data_epoch;
-        report
-    });
+    )?);
     tx.commit().map_err(map_sqlite)?;
     Ok(outcome)
 }
@@ -722,13 +729,10 @@ pub fn discard_session(
         .iter()
         .all(|interval| interval.voided_at.is_some());
     if all_voided && session.state == SessionState::Discarded && !session.needs_review {
-        let outcome = settle(&tx, WriteOutcome::Unchanged(report(session.clone(), first)))?.map(
-            |(mut report, settled)| {
-                report.revision = settled.revision;
-                report.data_epoch = settled.data_epoch;
-                report
-            },
-        );
+        let outcome = settle_into(settle(
+            &tx,
+            WriteOutcome::Unchanged(report(session.clone(), first)),
+        )?);
         tx.commit().map_err(map_sqlite)?;
         return Ok(outcome);
     }
@@ -780,7 +784,7 @@ pub fn discard_session(
         now,
     )?;
 
-    let outcome = settle(
+    let outcome = settle_into(settle(
         &tx,
         WriteOutcome::Changed(HistoryEditReport {
             session: updated,
@@ -789,12 +793,7 @@ pub fn discard_session(
             revision: 0,
             data_epoch: String::new(),
         }),
-    )?
-    .map(|(mut report, settled)| {
-        report.revision = settled.revision;
-        report.data_epoch = settled.data_epoch;
-        report
-    });
+    )?);
     tx.commit().map_err(map_sqlite)?;
     Ok(outcome)
 }
@@ -939,31 +938,16 @@ fn record_edit(tx: &Transaction<'_>, edit: &ScanEdit<'_>, now: i64) -> Result<()
     )
 }
 
+/// 公共骨架（[`edit_json_base`]）+ 本模块自己的可选键：有候选端点推导时才有
+/// `candidate_end` / `candidate_end_source`（Ruling 8）——扫描归一那条路没有候选，
+/// 两个键就不出现。
 fn edit_json(
     change: &str,
     session: &SessionRow,
     intervals: &[IntervalRow],
     candidate: Option<(i64, &'static str)>,
 ) -> String {
-    let mut json = serde_json::json!({
-        "change": change,
-        "session": {
-            "id": session.id,
-            "state": session.state.as_str(),
-            "run_id": session.run_id,
-            "needs_review": session.needs_review,
-            "row_version": session.row_version,
-        },
-        "intervals": intervals.iter().map(|i| serde_json::json!({
-            "id": i.id,
-            "started_at": i.started_at,
-            "ended_at": i.ended_at,
-            "duration_ms": i.duration_ms,
-            "sampled_end_wall_at": i.sampled_end_wall_at,
-            "needs_review": i.needs_review,
-            "voided_at": i.voided_at,
-        })).collect::<Vec<_>>(),
-    });
+    let mut json = edit_json_base(change, session, intervals);
     if let Some((end, source)) = candidate {
         json["candidate_end"] = serde_json::json!(end);
         json["candidate_end_source"] = serde_json::json!(source);

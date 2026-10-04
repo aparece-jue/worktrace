@@ -18,7 +18,7 @@ use crate::domain::session::{SessionMode, SessionState, TimerBudget, TimerKind};
 use crate::domain::task::{TaskStatus, TransitionCause};
 use crate::error::AppError;
 use crate::platform::clock::{Clock, ClockSample};
-use crate::services::tx::settle;
+use crate::services::tx::{settle, settle_into, SettledReport};
 use crate::storage::checkpoint_repo::{self, Checkpoint};
 use crate::storage::db::{map_sqlite, Db};
 use crate::storage::guards::{guard_epoch, guard_row_version};
@@ -1438,6 +1438,16 @@ pub struct ClockCorrectionAccepted {
     pub revision: i64,
 }
 
+impl SettledReport for ClockCorrectionAccepted {
+    fn revision_mut(&mut self) -> &mut i64 {
+        &mut self.revision
+    }
+
+    fn data_epoch_mut(&mut self) -> &mut String {
+        &mut self.data_epoch
+    }
+}
+
 impl Coordinator {
     /// 用户命令：显式接受一次**已检测但未接受**的墙钟校正（P3 S4，08 §1）。
     ///
@@ -1455,6 +1465,8 @@ impl Coordinator {
     ///    零变化、不加版本）。但这条路上观察到的**非 `Trusted` 判决不得被静默丢掉**：
     ///    交给既有异常处理——该提交的系统恢复事务先提交，再按总纲 §9 拒绝原命令
     ///    （`RECOVERY_REQUIRED`）。理由见方法体里的第 ③ 步。
+    ///    **前置的硬故障判据**（单调读数倒退）排在它前面：那条路零写入，谁也不提交
+    ///    （总纲 §9 的系统恢复事务对硬故障没有意义——只能新 run 安全重建）。
     /// ④ 一个用户事务：写 `time_edit`（`before_json` = 三参照点，`after_json` =
     ///    本次样本 + `clock_correction_accepted: true` + `intervals_changed: false`）
     ///    → `revision` 恰好 +1 → 提交。**提交之后**才调
@@ -1484,6 +1496,18 @@ impl Coordinator {
         let sample = self.read_sample(db)?;
         let verdict = self.observe(sample);
 
+        // 单调读数倒退不是墙钟校正：那是硬故障，只能新 run 安全重建
+        // （`retry_recovery` 也解不开，见 `Coordinator::retry_recovery`）。
+        // 它必须排在接受路径**与下一条异常处理**之前：`flag == true` 时不许把硬故障
+        // 当成可接受的校正，`flag == false` 时也不许先替它提交一笔恢复事务——
+        // 「硬故障 ⇒ 零写入」是每个采样入口的共同性质（`snapshot`/`tick`/`heartbeat`/
+        // `start` 在 `MonotonicBackwards` 下都不分割、不写审计、不加版本），
+        // 本入口不能是例外。
+        if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
+            self.faulted = true;
+            return Err(AppError::RecoveryRequired);
+        }
+
         // ③ 「本来会返回 `Unchanged`」的那条路上，观察到的**非 `Trusted`** 判决不得
         //    被静默丢掉（Ruling 34）。为什么不能丢：`observe` 已经推进了检测器的 `last`，
         //    这一拍之后**再也判不出来**。最要命的是长间隔 `Suspended`——若本命令是
@@ -1494,21 +1518,14 @@ impl Coordinator {
         //    （`snapshot`/`tick`/`heartbeat`/`start` 走的都是它）。
         //
         //    判据只看内存标记（它只在 `live.state == Recovering` 分支里被置真）与 `live`：
-        //    **`flag == true` 的正常接受路径不受影响**（用户正是在接受那一拍校正）。
+        //    **`flag == true` 的正常接受路径不受影响**（用户正是在接受那一拍校正），
+        //    **硬故障也不受影响**（上面那一条已经把它挡在零写入的出口上）。
         let would_be_unchanged = !self.unaccepted_clock_correction || self.live.is_none();
         if would_be_unchanged && verdict.needs_recovery() {
             // `handle_anomaly` 失败时自己置故障态并返回 `RECOVERY_REQUIRED`；
             // 成功时它返回提交后的快照，但这条命令的意图（接受校正）**没有执行**，
             // 所以对外一律 `RECOVERY_REQUIRED`（总纲 §9：异常优先于用户命令）。
             let _ = self.handle_anomaly(db, sample, verdict)?;
-            return Err(AppError::RecoveryRequired);
-        }
-
-        // 单调读数倒退不是墙钟校正：那是硬故障，只能新 run 安全重建
-        // （`retry_recovery` 也解不开，见 `Coordinator::retry_recovery`）。
-        // 它必须排在接受路径之前——`flag == true` 时也不许把硬故障当成可接受的校正。
-        if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
-            self.faulted = true;
             return Err(AppError::RecoveryRequired);
         }
 
@@ -1556,7 +1573,9 @@ impl Coordinator {
             },
         )?;
 
-        let (mut accepted, settled) = settle(
+        // 这条路上结果必定是 `Changed`（写审计 + 恰好一次版本）；权威版本位由
+        // `settle_into`（R10 的唯一填法）填回，「变了 / 没变」这一位在这里没有别的用处。
+        let (accepted, _) = settle_into(settle(
             &tx,
             WriteOutcome::Changed(ClockCorrectionAccepted {
                 accepted: true,
@@ -1564,11 +1583,8 @@ impl Coordinator {
                 data_epoch: String::new(),
                 revision: 0,
             }),
-        )?
-        .into_parts()
-        .0;
-        accepted.data_epoch = settled.data_epoch;
-        accepted.revision = settled.revision;
+        )?)
+        .into_parts();
         tx.commit().map_err(map_sqlite)?;
 
         // ⑥ 提交之后才清标记并前移长期参照。

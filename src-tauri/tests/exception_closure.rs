@@ -1169,6 +1169,55 @@ fn a_backwards_monotonic_clock_is_not_accepted_as_a_correction() {
     assert_eq!(session_of(state.db(), &session_id).state, "recovering");
 }
 
+/// 上一条用例走的是 `flag == true`：会话已经挂着**待接受的墙钟校正**，于是它连
+/// Ruling 34 那个分支都进不去。这一条走 `flag == false`——本来会返回 `Unchanged` 的
+/// 那一路，也是 Ruling 34 真正要补的那条路。
+///
+/// 硬故障在这条路上必须和别的采样入口一样**零写入**：单调读数倒退不是「异常要隔离」，
+/// 而是这一拍读数对本 run 已无意义（`snapshot`/`tick`/`heartbeat`/`start` 在
+/// `MonotonicBackwards` 下都不分割、不写审计、不加版本）。所以异常处理后置块必须排在
+/// `MonotonicBackwards` 守卫**之后**：先认硬故障，再谈「有没有别的判决要被处理」。
+#[test]
+fn a_backwards_monotonic_clock_writes_nothing_without_an_unaccepted_correction() {
+    let paths = fixture();
+    let db = seeded(&paths);
+    drop(db);
+    let app = started(paths);
+    let epoch = app.epoch();
+    let mut state = lock_app(app.running.app());
+
+    let t1_version = task_version(state.db(), "t1");
+    state
+        .start(start_request(&epoch, "t1", t1_version))
+        .unwrap();
+    let session_id = state.coordinator().live().unwrap().id.clone();
+    app.advance(1_000);
+
+    // 前置由探针自己证明：没有待接受的校正 ⇒ 本条命令本来返回 `Unchanged`（零变化）。
+    let probe = state.accept_detected_clock_correction(&epoch).unwrap();
+    assert!(
+        !probe.accepted,
+        "前置：这条路上没有待接受的校正（`flag == false`）"
+    );
+    let before = world(state.db());
+
+    // 单调钟倒退：硬故障，必须锁死协调器（正常平台永不出现）。
+    app.advance_mono_only(-5_000);
+    let error = state.accept_detected_clock_correction(&epoch).unwrap_err();
+    assert_code(&error, "RECOVERY_REQUIRED");
+    assert!(state.coordinator().is_faulted(), "硬故障必须锁死协调器");
+    assert_eq!(
+        world(state.db()),
+        before,
+        "硬故障零写入：不得先提交一笔恢复事务（分割 / 审计 / 版本 +1）"
+    );
+    assert_eq!(
+        session_of(state.db(), &session_id).state,
+        "running",
+        "硬故障不得把会话推成 recovering 或标待确认"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ④ 存储忙 / 磁盘不足使异常事务失败：整体回滚、faulted；S12 成功后重算门禁
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1520,4 +1569,211 @@ fn a_committed_command_survives_a_failed_rescan_without_repeating_its_writes() {
     state
         .start(start_request(&epoch, "t1", t1_version))
         .expect("重扫成功之后门禁必须放开");
+}
+
+/// 上一条用例留下的缺口（Task 7 评审登记的携带项）：它作废的是**别的 run** 的会话，
+/// 而那时 `live == None`——于是「重扫失败之后仍然刷新镜像」这条路径既没被钉住、
+/// 也没被证伪。这一条把被作废的会话换成**协调器此刻镜像的那条**（`live`）。
+///
+/// 不刷新的话，采样线程会继续按旧状态出快照：这条已经 `discarded` 的会话仍被报成
+/// `running`、`active_ms` 继续涨，而且 ~30s 一次的心跳会在
+/// `checkpoint_repo::write` 的守卫上失败（017 的「不得留一个继续按旧状态出快照的
+/// `live`」，即计划的新增-2）。
+///
+/// 与「重扫失败」共存的还有三条口径：命令仍然返回 `RECOVERY_REQUIRED`（提交后约定：
+/// 缺的是内存与事实重新对上，不是「再试一次」）、已提交事实逐字段保留、失败没有
+/// 顺带多写一条审计或多加一次版本。
+#[test]
+fn a_failed_rescan_still_refreshes_the_mirror_of_the_discarded_live_session() {
+    let paths = fixture();
+    let db = seeded(&paths);
+    drop(db);
+    let app = started(paths);
+    let epoch = app.epoch();
+    let mut state = lock_app(app.running.app());
+
+    // 镜像 = 本 run 正在计时的会话：这次作废的正是它。
+    let t1_version = task_version(state.db(), "t1");
+    state
+        .start(start_request(&epoch, "t1", t1_version))
+        .unwrap();
+    let session_id = state.coordinator().live().unwrap().id.clone();
+    assert_eq!(
+        state.coordinator().live().unwrap().state,
+        SessionState::Running,
+        "前置：镜像是一条正在计时的会话"
+    );
+    let session_version = session_of(state.db(), &session_id).row_version;
+    let revision_before = revision(state.db());
+    let edits_before = world(state.db()).edits.len();
+
+    // 注入「三条扫描查询失败」——用户命令本身仍然能提交（它只读自己那条会话）。
+    break_the_scan(state.db());
+    let error = state
+        .discard_session(env(&epoch, session_version), discard_request(&session_id))
+        .unwrap_err();
+    assert_code(&error, "RECOVERY_REQUIRED");
+
+    // 已提交事实保留：恰好一条审计、恰好一次版本，会话与全部区间按命令落地。
+    let committed = world(state.db());
+    assert_eq!(session_of(state.db(), &session_id).state, "discarded");
+    let intervals = intervals_of(state.db(), &session_id);
+    assert!(
+        intervals
+            .iter()
+            .all(|interval| interval.voided_at.is_some()),
+        "整次作废：全部区间软作废"
+    );
+    assert_eq!(committed.edits.len(), edits_before + 1, "恰好一条审计");
+    assert_eq!(committed.revision, revision_before + 1, "恰好一次版本");
+
+    // **镜像必须跟着已提交事实走**：重扫失败只说明「门禁快照没重算」，
+    // 不说明「内存可以停在旧状态」。
+    let live = state
+        .coordinator()
+        .live()
+        .expect("live 不清成 None（与 finish 之后同一口径）");
+    assert_eq!(live.id, session_id);
+    assert_eq!(
+        live.state,
+        SessionState::Discarded,
+        "镜像停在旧状态 = 继续把已作废的会话报成 running"
+    );
+    assert_eq!(
+        live.row_version,
+        session_of(state.db(), &session_id).row_version,
+        "镜像的会话版本必须追上已提交的那一行"
+    );
+    assert!(live.open_interval.is_none(), "作废之后没有开放区间");
+    assert_eq!(live.closed_trusted_ms, 0, "整次作废不留下可信工时");
+
+    // 扫描失败 ⇒ 「失败的扫描没有结论」，失败标记自己挡住计时（旧快照不被沿用），
+    // 而这次失败没有多写任何东西。
+    assert_code(
+        &state.guard_business_timing().unwrap_err(),
+        "RECOVERY_REQUIRED",
+    );
+
+    // 恢复出口：显式重扫成功。重扫只重算门禁，不重做任何已提交的写；刷新过的镜像
+    // 也不因为重扫而变回去。
+    repair_the_scan(state.db());
+    let scan = state.rescan_recovery().unwrap();
+    assert!(!scan.requires_recovery(), "作废过的会话不再挡计时");
+    assert!(
+        state.guard_business_timing().is_ok(),
+        "重扫成功必须清掉失败标记"
+    );
+    assert_eq!(revision(state.db()), committed.revision, "重扫不加版本");
+    assert_eq!(
+        world(state.db()).edits.len(),
+        committed.edits.len(),
+        "重扫不重复任何审计"
+    );
+    let snapshot = state.snapshot().unwrap();
+    assert_eq!(snapshot.session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(
+        snapshot.state,
+        Some(SessionState::Discarded),
+        "采样线程看到的必须已是作废后的状态"
+    );
+    assert_eq!(snapshot.active_ms, 0, "作废的会话不再累积工时");
+}
+
+/// 同一条时序的另一半：`reconcile` 也是「提交之后第一步重扫门禁」的命令，
+/// 而且它一旦失败，留下的旧镜像正是**用户刚对完账的那条 `recovering` 会话**——
+/// 不刷新的话，快照会继续按 `recovering` + 待确认区间出结果，直到某条别的命令
+/// 把它重新载入。
+#[test]
+fn a_failed_rescan_still_refreshes_the_mirror_of_the_reconciled_live_session() {
+    let paths = fixture();
+    let db = seeded(&paths);
+    drop(db);
+    let app = started(paths);
+    let epoch = app.epoch();
+    let mut state = lock_app(app.running.app());
+
+    // 镜像 = 本 run 的会话；长间隔先把它按异常隔离成 `recovering`（唯一能走
+    // `reconcile` 的状态），这一拍同时把新事实载回镜像。
+    let t1_version = task_version(state.db(), "t1");
+    state
+        .start(start_request(&epoch, "t1", t1_version))
+        .unwrap();
+    let session_id = state.coordinator().live().unwrap().id.clone();
+    app.advance(129_000);
+    state.snapshot().unwrap();
+    let recovering = session_of(state.db(), &session_id);
+    assert_eq!(recovering.state, "recovering", "前置：异常已按待确认隔离");
+    let session_version = recovering.row_version;
+    assert_eq!(
+        state.coordinator().live().unwrap().row_version,
+        session_version,
+        "前置：镜像就是这条 recovering 会话"
+    );
+    let revision_before = revision(state.db());
+    let edits_before = world(state.db()).edits.len();
+
+    // 注入「三条扫描查询失败」——用户命令本身仍然能提交。
+    break_the_scan(state.db());
+    let error = state
+        .reconcile(
+            env(&epoch, session_version),
+            ReconcileRequest {
+                session_id: session_id.clone(),
+                action: ReconcileAction::DiscardUncertain,
+                target_state: ReconcileTargetState::Paused,
+                ranges: Vec::new(),
+            },
+        )
+        .unwrap_err();
+    assert_code(&error, "RECOVERY_REQUIRED");
+
+    // 已提交事实保留：恰好一条审计、恰好一次版本，会话按命令收尾。
+    let committed = world(state.db());
+    assert_eq!(session_of(state.db(), &session_id).state, "paused");
+    assert_eq!(committed.edits.len(), edits_before + 1, "恰好一条审计");
+    assert_eq!(committed.revision, revision_before + 1, "恰好一次版本");
+
+    // **镜像必须跟着已提交事实走**（与作废那条同一口径）。
+    let live = state.coordinator().live().expect("live 不清成 None");
+    assert_eq!(live.id, session_id);
+    assert_eq!(
+        live.state,
+        SessionState::Paused,
+        "镜像停在旧状态 = 继续把已对账的会话报成 recovering"
+    );
+    assert_eq!(
+        live.row_version,
+        session_of(state.db(), &session_id).row_version,
+        "镜像的会话版本必须追上已提交的那一行"
+    );
+    assert!(
+        live.open_interval.is_none(),
+        "丢弃不确定区间之后没有开放区间"
+    );
+
+    // 扫描失败 ⇒ 失败标记自己挡住计时，且这次失败没有多写任何东西。
+    assert_code(
+        &state.guard_business_timing().unwrap_err(),
+        "RECOVERY_REQUIRED",
+    );
+
+    repair_the_scan(state.db());
+    let scan = state.rescan_recovery().unwrap();
+    assert!(!scan.requires_recovery());
+    assert!(
+        state.guard_business_timing().is_ok(),
+        "重扫成功必须清掉失败标记"
+    );
+    assert_eq!(revision(state.db()), committed.revision, "重扫不加版本");
+    assert_eq!(
+        world(state.db()).edits.len(),
+        committed.edits.len(),
+        "重扫不重复任何审计"
+    );
+    let snapshot = state.snapshot().unwrap();
+    assert_eq!(
+        snapshot.state,
+        Some(SessionState::Paused),
+        "采样线程看到的必须已是收尾后的状态"
+    );
 }

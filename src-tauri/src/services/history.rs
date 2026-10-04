@@ -96,7 +96,8 @@ use crate::storage::task_repo;
 use crate::storage::time_edit_repo::{self, TimeEdit};
 use crate::storage::WriteOutcome;
 
-use super::tx::{settle, write_tx, Settled};
+use super::audit::edit_json_base;
+use super::tx::{settle, settle_into, write_tx, SettledReport};
 
 /// 一次历史修正的动作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,8 +172,10 @@ pub fn correct(
         let range = IntervalRange::new(started_at, ended_at)?;
         // 逐字段相同 ⇒ 幂等：一个字段都不改（含 `session.row_version`），也不写审计。
         if interval.started_at == started_at && interval.ended_at == Some(ended_at) {
-            let outcome =
-                settle(&tx, WriteOutcome::Unchanged(report(session, interval)))?.map(with_settled);
+            let outcome = settle_into(settle(
+                &tx,
+                WriteOutcome::Unchanged(report(session, interval)),
+            )?);
             tx.commit().map_err(map_sqlite)?;
             return Ok(outcome);
         }
@@ -244,7 +247,7 @@ pub fn correct(
         now,
     )?;
 
-    let outcome = settle(
+    let outcome = settle_into(settle(
         &tx,
         WriteOutcome::Changed(HistoryEditReport {
             session: updated_session,
@@ -253,8 +256,7 @@ pub fn correct(
             revision: 0,
             data_epoch: String::new(),
         }),
-    )?
-    .map(with_settled);
+    )?);
     tx.commit().map_err(map_sqlite)?;
     Ok(outcome)
 }
@@ -284,11 +286,14 @@ fn report(session: SessionRow, interval: IntervalRow) -> HistoryEditReport {
     }
 }
 
-/// 把同一事务里读回的权威版本与库身份填回报告。
-fn with_settled((mut report, settled): (HistoryEditReport, Settled)) -> HistoryEditReport {
-    report.revision = settled.revision;
-    report.data_epoch = settled.data_epoch;
-    report
+impl SettledReport for HistoryEditReport {
+    fn revision_mut(&mut self) -> &mut i64 {
+        &mut self.revision
+    }
+
+    fn data_epoch_mut(&mut self) -> &mut String {
+        &mut self.data_epoch
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,7 +372,10 @@ pub fn backfill(
     record_backfill(&tx, &session, &intervals, now)?;
 
     // 成功必然 `Changed`：这条命令的定义就是「新建事实」。
-    let outcome = settle(&tx, WriteOutcome::Changed(report(session, interval)))?.map(with_settled);
+    let outcome = settle_into(settle(
+        &tx,
+        WriteOutcome::Changed(report(session, interval)),
+    )?);
     tx.commit().map_err(map_sqlite)?;
     Ok(outcome)
 }
@@ -435,33 +443,16 @@ fn record_edit(tx: &Transaction<'_>, edit: &HistoryEdit<'_>, now: i64) -> Result
     )
 }
 
-/// 与 `services::recovery` 的扫描审计同一份形状（Ruling 8/R12）：`session` + 全部
-/// 区间的逐字段值（含 `voided_at`）；没有候选端点推导，所以没有 `candidate_*` 键。
+/// 与 `services::recovery` 的扫描审计**同一份骨架**（Ruling 8/R12）：公共部分在
+/// [`edit_json_base`]（唯一一处形状），本模块只加自己的可选键 `user_reason`
+/// ——没有候选端点推导，所以没有 `candidate_*` 键。
 fn edit_json(
     change: &str,
     session: &SessionRow,
     intervals: &[IntervalRow],
     user_reason: Option<&str>,
 ) -> String {
-    let mut json = serde_json::json!({
-        "change": change,
-        "session": {
-            "id": session.id,
-            "state": session.state.as_str(),
-            "run_id": session.run_id,
-            "needs_review": session.needs_review,
-            "row_version": session.row_version,
-        },
-        "intervals": intervals.iter().map(|i| serde_json::json!({
-            "id": i.id,
-            "started_at": i.started_at,
-            "ended_at": i.ended_at,
-            "duration_ms": i.duration_ms,
-            "sampled_end_wall_at": i.sampled_end_wall_at,
-            "needs_review": i.needs_review,
-            "voided_at": i.voided_at,
-        })).collect::<Vec<_>>(),
-    });
+    let mut json = edit_json_base(change, session, intervals);
     if let Some(reason) = user_reason {
         json["user_reason"] = serde_json::json!(reason);
     }

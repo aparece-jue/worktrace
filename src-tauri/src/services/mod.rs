@@ -26,5 +26,9 @@ pub mod history;
 // 到这里 `services` 子树的注册就齐了（前两个由 Task 1/3 各自注册，见 Ruling 2）。
 pub mod tasks;
 
-// 写事务骨架（write_tx / settle）只有本层用，所以不对 crate 外公开（R-T6-l）。
+// P3 终审 I2c：`time_edit` 审计载荷的公共骨架（`recovery` 与 `history` 共用一份
+// 事实契约）。同样只有本层用。
+mod audit;
+
+// 写事务骨架（write_tx / settle / settle_into）只有本层用，所以不对 crate 外公开（R-T6-l）。
 mod tx;

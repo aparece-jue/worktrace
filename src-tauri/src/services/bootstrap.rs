@@ -683,6 +683,10 @@ impl AppState {
     /// 两处失败都映射 [`AppError::RecoveryRequired`]（P2 的提交后约定）：事务已经落库，
     /// 缺的是「让内存与事实重新对上」，不是「再试一次」——重发一条对账命令会撞上
     /// 「会话已经不是 `recovering`」的前置。
+    ///
+    /// 两步**互相独立**（P3 终审 I1）：重算失败只说明门禁快照没跟着走，
+    /// 不是「内存可以停在旧状态」——所以先取重扫的结果，照样做镜像刷新，
+    /// 最后再把重扫的错误抛出去。
     pub fn reconcile(
         &mut self,
         env: WriteEnvelope,
@@ -699,8 +703,31 @@ impl AppState {
         };
 
         // 提交之后的第一步：门禁重算（失败 ⇒ 标记挡住计时，旧快照不动）。
-        self.rescan_recovery()?;
+        let rescan = self.rescan_recovery();
+        // 第二步：条件化镜像刷新——**不能在重扫失败时被跳过**。
+        self.refresh_mirror_if_live(&session_id)?;
+        rescan?;
+        Ok(outcome)
+    }
 
+    /// 提交之后的**条件化镜像刷新**（Ruling 13）：当且仅当被改动的会话正是协调器
+    /// 此刻镜像的那条（`live`）时，按**已提交**的事实把它重新载入。
+    ///
+    /// 为什么必须有这一步：`Coordinator::build` 从内存镜像渲染快照。被改的会话若正是
+    /// 镜像那条，不刷新就等于继续按旧状态出快照——已作废的会话仍被报成 `running`、
+    /// `active_ms` 继续涨，直到某条别的命令把它重新载入。计划的新增-2 正因为这条性质
+    /// 才写明「**不得**留一个继续按旧状态出快照的 `live`」。
+    ///
+    /// 为什么只在被改动的那条命中时才刷新：无条件刷新会把 `live` 换成另一条会话
+    /// （可达位移见 [`AppState::reconcile`] 的文档）。
+    ///
+    /// 为什么抽成一处（P3 终审 I2a）：`reconcile` / `correct` / `discard_session` 原先
+    /// 各有**逐字相同**的一份；「只在被改动的是 `live` 那条时刷新」这条纪律不能靠
+    /// 三份拷贝维持。
+    ///
+    /// 失败映射 [`AppError::RecoveryRequired`]（P2 的提交后约定：事实已经落库，
+    /// 缺的是内存与事实重新对上）。
+    fn refresh_mirror_if_live(&mut self, session_id: &str) -> Result<(), AppError> {
         // `live()` 是只读访问器；先问清楚「镜像的是不是这条」，再决定要不要刷新。
         let mirrored = {
             let AppState { coordinator, .. } = self;
@@ -709,15 +736,15 @@ impl AppState {
                 .map(|live| live.id == session_id)
                 .unwrap_or(false)
         };
-        if mirrored {
-            let AppState {
-                db, coordinator, ..
-            } = self;
-            coordinator
-                .load_session(db.connection(), &session_id)
-                .map_err(|_| AppError::RecoveryRequired)?;
+        if !mirrored {
+            return Ok(());
         }
-        Ok(outcome)
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        coordinator
+            .load_session(db.connection(), session_id)
+            .map_err(|_| AppError::RecoveryRequired)
     }
 
     /// 历史修正（重定时 / 软删除）的命令入口（P3 S2）。`env` 的版本位是**会话**版本。
@@ -742,21 +769,8 @@ impl AppState {
             crate::services::history::correct(db, env, req, now)?
         };
 
-        let mirrored = {
-            let AppState { coordinator, .. } = self;
-            coordinator
-                .live()
-                .map(|live| live.id == session_id)
-                .unwrap_or(false)
-        };
-        if mirrored {
-            let AppState {
-                db, coordinator, ..
-            } = self;
-            coordinator
-                .load_session(db.connection(), &session_id)
-                .map_err(|_| AppError::RecoveryRequired)?;
-        }
+        // 唯一的提交后收尾：条件化镜像刷新（不重扫门禁，见上）。
+        self.refresh_mirror_if_live(&session_id)?;
         Ok(outcome)
     }
 
@@ -796,6 +810,9 @@ impl AppState {
     ///
     /// 两处失败都映射 [`AppError::RecoveryRequired`]（P2 的提交后约定）：事务已经落库，
     /// 缺的是「让内存与事实重新对上」。
+    ///
+    /// 与 [`AppState::reconcile`] 同样：两步**互相独立**（P3 终审 I1），重扫失败不得
+    /// 把镜像刷新一起跳过——这里被作废的通常正是镜像那条。
     pub fn discard_session(
         &mut self,
         env: WriteEnvelope,
@@ -809,23 +826,10 @@ impl AppState {
         };
 
         // 提交之后的第一步：门禁重算（失败 ⇒ 标记挡住计时，旧快照不动）。
-        self.rescan_recovery()?;
-
-        let mirrored = {
-            let AppState { coordinator, .. } = self;
-            coordinator
-                .live()
-                .map(|live| live.id == session_id)
-                .unwrap_or(false)
-        };
-        if mirrored {
-            let AppState {
-                db, coordinator, ..
-            } = self;
-            coordinator
-                .load_session(db.connection(), &session_id)
-                .map_err(|_| AppError::RecoveryRequired)?;
-        }
+        let rescan = self.rescan_recovery();
+        // 第二步：条件化镜像刷新——**不能在重扫失败时被跳过**。
+        self.refresh_mirror_if_live(&session_id)?;
+        rescan?;
         Ok(outcome)
     }
 
