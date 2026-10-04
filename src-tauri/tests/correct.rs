@@ -1272,3 +1272,81 @@ fn correcting_another_session_does_not_clobber_the_live_mirror() {
     assert_eq!(live.row_version, live_version, "镜像那条一个字段都没动");
     assert_eq!(session(state.db(), "s1").row_version, 1);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 不重扫门禁（计划原文）与零长度边界
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `correct` **不重扫门禁**：它只改 `finished` 会话的区间事实，恢复性快照照旧
+/// （重扫是 `reconcile`/`discard_session` 的提交后收尾，归 S1）。
+///
+/// 这条用例顺带把一条**可达边界**钉在明处（见 task-3-report.md 的「顾虑」）：
+/// `finished` 会话上残留的开放区间属于第 1 类不变量损坏（`open_interval_outside_running`），
+/// 门禁会数它；把它软删除之后事实已经不再损坏，但**门禁快照要等下一次重扫**才跟着变。
+/// 计划要求 `correct` 不重扫、也没要求它先做第 1 类判定，所以这是**记录在案的行为**，
+/// 不是漏掉的一步：本用例的第二个断言就是这条口径的机器证据。
+#[test]
+fn correct_does_not_rescan_the_recovery_gate() {
+    let fx = fixture();
+    let db = seeded(&fx);
+    finished_fixture(&db);
+    // 第 1 类：非 `running` 会话残留开放区间（`needs_review = 0`）。
+    insert_interval(&db, "s1-open", "s1", WALL - 1_000, None, None, 0, None);
+    drop(db);
+
+    let running = started(&fx);
+    let mut state = lock_app(running.app());
+    let epoch = running.data_epoch().to_string();
+    assert!(
+        state.recovery().requires_recovery(),
+        "残留开放区间是不变量损坏，启动后门禁关着"
+    );
+
+    state
+        .correct(env(&epoch, 0), delete("s1", "s1-open"))
+        .expect("删除这条残留的开放区间");
+    assert_eq!(
+        interval(state.db(), "s1-open").voided_at,
+        Some(WALL),
+        "事实已经软删除，库里的不变量损坏消失"
+    );
+    assert!(
+        state.recovery().requires_recovery(),
+        "correct 不重扫门禁：快照要等下一次 rescan_recovery 才跟着事实走"
+    );
+    let scan = state.rescan_recovery().unwrap();
+    assert!(!scan.requires_recovery(), "重扫之后门禁才跟着已提交事实走");
+}
+
+/// 零长度合法（半开区间的空集）：`ended_at == started_at` ⇒ `duration_ms = 0`，
+/// 三个字段仍然一起写（`IntervalRange::new` 明确要求覆盖这个边界）。
+#[test]
+fn a_zero_length_retime_is_allowed_and_keeps_the_duration_in_step() {
+    let fx = fixture();
+    let db = seeded(&fx);
+    finished_fixture(&db);
+    drop(db);
+
+    let running = started(&fx);
+    let mut state = lock_app(running.app());
+    let epoch = running.data_epoch().to_string();
+    let before = facts(state.db(), "s1");
+
+    let outcome = state
+        .correct(env(&epoch, 0), retime("s1", "s1-b", B_START, B_START))
+        .expect("零长度是合法边界");
+    let (report, changed) = outcome.into_parts();
+    assert!(changed, "起止确实变了（B_END → B_START），所以是真实写入");
+    assert_eq!(report.interval.started_at, B_START);
+    assert_eq!(report.interval.ended_at, Some(B_START));
+    assert_eq!(report.interval.duration_ms, Some(0));
+
+    let db = state.db();
+    let retimed = interval(db, "s1-b");
+    assert_eq!(
+        retimed.duration_ms,
+        Some(retimed.ended_at.unwrap() - retimed.started_at),
+        "时长与起止始终一致"
+    );
+    assert_eq!(facts(db, "s1").revision, before.revision + 1);
+}
