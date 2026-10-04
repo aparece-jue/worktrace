@@ -331,6 +331,27 @@
   这一处变异会红（`计时快照拿不到` / `展示值还没有基线` 两条用例的 `revision: 5` 对不上），
   报告已按实测订正。
 
+## Task 2 fix round 2（2026-10-04 深夜）
+
+定向复评对 fix round 1 的 8 条 finding + 3 条登记全部 ADDRESSED，但指出修复引入的一条新
+Important：`start()` 复用 `starting` 时**没有代次概念**，而 `stop()` 不清它——「启动在飞 →
+`stop()` → 立刻再 `start()`」会拿到一个注定关掉会话的旧 promise，调用方看到 `start()` 正常
+resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount 与 Task 4 的窗口生命周期
+正好走这条路径）。
+
+- **改法**：`starting` 从裸 promise 变成 `{ generation, promise }`——代次**跟 promise 存在
+  一起**，不新增标量（"这个 promise 还能不能用"与"属于哪一代"不会再各说各话）；
+  `start()` 只在代次相同时复用，`stop()` 清掉它；启动体抽成 `beginSession(token)`，
+  作废的那次只关自己的订阅、不写回，`finally` 只清自己那一格。
+- **用例**：`start → stop → start`（第二次的 `start()` **不 await 第一次**）断言订阅、轮询、
+  失效计数都真的起来了，不是只 resolve；事件替身同时改成每次会话各一份（两次启动同时在飞时
+  不能共用一个槽位）。
+- **反向验证**：单独摘掉"代次检查"或单独摘掉"`stop()` 清 `starting`"都仍然绿（两道护栏各自
+  独立生效）；两处都还原才复现 `expected 'idle' to be 'ready'`，另有 R11 钉住"作废的那次
+  必须关掉自己的订阅、不能复活"。
+- 细节与原始输出见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task2-report.md`
+  的「Fix round 2」一节（前端 61 条）。
+
 ## 遗留与边界（2026-10-04 Task 2 fix round 1 登记）
 
 - **协议向量能把"两侧不一致"逼出来，但替代不了"同一条规则两处实现"的风险，而且完全
