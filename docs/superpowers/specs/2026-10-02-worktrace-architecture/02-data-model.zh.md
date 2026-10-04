@@ -135,7 +135,7 @@ paused 无 open interval，因此值冻结。仅 countdown 的 remaining_ms = ma
 | 旧记录 | 启动后的处理 | 统计 |
 | --- | --- | --- |
 | paused 且无开放/待确认区间 | 保持 paused，更新 run_id；不自动继续 | 已确认闭合区间保持计入 |
-| running 且有开放区间 | session 设 recovering；只将该区间 needs_review=1 | 既有闭合区间计入；开放区间待确认 |
+| running 且有开放区间 | session 设 recovering；原开放区间按最后可信检查点归一为可信闭合前缀与待确认余段，无可信前缀则整段待确认；旧 run 归属保留直至 reconcile | 既有可信闭合及可信前缀计入；余段待确认，终点未知不推算 |
 | recovering | 保持待确认，不增加已知工时 | 同上 |
 | 状态/区间不变量损坏 | 隔离故障记录、诊断，禁止自动修复事实 | 可疑区间暂不计，UI 明示 |
 

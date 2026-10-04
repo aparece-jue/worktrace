@@ -143,3 +143,14 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 
 **仍未做**（按边界）：P7 的 IPC 接线与前端时序、`capture_error_response` 接线不在本轮（FOLLOW-01）；`tests/` 里仍有两处**手造**的英文 detail 夹具（`error_contract.rs` 的 `"no such task"`/`"illegal transition"`，用途是证明两个 detail 可辨）与一句注释，扫描范围本就只覆盖 `src/**/*.rs`，未动。复评同意留后续、已在报告登记的 4 项：退役子串表是**文件级**（可能误伤将来合法的英文 Storage 诊断，如 `no such table`）；加进 message 侧禁用表的 4 个词在常量 fixture 下打不响（不是第二道网）；扫描器「token 后 400 字符取第一个 anchor」在「Domain detail 变表达式 + 紧邻 Storage 字面量」时会误报（今天不发生）；`IllegalTransition` 渲染仍写「任务不能从…」（用于区间时措辞不贴）。
 
+
+## 2026-10-04 P3 开工契约复审（基线 4a96903）
+
+- 已修复计划冲突：S5 产出有候选 ended_at、无 duration_ms 的待确认区间，原 S8 作废时只清 needs_review 会触发 P1 ck_interval_duration。现在无时长候选清 ended_at，原候选值在 time_edit.before_json 保留；已有可信时长区间不动端点。已同步 P3 S8/Task 2/Task 4、P8 和中英文 02 恢复表。
+- 已修复 S12 签名缺口：AppState::retry_recovery 显式接收 expected_data_epoch，使正文要求的身份预检可实施；P2 内部原语不变。
+- 新增 transaction_boundary::voiding_a_pending_candidate_requires_clearing_its_unknown_endpoint，验证零长度/非零候选的原操作触发准确 CHECK 且字段不变，修订操作可落库；有可信时长区间作废保留时长与端点。它验证已发布约束与计划兼容，不冒充 P3 服务实现或审计验收。
+- 本轮 Rust 测试通过（存在一条既有 ignored 用例）；139 个前端测试通过；Clippy、fmt、分层和 diff 检查通过。P7 上轮身份/订阅代次修复仍保留，P3 服务与平台实机验收仍未完成。
+
+## P3 执行前闭环（2026-10-04）
+
+当前遗留已统一到 [pre-p3-closure](pre-p3-closure.md)，关联总纲/P3/P5/P6/P8；P7 的 42 条工程遗留逐项有明确裁定、责任和门槛。新增首份快照前通知、跨语言事件常量门禁，空状态查询改多状态夹具；源码注释与归一化 JSON 诊断同步。新增可重复的 check-pre-p3.ps1，日志记录当前 HEAD/工作区，实机验证固定未完成。P3 S1 新增提交后重扫失败闭环契约，生产实现仍归 P3。本页此前数字为历史证据，当前检查以收口页和脚本当次日志为准。

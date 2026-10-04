@@ -128,7 +128,7 @@ After single-instance ownership, create application_run and scan unfinished prev
 | Previous record | Startup action | Accounting |
 | --- | --- | --- |
 | paused with no open/pending intervals | Keep paused, update run_id, never auto-resume | Confirmed closed intervals still count |
-| running with an open interval | Set recovering, flag only that interval needs_review=1 | Closed confirmed intervals count, open interval pending |
+| running with an open interval | Set recovering; normalize the original open interval into a trusted closed prefix at the last trusted checkpoint and an uncertain remainder; without a trusted prefix the entire interval is pending. Retain the old run attribution until reconcile | Existing trusted intervals and the trusted prefix count; uncertain remainder stays pending, never infer an unknown endpoint |
 | recovering | Retain pending status, never add known effort | Same |
 | Broken state/interval invariant | Isolate and diagnose; no invented repairs | Suspect intervals excluded and visible |
 

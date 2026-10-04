@@ -76,6 +76,7 @@
 /// `requires_recovery()` 仍为真时 `start`/`resume` 继续拒绝（判据不变）。
 pub fn rescan_recovery(&mut self) -> Result<RecoveryScan, AppError>;
 ```
+**提交后失败也必须闭环**：S1 新增私有 `AppState::recovery_scan_failed: bool`（启动成功时 false）；扫描成功才原子替换 `recovery` 并清标记，失败置 true、返回 `RECOVERY_REQUIRED`，不把旧快照当成功结果。`guard_business_timing` 先检查该标记，再走原有门禁；查询/恢复入口仍可用。S12 必须允许在协调器已恢复但该标记仍为 true 时再次执行 S1，清标记不要求重做已提交的用户命令。P6 安装新 Runtime 前仍必须完成同一扫描并按结果设置标记。Task 7 注入“用户事务已提交、三条扫描查询失败”，断言已提交事实保留、不重复审计/revision、start/resume 拒绝、再次扫描成功才解除；新标记不改变 TimerSnapshot 或既有 IPC DTO。
 调用方：`AppState::reconcile`、`AppState::discard_session`（成功提交后**无条件**重扫：三条只读查询，幂等，与 `Changed` 与否无关）；P6 的恢复/替换库路径复用同一入口（**P6 计划的 Task 1「单实例与启动顺序的硬化」**启动顺序第 ④ 步写着"调用 **P3** 的恢复扫描"；**Task 4「WAL 一致备份与恢复」**的「恢复的执行骨架与顺序」条明确要与 S1 共用同一函数——P6 那边同样按小节/符号定位，不锁行号）。**为什么必须是本模块的方法**：`recovery` 是私有字段（`bootstrap.rs:344`），只有 `services::bootstrap` 能写（0.2）。
 
 **S2（全部命令入口）** `services/bootstrap.rs`，`impl AppState`：`reconcile` / `correct` / `backfill` / `discard_session` / `transition_task` / `accept_detected_clock_correction` 六个瘦包装（各自解构 `AppState { db, coordinator, .. }`、取 `now`、调服务、做提交后收尾）。命令层（P8）在 `run_command` 的 `lock_app` 守卫内调它们（`commands/mod.rs:127/140`）——**同一串行边界由此保证，P3 不得自行 `lock_app` 第二把锁**。
@@ -157,10 +158,10 @@ pub fn require_no_human_overlap(
 **S8（区间事实写入口，三条）** `storage/session_repo.rs`（服务不写 SQL）：
 ```rust
 pub fn confirm_interval(tx, interval_id: &str, started_at: i64, ended_at: i64, duration_ms: i64) -> Result<IntervalRow, AppError>; // needs_review 1→0；保留 voided_at=NULL 与 sampled_end_wall_at 原值
-pub fn void_interval(tx, interval_id: &str, voided_at: i64) -> Result<IntervalRow, AppError>;                                     // voided_at=…、needs_review=0、ended_at 原样（可为 NULL）
+pub fn void_interval(tx, interval_id: &str, voided_at: i64) -> Result<IntervalRow, AppError>;                                     // voided_at=…、needs_review=0、有 duration_ms 的已知区间保留 ended_at；无 duration_ms 的候选区间清 ended_at 为 NULL
 pub fn retime_interval(tx, interval_id: &str, started_at: i64, ended_at: i64, duration_ms: i64) -> Result<IntervalRow, AppError>;  // correct 用；仅允许 needs_review=0 且未作废
 ```
-`void_interval` **故意不动 `ended_at`**：`ck_interval_duration`（`schema_v1.rs:116-124`）要求「`ended_at` 非空且 `needs_review=0` ⇒ 必须有 `duration_ms`」，给一个终点未知的开放区间补 `duration_ms` 就是凭空造数；留 `ended_at IS NULL` 则 CHECK 走 `ELSE 1` 通过，而 `open_interval_outside_running` 查询要求 `voided_at IS NULL`（`:572`）⇒ 作废段不会被判成残留开放区间。
+`void_interval` 按时长是否已知处理：`duration_ms IS NOT NULL` 时保留原始起止与时长；`duration_ms IS NULL` 时将 `ended_at` 清为 `NULL`，同时设 `voided_at`、清 `needs_review`，保留 started_at/sample 原值。不能给未确认的候选区间补 0 时长冒充事实。S5 会造出 `ended_at=started_at, duration_ms=NULL, needs_review=1` 的零长度候选；只清 needs_review 会违反既有 ck_interval_duration（该 CHECK 不豁免 voided），因此不能承诺所有 ended_at 原样。修改前的候选终点完整记录在 time_edit.before_json，after_json 记录清空后的事实；不改已发布 schema。已作废且 ended_at=NULL 不占开放有效区间槽位，因为约束/查询都过滤 voided_at IS NULL。
 
 **S9（扫描/概览用的只读查询）** `storage/session_repo.rs`：把三条 run 过滤查询泛化成 `Option<&str>`（`None` = 不限 run），保留既有签名的兄弟入口（`tests/startup_order.rs` 的 `the_recovery_scan_only_counts_sessions_of_other_runs` 直接调 `scan_recovery`，别动它的语义——**以符号/用例名为准**）：
 ```rust
@@ -197,7 +198,7 @@ pub fn local_days_covering(timezone: &str, from: i64, to: i64) -> Result<Vec<(Lo
 /// 一个用户命令：`coordinator.retry_recovery(db)` 成功提交后才清故障态；
 /// 随后**无条件重扫门禁**（S1）——那笔系统事务可能刚把某个会话推成 `recovering`，
 /// 门禁字段必须跟着事实走。返回提交后的权威快照。
-pub fn retry_recovery(&mut self) -> Result<TimerSnapshot, AppError>;
+pub fn retry_recovery(&mut self, expected_data_epoch: &str) -> Result<TimerSnapshot, AppError>;
 ```
 - 为什么必须有这个包装：`Coordinator::retry_recovery`（`:1265`）是 `pub`，但 `AppState.coordinator` 私有（`bootstrap.rs:344`）⇒ 服务层与命令层都够不着；而**它是 `faulted` 的唯一生产出口**（置真点 12 处：`:624/636/641/645/653/663` 提交后重建失败、`:953` 无基线采样失败、`:1067` 异常事务失败、`:1090/1104/1154/1243` 单调钟硬故障；置真后 `refuse_if_faulted`（`:315`）会拒绝 `snapshot/tick/start/pause/resume/finish/heartbeat/system_pause` 等 10 个入口）。
 - 与 S1 的分工：**S12 清协调器故障态（内存 + 提交那笔系统事务），S1 重算门禁字段（三条只读查询）**；只调 S12 不重扫 ⇒ 新出现的 `recovering` 不会立刻挡计时（会滞后到下次重扫）；只重扫不调 S12 ⇒ `refuse_if_faulted` 继续拒绝一切，闭环不了。所以包装里**两个都调**，且 S12 先。
@@ -552,7 +553,7 @@ pub fn scan_at_startup(db: &mut Db, current_run_id: &str, now: i64) -> Result<St
      - **无检查点**（或 `attribution_at <= started_at`）：没有可信前缀，原区间整体待确认——`ended_at = iv.started_at`、`duration_ms = NULL`、`sampled_end_wall_at = NULL`、`needs_review = 1`；
      - 两种情形都**不得**留下 `voided_at IS NULL AND ended_at IS NULL` 的行（`uq_open_interval:185` + `open_interval_outside_running:569` 的双重理由）；
      - 会话：`state = 'recovering'`、`needs_review = true`（`SessionStateUpdate:248`）、**`run_id` 保持不变**（02 §10：recovering 保持原恢复归属，直到 `reconcile` 更新并审计）、`row_version + 1`（由 `update_session_state` 负责）。
-     - **spec 冲突登记（2026-10-04 fix round 2：因 R9）**：02 §4 的恢复表第 2 行（"running 且有开放区间…只将该区间 `needs_review=1`"；原记 `02-data-model.zh.md:138`）写的是「session 设 recovering；**只将该区间 `needs_review=1`**」（单行形态），与本节的**两行分割**（可信前缀闭合 + 新待确认段）不一致。同文件 §3（"在最后可信检查点停止可疑区间并进入 recovering"）、§9（检查点与 `duration_ms` 口径）与 08 §1（"异常时保留至最后可信检查点的闭合前缀，剩余部分标 `needs_review`…没有可信检查点则整个当前区间待确认"）都支持两行分割（原记 `:127`/`:248`、`08-implementation-contracts.zh.md:14`）。⇒ **实现以本节为准；该表行待订正**（spec 不在本计划的改动范围，由控制器统一落盘）。不写这一句，实施者照 02 §4 表写就会复现 C3。
+     - **spec 冲突登记（2026-10-04 fix round 2：因 R9）**：02 §4 的恢复表第 2 行（"running 且有开放区间…只将该区间 `needs_review=1`"；原记 `02-data-model.zh.md:138`）写的是「session 设 recovering；**只将该区间 `needs_review=1`**」（单行形态），与本节的**两行分割**（可信前缀闭合 + 新待确认段）不一致。同文件 §3（"在最后可信检查点停止可疑区间并进入 recovering"）、§9（检查点与 `duration_ms` 口径）与 08 §1（"异常时保留至最后可信检查点的闭合前缀，剩余部分标 `needs_review`…没有可信检查点则整个当前区间待确认"）都支持两行分割（原记 `:127`/`:248`、`08-implementation-contracts.zh.md:14`）。⇒ **实现以本节为准；该表行已在 2026-10-04 本轮复审同步订正（中英）**。不写这一句，实施者照 02 §4 表写就会复现 C3。
      - **别把 `TimerSnapshot.pending_ms` 当成"有没有待确认"的判据**：归一后的待确认段是零长度候选（`started_at == ended_at`），`Coordinator::pending_ms_of`（`:1366-1376`）对它求和得 0 ⇒ `pending_ms` 是 `None`。判据是 `state == 'recovering'` / 区间 `needs_review = 1`；P8 的展示规则用 `duration_ms IS NULL` 表示"终点未知"（下游接口第 2 条）。
   3. **`recovering`** → 原样保持（含 P2 留下的 `ended_at=NULL` 待确认段），不增加已知工时、**不写任何行**。
   4. **`paused` 且无开放/待确认区间** → 保持 `paused`，`run_id` 重绑当前 run（`update_session_state`，`SessionStateUpdate { run_id: Some(current), .. }`），`row_version + 1`，写 `time_edit`，**不自动继续计时**。
@@ -587,7 +588,7 @@ pub fn reconcile(db: &mut Db, env: WriteEnvelope, req: ReconcileRequest, now: i6
 - [ ] 前置：仅 `recovering`；非 `recovering` 返回 `DOMAIN_ERROR` 并给出明确中文规则说明；只有未解决的恢复事实使用 `RECOVERY_REQUIRED`，**不新增错误码**；`running`/`paused` 想改可信历史必须先 `finish`，再走 `correct`。**命中第 1 类（不变量损坏）一律拒绝**，文案指向诊断——不允许"确认一下就修好"。
 - [ ] **一次事务处理该会话的全部待确认区间**，不做"一次一条"的多次往返。`Confirm` 的 `ranges` 必须与库里的待确认集合**逐一对应**：缺一条、多一条、`interval_id` 不属于该会话、或指向的区间不是"待确认且未作废" ⇒ 整条命令拒绝（零变化）。**待确认集合为空是合法输入**（`ranges` 必须为空）：P2 在「候选终点正好落在检查点上」时会留下一个没有余段的 `recovering` 会话，那是正常结果（`session_repo.rs:548-551` 的注释），此时 `Confirm` 只做状态跃迁。把 `started_at` 往**前**改会撞上可信前缀，由 S7 拒绝（不是特例）。
 - [ ] `Confirm` 校验（逐条，半开区间）：`ended_at >= started_at`（零长度合法）；**不与全部有效人工区间重叠**（S7，跨会话，端点相接不算）；**`ended_at <= now`**（未来的"已发生工时"不是事实；与 `require_available_human_start:455` 的"不能越过未来已有记录"同一口径）。`ranges` 之间也要两两不重叠（用 `IntervalSet::insert:119`，命中即 `DomainError::OverlappingInterval:38`）。已知单调时长**只作候选**（`ended_at = started_at` 的零长度候选就是"终点未知"），用户不接受时不强迫。
-- [ ] 写入（同一事务）：每条确认 → `confirm_interval`（S8：`started_at`/`ended_at`、`duration_ms = ended_at - started_at`、`needs_review → 0`、`voided_at` 保持 `NULL`、`sampled_end_wall_at` 保持原值）；`DiscardUncertain` → 该会话**全部**待确认区间 `void_interval(now)`（S8：`voided_at = now`、`needs_review → 0`、`ended_at` 原样，**保留此前有效闭合区间**）。`DiscardUncertain` 时 **`ranges` 必须为空**（作废哪些区间由服务从库里取 `needs_review=1 AND voided_at IS NULL` 的全部，不由客户端指定；非空 ⇒ 整条命令拒绝——否则"一次只作废一条"的歧义又回来了。fix round 2：因 R7）。它**不能**用来作废整次会话（那是 `discard_session`，Task 4）。
+- [ ] 写入（同一事务）：每条确认 → `confirm_interval`（S8：`started_at`/`ended_at`、`duration_ms = ended_at - started_at`、`needs_review → 0`、`voided_at` 保持 `NULL`、`sampled_end_wall_at` 保持原值）；`DiscardUncertain` → 该会话**全部**待确认区间 `void_interval(now)`（S8：`voided_at = now`、`needs_review → 0`、无时长的候选 `ended_at → NULL`（已知时长的端点保留），**保留此前有效闭合区间**）。`DiscardUncertain` 时 **`ranges` 必须为空**（作废哪些区间由服务从库里取 `needs_review=1 AND voided_at IS NULL` 的全部，不由客户端指定；非空 ⇒ 整条命令拒绝——否则"一次只作废一条"的歧义又回来了。fix round 2：因 R7）。它**不能**用来作废整次会话（那是 `discard_session`，Task 4）。
 - [ ] 会话收尾：`state = target_state`；`run_id → 当前 run`（02 §4/§10：**原始恢复归属保留在 `time_edit` 里**）；**`needs_review → false`（新增-1，闭环必需）**；`target_state = Finished` 时 `ended_at` 按**一条口径**取：`COALESCE((SELECT MAX(ended_at) FROM work_interval WHERE session_id = ? AND voided_at IS NULL AND ended_at IS NOT NULL), session.started_at)`——`voided_at IS NULL` 排除刚被作废的段、`ended_at IS NOT NULL` 排除 P2 遗留的"终点未知"段、`COALESCE` 兜住"一条可用区间都没有"（保证 `ck_session_range:93`）。`target_state = Paused` 时**不写 `ended_at`**（`SessionStateUpdate.ended_at = None`，走 `COALESCE` 保持原值）；两者都**不自动计时**。（fix round 2：因 R6。）V0.1 无番茄钟阶段，`phase_state` 相关分支不写。
 - [ ] **收尾后的形态不变量**：该会话**不得**再有 `voided_at IS NULL AND ended_at IS NULL` 的区间——`Confirm` 要求 `ranges` 覆盖全部待确认集合、`DiscardUncertain` 把它们全部作废，两条路都会消掉"终点未知"的遗留形态（与 Task 1 第 2 类的形态约束同一条）。测试里要按**全表**断言这一条，不只断言被处理的那几条。
 - [ ] 写 `time_edit`（`before_json`/`after_json` 记清每个被处理区间的**前**值（`started_at`/`ended_at`/`duration_ms`/`needs_review`/`voided_at`）与**后**值，以及 `run_id` 的前后值）；`reason` 写明是 `reconcile:confirm` 还是 `reconcile:discard_uncertain`。
@@ -639,7 +640,7 @@ pub fn discard_session(db: &mut Db, env: WriteEnvelope, req: DiscardSessionReque
 
 - [ ] `backfill`：校验任务存在（`task_repo::get_task`）、范围合法（`ended_at >= started_at`、`ended_at <= now`）、与既有人工时间不重叠（S7）；用 **S6** 创建 `finished` 会话与**可信闭合**区间（`needs_review = 0`、`duration_ms = ended_at - started_at`、`sampled_end_wall_at = NULL`——补录没有采样，**不得**把服务算的时刻写进那一列），写 `time_edit`。**不启动计时、不占前台槽位**（直接插 `finished` 行，`uq_running_foreground:183` 不受影响）、**不伪造 `task_change` 完成事件**（02 §3 原文）、不冻结估时基准（那是 `start` 的事）、不写 `interval_checkpoint`。
 - [ ] `backfill` 的固定字段（新增判定）：`mode = FOREGROUND`（02 §6：人工只有 FOREGROUND）、`timer_kind = stopwatch`、`target_duration_ms = NULL`（`ck_timer_budget:94`）；`run_id` = 当前 run。V0.1 不提供"补录一个倒计时/机器会话"的入口。
-- [ ] `discard_session`：**全部区间**（含运行中的开放区间）`void_interval(now)`：`voided_at = now`、`needs_review = 0`、**`ended_at` 原样**（开放区间保持 `NULL`——S8 的理由：`ck_interval_duration` 不允许"作废且已闭合却没有 `duration_ms`"，而给终点未知的段补时长就是造数；`open_interval_outside_running` 那条判据只查 `voided_at IS NULL`（`session_repo.rs:572`），作废段不会被判成残留开放区间）；会话设 `discarded`、`ended_at = max(now, session.started_at)`（`ck_session_range:93` 兜底）、`needs_review → false`（新增-1）、**`run_id` 不动**（终态会话不再参与门禁与联动）；写 `time_edit`。**不删除审计、不隐式改变任务状态**（02 §3 原文）。作废后协调器镜像停在 `discarded` 那条——**与 `finish` 之后停在 `finished` 完全同一口径**（`tests/timer_commands.rs:778` 的用例就是钉这个：`out.snapshot.state == Some(SessionState::Finished)`）；`live` 只表示"本 run 最后装载过哪条会话"，不是"正在计时"。**P8 登记界面表现**：作废后计时区显示"无活动会话/已作废"，不得按 running 计暂计（fix round 2：因 R8）。
+- [ ] `discard_session`：**全部区间**（含运行中的开放区间）`void_interval(now)`：`voided_at = now`、`needs_review = 0`、**已知时长区间的 `ended_at` 原样；无时长候选的 `ended_at` 清为 `NULL`**（开放区间仍保持 `NULL`——S8 的理由：`ck_interval_duration` 不允许"作废且已闭合却没有 `duration_ms`"，而给终点未知的段补时长就是造数；`open_interval_outside_running` 那条判据只查 `voided_at IS NULL`（`session_repo.rs:572`），作废段不会被判成残留开放区间）；会话设 `discarded`、`ended_at = max(now, session.started_at)`（`ck_session_range:93` 兜底）、`needs_review → false`（新增-1）、**`run_id` 不动**（终态会话不再参与门禁与联动）；写 `time_edit`。**不删除审计、不隐式改变任务状态**（02 §3 原文）。作废后协调器镜像停在 `discarded` 那条——**与 `finish` 之后停在 `finished` 完全同一口径**（`tests/timer_commands.rs:778` 的用例就是钉这个：`out.snapshot.state == Some(SessionState::Finished)`）；`live` 只表示"本 run 最后装载过哪条会话"，不是"正在计时"。**P8 登记界面表现**：作废后计时区显示"无活动会话/已作废"，不得按 running 计暂计（fix round 2：因 R8）。
 - [ ] **`discard_session` 不走 `end_session_in_tx`**：那条原语按 `run_id` 拒跨 run（`primitives.rs:75`），而"作废整次"必须能作用于**旧 run 留下的会话**（那正是恢复材料）。它只做 S8 的区间作废 + 会话状态更新，因而不受 `StaleRunContext` 限制；反过来，这也意味着它**不**参与"以可信方式闭合"，不会把停机时间算成工时。
 - [ ] 两者的区别要在错误与审计上可分辨：`discard_session` 不能只作废一个区间；`reconcile(discard_uncertain)` 不能作废整次。任何"含糊共用一个丢弃按钮"的实现都要在评审里被打回（02 §3/§4 原文）。
 - [ ] 提交后：`discard_session` 调 `rescan_recovery()`（S1）+ `load_session` 刷新镜像（新增-2）；`backfill` **不做**任何镜像刷新——它新建的是一条 `finished` 行，不改变当前镜像（`live` 仍指向 `running_foreground` 那条，或本来就是 `None`）。
@@ -714,7 +715,7 @@ pub fn transition_task(db: &mut Db, coordinator: &mut Coordinator, env: WriteEnv
 2. **全局待确认列表/数量：P3 补。** 服务入口 `services::recovery::attention_overview(db, expected_data_epoch) -> AttentionOverview`（只读、同一读事务信封，形状抄 `catalog::list_projects:285-307`）；**DTO 字段形状钉在 §0.5**（`AttentionOverview` / `SessionAttentionItem` / `PendingIntervalItem`——fix round 2：因 R1，原先这三个类型只有名字）。语义：**含终点未知的片段**（`needs_review=1` 的区间一律列出，`ended_at` 只是候选端点，`duration_ms IS NULL` 表示"未确认"），与当前计时会话分离（P8 用它，不要拿 `TimerSnapshot.pending_ms`/`needs_attention()` 顶替——P7 计划的「评审补充：恢复提示与时钟校正」第 1 条原文；原记 `:245`）。P5 想排除"可疑区间"时读它的 `fault_sessions`/`attention`，**不要自己写第二份损坏判定**。**IPC 命令由 P8 新增**（P8 计划已登记：其「P8 新增的 IPC 命令」清单第 8 条就是本条，请求带 `expected_data_epoch`、响应 `AttentionOverview`；P3 侧共 8 条 + 导出 1 条。P3 只交付服务入口与 DTO 形状、不新增 `#[tauri::command]`——fix round 2：因 R2）。
 3. **`retry_recovery`：实现是 P2 的，生产出口是 P3 的（S12），触发是 P8 的，采集/看门狗是 P6 的。**（fix round 2：因 R3 —— 终审实测 `faulted`（`coordinator.rs:170/322`）除 `retry_recovery:1265` 外**没有生产出口**，而 P6/P8/总纲对它 **0 命中**，故障路径上"计时可用"不闭环。）
    - **P2 已交付**：`Coordinator::retry_recovery(db) -> Result<TimerSnapshot, AppError>`（`:1265`，重试那笔失败的恢复事务，成功才清 `faulted`；硬故障 `MonotonicBackwards` 一律 `RECOVERY_REQUIRED`，`:1270-1272`）。**不重写它**。
-   - **P3 补 S12**：`AppState::retry_recovery()`（`services/bootstrap.rs`）——它是 `faulted` 的**唯一生产出口**，因为 `AppState.coordinator` 私有（`bootstrap.rs:344`），服务层与命令层都够不着。包装里 **先** `coordinator.retry_recovery(db)`、**再** `rescan_recovery()`（S1），返回提交后的快照。
+   - **P3 补 S12**：`AppState::retry_recovery(expected_data_epoch)`（`services/bootstrap.rs`）——它是 `faulted` 的**唯一生产出口**，因为 `AppState.coordinator` 私有（`bootstrap.rs:344`），服务层与命令层都够不着。包装里 **先** `coordinator.retry_recovery(db)`、**再** `rescan_recovery()`（S1），返回提交后的快照。
    - **触发时机：用户显式重试**（P8 新增一条 IPC 命令——其「P8 新增的 IPC 命令」第 7 条；请求带 `expected_data_epoch`、响应 `TimerSnapshot`；**不做定时自动重试**，08 §1：故障不能自己把证据擦掉）。S12 的 epoch 预检口径见 §0.3。
    - **P6 的活**：采样线程与启动路径的看门狗/重启（P7 验收 §6.7 第 37 条登记的"采样线程 panic 静默死亡"），以及把 `retry_recovery` 写进它自己的入口清单。**P6 计划侧的登记由控制器统一落盘**（本计划只改自己这一份文件）。
    - **与 `rescan_recovery` 的分工**：见 S12——一个清协调器故障态，一个重算门禁字段，互不替代。
@@ -736,3 +737,17 @@ pub fn transition_task(db: &mut Db, coordinator: &mut Coordinator, env: WriteEnv
 跨阶段接口、错误载荷、启动归属及 P7 前待办统一见[总纲 §10](2026-10-03-v01-plan-index.md)。P1/P2/P4/P7 核心已验收，P3 尚未实施；历史签名、测试数量和开工记录保留为当时证据，消费接口以当前源码及总纲为准。文档对齐不表示待办代码、IPC 或平台验证已经完成。
 
 **2026-10-04 修订后的自检口径**：本计划里的每个 `file:line` 都按当时 HEAD（`18861e3`，`origin/dev == HEAD`）的本地镜像 `worktrace-src/` 核过；`worktrace-src/` 是仓库 `src-tauri/` 的工作副本，行号漂移时以符号名为准。IPC 与界面仍归 P8（顺带-1）。
+
+## 2026-10-04 本轮复审补正
+
+1. S8/Task 2/Task 4 作废规则与 P1 ck_interval_duration 对齐：无时长候选清 ended_at，有时长区间保留端点；原候选端点由 time_edit 保留，不补造时长。增加启动扫描后 discard_uncertain/discard_session 的端到端用例，覆盖零长度候选与非零候选、开放未知段及已有可信前缀，确保作废全部成功、前缀保留/整次作废边界正确。
+2. S12 包装签名显式接收 expected_data_epoch，使正文规定的请求身份预检可实施；P2 的 Coordinator::retry_recovery 签名不变。P8 请求字段映射至该参数。
+3. 02 §4 恢复表的单行标记表述已与可信前缀/待确认余段模型对齐。P3 服务仍未实现，此轮只修订契约并验证既有 schema，不虚报功能交付。
+
+## 执行前与异常交接门禁（2026-10-04）
+
+- [ ] 新增 Domain 文案构造点逐条复核，留意既有扫描器文件级/400 字符启发式的误报；Storage 诊断不要求中文，不复用任务跃迁错误描述区间。
+- [ ] 开工前读取 [pre-p3-closure](../../validation/pre-p3-closure.md)，运行 check-pre-p3.ps1，全部自动化检查通过；真实平台验收保持未完成。
+- [ ] Task 1 明确 SessionAttention 与新恢复 DTO 的消费者，禁止两份生产损坏判定；复核 useRunningTaskId 的现有前台/mode 语义，不提前扩展 V0.2。
+- [ ] Task 7 按交接页“P3 必须验证的异常闭环”逐行登记测试名/结果，包含 S1 扫描失败标记、S12 二次重扫、提交后失败不重复用户写入、未知候选作废及完整审计。
+- [ ] 交付给 P5/P6/P8 的恢复/故障状态及 DTO 与本计划一致；后续阶段归属不代替本阶段测试，也不把后续界面未实现写成服务不可实施。
