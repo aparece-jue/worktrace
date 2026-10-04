@@ -22,8 +22,8 @@
 | FOLLOW-03 | P3 扫描版本与审计规则 | 文档已明确：扫描查询零写；实际修改 session 状态/run_id/区间事实时修改对象版本，并在同一批事务增加一次 revision、记审计。paused 重绑定适用；recovering 保持原恢复归属直至 reconcile。P3 尚未实施，后续按真实扫描测试验证 |
 | FOLLOW-04 | 中文错误提示一致性 | P4 验收记录仍登记 P1/P2 遗留的内部列名、英文提示等；建议 P7 前集中清理。Storage.detail 仅诊断，Domain.detail 会进入用户 message，不能混用 |
 | FOLLOW-05 | 平台验收 | 正式系统事件、锁屏/休眠/改时、多窗口/托盘、备份恢复及跨机器容差验证由 P6/P7/P8 承接；自动测试不能替代实机验收 |
-| FOLLOW-06 | 计时/统计快照的元数据取自**提交之后** | P2 的计时写路径是「先提交、再重建视图」：`src-tauri/src/services/timer/coordinator.rs:501-504` 在 `bump_revision` 之后 `tx.commit()`，再调 `rebuild_from_committed`（定义在 `:518`，另见 `:652`/`:778`/`:809`/`:1263` 的调用点），`TimerSnapshot` 的 `data_epoch`/`revision` 由提交后的 `require_meta(conn)` 读回（`:553` 附近）。严格按「写结果的数据与元数据同一写事务取得」这条口径，**P2 并不满足**（它满足的是「提交后只读一次、不由 IPC 层补读」）。本轮 COMP-01 的 R-E 明确冻结 P2 不动，故如实登记：**P7 接线前评估**——要么接受「P2 提交后重建」作为计时快照的既定形状并写进契约，要么随 P7 的接线一并收口。 |
-| FOLLOW-07 | 分层门禁不查 `commands → storage` | `src-tauri/scripts/check-layers.ps1:76-86` 只查 domain / storage / services 三条反向边（`domain` 禁 `storage::`/`commands::`/`services::`、`storage` 禁 `platform::`/`commands::`/`services::`、`services` 禁 `commands::`），**没有**「`src/commands` 不得出现 `storage::`」这条。当前命令层还是空壳（`src/commands/mod.rs` 只有模块文档，P4 已删掉 `commands::envelope` 转发路径），所以这条规则是**真空满足**；P7 往命令层加 IPC 命令时，绕过服务直连仓储不会被门禁拦住。归属：P7 接线时补规则并做一次反向验证（注入一行 `use crate::storage::…` ⇒ LEAK + exit 1）。 |
+| FOLLOW-06 | P2 提交后重建的一致读 | 已修复（2026-10-04）：rebuild_from_committed 在提交后开启一个读事务，session、区间、前台会话、快照元数据和 task_version 均在同一读快照内取得；CommandOutcome.revision 复用 snapshot.revision，不再另读。保留同次采样及提交后失败进入 RECOVERY_REQUIRED 的原规则。这是计时结果的明确例外：提交后应用内存/重建响应，不要求在业务写事务内生成最终展示快照。 |
+| FOLLOW-07 | commands 分层门禁 | 已修复（2026-10-04）：check-layers.ps1 增加 src/commands 对 storage::、rusqlite、Connection 的检查；正常通过，并须执行反向注入验证。命令层继续只调用服务，不接受连接。 |
 
 ## 三、已核对合理的边界（避免后续误当冲突）
 
@@ -84,7 +84,7 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 
 **门禁**（Windows，离线，提交 `27f8a7a` 上实跑）：`cargo test --offline` **350 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED。**反向验证**：去掉 `list_projects` 的 `guard_epoch` ⇒ 两条读信封用例变红；把 `Settled::read` 的 `data_epoch` 换成常量 ⇒ 写结果用例变红（`left: "not-the-epoch"`）。
 
-**首次握手不是待定项**：00 §5 规则 1 与 P7 计划已经定义好形状——窗口**先监听并暂存通知，再拉**含 epoch/revision 的一致快照；可见窗口至多每 30 秒校验 `get_revision`（`00-architecture.zh.md:61`、`2026-10-03-p7-shell-and-ui.md:48`/`:50`）。本轮已统一服务侧的 epoch 校验口径（所有查询只接受**请求带来的**期望值，`guard_epoch` 在同一个读事务内跑），P7 负责实现上述握手与迟到响应丢弃。
+**首次握手时序已定，服务入口现已补齐**：00 §5 规则 1 与 P7 计划已经定义好形状——窗口**先监听并暂存通知，再拉**含 epoch/revision 的一致快照；可见窗口至多每 30 秒校验 `get_revision`（`00-architecture.zh.md:61`、`2026-10-03-p7-shell-and-ui.md:48`/`:50`）。本轮已统一服务侧的 epoch 校验口径（所有查询只接受**请求带来的**期望值，`guard_epoch` 在同一个读事务内跑），P7 负责实现上述握手与迟到响应丢弃。
 
 **仍未做**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃、先监听后拉的握手时序）与 UI 不在本轮范围。
 
@@ -92,3 +92,11 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 
 1. **「同一读/写事务」缺可观察证据**：现有断言只能证明「返回值等于当时的库值」，证伪「返回前补读」需要第二连接并发写 + 快照校验（`unchecked_transaction` 是 DEFERRED，要在另一连接提交后确认旧信封仍持旧 revision），约 1–2 小时，本轮不做；「同事务」目前由结构保证（四个读服务与 `settle` 的代码形状）。
 2. **P2 计时快照是提交后重建**（FOLLOW-06）：严格按「写结果与元数据同一写事务」这条口径 P2 不满足，R-E 冻结范围，P7 接线前评估。
+
+## 首次握手与 P2 快照收口（2026-10-04）
+
+新增 services::handshake::get_revision(db) -> RevisionSnapshot {data_epoch,revision}，不需要 expected_data_epoch，纯读、不采样、不初始化库、不增加 revision。P7 先监听并缓冲事件，再调用此入口获得库身份，随后携该 epoch 拉业务一致快照；期间发生恢复则业务查询返回 DATA_EPOCH_MISMATCH，重新握手。get_revision 不是包含全部业务数据的快照，窗口仍需拉取所需业务视图，并保留事件缓冲与版本丢弃协议。周期校验与恢复后重新握手复用同一入口，生产 IPC 尚未接线。
+
+历史 FOLLOW-06 所谓“提交后只读一次”不准确：原实现 build 和随后 require_meta 各读一次元数据，且实体分次读取。现改为一个提交后读事务，并直接复用 snapshot.revision。历史记录中的未完成说法以本节和最新表格为准。
+
+本轮验证：352 个测试通过；分层正向通过，临时注入 commands 对 storage 的引用后门禁明确返回 1，移除探针后再次通过。首次握手用例覆盖无初始 epoch、恢复后库身份改变/旧查询拒绝、未初始化元数据拒绝且零创建。

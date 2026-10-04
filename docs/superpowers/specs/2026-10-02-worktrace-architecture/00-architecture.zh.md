@@ -105,3 +105,7 @@ V0.2 番茄钟在同一信封增加 phase、phase_state、cycle_index、phase_el
 公开工作命令统一 pause/resume；计时 DTO 的 remaining_ms/overtime_ms 仅 countdown 非空，番茄钟使用 phase_remaining_ms/phase_overtime_ms。命令分派、null 字段及轮次恢复以 08 §8 为准。
 
 公开会话命令唯一登记在 02 §3；08 §7 只扩展番茄钟条件。switch 的 interrupt 是 reason 值而非另一条公开命令；恢复走 reconcile、可信历史修正走 correct、整次作废走 discard_session，手工补录走 backfill。
+
+## 首次握手与计时提交后快照补充
+
+首次窗口及恢复后重新握手调用 services::handshake::get_revision，不要求 expected_data_epoch，只返回 data_epoch/revision；先监听并缓冲事件，再握手，再携 epoch 拉业务一致快照。它不代替业务快照；恢复竞态由业务查询的 epoch 守卫拒绝并重新握手。P4 写响应在业务写事务内取得数据与元数据；计时命令须先提交再应用内存，因此 P2 在同一串行边界内从一个提交后读事务重建响应，session/interval/task 与元数据来自同一读快照，CommandOutcome.revision 复用 snapshot.revision，不独立补读。仍使用原采样；提交后失败走恢复语义，不返回普通可重试失败。

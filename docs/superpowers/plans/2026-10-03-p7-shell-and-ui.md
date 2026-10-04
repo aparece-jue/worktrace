@@ -120,3 +120,7 @@
 ## P1～P4 兼容接入前置门禁
 
 接线前完成[总纲 §10](2026-10-03-v01-plan-index.md)的三项服务兼容补全：完整 epoch/revision 响应信封、完整项目列表服务、仅 active 项目可新关联的统一检查。之后再接所有错误响应的权威捕获；不得由 commands 直连仓储或补读元数据绕过门禁。P1/P2/P4 核心已验收不代表上述补全或本阶段 IPC 已实现。
+
+## 已实现的接入基座（2026-10-04）
+
+首次与恢复后身份握手、周期版本校验统一调用 services::handshake::get_revision(db)，无需 expected_data_epoch；业务查询仍必须带握手得到的 epoch。顺序为监听并缓冲事件→握手→业务快照；epoch 变化时丢弃旧请求结果并重新握手。get_revision 仅返回身份/版本，不代替完整业务视图。P2 命令结果在提交后从一个读事务重建，结果 revision 与 snapshot.revision 相同。分层脚本已检查 commands 禁止依赖 storage/rusqlite/Connection；IPC 和事件协议仍待本阶段实现。

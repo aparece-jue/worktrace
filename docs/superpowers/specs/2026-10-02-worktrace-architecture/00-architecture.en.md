@@ -103,3 +103,7 @@ V0.2 Pomodoro envelopes add phase/phase_state/cycle_index/phase_elapsed_ms/phase
 Public work commands are pause/resume; remaining_ms/overtime_ms are countdown-only, Pomodoro uses phase_remaining_ms/phase_overtime_ms. Dispatch/null fields/cycle recovery follow 08 §8.
 
 02 §3 is the sole public session registry; 08 §7 only extends Pomodoro conditions. interrupt is switch reason, not a public alias. Recovery uses reconcile, trusted history correct, whole-session void discard_session, manual history backfill.
+
+## Initial handshake and post-commit timer snapshots
+
+Initial windows and restore re-handshakes call services::handshake::get_revision without an expected epoch; it returns only data_epoch/revision. Subscribe and buffer, handshake, then query consistent business views using that epoch. It does not replace business snapshots; restore races are rejected by query epoch guards and require a new handshake. P4 captures write response data and metadata inside its business transaction. Timer commands commit before applying runtime state, so P2 rebuilds the response in one post-commit read transaction within the same serialized boundary. Session/interval/task data and metadata share one read snapshot; CommandOutcome.revision reuses snapshot.revision. Retain the original clock sample and recovery semantics for post-commit failure, never an ordinary retryable failure.
