@@ -12,19 +12,37 @@
 
 import { useSyncExternalStore } from "react";
 
-import { domainState, type DomainView } from "./domainState";
+import { domainState, type DomainView, type HandshakePhase } from "./domainState";
 import type { TimerSnapshot } from "../types/ipc";
 
 // 单例上的方法不依赖 `this`（都是闭包），所以可以当值传出去；
 // 引用稳定是 `useSyncExternalStore` 的要求（每次渲染换函数会反复重订阅）。
 const subscribe = domainState.subscribe;
 const getView = domainState.getView;
+const selectEpoch = (): string | null => domainState.getView().dataEpoch;
+const selectPhase = (): HandshakePhase => domainState.getView().phase;
 const selectTimer = (): TimerSnapshot | null => domainState.getView().timer;
 const selectInvalidated = (): number => domainState.getView().invalidated;
 
 /** 整个镜像快照（epoch / 水位 / 失效计数 / 计时展示值 / 握手状态）。 */
 export function useDomainView(): DomainView {
   return useSyncExternalStore(subscribe, getView);
+}
+
+/**
+ * 已应用的一致快照 epoch（库身份）；还没握手成功时为 `null`。
+ *
+ * 页面发任何**带 `expected_data_epoch` 的**业务命令之前都要先看它：`null` 说明还没握手，
+ * 这时发出去的请求没有可用的库身份（`data_epoch` 不是可以猜的东西）。
+ * 只订阅这一个字段，避免页面跟着每一拍 `timer.tick` 重渲染。
+ */
+export function useDataEpoch(): string | null {
+  return useSyncExternalStore(subscribe, selectEpoch);
+}
+
+/** 握手/校验状态（`idle` / `connecting` / `ready` / `failed`）：状态栏按它展示。 */
+export function useHandshakePhase(): HandshakePhase {
+  return useSyncExternalStore(subscribe, selectPhase);
 }
 
 /** 计时展示值（`timer.tick` 或计时快照）；没有活动会话时为 `null`。 */

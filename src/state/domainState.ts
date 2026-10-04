@@ -56,6 +56,7 @@ import {
   timerSnapshot,
   type EventStream,
   type FreshnessGate,
+  type VersionStamp,
 } from "../ipc";
 
 /**
@@ -110,6 +111,33 @@ export interface DomainState {
   start(): Promise<void>;
   /** 撤掉监听、停掉轮询并把镜像复位；**幂等**。 */
   stop(): Promise<void>;
+  /**
+   * 重新握手一次：再调一次 `get_revision`，发现换了库就整体失效并按新 epoch 重取，
+   * 发现版本比已见版本靠前（通知丢了）就取新快照。
+   *
+   * 给**失败响应**用的那一条路（R8：`requires_handshake` ⇒ 先重新握手，不自动重试
+   * 非幂等命令）。它不会重发那条命令，也不改水位以外的任何状态。
+   */
+  rehandshake(): Promise<void>;
+  /**
+   * 推一次缓存失效并取一份新的计时快照（闸门规则④/§5 规则 5 的那个动作）。
+   *
+   * 两个调用场景共用同一份实现，**不新增第二条分支**：
+   * - 闸门内部：跳号/乱序无法证明一致时取新快照（`resync`）；
+   * - **失败响应的「冲突刷新」**（R8）：`VERSION_CONFLICT` 说明我们手上的行/会话版本旧了
+   *   ——先让各视图的缓存失效（页面据此重拉自己的数据），再取新快照。
+   *
+   * 页面的查询失败**不要**用它（那会自触发重拉循环），只提示即可。
+   */
+  refresh(): Promise<void>;
+  /**
+   * 这条**页面自己发的**查询响应是不是"回答的不是我们现在问的那个世界"。
+   *
+   * 页面在响应回来时问一次：`true` ⇒ **丢弃，不要拿它覆盖已经显示的新状态**。
+   * 只读：用的是本上下文**唯一那把**闸门（`FreshnessGate::isStaleResponse`，
+   * 闸门规则①/③的读侧一半），所以页面不必各自维护第二份水位、也不自己拼比较条件。
+   */
+  isStaleResponse(stamp: VersionStamp, requestEpoch: string | null): boolean;
 }
 
 const INITIAL_VIEW: DomainView = {
@@ -209,6 +237,12 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
    * `null`——用 `stream` 当判据会把整条启动缝里的 `resync`/重新握手静默丢掉
    * （闸门记下了缺口，动作却没发生，闸门规则④的"立即取快照"退化成"等 30 秒轮询"）。
    * 所以 `start()` 在 **await 之前**就置位，`stop()` 与启动失败时清位。
+   *
+   * ⚠️ 它只回答「**有没有**活着的代次」，**回答不了"这条通知属于哪一代"**：`stop()` 之后
+   * 旧订阅仍可能被调用（`unlisten` 是异步的，`close()` 完成前旧 handler 还在），而那一刻
+   * `start → stop → start` 的第二代可能已经把 `live` 重新置真——旧代次的通知就会被新代次
+   * 接纳（`invalidated` 白涨一次，甚至把旧库/旧会话的值并进展示）。
+   * **跨代次过滤一律走 `beginSession` 的 `token`**（每条订阅一个），这里只当第二道闸。
    */
   let live = false;
   /**
@@ -376,7 +410,8 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
   }
 
   function onEvent(envelope: EventEnvelope): void {
-    // `stop()` 之后（或启动中途被 stop()）到达的 flush：不再写回任何状态。
+    // 第二道闸（第一道在 `beginSession` 的 `token` 上，见 `live` 的声明处）：
+    // `stop()` 之后（或启动中途被 stop()）到达的 flush，不再写回任何状态。
     if (!live) return;
     if (envelope.event === EVENT_TIMER_TICK) onTimerTick(envelope);
     else if (envelope.event === EVENT_DOMAIN_CHANGED) onDomainChanged(envelope);
@@ -457,7 +492,17 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
    */
   async function beginSession(token: number): Promise<void> {
     try {
-      const opened = await deps.startEventSession<void>(onEvent, load);
+      // ⚠️ 事件入口**带代次**（Task 3 补的跨代次接纳窗口）：`onEvent` 自己那道 `live`
+      // 只回答"有没有活着的代次"，答不了"这条通知属于哪一代"。真实世界的窗口是
+      // `stop()` 之后、`unlisten` 回来之前：旧订阅仍会被调用，而 `start → stop → start`
+      // 的第二代那时已经把 `live` 重新置真——不过滤的话旧代次的通知会被新代次接纳
+      // （评审实测：`invalidated` 0→1）。代次过滤与这条订阅一一对应，所以做在这里。
+      //
+      // 注意 `startEventSession` 的暂存通知是在它**返回之前**交付的：那时 `token` 仍等于
+      // 当前代次，所以正常启动缝里的事件照常交付（这条包装不会把 flush 吃掉）。
+      const opened = await deps.startEventSession<void>((envelope) => {
+        if (token === generation) onEvent(envelope);
+      }, load);
       if (token !== generation) {
         // 这一代已经被 stop() 作废：不要把会话复活（订阅要撤、轮询不要挂）。
         await opened.stream.close();
@@ -492,8 +537,14 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     subscriberCount: () => listeners.size,
 
     start() {
-      // 只有**当前代次**的那次启动能被复用（见 `starting` 的声明处）：
-      // 否则 `start → stop → start` 会拿到一个注定关掉会话的旧 promise。
+      // 只有**当前代次**的那次启动能被复用（见 `starting` 的声明处）：否则
+      // `start → stop → start` 会拿到一个注定关掉会话的旧 promise。
+      //
+      // ⚠️ 而这个代次判断在当前实现里**永不触发**，它是**不变式断言**，不是活分支：
+      // `stop()` 会清掉 `starting`，它同时是唯一推进代次的地方——于是
+      // 「`starting` 非空 ⇒ 它的代次就是当前代次」恒真。留着它是为了让这条不变式在代码里
+      // 可读，并且一旦有人给 `starting` 添了别的写入点（不推进代次就设/清它），这里会立刻
+      // 拒绝复用那个 promise，而不是悄悄退回 fix round 2 的"镜像永久停在 idle"。
       if (starting !== null && starting.generation === generation) return starting.promise;
       if (stream !== null) return Promise.resolve();
       const token = generation;
@@ -518,6 +569,12 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
       gate = createFreshnessGate();
       publish({ ...INITIAL_VIEW });
     },
+
+    rehandshake: verify,
+
+    refresh: resync,
+
+    isStaleResponse: (stamp, requestEpoch) => gate.isStaleResponse(stamp, requestEpoch),
   };
 }
 

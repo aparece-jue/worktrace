@@ -131,6 +131,13 @@ interface Harness {
   /** 下一次 `timer_snapshot` 交回的样本；传函数可以在**取样期间**投递事件。 */
   queueSample(...values: Array<TimerSnapshot | (() => TimerSnapshot)>): void;
   emit(event: EventEnvelope): void;
+  /**
+   * 直接投递给**第 `index` 次**打开的那条订阅（从 0 数起），而不是"当前那条"。
+   *
+   * 跨代次接纳窗口那条用例要用它：真实世界里 `stop()` 之后旧订阅仍可能被调用
+   * （`unlisten` 是异步的），而 `emit` 只认最后一次会话，投不到旧代次上。
+   */
+  emitVia(index: number, event: EventEnvelope): void;
 }
 
 function harness(): Harness {
@@ -149,6 +156,12 @@ function harness(): Harness {
     buffering: boolean;
     buffered: EventEnvelope[];
   } | null = null;
+  /** 每次打开过的会话，按打开顺序（`emitVia` 用）。 */
+  const opened: Array<{
+    handler: (event: EventEnvelope) => void;
+    buffering: boolean;
+    buffered: EventEnvelope[];
+  }> = [];
 
   const deps: DomainDeps = {
     async getRevision() {
@@ -169,6 +182,7 @@ function harness(): Harness {
       calls.sessions += 1;
       const session = { handler: h, buffering: true, buffered: [] as EventEnvelope[] };
       current = session;
+      opened.push(session);
       let value;
       try {
         value = await load();
@@ -201,6 +215,12 @@ function harness(): Harness {
       if (current === null) throw new Error("事件会话还没打开");
       if (current.buffering) current.buffered.push(event);
       else current.handler(event);
+    },
+    emitVia(index, event) {
+      const session = opened[index];
+      if (session === undefined) throw new Error(`第 ${index} 次会话还没打开`);
+      if (session.buffering) session.buffered.push(event);
+      else session.handler(event);
     },
   };
 }
@@ -867,6 +887,70 @@ describe("生命周期：订阅、卸载与多窗口", () => {
     expect(h.state.getView().invalidated).toBe(1);
   });
 
+  it("跨代次的事件不被新代次接纳：旧订阅 flush 出来的通知一律丢弃", async () => {
+    // Task 3 补的接纳窗口（评审实测 invalidated 0→1）：`stop()` 之后 `unlisten` 回来之前，
+    // 旧订阅仍可能被调用（`close()` 是异步的），而那一刻 `start → stop → start` 的第二代
+    // 已经把 `live` 重新置真——只靠 `live` 就会把旧代次的通知当成自己代次的接纳。
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample());
+    await h.state.start(); // 第一代真的开起来了（旧订阅已建立）
+
+    await h.state.stop(); // 作废第一代
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample());
+    await h.state.start(); // 第二代起来了：live 重新为真
+
+    // 旧代次的订阅这时才 flush 出一条水位之上的通知（真实世界：它还在等 unlisten）。
+    h.emitVia(0, envelope({ revision: 6 }));
+    expect(h.state.getView().invalidated).toBe(0);
+
+    // 新代次自己的通知照常接纳 —— 上面那个 0 不是因为整体不动了。
+    h.emitVia(1, envelope({ revision: 6 }));
+    expect(h.state.getView().invalidated).toBe(1);
+  });
+
+  it("旧代次握手失败不打掉新代次（beginSession 的 catch 代次守卫是承重的）", async () => {
+    // 旧代次的失败在**新代次已经就绪之后**才落地（真实世界：IPC 慢、超时、或用户很快重开）。
+    // 去掉 `if (token === generation)` 那道守卫：旧代次的 catch 会把新代次的 `live` 清掉、
+    // `phase` 打成 failed —— 镜像静默变死（事件不再被接纳、展示也不再更新）。
+    let failFirst: (cause: unknown) => void = () => undefined;
+    const firstHandshake = new Promise<never>((_resolve, reject) => {
+      failFirst = reject;
+    });
+    let handshakes = 0;
+    const state = track(
+      createDomainState({
+        getRevision() {
+          handshakes += 1;
+          // 第一代：挂着不返回，等第二代起来之后再失败。
+          return handshakes === 1 ? firstHandshake : Promise.resolve(identity(EPOCH, 5));
+        },
+        async timerSnapshot() {
+          return sample();
+        },
+        // 真实实现：本文件顶部把 `listen` 换成了替身，事件从这里进来。
+        startEventSession,
+      }),
+    );
+
+    const first = state.start(); // 第一代：握手挂着
+    await settle();
+    await state.stop(); // 作废第一代
+    const second = state.start(); // 第二代：这一代的握手是好的
+    await second;
+    expect(state.getView()).toMatchObject({ phase: "ready", dataEpoch: EPOCH });
+
+    failFirst(new Error("旧代次握手失败")); // 旧代次这时才失败
+    await expect(first).rejects.toThrow("旧代次握手失败");
+
+    // 新代次不受影响：状态还在 ready，事件照常被接纳（去掉守卫 ⇒ 这两条都红）。
+    expect(state.getView()).toMatchObject({ phase: "ready", dataEpoch: EPOCH });
+    events.emit(envelope({ revision: 6 }));
+    expect(state.getView().invalidated).toBe(1);
+  });
+
   it("启动过程中 stop()：会话不会被复活（订阅撤掉、不挂轮询、不写回状态）", async () => {
     const h = harness();
     track(h.state);
@@ -879,6 +963,46 @@ describe("生命周期：订阅、卸载与多窗口", () => {
 
     expect(h.calls.closes).toBe(1);
     expect(h.state.getView()).toMatchObject({ dataEpoch: null, phase: "idle" });
+  });
+
+  it("rehandshake()：失败响应要求重新握手时再调一次 get_revision，换库就整体失效并重取", async () => {
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample({ tick_seq: 1 }));
+    h.queueSample(sample({ data_epoch: OTHER_EPOCH, revision: 9, tick_seq: 3 }));
+    await h.state.start();
+    expect(h.calls.getRevision).toBe(1);
+
+    h.queueIdentity(identity(OTHER_EPOCH, 9));
+    await h.state.rehandshake();
+
+    expect(h.calls.getRevision).toBe(2);
+    expect(h.state.getView()).toMatchObject({
+      dataEpoch: OTHER_EPOCH,
+      revision: 9,
+      invalidated: 1,
+    });
+    // 换了库 ⇒ 旧库的计时展示作废，并按新 epoch 重取一份
+    expect(h.calls.timerSnapshot).toBe(2);
+    expect(h.state.getView().timer?.tick_seq).toBe(3);
+  });
+
+  it("isStaleResponse()：页面查询响应按**本上下文那把**闸门判旧，不自己拼比较条件", async () => {
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample());
+    await h.state.start();
+
+    // 另一个库（闸门规则①）：即使版本更高也是"回答的不是我们问的那个世界"。
+    expect(h.state.isStaleResponse({ data_epoch: OTHER_EPOCH, revision: 9 }, EPOCH)).toBe(true);
+    // 同 epoch 但比已应用水位旧：不覆盖（闸门规则③的读侧）。
+    expect(h.state.isStaleResponse({ data_epoch: EPOCH, revision: 4 }, EPOCH)).toBe(true);
+    // 同版本是合法的（重复查询），不丢。
+    expect(h.state.isStaleResponse({ data_epoch: EPOCH, revision: 5 }, EPOCH)).toBe(false);
+    // 不带 epoch 的请求（`null`）只按水位判：另一个库的响应在这里不算"旧"。
+    expect(h.state.isStaleResponse({ data_epoch: OTHER_EPOCH, revision: 9 }, null)).toBe(false);
   });
 
   it("两个实例互不共享内存（多窗口各自一个 JS 上下文）", async () => {
