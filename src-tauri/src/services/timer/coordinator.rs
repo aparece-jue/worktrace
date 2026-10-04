@@ -521,6 +521,13 @@ impl Coordinator {
         session_id: &str,
         sample: ClockSample,
     ) -> Result<CommandOutcome, AppError> {
+        // The business write has committed. Rebuild all persisted fields from
+        // one read snapshot, within the same serialized coordinator boundary.
+        let read_tx = conn.unchecked_transaction().map_err(|_| {
+            self.faulted = true;
+            AppError::RecoveryRequired
+        })?;
+        let conn = &*read_tx;
         if self.faulted
             && session_repo::get_session(conn, session_id)
                 .map_err(|_| AppError::RecoveryRequired)?
@@ -550,13 +557,7 @@ impl Coordinator {
                 return Err(AppError::RecoveryRequired);
             }
         };
-        let revision = match require_meta(conn) {
-            Ok(m) => m.revision,
-            Err(_) => {
-                self.faulted = true;
-                return Err(AppError::RecoveryRequired);
-            }
-        };
+        let revision = snapshot.revision;
         let task_version = session_repo::get_session(conn, session_id)
             .and_then(|session| session.ok_or(AppError::RecoveryRequired))
             .and_then(|session| task_repo::get_task(conn, &session.task_id))
