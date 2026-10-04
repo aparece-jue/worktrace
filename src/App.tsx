@@ -1,16 +1,19 @@
 /**
- * 应用外壳（P7 Task 1b 建立，Task 3 把页面接进来）：**固定布局 + 两块页面 + 状态栏**。
+ * 应用外壳（P7 Task 1b 建立，Task 3 把收件箱/计时接进来，Task 5 再接入项目/任务）：
+ * **固定布局 + 四块页面 + 状态栏**。
  *
  * 外壳只负责四件事，别的一概不做（00 §6：前端不含业务规则）：
  *
  * 1. `data-region="nav"`：常驻导航区——**不引路由**（离线取不到 `react-router`），
- *    两块页面用一次 `useState` 切换；
- * 2. `data-region="page"`：页面挂载区（收件箱 / 计时）；
+ *    四块页面用一次 `useState` 切换；
+ * 2. `data-region="page"`：页面挂载区（收件箱 / 项目 / 任务 / 计时）；
  * 3. `data-region="status"`：状态栏，读镜像的握手状态与计时展示值；
  * 4. **本上下文唯一那个订阅入口的启动接线**：挂载时 `domainState.start()`
  *    （Task 2 的 `startEventSession` 语义：先订阅并暂存 → 握手 → 取计时快照 → 按序交付），
  *    卸载时 `domainState.stop()`。**页面自己不开会话、也不各自订阅事件**——
  *    它们只通过 `src/state/hooks.ts` 读同一个入口。
+ *
+ * 页面顺序照 GTD 的动线排：捕获（收件箱）→ 项目 → 任务 → 计时。
  *
  * 「当前任务」不在外壳里存：计时页与状态栏的标题都读**快照自己的** `task_title`
  * （契约随 `task_id` / `task_row_version` 一起下发，见 `src/components/timerRequests.ts`
@@ -26,18 +29,40 @@ import { Layout, Menu, Typography } from "antd";
 import "./App.css";
 import { formatDuration } from "./components/duration";
 import { Inbox } from "./pages/Inbox";
+import { Projects } from "./pages/Projects";
+import { Tasks } from "./pages/Tasks";
 import { SESSION_STATE_TEXT, Timer } from "./pages/Timer";
 import { domainState } from "./state/domainState";
 import { useHandshakePhase, useTimerSnapshot } from "./state/hooks";
 
 const { Header, Sider, Content, Footer } = Layout;
 
-type PageKey = "inbox" | "timer";
+type PageKey = "inbox" | "projects" | "tasks" | "timer";
 
 const PAGES: Array<{ key: PageKey; label: string }> = [
   { key: "inbox", label: "收件箱" },
+  { key: "projects", label: "项目" },
+  { key: "tasks", label: "任务" },
   { key: "timer", label: "计时" },
 ];
+
+/**
+ * 页面挂载区：固定布局 + 一次 `useState` 切换，不引路由（R-04）。
+ *
+ * 用 `switch` 而不是嵌套三元：四个页面写成一串三元已经读不出分支了。
+ */
+function PageView({ page }: { page: PageKey }) {
+  switch (page) {
+    case "inbox":
+      return <Inbox />;
+    case "projects":
+      return <Projects />;
+    case "tasks":
+      return <Tasks />;
+    case "timer":
+      return <Timer />;
+  }
+}
 
 /** 握手状态的中文。这是**镜像自己**的状态（不是错误码），与 Rust 的失败文案无关。 */
 const PHASE_TEXT: Record<string, string> = {
@@ -100,7 +125,7 @@ export default function App() {
           />
         </Sider>
         <Content className="app-page" data-region="page">
-          {page === "inbox" ? <Inbox /> : <Timer />}
+          <PageView page={page} />
         </Content>
       </Layout>
       <Footer className="app-status" data-region="status">

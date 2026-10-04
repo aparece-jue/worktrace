@@ -11,10 +11,13 @@
  * 外壳**不持有任何跨页面的业务状态**（接线轮删掉了过渡的「当前任务」）：计时页与状态栏的
  * 标题都读快照自己的 `task_title`。下面两条用例把这一点钉住：快照给了标题就显示，
  * 没给就整段不渲染——**任何状态（含结束后那一拍）都不出现占位文案**。
+ *
+ * Task 5 把项目页与任务页接进同一个挂载区：导航四项与「切过去就发它自己的读查询」
+ * 由一条用例钉住（默认页仍是收件箱，所以上面那条"恰好四条命令"的断言不受影响）。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 
 const events = vi.hoisted(() => {
@@ -101,6 +104,10 @@ function scriptShell(session: Record<string, unknown> | null = null): string[] {
         return { tasks: [], total: 0, data_epoch: EPOCH, revision: 5 };
       case "list_selectable_projects":
         return { items: [], data_epoch: EPOCH, revision: 5 };
+      case "list_projects":
+        return { items: [], data_epoch: EPOCH, revision: 5 };
+      case "list_tags":
+        return { items: [], data_epoch: EPOCH, revision: 5 };
       default:
         throw new Error(`外壳不该调用 ${command}`);
     }
@@ -147,6 +154,27 @@ describe("应用外壳", () => {
     expect(container.querySelector('[data-region="page"]')?.textContent).toContain("收件箱");
   });
 
+  it("导航里四项都在；「项目」「任务」接进挂载区，各自发自己的读查询", async () => {
+    // 反向验证：把 `PageView` 的某个分支接错页（或忘了把新页加进 `PAGES`）⇒
+    // 导航文案或挂载区里那句断言红。
+    const called = scriptShell();
+    const { container } = render(<App />);
+    await waitFor(() => expect(called).toContain("list_tasks"));
+
+    const nav = container.querySelector('[data-region="nav"]');
+    for (const label of ["收件箱", "项目", "任务", "计时"]) {
+      expect(nav?.textContent, `导航里缺少「${label}」`).toContain(label);
+    }
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "项目" }));
+    await waitFor(() => expect(called).toContain("list_projects"));
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("项目");
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "任务" }));
+    await waitFor(() => expect(called).toContain("list_tags"));
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("任务");
+  });
+
   it("导航切到计时页；卸载时把事件会话撤掉（不留监听）", async () => {
     scriptShell();
     const { container, unmount } = render(<App />);
@@ -191,5 +219,25 @@ describe("应用外壳", () => {
     await waitFor(() => expect(called).toContain("finish_timer"));
     expect(status()).not.toContain("本窗口不知道");
     expect(screen.queryByTestId("timer-task-title")).toBeNull();
+  });
+
+  it("M1（补）：非空标题在「结束」的响应回来那一拍仍然显示", async () => {
+    // 前一条用的是 `task_title: null` 的夹具，所以它只钉住「不出现占位」，钉不住
+    // 「标题在这一拍会不会**消失**」。这里用非空标题补上另一半。
+    //
+    // 反向验证：把 `finish_timer` 的响应当成新状态用（例如成功后
+    // `setTimer(response.snapshot)`，而响应里的空闲快照没有标题）⇒ 下面两句红。
+    const called = scriptShell(activeSnapshot({ task_title: "写季报" }));
+    const { container } = render(<App />);
+    fireEvent.click(screen.getByRole("menuitem", { name: "计时" }));
+    await waitFor(() => expect(screen.getByTestId("timer-task-title").textContent).toBe("写季报"));
+
+    fireEvent.click(screen.getByTestId("finish-button"));
+    await waitFor(() => expect(called).toContain("finish_timer"));
+    // 等这条命令的响应真的回来（页面在这一拍清 busy；展示值**不**由响应决定）
+    await act(async () => undefined);
+
+    expect(screen.getByTestId("timer-task-title").textContent).toBe("写季报");
+    expect(container.querySelector('[data-region="status"]')?.textContent).toContain("写季报");
   });
 });
