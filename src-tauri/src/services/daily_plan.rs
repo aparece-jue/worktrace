@@ -14,7 +14,11 @@
 //!   那一天」的事实，新时区只影响之后写入的行。本模块不提供任何迁移/改写入口，
 //!   也不要用「把旧行的日期按新时区重算一遍」来实现换时区。
 //! - **日界**：[`local_date_at`] 按**所选时区**算日期（同一时刻在上海与纽约可能差
-//!   一天），永远**不**拿 `updated_at` 或 UTC 日期代替（02 §9）。
+//!   一天），永远**不**拿 `updated_at` 或 UTC 日期代替（02 §9）。反向换算由
+//!   [`local_day_bounds`] / [`local_days_covering`]（P3 S10）负责：一天的界是
+//!   「次日零点」的换算结果，**不是** `start + 86_400_000`——夏令时切换日是
+//!   23/25 小时（半小时制 DST 的时区是 23.5/24.5）。P5 的统计口径直接用这一对
+//!   函数加 [`crate::domain::interval::IntervalRange::clipped_ms`]，不另写一份。
 //!
 //! # 今日选择不是排期（P4 Task 4）
 //!
@@ -29,6 +33,7 @@
 //! 表达的正是被校验之后的那个日期。
 
 use crate::domain::error::DomainError;
+use crate::domain::interval::IntervalRange;
 use crate::domain::localdate::LocalDate;
 use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
@@ -97,6 +102,135 @@ fn timezone_of(raw: &str) -> Result<jiff::tz::TimeZone, AppError> {
         return Err(DomainError::EmptyText { field: "时区" }.into());
     }
     jiff::tz::TimeZone::get(trimmed).map_err(|_| unknown_timezone(raw))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 真实日界（P3 S10）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 「某一天」**不是**一个固定长度：夏令时切换日是 23 或 25 小时（半小时制 DST 的时区
+// 是 23.5 / 24.5 小时）。所以一天的界只能由「次日零点的换算」得到，不能写
+// `start + 86_400_000`——那会在切换日把第二天（或前一天）的一小时算进来。
+//
+// 这两个函数是「本地日 ↔ 半开毫秒区间」的唯一换算入口：时区一律先过
+// [`normalize_timezone`]（与写路径同一个存储键），P5 的统计口径直接用它们加
+// `IntervalRange::clipped_ms`，不自己再算一份。
+
+/// 本地日期在给定时区里的**真实**半开界 `[start, end)`。
+///
+/// - `end` 是**次日零点**的换算结果，不是 `start + 86_400_000`（08 §1）：夏令时切换日
+///   因此是 23/25 小时。
+/// - 本地零点正好落在跳变**缺口**里时（例如 `America/Santiago` 2024-09-08 的 `00:00`
+///   被跳过），jiff 的默认消歧给出跳变之后的那一刻——那正是这一天真正开始的一刻，
+///   不是「前一天再晚一点」。
+/// - 日期（或它的次日）越过可表示范围时**报错，不钳制**：与 [`local_date_at`] 的越界
+///   口径一致，坏输入不该变成一个看起来合理的区间。
+pub fn local_day_bounds(timezone: &str, date: LocalDate) -> Result<IntervalRange, AppError> {
+    // 与写路径同一口径：能当存储键的名字才允许拿来算日界，读写不会分叉。
+    let name = normalize_timezone(timezone)?;
+    let zone = timezone_of(&name)?;
+    bounds_in(&zone, date)
+}
+
+/// 一个半开范围 `[from, to)` 覆盖到的每一个本地日：`(本地日期, 该日的真实半开界)`，
+/// 按日升序。
+///
+/// 语义（与 `IntervalRange` 的半开口径同一套）：
+/// - 只返回与 `[from, to)` **正相交**（`IntervalRange::overlap_ms > 0`）的日；
+/// - `from == to`（零长度）⇒ 空 `Vec`——零长度范围不覆盖任何一天；
+/// - `from > to` ⇒ [`DomainError::NegativeInterval`]，**不静默交换端点**：交换会把
+///   「调用方算错了」变成「悄悄换了一天」；
+/// - 端点正好落在日界上时**不含次日**（半开：`[d0, d1)` 只覆盖 `d0`）。
+///
+/// 逐日按同一个换算推进（前一日的 `end` 就是后一日的 `start`），所以结果天然
+/// **无缺口、无重叠**；调用方要取与范围的交集请用
+/// [`crate::domain::interval::IntervalRange::clipped_ms`]，不要自己算。
+pub fn local_days_covering(
+    timezone: &str,
+    from: i64,
+    to: i64,
+) -> Result<Vec<(LocalDate, IntervalRange)>, AppError> {
+    // 区间形状先判：与 `IntervalRange::new` 同一判据，且**绝不交换端点**。
+    if to < from {
+        return Err(DomainError::NegativeInterval {
+            started_at: from,
+            ended_at: to,
+        }
+        .into());
+    }
+    // 时区仍要校验：坏输入不该因为「范围是空的」而悄悄放行（本模块的时区校验只有
+    // `normalize_timezone` 这一个入口，读写与统计都走它）。
+    let name = normalize_timezone(timezone)?;
+    let zone = timezone_of(&name)?;
+    if to == from {
+        return Ok(Vec::new());
+    }
+
+    // 半开：最后一个被覆盖的毫秒是 `to - 1`，它的本地日就是最后一天。
+    // 这也正是「端点落在日界上不含次日」的实现——`to` 是零点的瞬间本身不算被覆盖。
+    let first = local_date_at(&name, from)?;
+    let last = local_date_at(&name, to - 1)?;
+
+    let mut days = Vec::new();
+    let mut date = first;
+    let mut start = midnight_in(&zone, date)?;
+    loop {
+        let next = next_date(date)?;
+        let end = midnight_in(&zone, next)?;
+        // 前一日的 `end` 就是后一日的 `start`：同一个换算结果，不重复算第二次。
+        days.push((date, IntervalRange::new(start, end)?));
+        if date == last {
+            return Ok(days);
+        }
+        date = next;
+        start = end;
+    }
+}
+
+/// 某一天在给定（已解析）时区里的半开界。两个公开入口共用这一份换算。
+fn bounds_in(zone: &jiff::tz::TimeZone, date: LocalDate) -> Result<IntervalRange, AppError> {
+    let start = midnight_in(zone, date)?;
+    let end = midnight_in(zone, next_date(date)?)?;
+    Ok(IntervalRange::new(start, end)?)
+}
+
+/// `date` 在 `zone` 里那一天的**零点**（Unix 毫秒）。
+///
+/// `Date::at(0,0,0,0).to_zoned(zone)` 就是「本地零点这一刻」；缺口与重叠由 jiff 的
+/// 默认消歧处理（见 [`local_day_bounds`]）。
+fn midnight_in(zone: &jiff::tz::TimeZone, date: LocalDate) -> Result<i64, AppError> {
+    let civil = to_civil(date)?;
+    let zoned = civil
+        .at(0, 0, 0, 0)
+        .to_zoned(zone.clone())
+        .map_err(|_| date_out_of_range())?;
+    Ok(zoned.timestamp().as_millisecond())
+}
+
+/// 次日。**这是「一天不是 24 小时」的实现要点**：`end` 由它推进，而不是加常量。
+fn next_date(date: LocalDate) -> Result<LocalDate, AppError> {
+    let next = to_civil(date)?
+        .tomorrow()
+        .map_err(|_| date_out_of_range())?;
+    LocalDate::from_jiff(next).map_err(Into::into)
+}
+
+/// `LocalDate` → jiff 的日历日。
+///
+/// `LocalDate` 已经过同一套日历校验（年 0..=9999），所以这里不会失败；真失败了也只能是
+/// 内部不一致，同样按「超出可表示范围」报错，**不回落**到某个默认日期。
+fn to_civil(date: LocalDate) -> Result<jiff::civil::Date, AppError> {
+    jiff::civil::Date::new(date.year(), date.month(), date.day()).map_err(|_| date_out_of_range())
+}
+
+/// 「这个日期（或它的次日）超出可表示的日期范围」。
+///
+/// 与 [`local_date_at`] 的越界文案同一口径：**报错，不钳制**。用手写的
+/// `AppError::Domain`（中文、面向用户），不新增错误码、也不新增 `DomainError` 变体。
+fn date_out_of_range() -> AppError {
+    AppError::Domain {
+        detail: "这个日期超出可表示的日期范围。".into(),
+    }
 }
 
 /// 「这不是一个可用的 IANA 时区」。

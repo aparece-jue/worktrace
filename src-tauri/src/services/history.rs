@@ -44,6 +44,17 @@
 //! 不加 `revision`、不加 `row_version`，只返回当前行。（`Delete` 没有这一支：
 //! 已作废的行在区间前置里就被拒了，重复删除不会变成「又作废一次」。）
 //!
+//! # 相交判定的唯一入口（P3 Task 5，I3）
+//!
+//! 两段区间是否相交**只有一处实现**：[`crate::domain::interval`] 的
+//! [`IntervalRange::overlap_ms`] / [`IntervalRange::overlaps`] /
+//! [`IntervalRange::clipped_ms`]，以及
+//! [`IntervalFacts`](crate::domain::interval::IntervalFacts) /
+//! [`IntervalSet`](crate::domain::interval::IntervalSet)（`insert` 已经是
+//! 「与既有区间重叠则拒绝、端点相接允许」）。本模块**不新写第二份相交实现**：
+//! `correct` 的重叠校验走 [`session_repo::require_no_human_overlap`]（S7，半开、
+//! 端点相接不算），它与上面那条公式是同一套口径；P5 的统计口径同样直接复用它们。
+//!
 //! # 并发：用**所属会话**的版本
 //!
 //! `env.expected_row_version` 是会话版本，不新增 `interval.row_version`。一次真实的
