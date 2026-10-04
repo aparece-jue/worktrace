@@ -140,9 +140,15 @@ function harness(): Harness {
   let lastIdentity = identity(EPOCH, 5);
   let lastSample = sample();
 
-  let handler: ((event: EventEnvelope) => void) | null = null;
-  let buffering = false;
-  let buffered: EventEnvelope[] = [];
+  /**
+   * 当前那一次会话（每次 `startEventSession` 各自一份，fix round 2 的 start→stop→start
+   * 用例会同时有两次在飞；共用一个槽位的话，先落地那次关订阅会把后一次的直通目标清掉）。
+   */
+  let current: {
+    handler: (event: EventEnvelope) => void;
+    buffering: boolean;
+    buffered: EventEnvelope[];
+  } | null = null;
 
   const deps: DomainDeps = {
     async getRevision() {
@@ -161,26 +167,25 @@ function harness(): Harness {
     // 按原顺序交付暂存的通知 → 转直通。
     async startEventSession(h, load) {
       calls.sessions += 1;
-      handler = h;
-      buffering = true;
-      buffered = [];
+      const session = { handler: h, buffering: true, buffered: [] as EventEnvelope[] };
+      current = session;
       let value;
       try {
         value = await load();
       } catch (cause) {
         calls.closes += 1;
-        handler = null;
+        if (current === session) current = null;
         throw cause;
       }
-      buffering = false;
-      for (const event of buffered) h(event);
-      buffered = [];
+      session.buffering = false;
+      for (const event of session.buffered) h(event);
+      session.buffered = [];
       return {
         value,
         stream: {
           async close() {
             calls.closes += 1;
-            handler = null;
+            if (current === session) current = null;
           },
         },
       };
@@ -193,9 +198,9 @@ function harness(): Harness {
     queueIdentity: (...values) => identities.push(...values),
     queueSample: (...values) => samples.push(...values),
     emit(event) {
-      if (handler === null) throw new Error("事件会话还没打开");
-      if (buffering) buffered.push(event);
-      else handler(event);
+      if (current === null) throw new Error("事件会话还没打开");
+      if (current.buffering) current.buffered.push(event);
+      else current.handler(event);
     },
   };
 }
@@ -275,7 +280,11 @@ describe("启动顺序与水位前置", () => {
     let emitted = false;
     // fix round 1 / I3：投递点在**注册那一刻**（订阅已建立、load 还没开始）。
     // 这一条是区分性的：把 startEventSession 的暂存改成直通，rev 4 会在水位还是
-    // `null` 的时候到达 ⇒ 被当成跳号（`invalidated` 与 `timerSnapshot` 都变多）。
+    // `null` 的时候到达 ⇒ 被当成跳号、**多取一次计时快照**（下面 `timerSnapshot`
+    // 那条断言就是它的红点）。
+    // ⚠️ 措辞订正（fix round 2）：有区分力的**只有** `timerSnapshot` 那一条——同一变异下
+    // `invalidated` 仍是 1（rev 4 触发的 resync 与 rev 6 触发的 resync 被 `resyncing`
+    // 合并成一次），别把 `invalidated` 说成这条用例的判据。
     events.onRegister((handler) => {
       handler({ payload: envelope({ revision: 4 }) });
     });
@@ -826,6 +835,36 @@ describe("生命周期：订阅、卸载与多窗口", () => {
     await settle();
     expect(h.calls.getRevision).toBe(2); // 显示前校验
     expect(vi.getTimerCount()).toBe(1); // 并且开始轮询
+  });
+
+  it("start → stop → start：第二次启动必须真的重新就绪，而不是复用被作废的那一次", async () => {
+    // fix round 2：StrictMode 的 mount→cleanup→mount 与 Task 4 的窗口生命周期正好走这条路径。
+    vi.useFakeTimers();
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample());
+
+    const first = h.state.start(); // 第一次启动还在飞
+    await h.state.stop(); // 还没落地就停
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample());
+    // ⚠️ 关键：**不 await 第一次**就再起一次（StrictMode 的 mount→cleanup→mount 就是这样）。
+    // 若第二次 start() 复用了那个已被作废的 promise，它只会把会话关掉、不会重新开。
+    const second = h.state.start();
+    await Promise.all([first, second]);
+
+    expect(h.calls.closes).toBe(1); // 旧的那次只把会话关掉，不复活
+
+    // 订阅真的开起来了（不是只 resolve）
+    expect(h.state.getView().phase).toBe("ready");
+    expect(h.calls.sessions).toBe(2);
+    expect(h.calls.closes).toBe(1);
+    // 轮询真的挂上了
+    expect(vi.getTimerCount()).toBe(1);
+    // 失效计数真的会动
+    h.emit(envelope({ revision: 6 }));
+    expect(h.state.getView().invalidated).toBe(1);
   });
 
   it("启动过程中 stop()：会话不会被复活（订阅撤掉、不挂轮询、不写回状态）", async () => {

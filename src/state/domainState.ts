@@ -211,7 +211,17 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
    * 所以 `start()` 在 **await 之前**就置位，`stop()` 与启动失败时清位。
    */
   let live = false;
-  let starting: Promise<void> | null = null;
+  /**
+   * 在飞的那次启动。**代次跟 promise 存在一起**（fix round 2），不另立一个标量：
+   *
+   * ⚠️ 只有 `generation` 与当前代次相同的那个 promise 才能被复用。`stop()` 递增代次后，
+   * 旧 promise 注定走"这一代已作废 ⇒ 关掉订阅"那条路——若第二次 `start()` 拿它当结果返回，
+   * 调用方会看到 `start()` 正常 resolve，而镜像**永久停在 idle**（`start → stop → start`
+   * 正好是 StrictMode 的 mount→cleanup→mount 与 Task 4 窗口生命周期的走法）。
+   * 把代次挂在 promise 上（而不是再开一个 `startingGeneration`），是为了不让"三个状态位
+   * 谁跟谁同步"再多一处可以漂移的地方：判据只有一条——`starting.generation === generation`。
+   */
+  let starting: { generation: number; promise: Promise<void> } | null = null;
   let verifying = false;
   let resyncing = false;
   let poll: ReturnType<typeof setInterval> | null = null;
@@ -441,6 +451,34 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     onVisibilityChange = null;
   }
 
+  /**
+   * 一次启动尝试。`token` 是发起时的代次：`stop()` 之后这次尝试**作废**——
+   * 把已经拿到的订阅关掉、不写回任何状态（不复活），但也不吞掉失败（调用方收到 reject）。
+   */
+  async function beginSession(token: number): Promise<void> {
+    try {
+      const opened = await deps.startEventSession<void>(onEvent, load);
+      if (token !== generation) {
+        // 这一代已经被 stop() 作废：不要把会话复活（订阅要撤、轮询不要挂）。
+        await opened.stream.close();
+        return;
+      }
+      stream = opened.stream;
+      attachLifecycle();
+      publish({ phase: "ready" });
+    } catch (cause) {
+      if (token === generation) {
+        // startEventSession 已经把订阅撤掉了（不留悬挂监听），这里只记状态。
+        live = false;
+        publish({ phase: "failed" });
+      }
+      throw cause;
+    } finally {
+      // 只清自己那一格：期间可能有更新的一代已经在飞。
+      if (starting !== null && starting.generation === token) starting = null;
+    }
+  }
+
   return {
     subscribe(listener) {
       listeners.add(listener);
@@ -454,38 +492,25 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     subscriberCount: () => listeners.size,
 
     start() {
-      if (starting !== null) return starting;
+      // 只有**当前代次**的那次启动能被复用（见 `starting` 的声明处）：
+      // 否则 `start → stop → start` 会拿到一个注定关掉会话的旧 promise。
+      if (starting !== null && starting.generation === generation) return starting.promise;
       if (stream !== null) return Promise.resolve();
+      const token = generation;
       publish({ phase: "connecting" });
       // ⚠️ 在 **await 之前**置位：`startEventSession` 的暂存通知在它返回之前就交付了，
       // 那一刻还没有 `stream`（fix round 1 / I2）。见 `live` 的声明处。
       live = true;
-      starting = (async () => {
-        try {
-          const opened = await deps.startEventSession<void>(onEvent, load);
-          if (!live) {
-            // 启动过程中被 stop()：不要把会话复活（订阅要撤、轮询不要挂）。
-            await opened.stream.close();
-            return;
-          }
-          stream = opened.stream;
-          attachLifecycle();
-          publish({ phase: "ready" });
-        } catch (cause) {
-          // startEventSession 已经把订阅撤掉了（不留悬挂监听），这里只记状态。
-          live = false;
-          publish({ phase: "failed" });
-          throw cause;
-        } finally {
-          starting = null;
-        }
-      })();
-      return starting;
+      const promise = beginSession(token);
+      starting = { generation: token, promise };
+      return promise;
     },
 
     async stop() {
       generation += 1;
       live = false;
+      // 在飞的那次启动已经作废（代次对不上了）：清掉它，下一次 `start()` 重新起一次。
+      starting = null;
       detachLifecycle();
       const open = stream;
       stream = null;
