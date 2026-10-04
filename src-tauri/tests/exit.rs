@@ -173,7 +173,7 @@ fn seed_sessions(h: &Harness) {
 
 #[test]
 fn explicit_exit_ends_running_and_paused_and_writes_clean_exit_at() {
-    let mut h = harness();
+    let h = harness();
     seed_sessions(&h);
     let revision_before = h.scalar("SELECT revision FROM app_meta WHERE singleton = 1");
     let run_id = h.running.run_id().to_string();
@@ -273,7 +273,7 @@ fn explicit_exit_ends_running_and_paused_and_writes_clean_exit_at() {
 /// 重复退出是幂等的：不重复结束、不重复加 revision、不覆盖第一次的时刻。
 #[test]
 fn explicit_exit_is_idempotent() {
-    let mut h = harness();
+    let h = harness();
     seed_sessions(&h);
 
     let first = h.running.shutdown().unwrap();
@@ -313,7 +313,7 @@ fn explicit_exit_is_idempotent() {
 /// 一个事务：中途失败 ⇒ 前面已经结束的会话也要回滚，`clean_exit_at` 不写。
 #[test]
 fn a_failing_session_end_rolls_back_the_whole_exit() {
-    let mut h = harness();
+    let h = harness();
     seed_sessions(&h);
 
     // 故意造一条结束不了的会话：`needs_review=1` 的会话必须等恢复，
@@ -366,7 +366,7 @@ fn a_failing_session_end_rolls_back_the_whole_exit() {
 /// 退出先停定时器：之后不会再有一拍落进已经结束的事务里。
 #[test]
 fn shutdown_stops_the_sampler_first() {
-    let mut h = harness();
+    let h = harness();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while h.running.sampling_ticks() < 2 {

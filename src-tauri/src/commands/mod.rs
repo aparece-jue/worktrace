@@ -62,17 +62,28 @@
 //! 计时命令（`start`/`pause`/`resume`/`finish`）没有「幂等重复」这一支：能走到广播
 //! 就说明这次状态跃迁真的提交了，所以它们的 `changed` 恒为真。
 //!
+//! # 托盘动作（P7 Task 4）
+//!
+//! 托盘菜单点到的动作走**与 IPC 相同的命令体**：暂停 = [`tray_pause_impl`]（内部就是
+//! [`pause_timer_impl`]），退出 = [`tray_quit_impl`]（内部就是 Task 0 的显式退出入口
+//! `RunningApp::shutdown`）。菜单本身的装配在 `platform::tray`（那一层不碰业务），
+//! 组合根 `lib.rs` 把动作接到这两个入口上。
+//!
+//! 与 IPC 的一点差别：托盘**没有响应通道**，所以 `spawn_tray_*` 在阻塞线程里执行完
+//! 只把结果写进诊断（正式诊断日志归 P6）。串行边界与 IPC 完全相同——同一把
+//! `Mutex<AppState>`、同样不在 UI 回调里开事务。
+//!
 //! # 本阶段不做
 //!
 //! 恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；维护态分流（P6）。
 
 use std::sync::Arc;
 
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 
 use crate::envelope::WriteEnvelope;
 use crate::error::{AppError, AuthorityKind, AuthorityTarget, ErrorResponse};
-use crate::services::bootstrap::{lock_app, AppState, RunningApp};
+use crate::services::bootstrap::{lock_app, AppState, ExitReport, RunningApp};
 use crate::services::error_response::capture_error_response;
 use crate::services::events::{Broadcaster, EventEnvelope};
 use crate::services::timer::coordinator::{
@@ -1037,4 +1048,127 @@ pub fn finish_timer_impl(
         outcome.snapshot.as_of,
         outcome,
     ))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 托盘动作（P7 Task 4）：**复用与 IPC 相同的命令体/服务入口**，不另开业务路径
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 菜单本身的装配在 `platform::tray`：那一层只把「点到了什么」交出来，不碰业务
+// （分层门禁也不允许它反向引用这一层）。这里补齐另一半——「动作 → 命令体」，
+// 由组合根 `lib.rs` 接上。
+//
+// 托盘**没有响应通道**，所以结果只进诊断；但执行姿势与 IPC 逐条相同：切到阻塞线程
+// （菜单回调跑在 UI 线程上，长事务不得留在那里，D6 硬约束 2）、取同一把
+// `Mutex<AppState>`（于是「用户命令」与「托盘动作」不可能并发进入协调器）。
+
+/// 托盘「暂停」的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrayPause {
+    /// 没有**运行中**的会话：什么都没做（不写库、不加 revision、不广播）。
+    NothingToPause,
+    /// 复用 [`pause_timer_impl`] 暂停了当前会话。
+    Paused(Box<CommandOutcome>),
+}
+
+/// 托盘「暂停」：暂停**当前正在跑的那个会话**。
+///
+/// 会话 id 与会话版本取自**刚取到的快照**，与界面点「暂停」用的是同一组字段
+/// （界面把展示中的快照回传，这里把刚读到的快照交回），落点都是 [`pause_timer_impl`]
+/// → `AppState::pause` → `Coordinator::pause`。**没有第二条业务路径。**
+///
+/// 没有会话、或当前会话已经暂停（`recovering` 同理）⇒ [`TrayPause::NothingToPause`]：
+/// 重复 `pause` 会撞 `VERSION_CONFLICT`，对用户毫无意义，空转还会白广播一次。
+pub fn tray_pause_impl(
+    app: &mut AppState,
+    broadcaster: &Broadcaster,
+) -> Result<TrayPause, AppError> {
+    let snapshot = app.snapshot()?;
+    if !snapshot.is_running() {
+        return Ok(TrayPause::NothingToPause);
+    }
+    let (Some(session_id), Some(session_version)) =
+        (snapshot.session_id.clone(), snapshot.session_version)
+    else {
+        return Ok(TrayPause::NothingToPause);
+    };
+
+    pause_timer_impl(
+        app,
+        broadcaster,
+        SessionRequest {
+            expected_data_epoch: snapshot.data_epoch,
+            session_id,
+            session_expected_version: session_version,
+        },
+    )
+    .map(|outcome| TrayPause::Paused(Box::new(outcome)))
+}
+
+/// 托盘「退出」：**复用 Task 0 的显式退出入口**（[`RunningApp::shutdown`]）。
+///
+/// 顺序与语义全在那一条入口里（先停定时器，再一个事务结束 `running`/`paused`、
+/// 写 `clean_exit_at`、按需推进 revision；`recovering` 记录保留）。这里不做任何改动：
+/// 托盘只是它的第二个调用方，不是第二份实现。**不是杀进程。**
+pub fn tray_quit_impl(running: &RunningApp) -> Result<ExitReport, AppError> {
+    running.shutdown()
+}
+
+/// 托盘「暂停」：在**阻塞线程**上、**串行边界内**执行（与 [`run_command`] 同一条骨架）。
+pub fn spawn_tray_pause(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (shared, broadcaster) = {
+            let running = handle.state::<RunningApp>();
+            (Arc::clone(running.app()), Arc::clone(running.broadcaster()))
+        };
+        let mut state = lock_app(&shared);
+        match tray_pause_impl(&mut state, &broadcaster) {
+            Ok(TrayPause::Paused(outcome)) => {
+                println!("[worktrace] tray: 已暂停（revision {}）", outcome.revision)
+            }
+            Ok(TrayPause::NothingToPause) => {
+                println!("[worktrace] tray: 没有运行中的计时，暂停未执行")
+            }
+            Err(error) => eprintln!(
+                "[worktrace] tray: 暂停失败：{}（{}）",
+                error.message(),
+                error.code()
+            ),
+        }
+    });
+}
+
+/// 托盘「退出」：同样切到阻塞线程（退出要开事务），成功之后才结束进程。
+///
+/// 退出事务失败时（例如库里有一条结束不了的会话）**仍然退出，用非零码标出来**：
+/// 此刻事务已经回滚、库是一致的，这一次 run 会以「没有 `clean_exit_at`」结束——
+/// 那正是恢复扫描的输入（F-015）。把用户困在一个没有窗口的托盘里比一次不干净退出更糟。
+pub fn spawn_tray_quit(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = {
+            let running = handle.state::<RunningApp>();
+            tray_quit_impl(&running)
+        };
+        match result {
+            Ok(report) => {
+                println!(
+                    "[worktrace] tray: 退出（run {} clean_exit_at {} 结束会话 {}）",
+                    report.run_id,
+                    report.clean_exit_at,
+                    report.sessions_ended.len()
+                );
+                handle.exit(0);
+            }
+            Err(error) => {
+                eprintln!(
+                    "[worktrace] tray: 退出失败：{}（{}）",
+                    error.message(),
+                    error.code()
+                );
+                handle.exit(1);
+            }
+        }
+    });
 }

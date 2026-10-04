@@ -241,7 +241,13 @@ impl RunningApp {
     /// `recovering` 记录原样保留（02 §4）。
     ///
     /// 退出是**终态**：调用方随后应当退出进程，不得再对本实例下命令。
-    pub fn shutdown(&mut self) -> Result<ExitReport, AppError> {
+    ///
+    /// 取 `&self` 而不是 `&mut self`（2026-10-04 Task 4）：托盘的「退出」在组合根里
+    /// 只拿得到共享引用（`AppHandle::state::<RunningApp>()` 给的正是 `&RunningApp`），
+    /// 而要它走**这一条**入口就不能另开一条 `&mut` 通道——那等于把退出拆成两份实现。
+    /// 内部可变性收在 `Scheduler`（停止位 + `Mutex<Option<JoinHandle>>`）与 `AppState`
+    /// 那把锁里，本类型自身仍然没有可被外部摆布的状态。
+    pub fn shutdown(&self) -> Result<ExitReport, AppError> {
         self.sampling.stop();
 
         let at = {
@@ -619,7 +625,7 @@ pub fn startup(
     }));
     let broadcaster = Arc::new(Broadcaster::new(sink));
     let sampling_errors = Arc::new(AtomicU64::new(0));
-    let mut sampling = Scheduler::spawn(config.sampling_interval_ms, {
+    let sampling = Scheduler::spawn(config.sampling_interval_ms, {
         let app = Arc::clone(&app);
         let broadcaster = Arc::clone(&broadcaster);
         let errors = Arc::clone(&sampling_errors);

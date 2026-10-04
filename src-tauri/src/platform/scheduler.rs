@@ -17,9 +17,14 @@
 //!
 //! [`Scheduler::stop`]（以及 `Drop`）置停止位并 `join`，所以退出路径上不会再有一拍
 //! 落在「事务已经结束」之后。等待被切成 ≤ 50ms 的小片，停止不需要等满一个周期。
+//!
+//! `stop` 取 **`&self`**：显式退出的调用方（`RunningApp::shutdown`）在组合根里只拿得到
+//! 共享引用——Tauri 托管状态给出的就是 `&RunningApp`，而托盘的「退出」必须走那一条入口
+//! （不能另开一条 `&mut` 通道，那等于把退出拆成两份实现）。停止位与 `join` 句柄因此
+//! 都用内部可变性：`AtomicBool` + `Mutex<Option<JoinHandle>>`。`stop` 依旧幂等。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -30,7 +35,7 @@ const MAX_SLEEP_SLICE: Duration = Duration::from_millis(50);
 #[derive(Debug)]
 pub struct Scheduler {
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    handle: Mutex<Option<JoinHandle<()>>>,
     /// 已完成的触发次数。只用于诊断与测试，不参与任何业务判断。
     ticks: Arc<AtomicU64>,
 }
@@ -74,7 +79,7 @@ impl Scheduler {
 
         Self {
             stop,
-            handle: Some(handle),
+            handle: Mutex::new(Some(handle)),
             ticks,
         }
     }
@@ -84,10 +89,17 @@ impl Scheduler {
         self.ticks.load(Ordering::SeqCst)
     }
 
-    /// 停止并等待线程退出。可重复调用。
-    pub fn stop(&mut self) {
+    /// 停止并等待线程退出。可重复调用，且**只要共享引用就能调**（见模块头「停」）。
+    pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.handle.take() {
+        // 先取出句柄、**放开那把 `Mutex`**，再 `join`：join 期间不让别人为了一把已经
+        // 没用的锁排队（`stop` 是幂等的，第二个调用者拿到 `None` 直接返回）。
+        let handle = self
+            .handle
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(handle) = handle {
             let _ = handle.join();
         }
     }
@@ -122,7 +134,7 @@ mod tests {
     #[test]
     fn ticks_until_stopped_without_any_window_reference() {
         let seen = Arc::new(AtomicUsize::new(0));
-        let mut scheduler = {
+        let scheduler = {
             let seen = Arc::clone(&seen);
             Scheduler::spawn(5, move || {
                 seen.fetch_add(1, Ordering::SeqCst);
@@ -170,7 +182,7 @@ mod tests {
     /// 停止不需要等满一个周期（分片睡眠）。
     #[test]
     fn stop_is_prompt_even_with_a_long_interval() {
-        let mut scheduler = Scheduler::spawn(30_000, || {});
+        let scheduler = Scheduler::spawn(30_000, || {});
         let started = std::time::Instant::now();
         scheduler.stop();
         assert!(
