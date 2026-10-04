@@ -12,6 +12,7 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
+use crate::domain::error::DomainError;
 use crate::domain::interval::IntervalFacts;
 use crate::domain::session::{SessionMode, SessionState, TimerBudget, TimerKind};
 use crate::domain::task::{TaskStatus, TransitionCause};
@@ -190,9 +191,8 @@ impl Coordinator {
     /// **可信闭合**的进 `closed_trusted_ms`，只有 `running` 才认开放区间。
     /// 待确认、已作废、以及非 running 状态下残留的开放区间**都不计入**。
     pub fn load_session(&mut self, conn: &Connection, session_id: &str) -> Result<(), AppError> {
-        let row = session_repo::get_session(conn, session_id)?.ok_or_else(|| AppError::Domain {
-            detail: "no such session".into(),
-        })?;
+        let row =
+            session_repo::get_session(conn, session_id)?.ok_or(DomainError::UnknownSession)?;
 
         let mut closed_trusted_ms: i64 = 0;
         let mut open: Option<(String, i64)> = None;

@@ -140,10 +140,12 @@ pub fn create_session(
         }
         (TimerKind::Stopwatch, None) => {}
         (TimerKind::Stopwatch, Some(_)) => {
+            // `what` 是**面向用户**的「这项功能/这种组合」，不是代码里的标识：
+            // 收口前这里是 `stopwatch with a budget`，用户会读到整句英文。
             return Err(DomainError::NotInThisVersion {
-                what: "stopwatch with a budget",
+                what: "给正计时设预算",
             }
-            .into())
+            .into());
         }
     }
 
@@ -177,8 +179,7 @@ pub fn open_interval(
     session_id: &str,
     attributed_start: i64,
 ) -> Result<(), AppError> {
-    let session =
-        get_session(tx, session_id)?.ok_or(DomainError::EmptyText { field: "session" })?;
+    let session = get_session(tx, session_id)?.ok_or(DomainError::UnknownSession)?;
     if !session.state.allows_open_interval() {
         return Err(DomainError::IntervalOpenInWrongState {
             state: session.state.as_str(),
@@ -200,13 +201,13 @@ pub fn close_interval(
     id: &str,
     facts: ClosedIntervalFacts,
 ) -> Result<IntervalRow, AppError> {
-    let before = get_interval(tx, id)?.ok_or(DomainError::EmptyText { field: "interval" })?;
+    let before = get_interval(tx, id)?.ok_or(DomainError::UnknownInterval)?;
     if before.ended_at.is_some() {
-        return Err(DomainError::IllegalTransition {
-            from: "closed",
-            to: "closed",
-        }
-        .into());
+        // 没有开放区间却要求闭合：这条规则本来就是 `NoOpenInterval` 的语义
+        // （「没有开放区间，却要求闭合」）。原先借用 `IllegalTransition` 并塞进
+        // `from: "closed", to: "closed"`，用户会读到一句关于**任务**跃迁、
+        // 且带内部标识的胡话：「任务不能从「closed」变成「closed」。」。
+        return Err(DomainError::NoOpenInterval.into());
     }
     if facts.ended_at < before.started_at {
         return Err(DomainError::NegativeInterval {
@@ -261,7 +262,7 @@ pub fn update_session_state(
     target: SessionState,
     update: SessionStateUpdate<'_>,
 ) -> Result<SessionRow, AppError> {
-    let before = get_session(tx, id)?.ok_or(DomainError::EmptyText { field: "session" })?;
+    let before = get_session(tx, id)?.ok_or(DomainError::UnknownSession)?;
     guard_row_version(before.row_version, expected_version)?;
 
     let n = tx

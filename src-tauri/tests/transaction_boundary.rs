@@ -12,7 +12,7 @@ use worktrace_lib::domain::task::{TaskStatus, TransitionCause};
 use worktrace_lib::error::AppError;
 use worktrace_lib::storage::checkpoint_repo::{self, Checkpoint};
 use worktrace_lib::storage::db::Db;
-use worktrace_lib::storage::guards::{guard_epoch, guard_row_version_of};
+use worktrace_lib::storage::guards::{guard_epoch, guard_row_version};
 use worktrace_lib::storage::meta::{bump_revision, init_meta, read_meta, require_meta};
 use worktrace_lib::storage::migrations::migrate;
 use worktrace_lib::storage::session_repo;
@@ -70,7 +70,11 @@ fn start_session(
 
     // ① 请求校验必须在写事务内
     guard_epoch(&tx, epoch)?;
-    guard_row_version_of(&tx, "task", task_id, task_version)?;
+    // 读这一行并校验版本：**「找不到」与「版本不符」必须可区分**。
+    // 原先调 `guards::guard_row_version_of`（零生产调用，且不存在时的手写文案是整句英文），
+    // FOLLOW-04 收口时删除；这里照生产侧的形状用 `get_task` + `guard_row_version`。
+    let task = task_repo::get_task(&tx, task_id)?.ok_or(DomainError::UnknownTask)?;
+    guard_row_version(task.row_version, task_version)?;
 
     // ② 任务理清到 Doing
     task_repo::transition_task(
@@ -304,10 +308,20 @@ fn version_conflict_and_unknown_record_are_distinguishable() {
 
     let tx = db.connection_mut().unchecked_transaction().unwrap();
 
-    let unknown = guard_row_version_of(&tx, "task", "no-such-task", 0).unwrap_err();
+    // 未知记录：行读不到 ⇒ `UnknownTask`（领域错误），**不是**版本冲突。
+    // 断言走 `get_task(...).ok_or(DomainError::UnknownTask).into()`——这是生产侧
+    // 逐字相同的那两步（`storage/guards.rs` 的 `guard_row_version_of` 已删，它当时
+    // 用一句英文 detail 冒充领域错误）。
+    let unknown: AppError = task_repo::get_task(&tx, "no-such-task")
+        .unwrap()
+        .ok_or(DomainError::UnknownTask)
+        .unwrap_err()
+        .into();
     assert_eq!(unknown.code(), "DOMAIN_ERROR", "未知记录不是版本冲突");
 
-    let conflict = guard_row_version_of(&tx, "task", "t1", 7).unwrap_err();
+    // 版本不符：行在，但请求带的版本旧了 ⇒ `VERSION_CONFLICT`。
+    let task = task_repo::get_task(&tx, "t1").unwrap().unwrap();
+    let conflict = guard_row_version(task.row_version, 7).unwrap_err();
     assert_eq!(conflict.code(), "VERSION_CONFLICT");
     match conflict {
         AppError::VersionConflict { expected, actual } => {

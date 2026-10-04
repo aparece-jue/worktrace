@@ -3,8 +3,10 @@
 //! 计划要求的四件事：未知记录、非法状态、epoch 冲突、版本冲突都能被区分；
 //! 且错误文本不含数据库路径、SQL 与业务正文。
 
+use std::path::{Path, PathBuf};
+
 use worktrace_lib::domain::error::DomainError;
-use worktrace_lib::domain::session::{SessionMode, TimerKind};
+use worktrace_lib::domain::session::{SessionMode, SessionState, TimerKind};
 use worktrace_lib::domain::tag::TagKind;
 use worktrace_lib::domain::task::{TaskStatus, TaskTransition, TransitionCause};
 use worktrace_lib::error::{
@@ -73,7 +75,22 @@ fn errors_never_leak_paths_sql_or_payload() {
     for e in &cases {
         let shown = format!("{} {} {:?}", e.code(), e.message(), e.message());
         for banned in [
-            "SELECT", "INSERT", "UPDATE ", "DELETE", ".db", "C:\\", "/home/", "sqlite",
+            "SELECT",
+            "INSERT",
+            "UPDATE ",
+            "DELETE",
+            ".db",
+            "C:\\",
+            "/home/",
+            "sqlite",
+            // FOLLOW-04 收口时删掉的英文片段：这里是**用户可见文本**（code + message）
+            // 的第二道网；`src` 侧的防回潮由 `src_has_no_retired_english_error_text`
+            // 扫源码（那份表里没有 `vanished`——`AppError::Storage` 的诊断按契约保留
+            // 英文，只是它永远不进用户文案）。
+            "no such",
+            "vanished",
+            "task.title",
+            "stopwatch with a budget",
         ] {
             assert!(
                 !shown.contains(banned),
@@ -137,9 +154,14 @@ fn domain_error_messages_are_user_facing_chinese() {
             to: "Doing",
         },
         DomainError::ReopenMustBeExplicit { from: "Done" },
-        DomainError::NotInThisVersion { what: "pomodoro" },
+        // `what` 的取值语义是「这项功能 / 这种组合」：生产里要么是中文
+        // （「把任务关联到已完成的项目」等），要么是任务状态名（经 `zh_status`，
+        // 由下面三条 `transition_error` 覆盖）。这里用中文取值钉住**直通**路径。
+        DomainError::NotInThisVersion { what: "番茄钟" },
         DomainError::IntervalAlreadyOpen,
         DomainError::NoOpenInterval,
+        // `state` 保留生产取值（`SessionState::as_str()`）——它经 `zh_session_state`
+        // 打中文，正是 ④ 要守的那条：收口前这里走的是任务状态的映射表。
         DomainError::IntervalOpenInWrongState {
             state: "recovering",
         },
@@ -153,7 +175,10 @@ fn domain_error_messages_are_user_facing_chinese() {
         },
         DomainError::TrustedIntervalWithoutDuration,
         DomainError::PendingAndVoided,
-        DomainError::EmptyText { field: "task" },
+        // 字段名是**面向用户**的「任务标题」，不是列名 `task.title`（FOLLOW-04 收口）。
+        DomainError::EmptyText {
+            field: "任务标题"
+        },
         DomainError::UntrustedSample {
             reason: "monotonic went backwards",
         },
@@ -180,6 +205,9 @@ fn domain_error_messages_are_user_facing_chinese() {
         // P4 Task 5（任务筛选、捕获与理清为待办）新增的两个变体。
         DomainError::ContextTagRequired { kind: "Domain" },
         DomainError::TaskNotClarifiable { status: "Doing" },
+        // FOLLOW-04（用户可见文案一致性）新增的两个变体。
+        DomainError::UnknownSession,
+        DomainError::UnknownInterval,
         // 三条**走真实跃迁校验入口**造出来的错误（不是手写字面量）：
         // 手写 `what: "Scheduled"` 的用例对 M2 那种「构造时塞了内部枚举名」的毛病
         // 恒真——只有从入口造出来的错误才带着映射表的结果。
@@ -199,9 +227,11 @@ fn domain_error_messages_are_user_facing_chinese() {
             TransitionCause::User,
         ),
     ];
-    assert_eq!(cases.len(), 26, "26 个变体都要覆盖，加了新的记得补进来");
+    assert_eq!(cases.len(), 28, "28 个变体都要覆盖，加了新的记得补进来");
 
     for e in cases {
+        // ④ 的豁免在 `into()` 之前判：`UnknownEnumValue` 需要回显非法取值与列名。
+        let echoes_the_bad_value = matches!(e, DomainError::UnknownEnumValue { .. });
         let shown: AppError = e.into();
         let message = shown.message();
 
@@ -267,6 +297,217 @@ fn domain_error_messages_are_user_facing_chinese() {
             !message.contains("重试"),
             "拒绝类文案不该说「重试」：{message}"
         );
+        // ④ **变体级**：除 `UnknownEnumValue` 外，用户文案里不得出现 ASCII 字母。
+        //
+        // ① 只要求「至少含一个 CJK」，中文句子里夹一个英文词照样通过——
+        // FOLLOW-04 收口正是靠这条抓出两个漏网：`IntervalOpenInWrongState` 拿着
+        // **会话**状态走**任务**状态的映射表（用户会读到「会话处于「recovering」时…」），
+        // 以及测试里 `NotInThisVersion { what: "pomodoro" }` 这种非生产取值。
+        //
+        // 豁免 `UnknownEnumValue`：它要回显**非法取值**与**列名**（「「state」里是一个
+        // 无法识别的值 "???"。」），回显是诊断所需，写进豁免说明而不是放宽整条规则；
+        // 它的生产构造点（`services::daily_plan`）用的是中文列名「时区」。
+        if !echoes_the_bad_value {
+            assert!(
+                !user_text.chars().any(|c| c.is_ascii_alphabetic()),
+                "除 UnknownEnumValue 外的用户文案不得含 ASCII 字母：{user_text}"
+            );
+        }
+    }
+}
+
+/// `zh_session_state` **五个取值一个不漏**：`IntervalOpenInWrongState` 的 `state` 直接来自
+/// `SessionState::as_str()`，映射表漏掉哪一个，用户就会读到那个英文取值。
+///
+/// 这是变体级规则（④）的补强：④ 只覆盖用例里那一个会话状态，与任务状态那边用三条
+/// `transition_error` 补齐十个取值是同一个道理。
+#[test]
+fn every_session_state_renders_in_chinese_without_the_raw_value() {
+    for state in SessionState::ALL {
+        let shown = DomainError::IntervalOpenInWrongState {
+            state: state.as_str(),
+        }
+        .to_string();
+        assert!(
+            !shown.chars().any(|c| c.is_ascii_alphabetic()),
+            "会话状态 {} 没进中文映射表，用户会读到：{shown}",
+            state.as_str()
+        );
+        assert!(!shown.contains(state.as_str()), "不得漏出内部取值：{shown}");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 文案门禁（FOLLOW-04：把「用户可见文案必须是中文」变成可机器检查）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 上面那条用例是**变体级**：它只看测试里构造的那一份取值。下面两条门禁补上它够不着的
+// 两类，三条规则分工如下：
+//
+// - 变体级（`domain_error_messages_are_user_facing_chinese` 的 ④）：每个 `DomainError`
+//   变体渲染出的用户文案不得含 ASCII 字母（`UnknownEnumValue` 豁免，理由见该处）；
+// - 构造点级（`inline_user_facing_error_literals_are_chinese`）：`src/**/*.rs` 里
+//   **内联字面量**形式的用户文案必须含中文。生产代码里的
+//   `EmptyText { field: "task.title" }` 这种列名，变体级规则永远看不到；
+// - 禁用子串（`src_has_no_retired_english_error_text`）：本次删掉的英文片段不得回潮。
+//
+// 表达式形式（`field: FIELD`、`what: to.as_str()`、`detail: other.to_string()`）由变体级
+// 规则与各自的映射表（`zh_status` / `zh_kind` / `zh_session_state`）覆盖，扫源码时跳过。
+
+/// 一个字符是不是 CJK 统一表意文字（与 ① 的判据同一个区间）。
+fn is_cjk(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&c)
+}
+
+/// `src/**/*.rs` 的（路径，源码），源码已剔除**整行注释**。
+///
+/// 只剔整行注释（`//` 开头，含 `///`/`//!`）：本仓的文档注释都是整行的，而注释里会
+/// 引用历史文案（如「原先借用 `EmptyText{field:"project"}`」）——那不是产出的文案。
+/// 空行占位，所以行号与源码一致。
+fn src_rust_sources() -> Vec<(PathBuf, String)> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("src 目录必须可读") {
+            let path = entry.expect("目录项必须可读").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if matches!(path.extension().and_then(|e| e.to_str()), Some("rs")) {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    assert!(
+        !files.is_empty(),
+        "扫不到 src 下的 .rs，门禁等于空转：{root:?}"
+    );
+    files.sort();
+    files
+        .into_iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(&path).expect("源码是 UTF-8");
+            let code = text
+                .lines()
+                .map(|line| {
+                    if line.trim_start().starts_with("//") {
+                        ""
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (path, code)
+        })
+        .collect()
+}
+
+/// `anchor`（如 `field:`）之后**紧跟的内联字符串字面量**；表达式形式返回 `None`。
+fn inline_literal_after(text: &str, anchor: &str) -> Option<String> {
+    let rest = text.get(text.find(anchor)? + anchor.len()..)?;
+    let body = rest.trim_start().strip_prefix('"')?;
+    let mut literal = String::new();
+    let mut escaped = false;
+    for c in body.chars() {
+        if escaped {
+            literal.push(c);
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '"' {
+            return Some(literal);
+        } else {
+            literal.push(c);
+        }
+    }
+    None
+}
+
+/// 某个构造点在源码里出现的内联字面量：`(行号, 字面量)`。
+fn inline_literals(code: &str, variant: &str, field: &str) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = code[from..].find(variant) {
+        let at = from + offset;
+        // 只看构造点之后的一小段：够跨过 `Variant {\n    field: "…"`，
+        // 又不会把下一个构造点的字面量算到这一个头上。
+        let tail: String = code[at..].chars().take(400).collect();
+        if let Some(literal) = inline_literal_after(&tail, field) {
+            found.push((code[..at].matches('\n').count() + 1, literal));
+        }
+        from = at + variant.len();
+    }
+    found
+}
+
+/// **构造点级**：`src` 里内联字面量的用户文案必须至少含一个 CJK 字符。
+///
+/// 变体级规则看的是测试构造的那一份取值；生产代码里的字面量只有扫源码才抓得住——
+/// FOLLOW-04 收口前这三处都在漏：`EmptyText { field: "task.title" }`（列名）、
+/// `NotInThisVersion { what: "stopwatch with a budget" }`、
+/// `AppError::Domain { detail: "no such session" }`（整句英文）。
+#[test]
+fn inline_user_facing_error_literals_are_chinese() {
+    // （构造点, 字段, 这个字面量会被拼进的那句话）
+    let patterns = [
+        ("EmptyText {", "field:", "「{field}」不能为空。"),
+        (
+            "NotInThisVersion {",
+            "what:",
+            "当前版本还没有「{what}」这项功能。",
+        ),
+        ("AppError::Domain", "detail:", "操作不被允许：{detail}"),
+    ];
+
+    let mut scanned = 0usize;
+    for (path, code) in src_rust_sources() {
+        for (variant, field, template) in patterns {
+            for (line, literal) in inline_literals(&code, variant, field) {
+                assert!(
+                    literal.chars().any(is_cjk),
+                    "{}:{} 的 `{}` 是内联字面量，会拼进用户句子「{}」，必须含中文：{:?}",
+                    path.display(),
+                    line,
+                    field,
+                    template,
+                    literal
+                );
+                scanned += 1;
+            }
+        }
+    }
+    assert!(scanned > 0, "一个字面量都没扫到，门禁等于空转");
+}
+
+/// **禁用子串**：本次收口删掉的英文片段不得回到 `src`。
+///
+/// 表里**没有** `vanished`：`AppError::Storage` 的 detail 是内部诊断（`message()` 固定为
+/// 「存储暂时不可用，请稍后重试。」），按契约保留英文，所以 `task vanished after insert`
+/// 这类片段留在这里会误伤；它们由 `errors_never_leak_paths_sql_or_payload` 在
+/// **用户可见文本**上守。
+#[test]
+fn src_has_no_retired_english_error_text() {
+    let retired = [
+        "no such",
+        "task.title",
+        "stopwatch with a budget",
+        "checkpoint requires a trusted running interval",
+        "checkpoint attribution and elapsed disagree",
+        "checkpoint must not move backwards",
+    ];
+
+    for (path, code) in src_rust_sources() {
+        for fragment in retired {
+            assert!(
+                !code.contains(fragment),
+                "{} 里还有已收口的英文文案 {:?}：用户可见的错误文案要走 `DomainError`（中文），\
+                 或 `EmptyText`/`NotInThisVersion` 的中文字面量；内部诊断才用 `AppError::Storage`",
+                path.display(),
+                fragment
+            );
+        }
     }
 }
 

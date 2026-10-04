@@ -25,6 +25,12 @@ pub enum DomainError {
     /// 没有开放区间，却要求闭合。
     NoOpenInterval,
     /// 该状态不允许有开放区间。
+    ///
+    /// `state` 保留**代码里的原值**（`SessionState::as_str()`：`running`/`paused`…，
+    /// 供诊断与结构化载荷用），面向用户的 [`std::fmt::Display`] 经 [`zh_session_state`]
+    /// 打中文——与 [`Self::TaskNotInClarifying`] 用 [`zh_status`] 是同一条规矩。
+    /// FOLLOW-04 收口前这里错用了任务状态的映射表，用户会读到
+    /// 「会话处于「recovering」时不该有开放的计时区间。」。
     IntervalOpenInWrongState { state: &'static str },
     /// 区间为负：`ended_at < started_at`。
     NegativeInterval { started_at: i64, ended_at: i64 },
@@ -110,6 +116,19 @@ pub enum DomainError {
     /// 编排归 P3 的状态联动：这个最小入口不能变成绕过联动规则的旁路。
     /// 所以这里要单独说清「这个入口只处理哪两个状态」，而不是借跃迁表的措辞。
     TaskNotClarifiable { status: &'static str },
+    // ── FOLLOW-04（用户可见文案一致性）新增 ────────────────────────────────
+    /// 目标会话不存在（已被删除，或请求里的 ID 从来不存在）。
+    ///
+    /// 与 [`Self::UnknownTask`] / [`Self::UnknownProject`] / [`Self::UnknownTag`]
+    /// 同一形状：「找不到」不是「为空」，所以不复用 [`Self::EmptyText`]——
+    /// 收口前 `session_repo` 的三处借用它，用户会读到「「session」不能为空。」。
+    UnknownSession,
+    /// 目标计时区间不存在（已被删除，或请求里的 ID 从来不存在）。
+    ///
+    /// 与 [`Self::UnknownSession`] 同一形状；收口前 `session_repo::close_interval`
+    /// 与 `checkpoint_repo::write` 借用 `EmptyText { field: "interval" }`，
+    /// 用户会读到「「interval」不能为空。」。
+    UnknownInterval,
 }
 
 /// 任务状态的中文名。用户的提示语里不该出现 `Inbox` 这种内部标识。
@@ -145,6 +164,23 @@ fn zh_kind(raw: &str) -> &str {
     }
 }
 
+/// **会话状态**的中文名，取值与 [`crate::domain::session::SessionState`] 一一对应。
+///
+/// 与 [`zh_status`] / [`zh_kind`] 同一理由，但**不是同一张表**：任务状态是
+/// `Inbox`/`Ready`…，会话状态是 `running`/`paused`…，两者没有任何一个取值重合
+/// （FOLLOW-04 收口前 [`DomainError::IntervalOpenInWrongState`] 误用任务状态表，
+/// 会话状态整句漏成了英文）。五个取值一个不能少。
+fn zh_session_state(raw: &str) -> &str {
+    match raw {
+        "running" => "运行中",
+        "paused" => "已暂停",
+        "recovering" => "待确认",
+        "finished" => "已结束",
+        "discarded" => "已作废",
+        other => other,
+    }
+}
+
 /// **这里的文案是面向用户的**，不是给日志看的。
 ///
 /// 原因：`AppError::Domain { detail }` 的 `message()` 是
@@ -176,7 +212,7 @@ impl std::fmt::Display for DomainError {
                 write!(
                     f,
                     "会话处于「{}」时不该有开放的计时区间。",
-                    zh_status(state)
+                    zh_session_state(state)
                 )
             }
             Self::NegativeInterval {
@@ -230,6 +266,8 @@ impl std::fmt::Display for DomainError {
                     zh_status(status)
                 )
             }
+            Self::UnknownSession => write!(f, "找不到这个会话。"),
+            Self::UnknownInterval => write!(f, "找不到这段计时区间。"),
         }
     }
 }

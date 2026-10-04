@@ -67,7 +67,7 @@ pub fn write(tx: &Transaction<'_>, cp: &Checkpoint) -> Result<(), AppError> {
         )
         .optional()
         .map_err(map_sqlite)?
-        .ok_or(DomainError::EmptyText { field: "interval" })?;
+        .ok_or(DomainError::UnknownInterval)?;
 
     if session_run != cp.run_id {
         return Err(DomainError::StaleRunContext {
@@ -82,13 +82,15 @@ pub fn write(tx: &Transaction<'_>, cp: &Checkpoint) -> Result<(), AppError> {
         || session_review
         || state != "running"
     {
+        // `AppError::Domain` 的 detail **会进用户文案**（`操作不被允许：{detail}`），
+        // 所以这三条不变量违反也必须是中文；`AppError::Storage` 才是英文诊断。
         return Err(AppError::Domain {
-            detail: "checkpoint requires a trusted running interval".into(),
+            detail: "这段计时区间不在运行中，不能写检查点。".into(),
         });
     }
     if started_at.checked_add(cp.elapsed_ms) != Some(cp.attribution_at) {
         return Err(AppError::Domain {
-            detail: "checkpoint attribution and elapsed disagree".into(),
+            detail: "检查点的归属时刻与已计时长对不上。".into(),
         });
     }
     if let Some(previous) = latest(tx, &cp.interval_id)? {
@@ -98,7 +100,7 @@ pub fn write(tx: &Transaction<'_>, cp: &Checkpoint) -> Result<(), AppError> {
             || cp.wall_at < previous.wall_at
         {
             return Err(AppError::Domain {
-                detail: "checkpoint must not move backwards".into(),
+                detail: "检查点不能倒退。".into(),
             });
         }
     }

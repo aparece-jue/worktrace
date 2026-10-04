@@ -70,8 +70,10 @@ pub fn create_task(
     now: i64,
 ) -> Result<TaskRow, AppError> {
     if title.trim().is_empty() {
+        // 字段名是**面向用户**的：`EmptyText` 的 `Display` 会把它拼进
+        // 「「…」不能为空。」，所以写「任务标题」而不是列名 `task.title`。
         return Err(DomainError::EmptyText {
-            field: "task.title",
+            field: "任务标题"
         }
         .into());
     }
@@ -292,7 +294,7 @@ pub fn transition_task(
     cause: TransitionCause,
     now: i64,
 ) -> Result<TaskRow, AppError> {
-    let before = get_task(tx, id)?.ok_or(DomainError::EmptyText { field: "task" })?;
+    let before = get_task(tx, id)?.ok_or(DomainError::UnknownTask)?;
     guard_row_version(before.row_version, expected_version)?;
 
     let transition = TaskTransition::new(before.status, to, cause)?;
@@ -437,7 +439,7 @@ pub fn freeze_baseline_estimate(
     expected_version: i64,
     now: i64,
 ) -> Result<FreezeOutcome, AppError> {
-    let before = get_task(tx, task_id)?.ok_or(DomainError::EmptyText { field: "task" })?;
+    let before = get_task(tx, task_id)?.ok_or(DomainError::UnknownTask)?;
     guard_row_version(before.row_version, expected_version)?;
 
     let existing: i64 = tx

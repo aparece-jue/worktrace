@@ -114,7 +114,9 @@ mod tests {
                 actual: 2,
             },
             AppError::RecoveryRequired,
-            AppError::Domain { detail: "x".into() },
+            AppError::Domain {
+                detail: "非法状态".into(),
+            },
             AppError::Storage { detail: "x".into() },
         ];
         let codes: Vec<&str> = all.iter().map(|e| e.code()).collect();
