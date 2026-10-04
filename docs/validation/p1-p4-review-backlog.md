@@ -107,15 +107,15 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 
 **改动的点位**（行号为提交后位置；`file:line` 均在 `src-tauri/` 下）：
 
-1. `src/services/timer/coordinator.rs:193`：手写 `AppError::Domain { detail: "no such session" }` → `DomainError::UnknownSession`。P4 验收记录里登记的最后一条「整句英文进用户文案」。
-2. `src/storage/task_repo.rs:73`：`EmptyText { field: "task.title" }` → 「任务标题」。这是**校验**错误（标题为空），字段名会被拼进「「…」不能为空。」，所以照 `catalog.rs`/`domain/localdate.rs`/`tag_repo.rs` 的先例用中文，不用列名。
-3. `src/storage/task_repo.rs:295` 与 `:440`：`EmptyText { field: "task" }` → `UnknownTask`。这两处语义是**找不到任务**，与 `:572` `set_task_project` 的注释口径（「『找不到』用 `UnknownTask`，不是 `EmptyText`」）统一。
-4. `src/storage/session_repo.rs:181`/`:264`：`EmptyText { field: "session" }` → **新增** `DomainError::UnknownSession`；`src/storage/session_repo.rs:203`、`src/storage/checkpoint_repo.rs:70`：`EmptyText { field: "interval" }` → **新增** `DomainError::UnknownInterval`。两个变体照 `UnknownTask`/`UnknownProject`/`UnknownTag` 写（「找不到这个会话。」「找不到这段计时区间。」），`tests/error_contract.rs` 的变体清单同步 26 → 28。
-5. `src/storage/session_repo.rs:143`：`NotInThisVersion { what: "stopwatch with a budget" }` → 「给正计时设预算」。
+1. `src/services/timer/coordinator.rs:195`：手写 `AppError::Domain { detail: "no such session" }` → `DomainError::UnknownSession`。P4 验收记录里登记的最后一条「整句英文进用户文案」。
+2. `src/storage/task_repo.rs:75`：`EmptyText { field: "task.title" }` → 「任务标题」（字段字面量在 `:76`）。这是**校验**错误（标题为空），字段名会被拼进「「…」不能为空。」，所以照 `catalog.rs`/`domain/localdate.rs`/`tag_repo.rs` 的先例用中文，不用列名。
+3. `src/storage/task_repo.rs:297` 与 `:442`：`EmptyText { field: "task" }` → `UnknownTask`。这两处语义是**找不到任务**，与 `:574` `set_task_project` 的注释口径（「『找不到』用 `UnknownTask`，不是 `EmptyText`」）统一。
+4. `src/storage/session_repo.rs:182`/`:265`：`EmptyText { field: "session" }` → **新增** `DomainError::UnknownSession`；`src/storage/session_repo.rs:204`、`src/storage/checkpoint_repo.rs:70`：`EmptyText { field: "interval" }` → **新增** `DomainError::UnknownInterval`。两个变体照 `UnknownTask`/`UnknownProject`/`UnknownTag` 写（「找不到这个会话。」「找不到这段计时区间。」），`tests/error_contract.rs` 的变体清单同步 26 → 28。
+5. `src/storage/session_repo.rs:145`：`NotInThisVersion { what: "stopwatch with a budget" }` → 「给正计时设预算」。
 6. **顺带审计的两处发现（原清单之外，一并改）**：
-   - `src/storage/checkpoint_repo.rs:85`/`:90`/`:100` 的三条不变量违反用的是 **`AppError::Domain`**（不是 `AppError::Storage`），detail 会原样进用户句子（用户会读到「操作不被允许：checkpoint must not move backwards.」）⇒ 改中文。`AppError::Storage` 的诊断（`task vanished after insert`、`expected journal_mode=wal…`、`app_meta is not initialised` 等）按契约**保留英文**，本次一字未动。
+   - `src/storage/checkpoint_repo.rs:88`/`:93`/`:103` 的三条不变量违反用的是 **`AppError::Domain`**（不是 `AppError::Storage`），detail 会原样进用户句子（用户会读到「操作不被允许：checkpoint must not move backwards.」）⇒ 改中文。`AppError::Storage` 的诊断（`task vanished after insert`、`expected journal_mode=wal…`、`app_meta is not initialised` 等）按契约**保留英文**，本次一字未动。
    - `DomainError::IntervalOpenInWrongState` 原先走 `zh_status`（**任务**状态映射表），而它的 `state` 来自 `SessionState::as_str()` ⇒ 五个会话状态一个都不在表里，整句漏成英文（「会话处于「recovering」时不该有开放的计时区间。」）⇒ 新增 `zh_session_state`（运行中/已暂停/待确认/已结束/已作废）；同时 `session_repo::close_interval` 里借用 `IllegalTransition { from: "closed", to: "closed" }` 的分支改回 `NoOpenInterval`（该分支语义本就是 NoOpenInterval 的注释所写「没有开放区间，却要求闭合」，原先那句会渲染成关于**任务**跃迁、且带内部标识的胡话）。
-7. 删除零调用的 `storage::guards::guard_row_version_of`（`detail: format!("no such {table}")`，生产零调用、只剩测试用）。`tests/transaction_boundary.rs` 三处调用改用 `task_repo::get_task` + `guards::guard_row_version`：`start_session` 的请求校验用 `ok_or(DomainError::UnknownTask)`，「未知记录 = `DOMAIN_ERROR`」与「版本不符 = `VERSION_CONFLICT`」两个区分与断言强度都保留（后者仍断言 `expected/actual = (7, 1)`）。其余构造点逐个核对，**确认已是中文**：`services/catalog.rs:46/79/86/525`、`storage/project_repo.rs:96/123/203`、`storage/tag_repo.rs:112`、`domain/tag.rs:48/59`、`domain/project.rs:60`、`domain/localdate.rs:38`（`field: FIELD`，表达式）、`storage/task_repo.rs:89`、`domain/task.rs:113`（`what: to.as_str()`，表达式、经 `zh_status`，未动）。
+7. 删除零调用的 `storage::guards::guard_row_version_of`（`detail: format!("no such {table}")`，生产零调用、只剩测试用）。`tests/transaction_boundary.rs` 三处调用改用 `task_repo::get_task` + `guards::guard_row_version`：`start_session` 的请求校验用 `ok_or(DomainError::UnknownTask)`，「未知记录 = `DOMAIN_ERROR`」与「版本不符 = `VERSION_CONFLICT`」两个区分与断言强度都保留（后者仍断言 `expected/actual = (7, 1)`）。其余构造点逐个核对，**确认已是中文**：`services/catalog.rs:46/79/86/525`、`storage/project_repo.rs:96/123/203`、`storage/tag_repo.rs:112`、`domain/tag.rs:48/59`、`domain/project.rs:60`、`domain/localdate.rs:38`（`field: FIELD`，表达式）、`storage/task_repo.rs:91`、`domain/task.rs:113`（`what: to.as_str()`，表达式、经 `zh_status`，未动）。
 
 **门禁（`src-tauri/tests/error_contract.rs`，三条规则分工）**：
 
