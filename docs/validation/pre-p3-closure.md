@@ -70,6 +70,14 @@ P3 Task 7 逐行提供测试名/结果，P6/P8 消费同一故障与提示语义
 
 ## 本次验证
 
+### 门禁启动失败误判修复（2026-10-04，13f2c42 后）
+
+复审复现：上次原生命令退出 0 后调用不存在的命令，旧 Invoke-Gate 仍记录 exit_code=0。现将生产调用函数抽到 scripts/invoke-gate.ps1，每次清空原生退出码、显式解析可执行命令，启动/管道/日志异常固定失败且保存 failure_reason；正常非零退出保留原码，stderr 不单独判失败。
+
+scripts/test-invoke-gate.ps1 直接消费同一生产函数，覆盖六种情况：成功、成功后缺命令、退出 7、失败后缺命令、stderr 但退出 0、日志路径不可写。**Windows PowerShell 5.1 已完整实跑通过**；脚本按 PowerShell 7 兼容编写（`$PSNativeCommandUseErrorActionPreference` 在 5.1 上只是未使用的变量），但**本机没有 `pwsh`，PS 7 未实跑**，不得据此声称"两版均通过"。该回归已作为 runner-regression 接入 check-pre-p3.ps1，缺工具不再沿用旧成功码。
+
+PowerShell 5.1 完整门禁复跑通过，八项检查均退出 0；Rust 467 passed / 1 ignored，前端 142 passed，构建/Clippy/格式/分层/diff 检查通过。新证据在 `C:\Users\lenovo\AppData\Local\Temp\worktrace-pre-p3-20261004-222738\result.json`。本次仅修门禁及证据，不实施 P3，不修改业务或 IPC 契约。
+
 自动化门禁修订后完整执行通过：Rust **467 passed / 0 failed / 1 ignored**（startup helper）、前端 **14 files / 142 tests**；Clippy、格式、六条分层规则、前端构建及 diff 检查均通过。首次门禁发现分层脚本依赖 crate 工作目录，已修正调用位置并完整重跑，失败记录未冒充通过。构建仍有既有 728 kB chunk 告警，按 #27 处理。
 
 **门禁可移植性修正（2026-10-04 复审）**：脚本原先硬编码 `pwsh` 跑分层子脚本；在只装 Windows PowerShell 5.1 的机器上该步假红（`CommandNotFoundException`，而分层规则本身是过的——已用 `check-layers.ps1` 直接复跑确认 `LAYER CHECK PASSED`）。现改为**当前宿主解释器** + `-ExecutionPolicy Bypass`，并给 `Invoke-Gate` 加了「原生命令写 stderr 时临时降 `ErrorActionPreference`」的处理（PS 5.1 在 `Stop` 下会把成功的原生命令也抛成 `NativeCommandError`）。修正后在本机以 `powershell -NoProfile -ExecutionPolicy Bypass -File` 完整重跑：`automated_passed = true`。
