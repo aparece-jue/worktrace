@@ -9,29 +9,12 @@ New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
 $evidenceRoot = (Resolve-Path -LiteralPath $EvidenceDirectory).Path
 $results = [Collections.Generic.List[object]]::new()
 
-function Invoke-Gate {
-    param([string]$Name, [string]$Command, [string[]]$Arguments)
-    $logPath = Join-Path $evidenceRoot "$Name.log"
-    $code = 1
-    # 原生命令写 stderr 时，Windows PowerShell 5.1 在 ErrorActionPreference=Stop 下会抛
-    # NativeCommandError——命令其实成功了也照样抛。这一步临时降为 Continue，成败只认
-    # $LASTEXITCODE，避免把「有 stderr 输出」误判成失败。
-    $previousPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        & $Command @Arguments 2>&1 | Tee-Object -FilePath $logPath
-        $code = $LASTEXITCODE
-    } catch {
-        $_ | Out-String | Add-Content -LiteralPath $logPath
-        if ($null -ne $LASTEXITCODE) { $code = $LASTEXITCODE }
-    } finally {
-        $ErrorActionPreference = $previousPreference
-    }
-    $results.Add([pscustomobject]@{ name = $Name; exit_code = $code; log = $logPath })
-}
+. (Join-Path $PSScriptRoot 'invoke-gate.ps1')
 
 Push-Location $repoRoot
 try {
+    $hostExe = (Get-Process -Id $PID).Path
+    Invoke-Gate 'runner-regression' $hostExe @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'src-tauri/scripts/test-invoke-gate.ps1')
     Invoke-Gate 'rust-tests' 'cargo' @('test', '--offline', '--manifest-path', 'src-tauri/Cargo.toml', '-q')
     Invoke-Gate 'rust-clippy' 'cargo' @('clippy', '--offline', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--', '-D', 'warnings')
     Invoke-Gate 'rust-format' 'cargo' @('fmt', '--manifest-path', 'src-tauri/Cargo.toml', '--check')
