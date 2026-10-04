@@ -16,5 +16,10 @@ pub mod handshake;
 pub mod catalog;
 pub mod daily_plan;
 
+// P3 Task 1：启动恢复扫描（四类判定 + 崩溃区间归一）与共享恢复原语。
+// 同计划的 `history` / `tasks` 由 Task 3 / Task 6 各自注册——它们的文件此刻还不存在，
+// 一起注册会直接编译失败。
+pub mod recovery;
+
 // 写事务骨架（write_tx / settle）只有本层用，所以不对 crate 外公开（R-T6-l）。
 mod tx;

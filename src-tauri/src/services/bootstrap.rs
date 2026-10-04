@@ -3,7 +3,7 @@
 //! ## 固定顺序（01 §2 + 02 §4，不得调整）
 //!
 //! ① 单实例检查 → ② 打开库并迁移（含新库的库身份）→ ③ 新建 `application_run`
-//! → ④ 恢复扫描（P3 未完成时是开发验证库门禁）→ ⑤ 启动协调器与周期采样驱动
+//! → ④ 恢复扫描（P3 的四类判定 + 落地事实，随后算门禁快照）→ ⑤ 启动协调器与周期采样驱动
 //! → ⑥ 开窗口。
 //!
 //! 每一步都通过 [`StartupProbe`] 报出去，`tests/startup_order.rs` 断言的是**调用次序**
@@ -31,8 +31,9 @@
 //!
 //! ## 本阶段不做
 //!
-//! 正式恢复扫描与四类判定（P3）；启动故障路径硬化与锁异常释放（P6 Task 1）；
-//! 维护态隔离（P6 Task 2/4）；备份（P6 Task 4）；平台事件的实机验收（P8 复核）。
+//! 恢复确认与历史修正的用户命令、门禁重扫（P3 Task 2 起）；启动故障路径硬化与锁异常
+//! 释放（P6 Task 1）；维护态隔离（P6 Task 2/4）；备份（P6 Task 4）；平台事件的实机
+//! 验收（P8 复核）。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -221,7 +222,7 @@ impl RunningApp {
         &self.data_epoch
     }
 
-    /// 启动扫描的结论（P3 接入前是开发验证库门禁）。
+    /// 启动扫描之后的恢复门禁快照（`requires_recovery()` 就是 `start`/`resume` 的判据）。
     pub fn recovery(&self) -> &RecoveryScan {
         &self.recovery
     }
@@ -284,13 +285,16 @@ impl RunningApp {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 恢复门禁（P3 之前的开发验证库）
+// 恢复门禁（启动第 ④ 步之后的门禁快照）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 启动扫描的结论：**不是本次 run** 的会话里有没有「没结束 / 待确认 / 事实损坏」。
+/// 启动扫描之后的门禁快照：**不是本次 run** 的会话里还有没有「没结束 / 待确认 /
+/// 事实损坏」。
 ///
 /// 三件事任一命中 ⇒ 拒绝业务计时（`start`/`resume` 拿 `RECOVERY_REQUIRED`），
-/// **不自动修复、不忽略历史**。四类判定归 P3；这里只是门禁。
+/// **不自动修复、不忽略历史**。四类判定与能安全归一的动作已经由
+/// [`crate::services::recovery::scan_at_startup`] 在第 ④ 步做完；快照是在那之后
+/// 重新查一遍事实得到的门禁依据（第 4 类重绑过的会话不再算「别的 run 的残留」）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecoveryScan {
     /// 未结束（`running`/`paused`/`recovering`）的会话 id。
@@ -695,7 +699,17 @@ pub fn startup(
     }
     probe.step(StartupStep::RunCreated);
 
-    // ④ 恢复扫描（P3 未完成时＝开发验证库门禁；命中只挡新计时，不自动修复）。
+    // ④ 恢复扫描。P3 的扫描服务先做四类判定并**落地事实**（第 2 类归一出可信前缀
+    //    与终点未知的待确认段、第 4 类把干净的暂停会话重绑到本次 run），随后仍由
+    //    [`scan_recovery`] 算门禁快照——它的语义与签名不动（`tests/startup_order.rs`
+    //    直接调它），命中也仍然只挡新计时、不自动修复。
+    //
+    //    扫描结论（`StartupScanReport`）在这里用完即弃：启动路径只需要事实落地，
+    //    恢复确认入口与全局概览由 P8 的命令去读（`attention_overview`），门禁字段
+    //    则由上面的快照负责。第 2 类归一后**不重建协调器镜像**——扫描发生在第 ⑤ 步之前，
+    //    `live` 还是 `None`。
+    let _scan_report =
+        crate::services::recovery::scan_at_startup(&mut db, &run_id, sample.wall_ms)?;
     let recovery = scan_recovery(db.connection(), &run_id)?;
     probe.step(StartupStep::RecoveryScanned);
 
