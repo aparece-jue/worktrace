@@ -264,3 +264,18 @@ retry_recovery 的 IPC 请求 expected_data_epoch 映射到 AppState::retry_reco
 - [ ] 修正同步手册计时判据：至多 30 秒启动校验与 IPC/渲染耗时分别记录，不能一处要求 ≤30 秒、另一处接受 31 秒、失败却只看 60 秒。真实隐藏判据以 visibilityState 为准，遮挡不保证 hidden。
 - [ ] 保留复制组件/模板依赖不等于接入；DockviewDemo 不进发布产物的反向验证仍必做。Context 显示沿用“上下文”，tick 完整排序只由前端 orderTimer 承担；无需复制第二套 Rust 展示状态机。
 - [ ] P3 已提交、后置门禁刷新失败时刷新权威版本与提示，禁止自动重发原写命令；重试入口复用 S12，确认旧工时与接受时钟校正分开。
+
+## P3 实际交付签名与界面口径（2026-10-05，控制器落盘）
+
+> P3 已实施（`0296827..63eab6c`，`cargo test --offline` 588 passed；服务层 + `AppState` 入口 + 测试，**不加 IPC 命令**）。
+> 完整签名与全部差异见 P3 计划文末「P3 实施记录（2026-10-05，控制器落盘）」。本节只列**接线必须知道**的部分。
+
+- **请求参数**：`reconcile` 与 `attention_overview` 的服务入口**各多一个 `current_run_id`**（服务层够不着协调器）⇒ IPC 包装从 `state.coordinator().run_id()` 取后传入；其余命令的请求形状仍按本计划「P8 新增的 IPC 命令」表。
+- **`attention_overview` 的列表口径**：`items` = 不变量损坏 ∪ 未作废待确认区间 ∪ **别的 run 未结束会话**（不限状态；终态会话也进列表；**正在计时的当前 run 会话不进**）⇒「门禁关着 ⇔ 列表非空」成立。界面**不要**用 `TimerSnapshot.pending_ms` / `needs_attention()` 顶替；`duration_ms IS NULL` 表示"终点未知"，`ended_at` 只是候选端点。
+- **恢复页的动作边界**：零区间会话（`recovering` 且无区间）**不能**用 `discard_session`（`DOMAIN_ERROR`），要用 `reconcile` + 空 `ranges` 的 `Confirm`；`paused` + 待确认区间这类**只能**用 `discard_session`（它无状态前置）——两者不要共用一个"丢弃"按钮。
+- **`correct` 的入口条件**：只接 `finished`；`recovering` 提示走 `reconcile`；`running`/`paused` 要求先结束会话。
+- **接受时钟校正**：`flag == false` 的无操作路径在恰好同时检测到异常时返回 **`RECOVERY_REQUIRED`**（不是 `Unchanged`）⇒ 界面收到后刷新并显示恢复提示，**不要**当成失败重试。
+- **`retry_recovery` 的两种 `RECOVERY_REQUIRED`**（协调器仍 `faulted` ⇔ 重扫门禁失败）只靠错误码分不开；需要区分时读 `coordinator().is_faulted()`——**不新增错误码**。
+- **读数陷阱**：`task_change` 与 `time_edit` **同一毫秒可落多行** ⇒ 界面/统计**禁止"取最后一条"**（托盘"完成"的时间、历史页的"最近一次修改"尤其危险），按 `reason` 或内容定位。
+- **作废后的界面表现**：`discard_session` 之后协调器镜像**停在 `discarded`**（与 `finish` 停在 `finished` 同一口径）⇒ 计时区显示"无活动会话/已作废"，**不得**按 running 计暂计。
+- **登记**：`backfill` 的 `before_json` 是创建型 ⇒ 历史页重建"改动前事实"时跳过创建型行。

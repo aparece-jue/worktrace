@@ -85,3 +85,11 @@ PowerShell 5.1 完整门禁复跑通过，八项检查均退出 0；Rust 467 pas
 事件常量反向验证已实跑：仅把 TS EVENT_CHANNEL 改成 `worktrace:broken-probe`，定向三项用例结果为 **1 failed / 2 passed、退出 1**，准确失败在频道一致性；随后原始字节完整还原，定向三项重跑通过。
 
 日志：`C:\Users\lenovo\AppData\Local\Temp\worktrace-pre-p3-20261004-220455\result.json` 及同目录逐项日志（临时证据，可能被系统清理，复验用脚本）。真实窗口/托盘/OS 事件结论仍未完成；本次不启动 P3 实施、不提交仓库。
+
+### P3 实施完成（2026-10-05）
+
+P3 服务层已实施并提交在 `dev`：`0296827..63eab6c`（11 提交、18 文件、+13218/−42；未 push）。门禁：`cargo test --offline` **588 passed / 0 failed / 1 ignored**（P3 前 467）、`cargo fmt --check` 0、`clippy --all-targets -D warnings` 0、`check-layers.ps1` 六条 PASSED；15 份快照 fixture 与 `src/commands/` 零 diff；无新 IPC 命令、无新错误码、无新锁。
+
+本文「P3 必须验证的异常闭环」7 行**逐行**登记在 `src-tauri/tests/exception_closure.rs`（其中第 6、7 行复用 Task 1/Task 6 的用例并附实跑结果），完整签名与实现期裁决见 [P3 计划文末的实施记录](../superpowers/plans/2026-10-03-p3-recovery-and-history.md)。
+
+**仍未完成（不得据本文宣称通过）**：真实平台验收（F-009 关窗后计时继续、F-011、F-016、真实双窗口 §2.1–§2.6）与全部界面接线归 **P8**；`manual_platform_verified` 仍为 false。

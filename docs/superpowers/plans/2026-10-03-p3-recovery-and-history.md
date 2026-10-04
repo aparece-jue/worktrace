@@ -107,6 +107,7 @@ pub fn accept_detected_clock_correction(
 ) -> Result<ClockCorrectionAccepted, AppError>;
 ```
 **与既有的分工**：`Coordinator::accept_clock_correction(sample)`（`coordinator.rs:245`）是 **P2 已交付的内存原语**（清 `unaccepted_clock_correction`、前移 `lifetime_ref`，**不写审计、不加 revision**）；S4 是它的**事务外壳**，不重写它。实现顺序：`guard_epoch`（只读预检 + 事务内各一次，模式抄 `catalog::list_projects`——只读事务 + `guard_epoch`，`catalog.rs:290-294`）→ `read_sample`（`:941`，含故障态与跨 run 判据）→ `observe` 一次（**必须观察**：不推进检测器的 `last`，下一拍会把"距上次观察很久"误判成长间隔 `Suspended`）→ 写审计 → `bump_revision` → 提交 → `accept_clock_correction(sample)`。判据：`unaccepted_clock_correction == false` ⇒ `Unchanged`（无审计、零变化）；`live` 为 `None` 同样按 `Unchanged` 处理（该标记只在 `live.state == Recovering` 分支里被置真，`:1096-1099`）；检测到 `MonotonicBackwards` ⇒ `faulted = true` 并返回 `RECOVERY_REQUIRED`（它不是墙钟校正，`SampleVerdict::is_wall_clock_anomaly`，`anchor.rs:119`）。`time_edit.session_id` 取当前 `live.id`。
+**（2026-10-05 实施期订正，见文末「P3 实施记录」第 8 条）**：上面的 `Unchanged` 只适用于**未观察到异常**的情形。`observe` 每个样本只能观察一次且会推进检测器的 `last`，所以在这条"本来会返回 `Unchanged`"的路上判出非 `Trusted` 判决后若直接丢弃，睡眠/休眠（`Suspended`）就**再也无法被重新检测**，停机时间会被静默计成工时。⇒ 实现为：该路上的非 `Trusted` 判决交给**既有异常处理**（系统事务）后返回 `RECOVERY_REQUIRED`；`flag == true` 的正常接受路径不变。**P8 的界面必须容忍这一点**（收到 `RECOVERY_REQUIRED` 后刷新并显示恢复提示，不要当失败重试）。
 
 **S5（C3，第 2 类的归一原语）** `storage/session_repo.rs`：
 ```rust
@@ -751,3 +752,71 @@ pub fn transition_task(db: &mut Db, coordinator: &mut Coordinator, env: WriteEnv
 - [ ] Task 1 明确 SessionAttention 与新恢复 DTO 的消费者，禁止两份生产损坏判定；复核 useRunningTaskId 的现有前台/mode 语义，不提前扩展 V0.2。
 - [ ] Task 7 按交接页“P3 必须验证的异常闭环”逐行登记测试名/结果，包含 S1 扫描失败标记、S12 二次重扫、提交后失败不重复用户写入、未知候选作废及完整审计。
 - [ ] 交付给 P5/P6/P8 的恢复/故障状态及 DTO 与本计划一致；后续阶段归属不代替本阶段测试，也不把后续界面未实现写成服务不可实施。
+
+---
+
+## P3 实施记录（2026-10-05，控制器落盘）
+
+> 本节在 P3 实施完成后写入，登记**实际交付的签名与口径**，供 P5/P6/P8 与终审消费。
+> 实施期的逐条裁决与证据在 SDD 台账 `.superpowers/sdd/2026-10-03-p3-recovery-and-history/progress.md`（工作区产物，不入仓库）。
+> 代码范围 `0296827..63eab6c`（11 提交、18 文件、+13218/−42）：`cargo test --offline` **588 passed / 0 failed**；
+> `cargo fmt --check` / `clippy --all-targets -D warnings` / `check-layers.ps1` 六条全绿；15 份快照 fixture 与 `src/commands/` 零 diff；无新错误码、无新锁、无新 IPC。
+
+### 实际交付签名（与 §0.3/§0.5 的差异已在下面逐条说明）
+
+```rust
+// services/recovery.rs
+pub fn scan_at_startup(db: &mut Db, current_run_id: &str, now: i64) -> Result<StartupScanReport, AppError>;
+pub fn reconcile(db: &mut Db, env: WriteEnvelope, req: ReconcileRequest, now: i64, current_run_id: &str)
+    -> Result<WriteOutcome<ReconcileReport>, AppError>;
+pub fn discard_session(db: &mut Db, env: WriteEnvelope, req: DiscardSessionRequest, now: i64)
+    -> Result<WriteOutcome<HistoryEditReport>, AppError>;
+pub fn attention_overview(db: &Db, expected_data_epoch: &str, current_run_id: &str) -> Result<AttentionOverview, AppError>;
+
+// services/history.rs
+pub fn correct(db: &mut Db, env: WriteEnvelope, req: CorrectRequest, now: i64)
+    -> Result<WriteOutcome<HistoryEditReport>, AppError>;
+pub fn backfill(db: &mut Db, env: WriteEnvelope, req: BackfillRequest, now: i64, run_id: &str)
+    -> Result<WriteOutcome<HistoryEditReport>, AppError>;
+
+// services/tasks.rs
+pub fn transition_task(db: &mut Db, coordinator: &mut Coordinator, env: WriteEnvelope, req: TransitionTaskRequest)
+    -> Result<WriteOutcome<TaskTransitionReport>, AppError>;
+
+// services/daily_plan.rs（S10 真实日界；相交判定仍只来自 domain::interval）
+pub fn local_day_bounds(timezone: &str, date: LocalDate) -> Result<IntervalRange, AppError>;
+pub fn local_days_covering(timezone: &str, from: i64, to: i64) -> Result<Vec<(LocalDate, IntervalRange)>, AppError>;
+
+// services/timer/coordinator.rs（S3 取样接缝 / S4 时钟校正的显式接受）
+pub fn boundary_facts(&mut self, db: &mut Db) -> Result<BoundaryFacts, AppError>;
+pub fn accept_detected_clock_correction(&mut self, db: &mut Db, req: AcceptClockCorrectionRequest)
+    -> Result<ClockCorrectionAccepted, AppError>;
+
+// services/bootstrap.rs（S1 门禁重扫 / S12 故障态出口；另有 7 个命令瘦包装）
+pub fn rescan_recovery(&mut self) -> Result<RecoveryScan, AppError>;
+pub fn retry_recovery(&mut self, expected_data_epoch: &str) -> Result<TimerSnapshot, AppError>;
+```
+
+### 与计划文本的差异（控制器逐条裁决；每条都记了代价）
+
+1. **`reconcile` 与 `attention_overview` 各多一个 `current_run_id`** —— 服务层够不着协调器（§0.2 私有），而正文要求「`run_id` → 当前 run」与 `is_current_run`。P8 的 IPC 包装从 `state.coordinator().run_id()` 取。
+2. **`reconcile` 的 `Unchanged` 不可达** —— 前置只接 `recovering` ⇒ 状态跃迁必然写；重复提交被前置拒绝，**不是**幂等零变化（`correct` 的 `Retime` 才是幂等零变化）。
+3. **`discard_session` 幂等** —— 它按设计**无状态前置**，重复作废已 `discarded` 的会话 ⇒ `Unchanged`（零写入/零审计/零版本），且**不移动 `ended_at`**。
+4. **零区间会话的 `discard_session` 返回 `DOMAIN_ERROR`**（`HistoryEditReport.interval` 必填，不编造区间）；该形态由 **`reconcile` + 空 `ranges` 的 `Confirm`** 只做状态跃迁解决（**不是死锁**）。
+5. **`backfill` 的 `before_json` 是创建型** `{"change":"backfill"}`（同 `create_task` 的 `"{}"`）⇒ P5/P8 按 `before_json.intervals` 重建"改动前事实"时**必须跳过创建型行**。
+6. **审计形状**：`candidate_end_source` **只在真有候选端点推导**时写（目前只有启动扫描的 `normalize_crashed_interval`），且写在 `after_json`；`correct` 的用户理由落 `after_json.user_reason`；`voided_at` 键在两种形状里都在。
+7. **提交后收尾统一为"仅在镜像那条上刷新"**（`reconcile`/`correct`/`discard_session`：只有被改动的会话正是 `live` 镜像的那条才 `load_session`）；`transition_task` 用 `rebuild_from_committed` 且**仅当确有会话被结束/暂停**。
+8. **S4 的"本来会返回 `Unchanged`"那条路不再丢弃已观察到的判决**：非 `Trusted` 判决交给既有异常处理（系统事务）后返回 `RECOVERY_REQUIRED`——否则睡眠/休眠（`Suspended` 无法被再次检测）会被**静默计成工时**。`flag == true` 的正常接受路径不变。
+9. **`paused` + 仍有待确认区间**这一类四类判定盖不住的形态：**原样保持**、归 `NeedsReview`、**零写入零版本**；出口是 `discard_session`（它无状态前置）。
+10. **`correct` 只放行 `Finished`**（`discarded` 单独中文拒绝）；它**不做第 1 类判定、不重扫门禁**，因而存在受控的"门禁快照滞后"窗口（方向是**过度拦截**，安全侧）。
+
+### 下游读数陷阱（两条，务必遵守）
+
+- **`task_change` 与 `time_edit` 同一毫秒可落多行** ⇒ `ORDER BY created_at, id` 在它们之间**不确定**，**禁止"取最后一条"**（P5 的报表、P8 的托盘/历史页尤其危险）；按 `reason` 或内容定位。
+- **`retry_recovery` 的两种 `RECOVERY_REQUIRED`（协调器仍 `faulted` ⇔ 重扫失败）只靠错误码分不开**；需要区分时读 `coordinator().is_faulted()`，**不新增错误码**。
+
+### 验证落点
+
+新增 8 个集成测试文件：`recovery_scan` / `reconcile` / `correct` / `backfill_discard` / `local_day_bounds` / `recovery_end_to_end` / `task_session_atomicity` / `exception_closure`。
+`docs/validation/pre-p3-closure.md` 的「P3 必须验证的异常闭环」7 行**逐行**登记在 `tests/exception_closure.rs`（其中 ⑥⑦ 复用 Task 1/Task 6 的用例，并附实跑结果）。
+**实机验收（F-009 / F-011 / F-016、真实双窗口 §2.1–§2.6）仍归 P8**，本阶段不冒充。
