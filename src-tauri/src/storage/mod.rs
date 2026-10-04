@@ -33,6 +33,7 @@ pub mod guards;
 pub mod meta;
 pub mod migrations;
 pub mod project_repo;
+pub mod run_repo;
 pub mod schema_v1;
 pub mod session_repo;
 pub mod tag_repo;

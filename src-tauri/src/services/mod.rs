@@ -5,6 +5,9 @@
 
 pub mod timer;
 
+// P7 Task 0：唯一启动入口与串行执行边界。
+pub mod bootstrap;
+
 pub mod error_response;
 pub mod handshake;
 

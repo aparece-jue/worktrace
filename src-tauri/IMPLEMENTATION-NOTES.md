@@ -69,3 +69,58 @@
 
 06 §4 的「单调/墙钟映射」与「双窗口同步」需要真实机器行为与窗口，分别归 P2 的完成门槛
 与 P7。**记录待补**，包括机器/系统版本、事件到达延迟与观察到的行为。
+
+---
+
+## 4. 串行执行边界（D6，P7 Task 0 定稿）
+
+计划 Task 0 要求二选一：**单一 `Mutex<AppState{db, coordinator}>`**，或等价的
+**专用工作线程 + channel**。
+
+**选定：单一 `Mutex`。** 落点在 `src/services/bootstrap.rs`：
+`AppState { db, coordinator, recovery }` + `SharedApp = Arc<Mutex<AppState>>` +
+`lock_app()`。周期采样驱动（`platform/scheduler.rs`）与用户命令取的是**同一把锁**——
+「每次触发走与用户命令同一条串行边界」不是口头约定，而是同一个 `Mutex`。
+
+### 为什么不是工作线程 + channel
+
+| 判据 | Mutex 边界（选定） | 工作线程 + channel |
+| --- | --- | --- |
+| 吞吐 | 与工作线程**同量级**（§2 实测：92.4ms vs 87.9ms） | 同量级 |
+| 阻塞落在谁身上 | 调用方线程卡在锁上，但它本来就跑在 `spawn_blocking` 的阻塞池线程上 | 调用方卡在 channel 上 |
+| 代码量 | 一个 `Arc<Mutex<..>>` + 取锁 | 需要一个命令枚举、响应通道、以及「响应也要在库里读」的二次往返 |
+| 事务生命周期 | 仓储的 `&Transaction` 天然活在临界区内 | 事务必须在工作线程里开、在同一个闭包里提交，命令语义要整体搬进枚举 |
+| 串行证据 | `lock_app` 是**唯一**能拿到 `db`/`coordinator` 的路径（字段私有可达性由类型保证） | 靠「只有一个消费者」这一约定，漏一条 path 就多一条并发 |
+
+决定性的一条是**第 5 行**：Mutex 的串行性由类型系统保证（拿不到锁就拿不到 `Db`），
+工作线程方案靠纪律保证（只要有人直接摸到 `Db` 就破功）。P1 §2 已经说明两种边界的
+**吞吐没有差别**，所以这里选择的不是性能，而是「哪种边界更难被绕过」。
+
+### 与选型无关的三条硬约束（依据 §2 的实测）
+
+1. **命令一律 `async`**；
+2. **不得在 UI 回调里跑长事务**——命令体的阻塞段放在
+   `tauri::async_runtime::spawn_blocking` 里（Tauri 2.12.0 有该入口，见
+   `tauri-2.12.0/src/async_runtime.rs:311`），绝不在 `invoke_handler` 的调用线程上
+   直接跑 SQLite；
+3. **`Connection` 不得跨 `await` 持有**——锁与事务都活在那个阻塞闭包内，
+   闭包结束即释放。`std::sync::MutexGuard` 不是 `Send`，这条在类型上也绕不过去。
+
+**代价（诚实记下）**：临界区从「一次业务写」扩大到「一次命令的整个阻塞段」，
+慢命令会让采样与其它命令排队；`busy_timeout` 仍是 5 秒上限。若 P6 的备份/维护态
+需要「长事务期间允许查询」，那时再评估读写分离，而不是现在先加一层通道。
+
+## 5. 单实例与周期采样（P7 Task 0）
+
+- **单实例锁用 `std::fs::File::try_lock`**（Rust 1.89 起稳定，本机 1.98.1 实测可用；
+  Windows 走 `LockFileEx`、类 Unix 走 `flock`）。因此**没有新增依赖**：不加
+  `windows-sys`/`libc`，也不用 `tauri-plugin-single-instance`/`fs2`/`fd-lock`/`interprocess`
+  （后四个在本机两侧缓存 0 命中）。锁由**内核**在进程被杀时释放，
+  不需要「清理陈旧 PID 文件」那套启发式（`tests/startup_order.rs` 用子进程 + 强杀实测过）。
+- **「唤起既有主窗」是通知，与锁分离**：拿锁失败的进程写一次同目录的
+  `instance.notify`（`platform/single_instance.rs`），既有实例消费它。
+  通知失败**不改变**「退出」这个决定。
+- **周期采样驱动是一个不挂在任何窗口上的线程**（`platform/scheduler.rs`，F-009）：
+  窗口对象根本传不进它的签名。空闲（无活动会话）时它只读不写——
+  由 `tests/periodic_sampling.rs` 用 `SELECT total_changes()` 与全表行数钉住。
+

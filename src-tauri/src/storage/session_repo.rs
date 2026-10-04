@@ -48,6 +48,10 @@ const SESSION_SELECT: &str =
 const INTERVAL_SELECT: &str =
     "SELECT id, session_id, started_at, ended_at, voided_at, duration_ms, \
      sampled_end_wall_at, needs_review FROM work_interval";
+/// 与 [`INTERVAL_SELECT`] 同序，但带表别名：跨表的恢复查询（P7 Task 0）要 JOIN。
+const INTERVAL_SELECT_ALIASED: &str =
+    "SELECT i.id, i.session_id, i.started_at, i.ended_at, i.voided_at, i.duration_ms, \
+     i.sampled_end_wall_at, i.needs_review FROM work_interval i";
 
 fn read_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     let mode: String = r.get(3)?;
@@ -456,4 +460,144 @@ pub fn require_available_human_start(conn: &Connection, start: i64) -> Result<()
         });
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 恢复扫描用的查询（P7 Task 0）
+//
+// **为什么必须按 `run_id` 过滤**：既有的 `running_foreground`（本文件下文）不带
+// `run_id`——它回答的是「现在有没有前台在跑」，而启动扫描问的是另一个问题：
+// 「**不是本次 run** 的会话里，有没有没结束的、待确认的、或事实已经坏掉的」。
+// 两个问题的答案在崩溃重启后恰好相反：崩溃留下的 running 行必须被判为
+// 「上一代次的残留」，不能被当成本次 run 正在计时的会话。
+//
+// 这三个查询是 P3 之前的**开发验证库门禁**（Task 0 第 8 条）：命中任一就不许
+// 开新计时，等恢复完成。四类判定本身归 P3，不在这里下结论。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 未结束（非终态）的会话，**排除当前 run**。
+///
+/// 含 `running`/`paused`/`recovering` 三种：`paused` 也「未结束」——02 §4 表里它
+/// 只是保持暂停，不是终态。
+pub fn unfinished_sessions_of_other_runs(
+    conn: &Connection,
+    current_run_id: &str,
+) -> Result<Vec<SessionRow>, AppError> {
+    let sql = format!(
+        "{SESSION_SELECT} WHERE run_id <> ?1 AND state NOT IN ('finished','discarded') \
+         ORDER BY started_at, id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(map_sqlite)?;
+    let rows = stmt
+        .query_map([current_run_id], read_session)
+        .map_err(map_sqlite)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+}
+
+/// **当前 run** 的未结束会话（含 `recovering`）。
+///
+/// 显式退出用它找出要结束的会话；调用方按状态分流——`recovering` 必须保留
+/// （02 §4：「recovering 记录保留不清」），所以这里**不**替调用方过滤。
+pub fn unfinished_sessions_of_run(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Vec<SessionRow>, AppError> {
+    let sql = format!(
+        "{SESSION_SELECT} WHERE run_id = ?1 AND state NOT IN ('finished','discarded') \
+         ORDER BY started_at, id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(map_sqlite)?;
+    let rows = stmt.query_map([run_id], read_session).map_err(map_sqlite)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+}
+
+/// 未作废的**待确认区间**，且其会话不属于当前 run。
+pub fn pending_intervals_of_other_runs(
+    conn: &Connection,
+    current_run_id: &str,
+) -> Result<Vec<IntervalRow>, AppError> {
+    let sql = format!(
+        "{INTERVAL_SELECT_ALIASED} JOIN work_session s ON s.id = i.session_id \
+         WHERE i.needs_review = 1 AND i.voided_at IS NULL AND s.run_id <> ?1 \
+         ORDER BY i.started_at, i.id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(map_sqlite)?;
+    let rows = stmt
+        .query_map([current_run_id], read_interval)
+        .map_err(map_sqlite)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+}
+
+/// 一条「事实已经不满足不变量」的会话（02 §4 的「状态/区间不变量损坏」类）。
+///
+/// `reason` 是**诊断**文本（会进报告与日志，不进用户文案）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvariantFault {
+    pub session_id: String,
+    pub reason: &'static str,
+}
+
+/// 不变量损坏的会话，**排除当前 run**。
+///
+/// 只查三条**无歧义**的运行时约束（都能被 SQL 直接判定，且 P2 的健康路径
+/// 不会产生）：
+/// 1. `running` 会话带未作废的待确认区间（02 §4：「running 必须无待确认区间」）；
+/// 2. `running` 会话没有开放区间（02 §4 表：running 那行以「有开放区间」为前提）；
+/// 3. 非 `running` 会话残留开放区间（02 §3：「paused 无 open interval」）。
+///
+/// **刻意不查「recovering 必须有待确认区间」**：02 §4 原文允许「有待确认区间**或
+/// 显式不变量故障标记**」，而 P2 的 `split_for_anomaly` 在候选终点正好落在检查点上时
+/// 会留下一个没有余段的 `recovering` 会话——那是正常结果，不是损坏。
+/// 把它误判成损坏会让门禁拒绝一批本来能恢复的数据；该分类归 P3 的四类判定。
+pub fn invariant_faults_of_other_runs(
+    conn: &Connection,
+    current_run_id: &str,
+) -> Result<Vec<InvariantFault>, AppError> {
+    // 四个分支用 UNION ALL 合成一条查询：每条都带 `run_id <> ?1`，
+    // 不能让「当前 run 的会话」被算进上一代次的损坏里。
+    let sql = "\
+        SELECT s.id, 'running_with_pending_interval' FROM work_session s \
+          WHERE s.run_id <> ?1 AND s.state = 'running' \
+            AND EXISTS(SELECT 1 FROM work_interval i WHERE i.session_id = s.id \
+                        AND i.needs_review = 1 AND i.voided_at IS NULL) \
+        UNION ALL \
+        SELECT s.id, 'running_without_open_interval' FROM work_session s \
+          WHERE s.run_id <> ?1 AND s.state = 'running' \
+            AND NOT EXISTS(SELECT 1 FROM work_interval i WHERE i.session_id = s.id \
+                            AND i.ended_at IS NULL AND i.voided_at IS NULL) \
+        UNION ALL \
+        SELECT s.id, 'open_interval_outside_running' FROM work_session s \
+          WHERE s.run_id <> ?1 AND s.state <> 'running' \
+            AND EXISTS(SELECT 1 FROM work_interval i WHERE i.session_id = s.id \
+                        AND i.ended_at IS NULL AND i.voided_at IS NULL) \
+        ORDER BY 1, 2";
+
+    let mut stmt = conn.prepare(sql).map_err(map_sqlite)?;
+    let rows = stmt
+        .query_map([current_run_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(map_sqlite)?;
+
+    let mut faults = Vec::new();
+    for row in rows {
+        let (session_id, code) = row.map_err(map_sqlite)?;
+        faults.push(InvariantFault {
+            session_id,
+            reason: fault_reason(&code)?,
+        });
+    }
+    Ok(faults)
+}
+
+/// 诊断码 → 可读原因。未知码是编程错误（查询与映射表必须同步改）。
+fn fault_reason(code: &str) -> Result<&'static str, AppError> {
+    match code {
+        "running_with_pending_interval" => Ok("running 会话带未作废的待确认区间"),
+        "running_without_open_interval" => Ok("running 会话没有开放区间"),
+        "open_interval_outside_running" => Ok("非 running 会话残留开放区间"),
+        other => Err(AppError::Storage {
+            detail: format!("unknown invariant fault code: {other}"),
+        }),
+    }
 }

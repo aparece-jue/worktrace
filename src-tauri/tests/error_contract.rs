@@ -324,6 +324,16 @@ fn domain_error_messages_are_user_facing_chinese() {
             .collect::<Vec<_>>()
     );
 
+    // 入口用例的**条数**也要有人盯着：它们与代表清单同变体、不参与「一变体一条」的
+    // 覆盖率断言（上面的两条断言对它们视而不见），所以漏登记、重复登记、或把
+    // 它们删空都不会让别的断言变红——旧的 `cases.len() == 28` 曾顺带盯过这件事，
+    // 改成变体多重集之后就没人盯了。
+    assert_eq!(
+        entry_point_cases().len(),
+        3,
+        "入口用例就是三条从真实跃迁入口造出来的拒绝：Scheduled / Waiting / Cancelled"
+    );
+
     let mut cases = representatives;
     cases.extend(entry_point_cases());
 
@@ -415,7 +425,17 @@ fn domain_error_messages_are_user_facing_chinese() {
         // 而 Storage 的 `message()` 是固定的一句中文，detail **永不进用户文案**
         // （佐证：`tests/transaction_boundary.rs::an_unknown_enum_value_fails_loudly_and_names_the_column`
         // 断的就是 `STORAGE_ERROR` + detail 含列名与脏值）。
-        // 只有 `services/daily_plan.rs:108` 把它当 **Domain** 用，那里的列名是中文「时区」。
+        // 把它当 **Domain** 用的有**三处**——它们的 `field` 现在**都是中文字面量/常量**：
+        //   1. `services/daily_plan.rs:107-113` 的 `unknown_timezone()`：列名「时区」；
+        //   2. `services/catalog.rs:98-104` 的 `invalid()`：经 `parse_tag_kind`（`:51`「标签类型」）
+        //      与 `parse_project_status`（`:84`「项目状态」）两个调用点传入，两者都是中文字面量；
+        //   3. `domain/localdate.rs:112-117` 的 `malformed()`：`field` 取该文件的
+        //      `FIELD` 常量（`:17`「本地日期」）。
+        //
+        // ⚠️ 这三处的中文**只是约定，不是被这条断言强制的**：豁免是**变体级**的
+        // （`if !echoes_the_bad_value` 整条跳过 ASCII 检查），它放行的本来只有 `value`
+        // 的回显。所以「新增 Domain 用途时 `field` 必须写中文」这条规矩**唯一的记录
+        // 就是本注释**——新增第四处时记得回来补这一行，并确认它写的是中文。
         if !echoes_the_bad_value {
             assert!(
                 !user_text.chars().any(|c| c.is_ascii_alphabetic()),
