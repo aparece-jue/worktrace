@@ -13,11 +13,19 @@
 //!
 //! 建库样板照 `tests/transaction_boundary.rs::bootstrap`。
 
-use worktrace_lib::commands::StartTimerRequest;
+use worktrace_lib::commands::{
+    ArchiveProjectRequest, ClarifyReadyRequest, CreateProjectRequest, CreateTagRequest,
+    CreateTaskRequest, EpochRequest, ListProjectsRequest, ListTagsRequest, PlanMutationRequest,
+    RenameProjectRequest, SetTaskProjectRequest, StartTimerRequest, TaskTagRequest,
+    TaskTagsRequest,
+};
 use worktrace_lib::domain::task::{TaskStatus, TransitionCause};
 use worktrace_lib::error::AppError;
-use worktrace_lib::services::catalog::{self, ProjectTarget, TaskQueryRequest};
-use worktrace_lib::services::timer::coordinator::{parse_session_mode, parse_timer_kind};
+use worktrace_lib::services::catalog::{self, ProjectSelector, ProjectTarget, TaskQueryRequest};
+use worktrace_lib::services::daily_plan::DailyPlanQuery;
+use worktrace_lib::services::timer::coordinator::{
+    parse_session_mode, parse_timer_kind, ResumeRequest, SessionRequest,
+};
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
 use worktrace_lib::storage::migrations::migrate;
@@ -277,4 +285,243 @@ fn the_project_target_has_its_two_documented_json_shapes() {
         serde_json::from_str::<ProjectTarget>(r#""any""#).is_err(),
         "筛选用的三值形状不属于改归属"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 18 个请求 DTO 的 JSON 形状（P7 Task 1b fix round 1，评审 I1）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 响应那一半由 `tests/ipc_snapshots.rs` 逐字节钉住；**请求这一半原先没有任何机械
+// 联系**：改一个 Rust 请求字段名，Rust 431 条绿、前端 17 条绿、`tsc` 也绿，
+// 生产里表现为那条命令**每次调用**都退化成 `TRANSPORT_ERROR`（Tauri 的参数反序列化
+// 失败拿不到 `ErrorResponse.code`）。下面按域分组，给**每个**请求 DTO 一份
+// 「字段一个不少」的 JSON 样本。
+//
+// **为什么每条都要断言取值**（不是 `from_str(...).unwrap()` 就完事）：
+// serde 默认**忽略未知字段**。一个 `Option<T>` 字段被改名之后，样本里那个旧键会被
+// 静静丢掉、新键缺失回落成 `None`，`unwrap()` 照样成功——只有当测试真的去读
+// `request.<字段>` 时，改名才会变成编译错误。必填字段缺失则由 `unwrap()` 当场炸。
+//
+// 另一侧的缺口（TS 写错、Rust 不知道）**没有**机械联系，只能人工对齐——
+// 登记在 `docs/superpowers/plans/2026-10-03-p7-shell-and-ui.md` 的「遗留与边界」一节。
+
+/// 握手与项目：`EpochRequest` / `ListProjectsRequest` / `CreateProjectRequest` /
+/// `RenameProjectRequest` / `ArchiveProjectRequest`。
+#[test]
+fn handshake_and_project_request_dtos_take_the_documented_json() {
+    let epoch: EpochRequest = serde_json::from_str(r#"{"expected_data_epoch":"e1"}"#).unwrap();
+    assert_eq!(epoch.expected_data_epoch, "e1");
+
+    let list: ListProjectsRequest =
+        serde_json::from_str(r#"{"expected_data_epoch":"e1","status":"archived"}"#).unwrap();
+    assert_eq!(list.expected_data_epoch, "e1");
+    assert_eq!(
+        list.status.as_deref(),
+        Some("archived"),
+        "读路径的取值域含 done"
+    );
+    let all: ListProjectsRequest =
+        serde_json::from_str(r#"{"expected_data_epoch":"e1","status":null}"#).unwrap();
+    assert_eq!(all.status, None, "null = 不限制状态");
+
+    let create: CreateProjectRequest =
+        serde_json::from_str(r#"{"expected_data_epoch":"e1","name":"项目一"}"#).unwrap();
+    assert_eq!(create.expected_data_epoch, "e1");
+    assert_eq!(create.name, "项目一");
+
+    let rename: RenameProjectRequest = serde_json::from_str(
+        r#"{"expected_data_epoch":"e1","project_id":"p1","expected_row_version":3,"name":"项目二"}"#,
+    )
+    .unwrap();
+    assert_eq!(rename.expected_data_epoch, "e1");
+    assert_eq!(rename.project_id, "p1");
+    assert_eq!(rename.expected_row_version, 3);
+    assert_eq!(rename.name, "项目二");
+
+    let archive: ArchiveProjectRequest = serde_json::from_str(
+        r#"{"expected_data_epoch":"e1","project_id":"p1","expected_row_version":3}"#,
+    )
+    .unwrap();
+    assert_eq!(archive.expected_data_epoch, "e1");
+    assert_eq!(archive.project_id, "p1");
+    assert_eq!(archive.expected_row_version, 3);
+}
+
+/// 标签：`ListTagsRequest` / `CreateTagRequest` / `TaskTagRequest` / `TaskTagsRequest`。
+#[test]
+fn tag_request_dtos_take_the_documented_json() {
+    let list: ListTagsRequest =
+        serde_json::from_str(r#"{"expected_data_epoch":"e1","kind":"Context"}"#).unwrap();
+    assert_eq!(list.expected_data_epoch, "e1");
+    assert_eq!(
+        list.kind.as_deref(),
+        Some("Context"),
+        "四类是大小写敏感的大写串"
+    );
+    let all: ListTagsRequest =
+        serde_json::from_str(r#"{"expected_data_epoch":"e1","kind":null}"#).unwrap();
+    assert_eq!(all.kind, None, "null = 全部四类");
+
+    let create: CreateTagRequest = serde_json::from_str(
+        r#"{"expected_data_epoch":"e1","kind":"Context","name":"在家","parent_id":null}"#,
+    )
+    .unwrap();
+    assert_eq!(create.expected_data_epoch, "e1");
+    assert_eq!(create.kind, "Context");
+    assert_eq!(create.name, "在家");
+    assert_eq!(create.parent_id, None, "V0.1 没有层级");
+
+    let tag: TaskTagRequest =
+        serde_json::from_str(r#"{"expected_data_epoch":"e1","task_id":"t1","tag_id":"tag1"}"#)
+            .unwrap();
+    assert_eq!(tag.expected_data_epoch, "e1");
+    assert_eq!(tag.task_id, "t1");
+    assert_eq!(tag.tag_id, "tag1");
+
+    let of_task: TaskTagsRequest =
+        serde_json::from_str(r#"{"expected_data_epoch":"e1","task_id":"t1"}"#).unwrap();
+    assert_eq!(of_task.expected_data_epoch, "e1");
+    assert_eq!(of_task.task_id, "t1");
+}
+
+/// 任务：`CreateTaskRequest` / `ClarifyReadyRequest` / `SetTaskProjectRequest` /
+/// `TaskQueryRequest`。
+#[test]
+fn task_request_dtos_take_the_documented_json() {
+    let create: CreateTaskRequest =
+        serde_json::from_str(r#"{"expected_data_epoch":"e1","title":"任务一","project_id":"p1"}"#)
+            .unwrap();
+    assert_eq!(create.expected_data_epoch, "e1");
+    assert_eq!(create.title, "任务一");
+    assert_eq!(create.project_id.as_deref(), Some("p1"));
+
+    let clarify: ClarifyReadyRequest = serde_json::from_str(
+        r#"{"expected_data_epoch":"e1","task_id":"t1","expected_row_version":0}"#,
+    )
+    .unwrap();
+    assert_eq!(clarify.expected_data_epoch, "e1");
+    assert_eq!(clarify.task_id, "t1");
+    assert_eq!(clarify.expected_row_version, 0);
+
+    let project: SetTaskProjectRequest = serde_json::from_str(
+        r#"{"expected_data_epoch":"e1","task_id":"t1","expected_row_version":0,"project":{"bind":"p1"}}"#,
+    )
+    .unwrap();
+    assert_eq!(project.expected_data_epoch, "e1");
+    assert_eq!(project.task_id, "t1");
+    assert_eq!(project.expected_row_version, 0);
+    assert_eq!(project.project, ProjectTarget::Bind("p1".to_string()));
+
+    let query: TaskQueryRequest = serde_json::from_str(
+        r#"{"statuses":["Ready","Doing"],"project":{"id":"p1"},"context_tag_id":"tag1",
+            "limit":10,"offset":20,"expected_data_epoch":"e1"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        query.statuses,
+        vec!["Ready".to_string(), "Doing".to_string()]
+    );
+    assert_eq!(query.project, ProjectSelector::Id("p1".to_string()));
+    assert_eq!(query.context_tag_id.as_deref(), Some("tag1"));
+    assert_eq!(query.limit, 10);
+    assert_eq!(query.offset, 20);
+    assert_eq!(query.expected_data_epoch, "e1");
+}
+
+/// 今日计划：`PlanMutationRequest` / `DailyPlanQuery`。
+#[test]
+fn daily_plan_request_dtos_take_the_documented_json() {
+    let mutate: PlanMutationRequest = serde_json::from_str(
+        r#"{"expected_data_epoch":"e1","task_id":"t1","date":"2026-10-04","timezone":"Asia/Shanghai"}"#,
+    )
+    .unwrap();
+    assert_eq!(mutate.expected_data_epoch, "e1");
+    assert_eq!(mutate.task_id, "t1");
+    assert_eq!(mutate.date, "2026-10-04");
+    assert_eq!(mutate.timezone, "Asia/Shanghai");
+
+    let read: DailyPlanQuery = serde_json::from_str(
+        r#"{"date":"2026-10-04","timezone":"Asia/Shanghai","expected_data_epoch":"e1"}"#,
+    )
+    .unwrap();
+    assert_eq!(read.date, "2026-10-04");
+    assert_eq!(read.timezone, "Asia/Shanghai");
+    assert_eq!(read.expected_data_epoch, "e1");
+}
+
+/// 计时：`StartTimerRequest` / `SessionRequest` / `ResumeRequest`。
+#[test]
+fn timer_request_dtos_take_the_documented_json() {
+    let start: StartTimerRequest = serde_json::from_str(
+        r#"{"expected_data_epoch":"e1","task_id":"t1","task_expected_version":0,
+            "mode":"FOREGROUND","timer_kind":"countdown","target_duration_ms":1500000,
+            "expected_interval_ms":250}"#,
+    )
+    .unwrap();
+    assert_eq!(start.expected_data_epoch, "e1");
+    assert_eq!(start.task_id, "t1");
+    assert_eq!(start.task_expected_version, 0);
+    assert_eq!(start.mode, "FOREGROUND", "mode 是字符串，由命令体显式解析");
+    assert_eq!(start.timer_kind, "countdown", "timer_kind 同理");
+    assert_eq!(start.target_duration_ms, Some(1_500_000));
+    assert_eq!(start.expected_interval_ms, 250);
+
+    let session: SessionRequest = serde_json::from_str(
+        r#"{"expected_data_epoch":"e1","session_id":"s1","session_expected_version":2}"#,
+    )
+    .unwrap();
+    assert_eq!(session.expected_data_epoch, "e1");
+    assert_eq!(session.session_id, "s1");
+    assert_eq!(session.session_expected_version, 2);
+
+    let resume: ResumeRequest = serde_json::from_str(
+        r#"{"expected_data_epoch":"e1","task_id":"t1","task_expected_version":0,
+            "session_id":"s1","session_expected_version":2}"#,
+    )
+    .unwrap();
+    assert_eq!(resume.expected_data_epoch, "e1");
+    assert_eq!(resume.task_id, "t1");
+    assert_eq!(resume.task_expected_version, 0);
+    assert_eq!(resume.session_id, "s1");
+    assert_eq!(resume.session_expected_version, 2);
+}
+
+/// 必填字段缺失**必须当场被拒**（这条是上面那些样本的对手面）。
+///
+/// 同时把「serde 默认忽略未知字段」这个事实钉住：它正是上面每条都要断言取值、
+/// 而不能只 `unwrap()` 的原因。
+#[test]
+fn a_request_missing_a_required_field_is_rejected() {
+    /// 报错必须说清缺的是哪个字段。
+    fn assert_missing(error: serde_json::Error, field: &str) {
+        let text = error.to_string();
+        assert!(
+            text.contains("missing field") && text.contains(field),
+            "报错要说清缺的是哪个字段（要找 {field:?}）：{text}"
+        );
+    }
+
+    // 新建项目没有 name。
+    let error = serde_json::from_str::<CreateProjectRequest>(r#"{"expected_data_epoch":"e1"}"#)
+        .expect_err("缺 name 必须被拒");
+    assert_missing(error, "name");
+
+    // 改既有对象没有带版本。
+    let error = serde_json::from_str::<RenameProjectRequest>(
+        r#"{"expected_data_epoch":"e1","project_id":"p1","name":"项目二"}"#,
+    )
+    .expect_err("缺 expected_row_version 必须被拒");
+    assert_missing(error, "expected_row_version");
+
+    // 会话命令没有会话 id。
+    let error = serde_json::from_str::<SessionRequest>(
+        r#"{"expected_data_epoch":"e1","session_expected_version":2}"#,
+    )
+    .expect_err("缺 session_id 必须被拒");
+    assert_missing(error, "session_id");
+
+    // 未知字段被**忽略**（不是报错）⇒ 只 `unwrap()` 挡不住「字段改名」。
+    let with_extra: ListProjectsRequest =
+        serde_json::from_str(r#"{"expected_data_epoch":"e1","status":"active","typo":1}"#).unwrap();
+    assert_eq!(with_extra.status.as_deref(), Some("active"));
 }
