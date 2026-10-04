@@ -291,10 +291,17 @@ export function finishTimer(request: SessionRequest): Promise<CommandOutcome> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 迟到响应丢弃（00 §5 规则②③）
+// 迟到响应丢弃（00 §5 规则①②③）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** 响应/通知身上的版本标记（每个业务响应 DTO 都有这两个字段）。 */
+/**
+ * 响应/通知身上的版本标记。
+ *
+ * **不是**每个业务响应 DTO 都直接带这两个字段：`CommandOutcome` 是例外——它的
+ * `data_epoch` 在 `snapshot` 里，顶层只有 `revision`（见
+ * `src/types/__snapshots__/command_outcome.json`）。拿它做迟到判定要取
+ * `outcome.snapshot` 那个戳，别把 `outcome` 自己当戳用。
+ */
 export interface VersionStamp {
   data_epoch: string;
   revision: number;
@@ -306,17 +313,29 @@ export interface VersionStamp {
  * 只做**比较**，不做接纳决策：接纳一个快照、丢弃一条通知、要不要重新握手，
  * 都是 Task 2 的 `domainState` 的事（这里给它一条可测的原语）。
  *
- * 两条规则的差别是 `<` 与 `<=`，别合并：
- * - **规则③（查询响应）**：旧于已应用水位（同 epoch 且 `revision` **更小**）⇒ 丢弃。
- *   同版本是合法的（重复查询），不丢。
- * - **规则②（通知）**：同 epoch 且 `revision` **小于等于**已应用水位 ⇒ 丢弃
- *   （快照已经把这一版包含进去了）。
+ * 三条规则的分工（别合并成一个 `shouldApply`：它们的**处置不同**）：
+ * - **规则①（未知 epoch）**：[`FreshnessGate.isUnknownEpoch`] ⇒ **重新握手**；
+ * - **规则③（查询响应）**：[`FreshnessGate.isStaleResponse`]，同 epoch 且 `revision`
+ *   **更小** ⇒ 丢弃。同版本是合法的（重复查询），不丢；
+ * - **规则②（通知）**：[`FreshnessGate.isStaleNotification`]，同 epoch 且 `revision`
+ *   **小于等于**已应用水位 ⇒ 丢弃（快照已经把这一版包含进去了）。
  */
 export interface FreshnessGate {
   /** 已应用的水位；还没应用过任何响应时为 `null`。 */
   applied(): VersionStamp | null;
   /** 记下一个已应用的响应。水位只前进：更旧或同版的标记不会把它拉回去。 */
   markApplied(stamp: VersionStamp): void;
+  /**
+   * 规则①：这个版本标记来自**未知 epoch**（与已应用水位不是同一个库）。
+   *
+   * 处置与规则②**不同**，所以是单独一个方法：规则②是安静地扔掉（快照已经包含它），
+   * 规则①要**重新握手**再拉一致快照。`isStaleNotification` 对未知 epoch 返回 `false`
+   * 正是为了不让它被"静默丢弃"那条路吞掉——调用方必须**显式先问这一条**。
+   *
+   * `applied()` 为 `null`（还没应用过任何快照）时不判未知：启动阶段"先订阅、再拉快照"
+   * 的顺序由 [`startEventSession`] 保证。
+   */
+  isUnknownEpoch(stamp: VersionStamp): boolean;
   /**
    * 规则③：这个查询响应该不该被丢弃。
    *
@@ -325,7 +344,7 @@ export interface FreshnessGate {
    * 问的那个世界，丢弃并由调用方重新握手（规则①）。
    */
   isStaleResponse(stamp: VersionStamp, requestEpoch: string | null): boolean;
-  /** 规则②：这条通知该不该被丢弃。 */
+  /** 规则②：这条通知该不该被丢弃（**不含**未知 epoch 那一支）。 */
   isStaleNotification(stamp: VersionStamp): boolean;
 }
 
@@ -345,6 +364,10 @@ export function createFreshnessGate(): FreshnessGate {
         return;
       }
       applied = { data_epoch: stamp.data_epoch, revision: stamp.revision };
+    },
+
+    isUnknownEpoch(stamp) {
+      return applied !== null && applied.data_epoch !== stamp.data_epoch;
     },
 
     isStaleResponse(stamp, requestEpoch) {
@@ -399,8 +422,13 @@ export interface EventStream {
  * 第 2 步必须在第 3 步之前完成，否则「快照与通知之间」的那条缝就会丢事件。
  * `load()` 抛错 ⇒ 订阅立刻撤掉并原样抛出（不留悬挂监听）。
  *
- * ⚠️ `handler` 拿到的通知**还没有经过水位过滤**：调用方要用
- * {@link FreshnessGate.isStaleNotification} 自己判（Task 2 的 `domainState`）。
+ * ⚠️ `handler` 拿到的通知**还没有经过水位过滤**（Task 2 的 `domainState` 自己判），
+ * 而且判的顺序不能反：
+ *
+ * 1. [`FreshnessGate.isUnknownEpoch`] 为真 ⇒ **重新握手**，**不能落到 apply 分支**
+ *    （规则①：那是"另一个库的数据"，不是"更新的数据"）；
+ * 2. 否则 [`FreshnessGate.isStaleNotification`] 为真 ⇒ 丢弃（规则②，安静地扔）；
+ * 3. 两条都不为真 ⇒ 才 apply。
  */
 export async function startEventSession<T>(
   handler: (event: EventEnvelope) => void,

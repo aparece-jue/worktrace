@@ -62,7 +62,8 @@ import type {
 } from "../ipc";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 读快照：整目录 glob，新增一份快照不需要改这个文件
+// 读快照：整目录 glob。**加载**新快照不需要改这个文件，**覆盖**它需要——
+// 下面的集合断言会把没在 `TOP_LEVEL`/`NESTED` 里登记的快照判红。
 // ─────────────────────────────────────────────────────────────────────────────
 
 const MODULES = import.meta.glob<Record<string, unknown>>("../__snapshots__/*.json", {
@@ -244,8 +245,10 @@ const NESTED: ReadonlyArray<{ where: string; keys: readonly string[] }> = [
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("快照契约", () => {
-  it("快照目录里至少有 15 份响应 DTO（少一份就说明有人删了契约文件）", () => {
-    expect(Object.keys(SNAPSHOTS).length).toBeGreaterThanOrEqual(15);
+  it("快照集合与登记表逐份对上（多一份、少一份都红 —— 新增快照必须在 TOP_LEVEL 登记）", () => {
+    // 精确集合比对，不是"至少 15 份"：`>=` 挡不住"第 16 份快照谁也没碰"——
+    // 契约文件加了、登记表没加，那条断言照样绿（评审 I2）。
+    expect(Object.keys(SNAPSHOTS).sort()).toEqual(Object.keys(TOP_LEVEL).sort());
   });
 
   it("运行期：每个响应 DTO 的顶层键集合与快照逐字相同", () => {

@@ -48,6 +48,7 @@ import {
   sendVersioned,
   startEventSession,
   timerSnapshot,
+  timerTick,
   toIpcError,
 } from "../ipc";
 import type { EventEnvelope } from "../types/ipc";
@@ -100,7 +101,12 @@ describe("命令转发", () => {
     const calls = recordCalls();
     await getRevision();
     await timerSnapshot();
-    expect(calls.map((call) => call.command)).toEqual(["get_revision", "timer_snapshot"]);
+    await timerTick();
+    expect(calls.map((call) => call.command)).toEqual([
+      "get_revision",
+      "timer_snapshot",
+      "timer_tick",
+    ]);
     for (const call of calls) {
       expect(call.args).toEqual({});
     }
@@ -170,6 +176,19 @@ describe("迟到响应丢弃", () => {
     expect(gate.isStaleResponse({ data_epoch: "other", revision: 6 }, EPOCH)).toBe(true);
     // 不带 epoch 的命令（get_revision）只按水位判
     expect(gate.isStaleResponse({ data_epoch: "other", revision: 1 }, null)).toBe(false);
+  });
+
+  it("规则①：未知 epoch 单独认出来（它要重新握手，不能走规则②'静默丢弃'那条路）", () => {
+    const gate = createFreshnessGate();
+    // 还没应用过任何快照：无从判断"未知"，启动顺序由 startEventSession 保证。
+    expect(gate.isUnknownEpoch({ data_epoch: EPOCH, revision: 1 })).toBe(false);
+
+    gate.markApplied({ data_epoch: EPOCH, revision: 5 });
+    expect(gate.isUnknownEpoch({ data_epoch: EPOCH, revision: 6 })).toBe(false);
+    expect(gate.isUnknownEpoch({ data_epoch: "other", revision: 1 })).toBe(true);
+    // 规则②对未知 epoch 恒为 false ⇒ 调用方**必须**先问规则①，
+    // 否则按字面实现会把"另一个库的数据"当新数据接纳。
+    expect(gate.isStaleNotification({ data_epoch: "other", revision: 1 })).toBe(false);
   });
 
   it("规则②：同 epoch 且 revision <= 已应用水位的通知被丢弃", () => {
