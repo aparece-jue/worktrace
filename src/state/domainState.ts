@@ -16,10 +16,20 @@
  *
  * | 这里 | Rust（规范文本） |
  * | --- | --- |
- * | `gate.onNotification` / `applySnapshot` / `onQueryResponse` | `services/events.rs` 的 `RevisionGate`（`:247`–`:363`，四条规则） |
- * | `gate.isStaleNotification` | 00 §5 规则 3：应用快照后丢弃同 epoch 且 `revision <=` 快照版本的通知 |
- * | `orderTimer` | 00 §5 的计时判据（`:69`）；Rust 侧对应 `Coordinator::is_stale_tick`（`services/timer/coordinator.rs:363`） |
+ * | `gate.onNotification` / `applySnapshot` / `onQueryResponse` | `services/events.rs` 的 `RevisionGate`（`:247`–`:363`，闸门规则①②③④） |
+ * | `gate.isStaleNotification` | 00 §5 规则 3：应用快照后丢弃同 epoch 且 `revision <=` 快照版本的通知（**只在这张表里对照**：真实判决走 `onNotification`） |
+ * | `orderTimer` | 00 §5 的计时判据（`:69`）。⚠️ Rust 侧只有**部分**对应：`Coordinator::is_stale_tick`（`services/timer/coordinator.rs:363`）只判 `session_id` + `row_version`，epoch / `run_id` / `tick_seq` 是展示侧独有的——**不是同一个函数**，两者要一起改（见计划「遗留与边界」） |
  * | {@link VERIFY_INTERVAL_MS} | 00 §5 规则 4 的「可见窗口至多每 30 秒」 |
+ *
+ * ## 编号约定（别混：这是 fix round 1 / M4 定的）
+ *
+ * - **§5 规则 1–5**：`00-architecture.zh.md` §5 的那五条（1 先监听后快照；2 新 epoch
+ *   全量失效 + 未知 epoch 通知只重新握手；3 应用快照后丢弃 `revision <=` 快照版本的通知；
+ *   4 重显/可见窗口至多每 30 秒校验 `get_revision`；5 跳号/乱序取新快照）；
+ * - **闸门规则①②③④**：`services/events.rs` 的 `on_notification` 判决分支（① 未知 epoch；
+ *   ② `<=` 已应用水位；③ `<=` 已见版本（重复/乱序）；④ 跳号）。对照：§5 规则 2 ≈ 闸门①、
+ *   §5 规则 3 ≈ 闸门②、§5 规则 5 ≈ 闸门④；
+ * - **判据 1–5**：本文件 `orderTimer` 里计时展示值的五级判定顺序（§5 那条计时判据的落地）。
  *
  * ⚠️ {@link VERIFY_INTERVAL_MS} 与 `Coordinator` 的 `HEARTBEAT_INTERVAL_MS = 30_000`
  * （`services/timer/coordinator.rs`，**检查点**频率）**无关**：数字相同纯属巧合，
@@ -117,8 +127,11 @@ type TimerSource = "tick" | "snapshot";
 type TimerDecision = "apply" | "stale" | "resync" | "rehandshake";
 
 /**
- * 计时展示值的新旧判定（00 §5 `:69` 的原文顺序，**不要重排**）：
- * 先 `data_epoch` → `run_id` → `session_version`，**再**比 `tick_seq`。
+ * 计时展示值的新旧判定（00 §5 `:69` 的原文顺序，**不要重排**）。
+ *
+ * **判据 1–5**（本文档的编号，与"闸门规则①②③④""§5 规则 1–5"都不是一套）：
+ * 1 `data_epoch` → 2 `run_id` → 3 会话（`session_id`）→ 4 `session_version` →
+ * 5 只有前四级全部相同才比 `tick_seq`。
  *
  * - `tick`（事件）：判不出来（未知）时**不自行推导状态跃迁**，交回 `resync` 去取一份
  *   计时快照；旧状态生成的 tick（更小的 `session_version`）即使序号较新也是 `stale`。
@@ -137,17 +150,18 @@ function orderTimer(
   if (held === null) return "apply";
   const authoritative = source === "snapshot";
 
-  // ① epoch：另一个库的数据。事件不许接纳（00 §5 规则 2 的"未知 epoch 通知"），
-  //    我们主动拉回的权威样本才作数（它回答的就是"现在"）。
+  // 判据 1：data_epoch —— 另一个库的数据。事件不许接纳（00 §5 规则 2 的"未知 epoch
+  // 通知"），我们主动拉回的权威样本才作数（它回答的就是"现在"）。
   if (candidate.data_epoch !== held.data_epoch) return authoritative ? "apply" : "rehandshake";
 
-  // ② run_id：重启会换 run，序号跨 run 无法比较 ⇒ 取一份计时快照。
+  // 判据 2：run_id —— 重启会换 run，`tick_seq` 跨 run 无法比较 ⇒ 取一份计时快照。
   if (candidate.run_id !== held.run_id) return authoritative ? "apply" : "resync";
 
-  // ③ 会话切换：另一次会话的序号同样不可比。
+  // 判据 3：会话切换 —— 另一次会话的 `tick_seq` 同样不可比（新会话的 row_version
+  // 可能与旧会话相同，所以 `session_id` 也要判）。
   if (candidate.session_id !== held.session_id) return authoritative ? "apply" : "resync";
 
-  // ④ 会话版本：旧状态生成的 tick 即使序号较新也不能覆盖暂停/切换后的展示。
+  // 判据 4：session_version —— 旧状态生成的 tick 即使序号较新也不能覆盖暂停/切换后的展示。
   const candidateVersion = candidate.session_version;
   const heldVersion = held.session_version;
   if (candidateVersion !== heldVersion) {
@@ -159,7 +173,7 @@ function orderTimer(
     return authoritative ? "apply" : "resync";
   }
 
-  // ⑤ 只有会话版本相同，`tick_seq` 才有可比性。
+  // 判据 5：只有前四级全部相同，`tick_seq` 才有可比性。
   return candidate.tick_seq > held.tick_seq ? "apply" : "stale";
 }
 
@@ -187,6 +201,16 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
   const listeners = new Set<() => void>();
 
   let stream: EventStream | null = null;
+  /**
+   * 会话是否"活着"（订阅已经建立、可以落地异步动作）。
+   *
+   * ⚠️ **不能用 `stream !== null` 代替它**（fix round 1 / I2）：`startEventSession` 的
+   * 暂存通知是在它**返回之前**交付的（`src/ipc.ts` 的 flush），那一刻 `stream` 还是
+   * `null`——用 `stream` 当判据会把整条启动缝里的 `resync`/重新握手静默丢掉
+   * （闸门记下了缺口，动作却没发生，闸门规则④的"立即取快照"退化成"等 30 秒轮询"）。
+   * 所以 `start()` 在 **await 之前**就置位，`stop()` 与启动失败时清位。
+   */
+  let live = false;
   let starting: Promise<void> | null = null;
   let verifying = false;
   let resyncing = false;
@@ -229,7 +253,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
 
   /** 应用一份**我们自己拉回来的**计时样本（水位 + 展示值两条判据）。 */
   function applySample(sample: TimerSnapshot): void {
-    // 规则③对快照的同一条要求：旧于已应用水位就不覆盖（数据与展示都不动）。
+    // §5 规则 3 对快照的同一条要求（闸门的 stale_ignored）：旧于已应用水位就不覆盖。
     if (applyStamp(sample) === "stale_ignored") return;
     if (orderTimer(sample, view.timer, "snapshot") === "apply") publish({ timer: sample });
   }
@@ -241,12 +265,13 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
   }
 
   /**
-   * 规则④：跳号/乱序无法证明一致 ⇒ 取新快照。
+   * 闸门规则④（§5 规则 5）：跳号/乱序无法证明一致 ⇒ 取新快照。
    *
    * 先推失效计数（受影响视图合并刷新），再拉一份计时快照把水位拉回连续。
    */
   async function resync(): Promise<void> {
-    if (resyncing || stream === null) return;
+    // `live`（不是 `stream`）：启动缝里交付的跳号通知也当场取快照（fix round 1 / I2）。
+    if (resyncing || !live) return;
     resyncing = true;
     const token = generation;
     try {
@@ -263,13 +288,14 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
    * 一次版本校验：握手 → 比 epoch → 比已见版本。
    *
    * 三个触发源共用它：可见窗口的 30 秒周期、隐藏窗口显示前的校验、以及
-   * **未知 epoch 的通知**（规则①的"重新握手"就是再调一次 `get_revision`）。
+   * **未知 epoch 的通知**（闸门规则①的"重新握手"就是再调一次 `get_revision`）。
    *
    * 同 epoch 且版本比已见版本靠前 ⇒ 中间有通知丢了（末次通知丢失也包括在内）：
    * 无法证明一致 ⇒ 走 {@link resync} 取新快照。
    */
   async function verify(): Promise<void> {
-    if (verifying || stream === null) return;
+    // 同上：缝里的未知 epoch 通知要当场重新握手，而不是被丢掉等下一次轮询。
+    if (verifying || !live) return;
     verifying = true;
     const token = generation;
     try {
@@ -280,7 +306,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
         return;
       }
       if (gate.isUnknownEpoch(identity)) {
-        // 规则①：库身份变了（恢复/换库）⇒ 全部失效，并按新 epoch 重新拉一致样本。
+        // 闸门规则①：库身份变了（恢复/换库）⇒ 全部失效，并按新 epoch 重新拉一致样本。
         if (applyStamp(identity) === "cache_invalidated") await pullTimerSample(token);
         return;
       }
@@ -319,7 +345,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     const tick = asTimerSnapshot(envelope.payload);
     if (tick === null) return;
     // 展示值还没有基线时（例如启动时那份计时快照没拿到），没有可比的对象：
-    // 先用闸门判一次未知 epoch —— 规则① 对通知一视同仁，tick 也不例外。
+    // 先用闸门判一次未知 epoch —— 闸门规则① 对通知一视同仁，tick 也不例外。
     if (view.timer === null && gate.isUnknownEpoch(tick)) {
       void verify();
       return;
@@ -340,6 +366,8 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
   }
 
   function onEvent(envelope: EventEnvelope): void {
+    // `stop()` 之后（或启动中途被 stop()）到达的 flush：不再写回任何状态。
+    if (!live) return;
     if (envelope.event === EVENT_TIMER_TICK) onTimerTick(envelope);
     else if (envelope.event === EVENT_DOMAIN_CHANGED) onDomainChanged(envelope);
     // 其它事件名：这一层不认识，也不去猜（不认识就不接纳）。
@@ -349,23 +377,27 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
    * `load()`：**必须在返回之前把快照应用进水位**。
    *
    * 这正是 Task 1b 说的「`markApplied` 前置」：{@link startEventSession} 会在
-   * `load()` 返回之后才交付暂存的通知，那时水位已经推过，规则②（`revision <=`
-   * 快照版本 ⇒ 丢弃）与规则④（跳号）才判得动；否则启动期那条缝里的通知会因为
-   * "还没应用过任何快照"落进 apply 分支。
+   * `load()` 返回之后才交付暂存的通知，那时水位已经推过，闸门规则②/④才判得动；
+   * 否则启动期那条缝里的通知会因为"还没应用过任何快照"落进 apply 分支。
+   *
+   * ⚠️ 缝里交付的通知**不只是**判一下：跳号要当场 `resync()`、未知 epoch 要当场
+   * `verify()`——那两个动作靠 `live`（不是 `stream`）才落得了地（fix round 1 / I2）。
    */
   async function load(): Promise<void> {
+    const token = generation;
     // ① 握手：全仓唯一不要求已知 epoch 的入口（`services::handshake::get_revision`）。
     //    它失败 ⇒ 这次启动失败（没有库身份就没有镜像可言），订阅由 startEventSession 撤掉。
     const identity = await deps.getRevision();
+    if (token !== generation) return; // 启动中途被 stop()：不再写回（start() 会关掉订阅）
     applyStamp(identity);
     // ② 携该 epoch 拉业务一致快照。本阶段镜像持有的业务数据只有计时展示值。
     //
     //    拿不到它**不该**让整个镜像起不来：协调器故障态下 `timer_snapshot` 会返回
     //    `RECOVERY_REQUIRED`（`Coordinator::refuse_if_faulted`，那是 P3/P6 的正常路径，
     //    见计划「计时族命令提交后重建失败」那条边界）。握手给的 epoch 与水位已经生效，
-    //    启动期暂存的通知照常按规则判；展示值由后续 `timer.tick` 或 30 秒校验补齐。
+    //    启动期暂存的通知照常按闸门规则判；展示值由后续 `timer.tick` 或 30 秒校验补齐。
     try {
-      await pullTimerSample(generation);
+      await pullTimerSample(token);
     } catch {
       // 诊断留给调用方（IPC 错误已经规范化过）；这里不改动任何已生效的水位。
     }
@@ -388,7 +420,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     if (typeof document !== "undefined") {
       onVisibilityChange = () => {
         if (isVisible()) {
-          // 规则④：隐藏窗口在**显示前**校验（这条与 30 秒周期是两个触发源，
+          // §5 规则 4：隐藏窗口在**显示前**校验（这条与 30 秒周期是两个触发源，
           // 同时到达时由 verify() 的 in-flight 合并挡住重复请求）。
           void verify();
           startPolling();
@@ -425,14 +457,23 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
       if (starting !== null) return starting;
       if (stream !== null) return Promise.resolve();
       publish({ phase: "connecting" });
+      // ⚠️ 在 **await 之前**置位：`startEventSession` 的暂存通知在它返回之前就交付了，
+      // 那一刻还没有 `stream`（fix round 1 / I2）。见 `live` 的声明处。
+      live = true;
       starting = (async () => {
         try {
           const opened = await deps.startEventSession<void>(onEvent, load);
+          if (!live) {
+            // 启动过程中被 stop()：不要把会话复活（订阅要撤、轮询不要挂）。
+            await opened.stream.close();
+            return;
+          }
           stream = opened.stream;
           attachLifecycle();
           publish({ phase: "ready" });
         } catch (cause) {
           // startEventSession 已经把订阅撤掉了（不留悬挂监听），这里只记状态。
+          live = false;
           publish({ phase: "failed" });
           throw cause;
         } finally {
@@ -444,6 +485,7 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
 
     async stop() {
       generation += 1;
+      live = false;
       detachLifecycle();
       const open = stream;
       stream = null;

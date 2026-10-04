@@ -30,16 +30,29 @@ import {
 
 // `listen` 走替身（与 `ipc.test.ts` 同一个做法）：只有这一条用例用真实的
 // `startEventSession`，它要看的是"订阅先于快照"这条顺序，而不是 tauri 的实现。
+//
+// `onRegister` 是 fix round 1 / I3 加的：真实世界的缝隙**从订阅那一刻**就开始了
+// （订阅已建立、`unlisten` 还没回来，事件就可能到达）。只在 `load()` **里面**投递
+// 事件区分不出"暂存"与"直通"——那时水位已经推过，两种交付的结果一样。
 const events = vi.hoisted(() => {
   const listeners = new Map<number, (event: { payload: unknown }) => void>();
+  const atRegister: Array<(handler: (event: { payload: unknown }) => void) => void> = [];
   let next = 1;
   return {
     get open() {
       return listeners.size;
     },
+    /** 注册那一刻要投递的（模拟"订阅已建立、load 还没开始"）。 */
+    onRegister(hook: (handler: (event: { payload: unknown }) => void) => void) {
+      atRegister.push(hook);
+    },
+    reset() {
+      atRegister.length = 0;
+    },
     async listen(_channel: string, handler: (event: { payload: unknown }) => void) {
       const id = next++;
       listeners.set(id, handler);
+      for (const hook of atRegister.splice(0)) hook(handler);
       return async () => {
         listeners.delete(id);
       };
@@ -198,10 +211,45 @@ afterEach(async () => {
   for (const state of created.splice(0)) await state.stop();
   vi.useRealTimers();
   Reflect.deleteProperty(document, "visibilityState");
+  events.reset();
 });
 
+/**
+ * 用**真实的** `startEventSession` 起一次会话，并在订阅建立的那一刻投递给定的通知
+ * （fix round 1 / I2、I3 用）。第一次 `timerSnapshot`（load 里那次）交回第 5 版，
+ * 之后每次（resync 里那次）交回第 8 版。
+ */
+async function startWithSeam(
+  atRegister: Array<Partial<EventEnvelope>>,
+): Promise<{ state: DomainState; calls: { getRevision: number; timerSnapshot: number } }> {
+  const calls = { getRevision: 0, timerSnapshot: 0 };
+  events.onRegister((handler) => {
+    for (const note of atRegister) handler({ payload: envelope(note) });
+  });
+  const state = track(
+    createDomainState({
+      async getRevision() {
+        calls.getRevision += 1;
+        return identity(EPOCH, 5);
+      },
+      async timerSnapshot() {
+        calls.timerSnapshot += 1;
+        return sample({
+          revision: calls.timerSnapshot === 1 ? 5 : 8,
+          tick_seq: calls.timerSnapshot,
+        });
+      },
+      startEventSession,
+    }),
+  );
+
+  await state.start();
+  await settle();
+  return { state, calls };
+}
+
 describe("启动顺序与水位前置", () => {
-  it("先订阅、再拉快照；load 返回前已经推过水位（load 期间的通知按规则②/④判）", async () => {
+  it("先订阅、再拉快照；load 返回前已经推过水位（load 期间的通知按闸门规则②/④判）", async () => {
     const h = harness();
     track(h.state);
     h.queueIdentity(identity(EPOCH, 5));
@@ -215,16 +263,22 @@ describe("启动顺序与水位前置", () => {
     await h.state.start();
 
     expect(h.calls.sessions).toBe(1);
-    // 若 load 没有在水位里留下快照：rev 4 会被当成"跳号"触发规则④（多一次取快照），
+    // 若 load 没有在水位里留下快照：rev 4 会被当成"跳号"触发闸门规则④（多一次取快照），
     // 两条通知也会各自推一次失效计数 —— 下面三条会同时红。
     expect(h.calls.getRevision).toBe(1);
     expect(h.calls.timerSnapshot).toBe(1);
     expect(h.state.getView()).toMatchObject({ dataEpoch: EPOCH, revision: 5, invalidated: 1 });
   });
 
-  it("真实的 startEventSession：快照与通知之间的那条缝不丢事件", async () => {
+  it("真实的 startEventSession：订阅那一刻起的缝里的事件都被暂存，快照之后再按水位判", async () => {
     const calls = { getRevision: 0, timerSnapshot: 0 };
     let emitted = false;
+    // fix round 1 / I3：投递点在**注册那一刻**（订阅已建立、load 还没开始）。
+    // 这一条是区分性的：把 startEventSession 的暂存改成直通，rev 4 会在水位还是
+    // `null` 的时候到达 ⇒ 被当成跳号（`invalidated` 与 `timerSnapshot` 都变多）。
+    events.onRegister((handler) => {
+      handler({ payload: envelope({ revision: 4 }) });
+    });
     const state = track(
       createDomainState({
         async getRevision() {
@@ -235,8 +289,7 @@ describe("启动顺序与水位前置", () => {
           calls.timerSnapshot += 1;
           if (!emitted) {
             emitted = true;
-            // 订阅已经建立、快照还没进水位：这三条必须被暂存而不是丢掉。
-            events.emit(envelope({ revision: 4 }));
+            // 快照还没进水位：这两条同样必须被暂存而不是丢掉。
             events.emit(envelope({ revision: 6 }));
             events.emit(
               envelope({
@@ -256,12 +309,35 @@ describe("启动顺序与水位前置", () => {
 
     expect(events.open).toBe(1);
     expect(calls.getRevision).toBe(1);
+    expect(calls.timerSnapshot).toBe(1);
     const view = state.getView();
     expect(view).toMatchObject({ dataEpoch: EPOCH, revision: 5, invalidated: 1 });
     expect(view.timer?.tick_seq).toBe(2);
 
     await state.stop();
     expect(events.open).toBe(0);
+  });
+
+  it("启动缝里的跳号通知当场就推失效并取新快照（不等 30 秒轮询）", async () => {
+    // fix round 1 / I2：`startEventSession` 的 flush 发生在它返回之前，那一刻
+    // `domainState` 还没有 `stream`——用 `stream` 当判据会把这条动作静默丢掉。
+    const seeded = await startWithSeam([{ revision: 4 }, { revision: 8 }]);
+    expect(seeded.state.getView().invalidated).toBe(1);
+    expect(seeded.calls.timerSnapshot).toBe(2);
+    expect(seeded.state.getView().revision).toBe(8);
+  });
+
+  it("启动缝里单独一条跳号通知也一样（不是靠前一条通知带出来的）", async () => {
+    const seeded = await startWithSeam([{ revision: 8 }]);
+    expect(seeded.state.getView().invalidated).toBe(1);
+    expect(seeded.calls.timerSnapshot).toBe(2);
+  });
+
+  it("启动缝里的未知 epoch 通知当场重新握手（不落 apply）", async () => {
+    const seeded = await startWithSeam([{ data_epoch: OTHER_EPOCH, revision: 1 }]);
+    expect(seeded.calls.getRevision).toBe(2);
+    expect(seeded.state.getView().invalidated).toBe(0);
+    expect(seeded.state.getView().dataEpoch).toBe(EPOCH);
   });
 
   it("start() 幂等：并发调用只握手一次、只开一个事件会话", async () => {
@@ -317,7 +393,7 @@ describe("启动顺序与水位前置", () => {
     expect(h.state.getView().timer?.tick_seq).toBe(2);
   });
 
-  it("展示值还没有基线时，另一个 epoch 的 tick 也只触发重新握手（规则① 对 tick 一视同仁）", async () => {
+  it("展示值还没有基线时，另一个 epoch 的 tick 也只触发重新握手（闸门规则① 对 tick 一视同仁）", async () => {
     const h = harness();
     track(h.state);
     h.queueIdentity(identity(EPOCH, 5));
@@ -402,7 +478,7 @@ describe("事件：只作缓存失效 / 只更新展示值", () => {
     );
     expect(h.state.getView().timer?.tick_seq).toBe(2);
 
-    // 因此 rev 6 的通知照常接纳；若 tick 推了水位，它会被规则②吞掉 → 这条红。
+    // 因此 rev 6 的通知照常接纳；若 tick 推了水位，它会被闸门规则②吞掉 → 这条红。
     h.emit(envelope({ revision: 6 }));
     expect(h.state.getView().invalidated).toBe(1);
     expect(h.state.getView().revision).toBe(5);
@@ -496,7 +572,7 @@ describe("计时展示值的新旧判定（00 §5 的先后顺序）", () => {
     h.queueSample(
       sample({ revision: 4, session_version: 2, tick_seq: 99, active_ms: 99_000 }),
     );
-    h.emit(envelope({ revision: 8 })); // 规则④：跳号 ⇒ 取新快照
+    h.emit(envelope({ revision: 8 })); // 闸门规则④：跳号 ⇒ 取新快照
     await settle();
 
     const view = h.state.getView();
@@ -506,7 +582,75 @@ describe("计时展示值的新旧判定（00 §5 的先后顺序）", () => {
   });
 });
 
-describe("重新握手与整体失效（规则①）", () => {
+describe("orderTimer 的前三级判据（跨库 / 跨 run / 跨会话）", () => {
+  // fix round 1 / I1：这三条各只改**一个字段**，而且断言的是"旧 tick 不覆盖展示"。
+  // 之前 42 条用例里这三行代码各自都能改成 `if (false)` 而全绿——正是计划 `:113`
+  // 点名的那三级（跨 run 的旧 tick 会按 tick_seq 覆盖新 run 的展示）。
+  it("判据 1（data_epoch）：另一个库的 tick 不覆盖展示，只触发重新握手", async () => {
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample({ tick_seq: 9 }));
+    await h.state.start();
+
+    h.queueIdentity(identity(EPOCH, 5)); // 握手回来说：库没变
+    h.emit(
+      envelope({
+        event: EVENT_TIMER_TICK,
+        data_epoch: OTHER_EPOCH,
+        payload: sample({ data_epoch: OTHER_EPOCH, tick_seq: 10 }),
+      }),
+    );
+
+    expect(h.state.getView().timer).toMatchObject({ data_epoch: EPOCH, tick_seq: 9 });
+    await settle();
+    expect(h.state.getView().timer).toMatchObject({ data_epoch: EPOCH, tick_seq: 9 });
+    expect(h.calls.getRevision).toBe(2); // 只重新握手
+    expect(h.calls.timerSnapshot).toBe(1); // 没把它当成"未知 tick"去取快照
+  });
+
+  it("判据 2（run_id）：另一个 run 的 tick 不覆盖展示（tick_seq 跨 run 不可比），先取计时快照", async () => {
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample({ run_id: RUN, tick_seq: 9 }));
+    await h.state.start();
+
+    h.emit(
+      envelope({
+        event: EVENT_TIMER_TICK,
+        payload: sample({ run_id: "run-2", tick_seq: 10 }),
+      }),
+    );
+
+    expect(h.state.getView().timer).toMatchObject({ run_id: RUN, tick_seq: 9 });
+    expect(h.calls.timerSnapshot).toBe(2);
+    await settle();
+    expect(h.state.getView().timer).toMatchObject({ run_id: RUN, tick_seq: 9 });
+  });
+
+  it("判据 3（session_id）：另一个会话的 tick 不覆盖展示（会话版本可以相同），先取计时快照", async () => {
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample({ session_id: SESSION, session_version: 1, tick_seq: 9 }));
+    await h.state.start();
+
+    h.emit(
+      envelope({
+        event: EVENT_TIMER_TICK,
+        payload: sample({ session_id: "session-2", session_version: 1, tick_seq: 10 }),
+      }),
+    );
+
+    expect(h.state.getView().timer).toMatchObject({ session_id: SESSION, tick_seq: 9 });
+    expect(h.calls.timerSnapshot).toBe(2);
+    await settle();
+    expect(h.state.getView().timer).toMatchObject({ session_id: SESSION, tick_seq: 9 });
+  });
+});
+
+describe("重新握手与整体失效（闸门规则①）", () => {
   it("未知 epoch 的通知只触发重新握手，不落 apply", async () => {
     const h = harness();
     track(h.state);
@@ -644,7 +788,11 @@ describe("生命周期：订阅、卸载与多窗口", () => {
     h.queueSample(sample());
     await h.state.start();
 
+    // fix round 1 / M1：可见窗口那一个 30 秒 interval 真的挂上了，stop() 之后真的撤了
+    // （把 stop() 里的 detachLifecycle() 删掉，这两条断言就红）。
+    expect(vi.getTimerCount()).toBe(1);
     await h.state.stop();
+    expect(vi.getTimerCount()).toBe(0);
 
     expect(h.calls.closes).toBe(1);
     await vi.advanceTimersByTimeAsync(VERIFY_INTERVAL_MS * 3);
@@ -659,6 +807,39 @@ describe("生命周期：订阅、卸载与多窗口", () => {
       invalidated: 0,
       phase: "idle",
     });
+  });
+
+  it("以隐藏态启动：一个 interval 都不挂，显示时才校验（§5 规则 4）", async () => {
+    vi.useFakeTimers();
+    setVisibility("hidden");
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample());
+    await h.state.start();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(VERIFY_INTERVAL_MS * 3);
+    expect(h.calls.getRevision).toBe(1); // 90 秒里一次校验都没有
+
+    setVisibility("visible");
+    await settle();
+    expect(h.calls.getRevision).toBe(2); // 显示前校验
+    expect(vi.getTimerCount()).toBe(1); // 并且开始轮询
+  });
+
+  it("启动过程中 stop()：会话不会被复活（订阅撤掉、不挂轮询、不写回状态）", async () => {
+    const h = harness();
+    track(h.state);
+    h.queueIdentity(identity(EPOCH, 5));
+    h.queueSample(sample());
+
+    const starting = h.state.start();
+    await h.state.stop(); // load 还没走完就停
+    await starting;
+
+    expect(h.calls.closes).toBe(1);
+    expect(h.state.getView()).toMatchObject({ dataEpoch: null, phase: "idle" });
   });
 
   it("两个实例互不共享内存（多窗口各自一个 JS 上下文）", async () => {

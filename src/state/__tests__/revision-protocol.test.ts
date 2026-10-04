@@ -118,6 +118,16 @@ describe("RevisionGate 的前端镜像（两侧共读的向量）", () => {
     });
   }
 
+  it("markApplied 与 applySnapshot 是同一次状态迁移：都清掉跳号标记（不留两套语义）", () => {
+    // fix round 1 / M5：原先 markApplied 另写一套（`<=` 与 `<`、清不清缺口标记都分叉）。
+    const gate = createFreshnessGate();
+    gate.applySnapshot("e1", 5);
+    expect(gate.onNotification({ data_epoch: "e1", revision: 8 })).toBe("resync"); // 记下缺口
+    gate.markApplied({ data_epoch: "e1", revision: 8 }); // 应用了一份到第 8 版的快照
+    expect(gate.seenRevision()).toBe(8);
+    expect(gate.onNotification({ data_epoch: "e1", revision: 9 })).toBe("apply"); // 缺口已闭
+  });
+
   it("与 Rust 唯一的一处字面差异：还没应用过快照时不判未知（启动顺序让它不可达）", () => {
     const gate = createFreshnessGate();
     // Rust 的 `on_notification` 在这一格判 Rehandshake（`epoch == None` 分支），

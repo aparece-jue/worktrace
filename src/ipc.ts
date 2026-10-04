@@ -291,11 +291,20 @@ export function finishTimer(request: SessionRequest): Promise<CommandOutcome> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 去重协议：`RevisionGate` 的 TS 镜像（00 §5 规则①②③④）
+// 去重协议：`RevisionGate` 的 TS 镜像（闸门规则①②③④）
 //
 // 规范文本是 `src-tauri/src/services/events.rs`（`RevisionGate`，`:247`–`:363`）。
 // 这里的三个方法逐条对应它的三个方法，**分支顺序与判据一个字都不改**：
 // 加一条分支、合并两条分支、换个比较符，都是改协议，得先改 Rust 那一侧。
+//
+// ⚠️ **两套编号别混**（fix round 1 / M4）：
+// - **闸门规则①②③④**（本文与 `domainState.ts` 用的这套）是 `events.rs`
+//   `on_notification` 里的**判决分支**编号：① 未知 epoch ⇒ 重新握手；② `revision <=`
+//   已应用水位 ⇒ 丢弃；③ `revision <=` 已见版本（重复/乱序）⇒ 丢弃；④ 跳号 ⇒ 取新快照；
+// - **00 §5 规则 1–5** 是架构文档那五条，与上面不是同一套编号。对照关系：
+//   §5 规则 1 = 先监听后快照（[`startEventSession`]）、§5 规则 2 ≈ 闸门①、
+//   §5 规则 3 ≈ 闸门②、§5 规则 4 = 重显/可见窗口至多每 30 秒校验 `get_revision`、
+//   §5 规则 5 ≈ 闸门④。
 //
 // 两侧靠一份**共读的向量**保持机械联系（`src/types/__vectors__/revision-gate.json`）：
 // Rust 的 `tests/revision_gate_vectors.rs` 与 TS 的
@@ -334,14 +343,17 @@ export type QueryVerdict = "accept" | "drop" | "rehandshake";
  * 只做**比较与判决**，不做接纳动作：接纳一个快照、丢弃一条通知、要不要重新握手，
  * 都是 `src/state/domainState.ts` 的事（这里给它可测的原语）。
  *
- * 四条规则的分工（别合并成一个 `shouldApply`：它们的**处置不同**）：
- * - **规则①（未知 epoch）**：[`FreshnessGate.isUnknownEpoch`] ⇒ **重新握手**；
- * - **规则②（通知）**：[`FreshnessGate.isStaleNotification`]，同 epoch 且 `revision`
- *   **小于等于**已应用水位 ⇒ 丢弃（快照已经把这一版包含进去了）；
- * - **规则③（查询响应）**：[`FreshnessGate.isStaleResponse`]，同 epoch 且 `revision`
- *   **更小** ⇒ 丢弃。同版本是合法的（重复查询），不丢；
- * - **规则④（跳号/乱序）**：[`FreshnessGate.onNotification`] 发现缺口 ⇒ `resync`，
- *   并且**在拿到新快照之前一直要求重新同步**（迟到的补号通知不能就地补课）。
+ * 分工（别合并成一个 `shouldApply`：它们的**处置不同**）：
+ * - **闸门规则①（未知 epoch）**：[`FreshnessGate.isUnknownEpoch`] ⇒ **重新握手**；
+ * - **闸门规则②（同 epoch 且 `revision <=` 已应用水位）**：安静丢弃。⚠️ 它**只在文档里
+ *   对照**：真实判决走 [`FreshnessGate.onNotification`]（内部按同样顺序调它），
+ *   调用方不要自己拼这些分支；
+ * - **闸门规则③（同 epoch 且 `revision <=` 已见版本，重复/乱序）**：同样丢弃；
+ * - **闸门规则④（跳号）**：[`FreshnessGate.onNotification`] 发现缺口 ⇒ `resync`，
+ *   并且**在拿到新快照之前一直要求重新同步**（迟到的补号通知不能就地补课）；
+ * - **查询响应**（另一条判据，**不是**上面④条之一）：[`FreshnessGate.onQueryResponse`]
+ *   与 [`FreshnessGate.isStaleResponse`]，同 epoch 且比已应用/所需版本**更小** ⇒ 丢弃；
+ *   同版本是合法的（重复查询），不丢。
  *
  * ⚠️ 与 Rust 的**唯一**一处字面差异：`RevisionGate::on_notification` 在
  * `epoch == None`（还没应用过任何快照）时判 `Rehandshake`，而这里的
@@ -356,15 +368,19 @@ export interface FreshnessGate {
   applied(): VersionStamp | null;
   /** 已应用的 epoch；等价于 `applied()?.data_epoch ?? null`（Rust 的 `epoch()`）。 */
   epoch(): string | null;
-  /** 已接纳通知/快照的最大版本；规则④的跳号判据（Rust 的 `seen_revision()`）。 */
+  /** 已接纳通知/快照的最大版本；闸门规则④的跳号判据（Rust 的 `seen_revision()`）。 */
   seenRevision(): number;
   /**
-   * 记下一个已应用的响应。水位只前进：同 epoch 内更旧或同版的标记不会把它拉回去；
-   * 换 epoch 则重新起算（`seen` 与缺口标记一并重置，同 `applySnapshot` 的
-   * `cache_invalidated` 分支）。
+   * 记下一个**已应用**的响应（"收到" ≠ "用上"：水位由调用方在真的应用进镜像之后才推）。
    *
-   * `seenRevision()` 也跟着前进——它记的是**一份已应用的快照**，不是"收到了一条通知"
-   * （那一条走 [`FreshnessGate.onNotification`]，它只推 `seen`）。
+   * 它就是 {@link FreshnessGate.applySnapshot} 的接受分支——**同一份实现**（fix round 1
+   * / M5：原先这里另写了一套，`<=` 与 `<` 的差别、清不清缺口标记都和 `applySnapshot`
+   * 分叉，等于给同一个状态留了两套语义）。水位只前进：同 epoch 内更旧或同版的标记不会
+   * 把它拉回去；换 epoch 则重新起算；应用一份到第 N 版的快照也会把缺口标记清掉
+   * （`events.rs`：「一份权威快照就是重新同步本身」）。
+   *
+   * ⚠️ **本阶段没有生产调用者**（登记在计划的「遗留与边界」）：页面（Task 3/5）应用
+   * 自己那份带 epoch 的查询响应时会用它；在那之前它与 `onQueryResponse` 一样只被用例驱动。
    */
   markApplied(stamp: VersionStamp): void;
   /**
@@ -377,7 +393,7 @@ export interface FreshnessGate {
   /**
    * 处置一条 **`domain.changed`** 通知（`RevisionGate::on_notification` 的逐条镜像）。
    *
-   * 分支顺序就是规则的顺序，不要重排：① 未知 epoch ⇒ `rehandshake`；
+   * 分支顺序就是闸门规则的顺序，不要重排：① 未知 epoch ⇒ `rehandshake`；
    * ② 同 epoch 且 `revision <=` 已应用水位 ⇒ `drop`；③ 同 epoch 且 `revision <=`
    * 已见版本（重复/乱序）⇒ `drop`；④ 跳号 ⇒ `resync`，且在拿到新快照之前**持续**
    * `resync`。
@@ -402,25 +418,25 @@ export interface FreshnessGate {
     requiredRevision: number,
   ): QueryVerdict;
   /**
-   * 规则①：这个版本标记来自**未知 epoch**（与已应用水位不是同一个库）。
+   * 闸门规则①：这个版本标记来自**未知 epoch**（与已应用水位不是同一个库）。
    *
-   * 处置与规则②**不同**，所以是单独一个方法：规则②是安静地扔掉（快照已经包含它），
-   * 规则①要**重新握手**再拉一致快照。`isStaleNotification` 对未知 epoch 返回 `false`
-   * 正是为了不让它被"静默丢弃"那条路吞掉——调用方必须**显式先问这一条**。
+   * 处置与闸门规则②**不同**，所以是单独一个方法：闸门规则②是安静地扔掉（快照已经包含它），
+   * 闸门规则①要**重新握手**再拉一致快照。`isStaleNotification` 对未知 epoch 返回 `false`
+   * 正是为了不让它被"静默丢弃"那条路吞掉——[`FreshnessGate.onNotification`] 显式先问它。
    *
    * `applied()` 为 `null`（还没应用过任何快照）时不判未知：启动阶段"先订阅、再拉快照"
    * 的顺序由 [`startEventSession`] 保证。
    */
   isUnknownEpoch(stamp: VersionStamp): boolean;
   /**
-   * 规则③：这个查询响应该不该被丢弃。
+   * 查询响应该不该被丢弃（`sendVersioned` 用；00 §5 规则 3 的那半）。
    *
    * `requestEpoch` 是**发起请求时**调用方手上的 epoch（`null` = 这条命令不带 epoch，
    * 如 `get_revision`）。响应回来的 epoch 与它不一致 ⇒ 这次响应回答的不是调用方
-   * 问的那个世界，丢弃并由调用方重新握手（规则①）。
+   * 问的那个世界，丢弃并由调用方重新握手（闸门规则①）。
    */
   isStaleResponse(stamp: VersionStamp, requestEpoch: string | null): boolean;
-  /** 规则②：这条通知该不该被丢弃（**不含**未知 epoch 那一支）。 */
+  /** 闸门规则②：这条通知该不该被丢弃（**不含**未知 epoch 与重复/乱序那两支）。 */
   isStaleNotification(stamp: VersionStamp): boolean;
 }
 
@@ -440,6 +456,22 @@ export function createFreshnessGate(): FreshnessGate {
     return stamp.revision <= applied.revision;
   };
 
+  /** `RevisionGate::apply_snapshot` 的逐条镜像；`markApplied` 也走它（只有一份状态迁移）。 */
+  const applySnapshot = (dataEpoch: string, revision: number): SnapshotEffect => {
+    if (applied !== null && applied.data_epoch === dataEpoch) {
+      if (revision < applied.revision) return "stale_ignored";
+      applied = { data_epoch: dataEpoch, revision };
+      seen = Math.max(seen, revision);
+      // 一份权威快照就是「重新同步」本身：缺口到此为止。
+      resyncRequired = false;
+      return "applied";
+    }
+    applied = { data_epoch: dataEpoch, revision };
+    seen = revision;
+    resyncRequired = false;
+    return "cache_invalidated";
+  };
+
   return {
     applied: () => applied,
 
@@ -448,44 +480,25 @@ export function createFreshnessGate(): FreshnessGate {
     seenRevision: () => seen,
 
     markApplied(stamp) {
-      if (applied !== null && applied.data_epoch === stamp.data_epoch) {
-        if (stamp.revision <= applied.revision) return;
-        applied = { data_epoch: stamp.data_epoch, revision: stamp.revision };
-        seen = Math.max(seen, stamp.revision);
-        return;
-      }
-      // 换 epoch：上一代次的 revision 不可比（00 §5），重新起算——
-      // 与 applySnapshot 的 cache_invalidated 分支同一条处置。
-      applied = { data_epoch: stamp.data_epoch, revision: stamp.revision };
-      seen = stamp.revision;
-      resyncRequired = false;
+      // 与 applySnapshot 是**同一次**状态迁移（fix round 1 / M5）：旧版这里另写了一套，
+      // 同版标记的处置与缺口标记的清与不清都和 applySnapshot 分叉。返回值（判决）只有
+      // 快照的调用方需要，这里丢掉；「收到 ≠ 用上」的分工不变——调用方在真的应用进
+      // 镜像之后才调它。
+      applySnapshot(stamp.data_epoch, stamp.revision);
     },
 
-    applySnapshot(dataEpoch, revision) {
-      if (applied !== null && applied.data_epoch === dataEpoch) {
-        if (revision < applied.revision) return "stale_ignored";
-        applied = { data_epoch: dataEpoch, revision };
-        seen = Math.max(seen, revision);
-        // 一份权威快照就是「重新同步」本身：缺口到此为止。
-        resyncRequired = false;
-        return "applied";
-      }
-      applied = { data_epoch: dataEpoch, revision };
-      seen = revision;
-      resyncRequired = false;
-      return "cache_invalidated";
-    },
+    applySnapshot,
 
     onNotification(stamp) {
-      // ① 未知 epoch：另一个库的数据 ⇒ 重新握手，绝不直接接纳。
+      // 闸门① 未知 epoch：另一个库的数据 ⇒ 重新握手，绝不直接接纳。
       if (isUnknownEpoch(stamp)) return "rehandshake";
-      // ② 同 epoch 且 revision <= 已应用水位：快照已经把那一版包含进去了。
+      // 闸门② 同 epoch 且 revision <= 已应用水位：快照已经把那一版包含进去了。
       if (isStaleNotification(stamp)) return "drop";
-      // ③ 同 epoch 且 revision <= 已见版本：重复或乱序。
+      // 闸门③ 同 epoch 且 revision <= 已见版本：重复或乱序。
       if (stamp.revision <= seen) return "drop";
-      // ④ 发现过缺口 ⇒ 在新快照到手之前持续要求重新同步。
+      // 闸门④ 发现过缺口 ⇒ 在新快照到手之前持续要求重新同步。
       if (resyncRequired) return "resync";
-      // ④ 跳号 ⇒ 记下缺口，取新快照。
+      // 闸门④ 跳号 ⇒ 记下缺口，取新快照。
       if (stamp.revision > seen + 1) {
         resyncRequired = true;
         return "resync";
@@ -530,7 +543,7 @@ export async function sendVersioned<T extends VersionStamp>(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 事件订阅（00 §5 规则①的调用顺序）
+// 事件订阅（00 §5 规则 1 的调用顺序）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** 一个已打开的事件会话；`close()` 之后不再有任何回调。 */
@@ -539,7 +552,7 @@ export interface EventStream {
 }
 
 /**
- * **先订阅、再拉快照**的唯一入口（00 §5 规则①）。
+ * **先订阅、再拉快照**的唯一入口（00 §5 规则 1）。
  *
  * 顺序固定，不可调换：
  *
@@ -552,12 +565,12 @@ export interface EventStream {
  * `load()` 抛错 ⇒ 订阅立刻撤掉并原样抛出（不留悬挂监听）。
  *
  * ⚠️ `handler` 拿到的通知**还没有经过水位过滤**（Task 2 的 `domainState` 自己判）：
- * `domain.changed` 走 [`FreshnessGate.onNotification`]（规则①②③④的唯一入口，分支
+ * `domain.changed` 走 [`FreshnessGate.onNotification`]（闸门规则①②③④的唯一入口，分支
  * 顺序写在那份实现的注释里）；`timer.tick` **不走水位**，按 00 §5 的计时判据单独处理。
  *
  * ⚠️ `load()` **必须在返回之前把快照应用进水位**（`applySnapshot`，即 Task 1b 说的
  * `markApplied` 前置）：暂存的通知是在 `load()` 返回之后才交付的，那时水位已经推过，
- * 它们才会按规则②（`revision <=` 快照版本 ⇒ 丢弃）判；否则启动期这条缝里的通知
+ * 它们才会按闸门规则②/④判；否则启动期这条缝里的通知
  * 会因为"还没应用过任何快照"落进 apply 分支（`isUnknownEpoch` 对 `applied() === null`
  * 不判未知、`isStaleNotification` 也不判过期）。
  */

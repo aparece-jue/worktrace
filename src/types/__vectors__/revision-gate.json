@@ -1,6 +1,6 @@
 {
   "protocol": "revision-gate",
-  "normative": "src-tauri/src/services/events.rs 的 RevisionGate（00 §5 的四条去重规则）",
+  "normative": "src-tauri/src/services/events.rs 的 RevisionGate（:247-:363；闸门规则①②③④，对应 00 §5 规则 2/3/5）",
   "read_by": [
     "src-tauri/tests/revision_gate_vectors.rs",
     "src/state/__tests__/revision-protocol.test.ts"
