@@ -199,6 +199,48 @@
 
 首次与恢复后身份握手、周期版本校验统一调用 services::handshake::get_revision(db)，无需 expected_data_epoch；业务查询仍必须带握手得到的 epoch。顺序为监听并缓冲事件→握手→业务快照；epoch 变化时丢弃旧请求结果并重新握手。get_revision 仅返回身份/版本，不代替完整业务视图。P2 命令结果在提交后从一个读事务重建，结果 revision 与 snapshot.revision 相同。分层脚本已检查 commands 禁止依赖 storage/rusqlite/Connection；IPC 与事件协议当时仍待实现（2026-10-04 晚订正：**IPC 的 Rust 半边已落地**，见下一节）。
 
+## Task 3 的契约补口：`TimerSnapshot` 带任务身份（2026-10-04）
+
+**为什么这是契约补口，不是计划外扩张**：缺口是 **Task 3 实施前端时发现的**，并按纪律登记成
+「待接线」而不是悄悄绕过去（见下面 Task 3 落地一节的最后一条）：「继续」按钮要发 `resume_timer`，
+而 `ResumeRequest` 需要 `task_id` + `task_expected_version`（`services/timer/coordinator.rs`，
+`resume` 用它 `guard_row_version_of_ro(conn, "task", …)` 并可能 `Ready → Doing`）。
+但 `TimerSnapshot`（`services/timer/snapshot.rs`）里**没有任何任务字段**，24 条命令里也
+**没有** session→task 的读路径（`TaskRow` 不带会话、`list_tasks` 只按 status/project/context 筛、
+托盘只做 `pause`）。后果是**本窗口之外的会话**——冷启动「重开窗口」（F-009 的正常路径）
+或托盘暂停之后——根本拿不到这条 paused 会话属于哪个任务，Task 3 里「继续」这一项
+**在这一处是断的**。
+
+**前端为什么绕不过去**：唯一的徒手办法是让发起 `start_timer` 的那一方把任务身份记在内存里，
+再经外壳交给计时页——那**只覆盖"本窗口自己开的会话"**，冷启动（重开窗口）与托盘暂停这两条
+正常路径仍然没有身份；而「会话 → 任务」的读路径在 24 条命令里不存在，前端**拿不到**，也不该
+为此新增一条命令（那要动命令面）。所以正确的落点是让**已有的那条读路径**（计时快照）带上任务
+身份——这也是 Task 3 落地一节当时写明的收口方式。
+
+- **新增两个字段**（`TimerSnapshot`，仍是 `Serialize`，仍是 `services`）：`task_id:
+  Option<String>` + `task_row_version: Option<i64>`。**空闲时一起是 `None`**（JSON 里是
+  `null`，键始终存在——**不加** `skip_serializing_if`，否则前端声明的 `string | null`
+  会在运行期变成 `undefined`）；有会话时 `task_id` 取自会话行、`task_row_version` 取自任务行。
+- **任务版本每次采样重读**，不缓存在协调器内存镜像里：暂停期间改任务（例如改标题）会 bump
+  `task.row_version`，缓存的值会让「继续」拿着过期版本去撞 `VERSION_CONFLICT`。
+  `LiveSession` 只多带 `task_id`（会话一生不变，属身份，不是第二份真相源）。
+- **纯读**：不采样（样本由入口传入）、不写库、不 bump `revision`、**不新开事务**（沿用调用方
+  给的连接）——既有事务边界一处未动。分层六条规则不变。
+- **同轮落地，缺一即红**：三份快照重生成（`timer_snapshot` / `timer_snapshot_idle` /
+  `command_outcome`，`WORKTRACE_UPDATE_IPC_SNAPSHOTS=1 cargo test --offline --test ipc_snapshots`；
+  复核 diff 只多这两行）、`src/types/ipc.ts` 的两个字段、`snapshot-contract.test.ts` 的键集合
+  登记，以及 4 处 `TimerSnapshot` **完整字面量**夹具（`tsconfig.json` 的 `include` 是 `src`，
+  漏一处 `pnpm build` 的 `tsc` 就红）。
+- **前端仍是「待接线」，不是「已接线」**：落点是**一个函数**——
+  `src/components/timerRequests.ts` 的 `buildResumeRequest(snapshot, taskIdentity)`。契约字段到了
+  之后，接线就是把第二个入参换成 `snapshot.task_id` / `snapshot.task_row_version`（三行），
+  并删掉 `TaskIdentity` 类型、外壳那份过渡状态与 `Inbox.onSessionStarted`；
+  「身份不可得 ⇒ 按钮不出现」这条判据语义不变（它退化成"快照里没有会话/任务 ⇒ 没有可继续的会话"）。
+  **本轮只补契约字段**：24 条命令的签名一条未动、没有新增命令、`src/pages/**` 与
+  `src/state/**` 的实现一行未动。
+- 细节、逐条「怎么才会红」与两处反向验证的原始输出见
+  `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task3-contract-report.md`。
+
 ## Task 1 的 Rust 半边已实现（2026-10-04 晚）
 
 **前端（Task 1b）要消费的 IPC 契约已冻在代码里**，细节与逐条验证见
@@ -393,6 +435,9 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
   任务身份由发起 `start_timer` 的收件箱页经外壳交给计时页；**身份不可得时「继续」不出现**。
   契约侧给 `TimerSnapshot` 补上 `task_id`/`task_row_version` 之后，接线就是把这个函数的第二个
   入参换成快照字段（三行），外壳那份过渡状态与 `Inbox.onSessionStarted` 一并删掉。
+  **（2026-10-04 同日收口）契约字段已落地**——`task_id` / `task_row_version` 已在快照里，
+  连同三份重生成的 IPC 快照与 TS 侧类型；理由、边界与反向验证见上面
+  「Task 3 的契约补口：`TimerSnapshot` 带任务身份」一节。
 - **顺带收（Task 2 复验点名）**：`beginSession` 的事件入口**按代次过滤**（`stop()` 之后
   `unlisten` 回来之前旧订阅 flush 出来的通知不再被新代次接纳）；补「旧代次握手失败 ⇒
   新代次不受影响」用例；`start()` 里那处永不触发的代次检查在注释里写明是**不变式断言**。
