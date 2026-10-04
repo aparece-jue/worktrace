@@ -7,6 +7,14 @@
 #   storage  must not touch platform::, commands:: or services::
 #   services must not touch std::time/SystemTime/Instant::now, nor commands::
 #
+# Matching is CASE-SENSITIVE (rg is by default; Select-String is not, hence
+# -CaseSensitive below): `AppError::Storage` is a variant name, not the `storage`
+# layer. A case-insensitive bare-word rule reported it as a leak.
+#
+# Since the P7 Task 1 fix round all four match the bare module WORD, not the
+# `module::` spelling: `use crate::{storage as db};` and `use crate::storage as _;`
+# are the same upward edge but contain no `storage::` substring. See the rule site.
+#
 # The services -> commands edge was added in P4 Task 2: the edge is the reverse of
 # the `commands -> services` direction. It slipped through once because nothing
 # checked it -- `WriteEnvelope` used to live in `commands::` and a service imported
@@ -70,7 +78,7 @@ function Test-LayerLeak {
     } else {
         Write-Host '  (rg absent, using Select-String)'
         $lines = Get-ChildItem -Recurse -File $Dir |
-            Select-String -Pattern $Pattern |
+            Select-String -Pattern $Pattern -CaseSensitive |
             ForEach-Object { "$($_.Path):$($_.LineNumber):$($_.Line)" }
     }
 
@@ -119,7 +127,7 @@ function Test-EntryPointLeak {
             $lines += $raw
         } else {
             $lines += Get-ChildItem -File $f |
-                Select-String -Pattern $Pattern |
+                Select-String -Pattern $Pattern -CaseSensitive |
                 ForEach-Object { "$($_.Path):$($_.LineNumber):$($_.Line)" }
         }
     }
@@ -139,9 +147,15 @@ function Test-EntryPointLeak {
 }
 
 $ok = $true
-$ok = (Test-LayerLeak 'src/commands' 'storage::|rusqlite|\bConnection\b' 'commands') -and $ok
-$ok = (Test-LayerLeak 'src/domain'  'rusqlite|std::fs|platform::|storage::|commands::|services::' 'domain')  -and $ok
-$ok = (Test-LayerLeak 'src/storage' 'platform::|commands::|services::'  'storage') -and $ok
+# P7 Task 1 fix round 1 (review I5): all four rules below used the `module::` form,
+# which misses the synonymous import spellings -- `use crate::{storage as db};` and
+# `use crate::storage as _;` contain no `storage::` substring at all. They now match
+# the bare module WORD (word boundaries, so `storage_path` is not a hit), the same
+# shape the platform rule already uses. Each of the four was reverse-verified with
+# both spellings injected: LEAK + exit 1 (see the P7 Task 1 fix round report).
+$ok = (Test-LayerLeak 'src/commands' '\b(storage|rusqlite|Connection)\b' 'commands') -and $ok
+$ok = (Test-LayerLeak 'src/domain'  '\b(rusqlite|platform|storage|commands|services)\b|std::fs' 'domain')  -and $ok
+$ok = (Test-LayerLeak 'src/storage' '\b(platform|commands|services)\b'  'storage') -and $ok
 
 # services must not read the system clock directly -- time has to come through
 # platform::clock::Clock so FakeClock can drive it. Without this check a single
@@ -150,7 +164,7 @@ $ok = (Test-LayerLeak 'src/storage' 'platform::|commands::|services::'  'storage
 # services must not touch commands:: either: that edge reverses the
 # `commands -> services` direction (P4 Task 2; see the header comment).
 # Both rules share this one check so the three output lines keep their shape.
-$ok = (Test-LayerLeak 'src/services' 'std::time|SystemTime|Instant::now|commands::' 'services') -and $ok
+$ok = (Test-LayerLeak 'src/services' 'std::time|SystemTime|Instant::now|\bcommands\b' 'services') -and $ok
 
 # platform must not reach up into any sibling layer (P7 Task 0, review I4; the
 # pattern was widened in the P7 Task 1 fix round -- see the header comment).

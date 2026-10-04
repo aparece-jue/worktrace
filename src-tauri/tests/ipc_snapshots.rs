@@ -345,8 +345,11 @@ fn every_response_dto_matches_its_committed_snapshot() {
 
 /// `timer.tick` 的 `payload` **就是** [`TimerSnapshot`] 的 JSON，不是第二份字段表。
 ///
-/// 原先 `services::events::timer_tick_payload` 手写了一份 `json!`，那是「改了 Rust 类型
-/// 忘了改前端类型」能漏过去的唯一一道缝；现在两份合成一份，这条等式钉住它。
+/// ⚠️ **这是回归绊线，不是当前行为的证据**（P7 Task 1 fix round 1，评审 M2）：两边现在
+/// 都走 `serde_json::to_value`，所以这条**恒真**。它的用处是将来——谁把
+/// `timer_tick_payload` 改回手写 `json!`（或漏掉一个字段），这里立刻红。
+/// 「载荷真的被发出去、字段真的到了客户端」这类外部证据在
+/// `tests/event_protocol.rs` 与 `tests/periodic_sampling.rs`（逐字段读 `payload["…"]`）。
 #[test]
 fn the_tick_payload_is_exactly_the_timer_snapshot_json() {
     let snapshot = timer_snapshot_active();

@@ -16,7 +16,7 @@
 use worktrace_lib::commands::StartTimerRequest;
 use worktrace_lib::domain::task::{TaskStatus, TransitionCause};
 use worktrace_lib::error::AppError;
-use worktrace_lib::services::catalog::{self, TaskQueryRequest};
+use worktrace_lib::services::catalog::{self, ProjectTarget, TaskQueryRequest};
 use worktrace_lib::services::timer::coordinator::{parse_session_mode, parse_timer_kind};
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
@@ -259,4 +259,22 @@ fn a_stale_epoch_is_rejected_by_the_query_guard() {
 fn write_outcome_hands_the_payload_and_the_changed_flag_to_the_command_layer() {
     assert_eq!(WriteOutcome::Changed(7).into_parts(), (7, true));
     assert_eq!(WriteOutcome::Unchanged(7).into_parts(), (7, false));
+}
+
+/// 改归属的二值 IPC 形状就是文档里写的那两个（P7 Task 1 fix round 1，评审 M4）。
+///
+/// 它与筛选用的三值 `ProjectSelector` 是**两个**枚举：那边有 `"any"`（不限制），
+/// 这边没有——「这次不改归属」的调用方不该调这个命令。
+#[test]
+fn the_project_target_has_its_two_documented_json_shapes() {
+    let bind: ProjectTarget = serde_json::from_str(r#"{"bind":"p1"}"#).unwrap();
+    assert_eq!(bind, ProjectTarget::Bind("p1".to_string()));
+
+    let clear: ProjectTarget = serde_json::from_str(r#""clear""#).unwrap();
+    assert_eq!(clear, ProjectTarget::Clear);
+
+    assert!(
+        serde_json::from_str::<ProjectTarget>(r#""any""#).is_err(),
+        "筛选用的三值形状不属于改归属"
+    );
 }
