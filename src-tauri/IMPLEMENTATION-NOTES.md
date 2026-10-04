@@ -78,9 +78,15 @@
 **专用工作线程 + channel**。
 
 **选定：单一 `Mutex`。** 落点在 `src/services/bootstrap.rs`：
-`AppState { db, coordinator, recovery }` + `SharedApp = Arc<Mutex<AppState>>` +
-`lock_app()`。周期采样驱动（`platform/scheduler.rs`）与用户命令取的是**同一把锁**——
+`AppState { db, coordinator, recovery }` + `AppBoundary { state: Mutex<AppState>, holder }`
++ `SharedApp = Arc<AppBoundary>` + `lock_app()`（返回 `AppGuard`）。
+周期采样驱动（`platform/scheduler.rs`）与用户命令取的是**同一把锁**——
 「每次触发走与用户命令同一条串行边界」不是口头约定，而是同一个 `Mutex`。
+
+> **2026-10-04 Task 4 fix round 1 订正**：`SharedApp` 早期就是 `Arc<Mutex<AppState>>`，
+> 现在多包了一层——`AppBoundary` 额外记着**当前持锁线程 id**（`holder`），
+> 用来在「持锁调显式退出」时明确失败而不是与采样线程互锁（评审 I1）。
+> 串行语义没变：能拿到 `db`/`coordinator` 的路径仍然只有 `lock_app` 一条。
 
 ### 为什么不是工作线程 + channel
 

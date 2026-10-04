@@ -52,25 +52,44 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
 
 ## 2. F-009：关掉全部窗口后托盘仍可用、计时继续
 
-1. 计时中记下界面秒数（或 `active_ms`），然后**关掉主窗**（标题栏 ×）：
+> **这一节是两趟（外加收尾的退出），前置状态不同，判据也不同**（fix round 1 复评 N1）：
+>
+> | 趟 | 关窗前的前置状态 | 只看什么 |
+> | --- | --- | --- |
+> | **2A** | 计时**正在跑** | 关窗 60 秒后 `interval_checkpoint` 的列值**前进**、`revision` **不变** |
+> | **2B** | 计时**已经暂停**（另起一趟） | 重开窗口**第一眼**就是 `paused` |
+> | **2C** | 接在 2A 那趟后面（计时仍在跑） | 托盘「退出」后 `clean_exit_at` 与会话收尾 |
+>
+> ⚠️ 不要混着做：**暂停之后**心跳直接 `Ok(false)`（`coordinator.rs` 的 `heartbeat` 第一句
+> 就查 `state != Running`），而且 `pause` 已经闭合了开放区间 ⇒ 2A 那条
+> `ended_at IS NULL` 的子查询**取不到行**，你会看到一个空结果，那不是「采样没在跑」，
+> 而是「这一趟的前置状态不对」。
+
+### 2A. 计时中关窗：核心还在采样
+
+1. **前置**：开始一次计时（会话 `running`），记下界面秒数（或 `active_ms`）；
+   **先查一次检查点并抄下两列的值**（60 秒后要对比）：
+
+   ```sql
+   SELECT wall_at, attribution_at, elapsed_ms FROM interval_checkpoint
+    WHERE interval_id = (SELECT id FROM work_interval
+                          WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1);
+   ```
+
+   同时抄下 `SELECT revision FROM app_meta WHERE singleton = 1`。
+2. **关掉主窗**（标题栏 ×）：
    - [ ] 进程仍在（任务管理器里有 `worktrace.exe`；托盘图标仍在）
    - [ ] 托盘菜单仍能展开、四项仍可点
    - [ ] `SELECT clean_exit_at FROM application_run ORDER BY started_at DESC LIMIT 1` 仍为 NULL
    - [ ] 开放区间仍在：`SELECT COUNT(*) FROM work_interval WHERE ended_at IS NULL` ≥ 1
    - 现象：
-2. 关窗后**等 60 秒**，从托盘点「当前任务」重开窗口：
+3. 关窗后**等 60 秒**，从托盘点「当前任务」重开窗口：
    - [ ] 展示的计时**继续走了这 60 秒**（不是停在关窗那一刻）
    - [ ] **核心判据——检查点在前进**（采样真的还在跑）。⚠️ 界面那个秒数是从
      `started_at` 算出来的：**采样线程就算死了，它照样「继续走」**，所以秒数本身证明不了
      关窗后还在采样。真正的证据在 `interval_checkpoint`，而且它**以 `interval_id` 为主键
      做 upsert**（`src/storage/schema_v1.rs:129`）——**行数不会涨，必须读列值**：
-     关窗前记一次，60 秒后再查一次，比列值：
-
-     ```sql
-     SELECT wall_at, attribution_at, elapsed_ms FROM interval_checkpoint
-      WHERE interval_id = (SELECT id FROM work_interval
-                            WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1);
-     ```
+     把第 1 步的 SQL 再跑一次，比列值：
 
      - [ ] `wall_at` 与 `elapsed_ms` 都**前进**，前进量 **≥ 20 秒**（心跳周期 30 秒、
        采样每秒一拍 ⇒ 正常情况下观察到 30–60 秒；**< 20 秒判不通过**：采样没在跑，
@@ -79,15 +98,35 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
      （原文见 `src/services/timer/coordinator.rs` 的 `heartbeat`：「心跳有自己的短事务，
      且**不加 revision**」；`services/bootstrap.rs` 的 `sample_tick` 说明同）。所以这一栏
      看到 revision 不动是**正确**的，不要把它当成「没有活动」。
-   - [ ] **窗口一出现就是对的**：devtools（`F12`）里新窗口先完成握手/拉快照、再收到事件
-     通知（Task 2 的启动顺序：先监听再拉一致快照）；**可操作判据**：关窗前先把计时
-     **暂停**，重开窗口后**第一眼**就应当是 paused（不是先空着/显示运行中、等下一拍通知
-     才纠正）。⚠️ 「秒数马上就是对的」**没有判别力**：有会话时采样每秒广播一次，
+     ⚠️ 如果这一栏看到 revision **涨了**，那不是心跳，是别的东西在写（例如你自己点了暂停）：
+     先查清再判定。
+   - 现象：
+4. **接着做 2C**（这一趟的计时还在跑，正好用来验退出收尾）。
+
+### 2B. 另起一趟：暂停后关窗，重开第一眼就该是暂停态
+
+> **前置状态与 2A 不同**：这一趟开始前，计时要**先暂停**（`state = 'paused'`）。
+> 这一趟**不看**检查点（暂停后心跳不写、开放区间已闭合，2A 那条 SQL 取不到行），
+> 只看「重开窗口第一眼对不对」。
+
+1. **前置**：开始一次计时，然后**暂停**它：
+   `SELECT state FROM work_session WHERE run_id = '<上面取到的 run id>'` = `paused`。
+2. **关掉主窗**（标题栏 ×），再等 10–30 秒（不必等 60 秒）。
+3. 从托盘点「当前任务」重开窗口：
+   - [ ] **第一眼**就是 paused（不是先空着/显示「运行中」、等下一拍通知才纠正）。
+     **可操作判据**：窗口一出现就去看计时区；若需要「眨一下眼」才变对，就是没通过。
+     devtools（`F12`）里也能看到：新窗口先完成握手/拉快照、再收到事件通知
+     （Task 2 的启动顺序：先监听再拉一致快照）。
+   - [ ] ⚠️ 「秒数马上就是对的」**没有判别力**：有会话时采样每秒广播一次，
      「等下一次通知」的实现看起来一模一样。
      （Rust 半边 = `platform::window` 的 `Rebuild` 分支，已由 `tests/shell_lifecycle.rs`
      钉住；前端半边归 Task 2 的单测。）
    - 现象：
-3. **再关掉全部窗口**，从托盘点「退出」：
+
+### 2C. 收尾：从托盘「退出」
+
+1. **前置**：至少还有一个**运行中**的会话（接 2A 那趟；若已做 2B，就再开一次计时）。
+2. **先关掉全部窗口**（确保「没有窗口也退得掉」），再从托盘点「退出」：
    - [ ] 进程结束，托盘图标消失
    - [ ] `clean_exit_at` 已写入（非 NULL）
    - [ ] 会话被结束：`state = 'finished'`，开放区间已闭合（`ended_at` 非 NULL）

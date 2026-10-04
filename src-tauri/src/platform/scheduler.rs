@@ -145,6 +145,13 @@ impl Scheduler {
 }
 
 impl Drop for Scheduler {
+    /// **注意（fix round 1 复评 N2）**：这里无条件 `stop()`，**不查**
+    /// `holds_app_lock`。所以「同一个线程既持有串行边界的 guard、又丢弃自己拥有的
+    /// `Scheduler`」能绕过 `RunningApp::shutdown` 的那道自死锁防线（`drop` 会 `join`，
+    /// 而采样线程正堵在那把锁上）。**当前生产路径不可达**：`Scheduler` 只被 `RunningApp`
+    /// 拥有，而 `RunningApp` 由 Tauri 托管、按进程生命周期析构（那时没有别的线程持锁）。
+    /// P8 若新增「拥有并显式丢弃 `RunningApp`」的退出路径，必须先放掉那把锁——
+    /// 与 `shutdown` 的姿势一致。
     fn drop(&mut self) {
         self.stop();
     }
