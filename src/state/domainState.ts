@@ -131,15 +131,20 @@ export interface DomainState {
    */
   refresh(): Promise<void>;
   /**
-   * 这条**页面自己发的**查询响应是不是"回答的不是我们现在问的那个世界"。
+   * 一条查询响应是不是"回答的不是我们现在问的那个世界"（**读侧**判据）。
    *
-   * 页面在响应回来时问一次：`true` ⇒ **丢弃，不要拿它覆盖已经显示的新状态**。
+   * 调用方拿到响应时问一次：`true` ⇒ **丢弃，不要拿它覆盖已经显示的新状态**。
    * 只读：用的是本上下文**唯一那把**闸门（`FreshnessGate::isStaleResponse`，
    * 闸门规则①/③的读侧一半）。
    *
    * ⚠️ 它比的是**全局**水位，所以只适合"全量快照"型响应。页面的**过滤 / 分页**视图
    * （`list_tasks` / `list_projects`）用自己那一份视图水位，见
    * `src/components/viewWatermark.ts` 与 {@link markApplied} 的警告（评审 I1）。
+   *
+   * 当前**生产调用者为 0**：最后一个调用方 `src/pages/Inbox.tsx` 已在 Task 5 fix round 2
+   * 改用 `viewWatermark`（三个页面现在都用本视图水位），只剩
+   * `src/state/__tests__/domainState.test.ts` 在驱动它。**登记、不删**——判据本身没错，
+   * 留给将来真的"全量快照型"响应；P8 若要复用它需**重新接线**。
    */
   isStaleResponse(stamp: VersionStamp, requestEpoch: string | null): boolean;
   /**

@@ -492,7 +492,9 @@ interface ViewWatermark {
   `createFreshnessGate`（`:444`）、`sendVersioned`（`:536`）、`startEventSession`（`:577`）。
 - `src/state/domainState.ts`：`DomainState` 接口（`:103`–`:166`）——
   `subscribe` / `getView` / `subscriberCount` / `start` / `stop` / `rehandshake` / `refresh` /
-  `isStaleResponse` / `markApplied`；单例 `domainState`（`:623`）。
+  `isStaleResponse`（**当前生产调用者为 0**：最后一个调用方 `Inbox.tsx` 已在 Task 5
+  fix round 2 改用 `viewWatermark`，只剩用例驱动 ⇒ P8 若复用需**重新接线**） /
+  `markApplied`（同：生产调用者为 0）；单例 `domainState`（`:623`）。
 - `src/state/hooks.ts`：`useDomainView` / `useDataEpoch` / `useHandshakePhase` /
   `useTimerSnapshot` / `useRunningTaskId` / `useInvalidation`。
 - **P8 加页面的姿势**：在 `src/App.tsx` 的挂载区加一个分支 + 一个 `src/pages/*.tsx`，
