@@ -10,3 +10,10 @@ body { margin: 0; background: #f5f7fa; color: #172235; font-family: "Segoe UI", 
 .app-nav { border-right: 1px solid #e5e9f0; padding: 16px; }
 .app-page { overflow: auto; padding: 24px; }
 .app-status { background: #ffffff; border-top: 1px solid #e5e9f0; padding: 8px 24px; }
+
+/* 收件箱列表（P7 Task 3）：每行「标题 | 状态标签 | 允许的入口」。 */
+.inbox-list { list-style: none; margin: 0; padding: 0; background: #ffffff; border: 1px solid #e5e9f0; border-radius: 8px; }
+.inbox-item { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid #f0f2f5; }
+.inbox-item:last-child { border-bottom: none; }
+.inbox-title { flex: 1; word-break: break-word; }
+.inbox-status { margin: 0; }
