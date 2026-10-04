@@ -698,6 +698,48 @@ pub fn void_interval(
     })
 }
 
+/// 重定时一段**已确认且未作废**的区间（S8 的第三条，P3 Task 3 的 `correct` 用）。
+///
+/// - 只接受 `needs_review = 0 AND voided_at IS NULL`：待确认的候选端点不是事实
+///   （要先用 `reconcile` 确认），已作废的行只能在历史与审计里看。服务层已经用
+///   「可信历史」前置挡住这两种输入，这里是原语自己的契约。
+/// - `started_at`/`ended_at`/`duration_ms` **一次 UPDATE 同时写**：`duration_ms` 是
+///   同一事实的校验值，不能独立编辑（08 §1），也不允许出现「改了起止但时长没跟着变」
+///   的行（`ck_interval_duration` 兜底）。
+/// - 时长由调用方按 `ended_at - started_at` 给；仓储不读时钟、不推算工时。
+pub fn retime_interval(
+    tx: &Transaction<'_>,
+    interval_id: &str,
+    started_at: i64,
+    ended_at: i64,
+    duration_ms: i64,
+) -> Result<IntervalRow, AppError> {
+    let before = get_interval(tx, interval_id)?.ok_or(DomainError::UnknownInterval)?;
+    if before.voided_at.is_some() || before.needs_review {
+        return Err(AppError::Domain {
+            detail: "只有已确认且未作废的区间能重新定时。".into(),
+        });
+    }
+
+    let changed = tx
+        .execute(
+            "UPDATE work_interval
+                SET started_at = ?1, ended_at = ?2, duration_ms = ?3
+              WHERE id = ?4 AND needs_review = 0 AND voided_at IS NULL",
+            rusqlite::params![started_at, ended_at, duration_ms, interval_id],
+        )
+        .map_err(map_sqlite)?;
+    if changed == 0 {
+        return Err(AppError::Domain {
+            detail: "只有已确认且未作废的区间能重新定时。".into(),
+        });
+    }
+
+    get_interval(tx, interval_id)?.ok_or_else(|| AppError::Storage {
+        detail: "interval vanished after retime".into(),
+    })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 恢复扫描用的查询（P7 Task 0；P3 Task 1 泛化成「可选 run 过滤」）
 //

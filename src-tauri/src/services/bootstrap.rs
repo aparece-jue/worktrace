@@ -50,6 +50,7 @@ use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
+use crate::services::history::{CorrectRequest, HistoryEditReport};
 use crate::services::recovery::{ReconcileReport, ReconcileRequest};
 use crate::services::timer::coordinator::{
     CommandOutcome, Coordinator, ResumeRequest, SessionRequest, StartRequest,
@@ -698,6 +699,46 @@ impl AppState {
         self.rescan_recovery()?;
 
         // `live()` 是只读访问器；先问清楚「镜像的是不是这条」，再决定要不要刷新。
+        let mirrored = {
+            let AppState { coordinator, .. } = self;
+            coordinator
+                .live()
+                .map(|live| live.id == session_id)
+                .unwrap_or(false)
+        };
+        if mirrored {
+            let AppState {
+                db, coordinator, ..
+            } = self;
+            coordinator
+                .load_session(db.connection(), &session_id)
+                .map_err(|_| AppError::RecoveryRequired)?;
+        }
+        Ok(outcome)
+    }
+
+    /// 历史修正（重定时 / 软删除）的命令入口（P3 S2）。`env` 的版本位是**会话**版本。
+    ///
+    /// 与 [`AppState::reconcile`] 的两点不同（Task 3 的计划原文）：
+    /// 1. **不重扫门禁**——`correct` 不改恢复性，门禁快照照旧；
+    /// 2. 提交后仍然**当且仅当被改动的会话正是协调器此刻镜像的那条**时
+    ///    `Coordinator::load_session` 刷新它（Ruling 13）：`finish` 之后 `live` 还停在
+    ///    那条 `finished` 会话上，所以这条真的会命中——不刷新的话，快照的
+    ///    `closed_trusted_ms` 会继续按修正前的时长算。刷新失败同样映射
+    ///    [`AppError::RecoveryRequired`]（提交后约定：已提交事实保留，缺的是内存与事实
+    ///    重新对上）。
+    pub fn correct(
+        &mut self,
+        env: WriteEnvelope,
+        req: CorrectRequest,
+    ) -> Result<WriteOutcome<HistoryEditReport>, AppError> {
+        let now = self.coordinator.wall_ms()?;
+        let session_id = req.session_id.clone();
+        let outcome = {
+            let AppState { db, .. } = self;
+            crate::services::history::correct(db, env, req, now)?
+        };
+
         let mirrored = {
             let AppState { coordinator, .. } = self;
             coordinator

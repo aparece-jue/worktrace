@@ -7,7 +7,7 @@
 //! （版本 + 库身份，仍在同一个写事务里读回）。
 //!
 //! 可见性 `pub(super)`：只有 `services` 自己的子模块（`catalog` / `daily_plan` /
-//! `recovery`）用它，命令层与仓储层都不该直接拿——事务的所有权属于服务层，
+//! `recovery` / `history`）用它，命令层与仓储层都不该直接拿——事务的所有权属于服务层，
 //! 仓储只接受 `&Transaction`。
 
 use rusqlite::Transaction;
