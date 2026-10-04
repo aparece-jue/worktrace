@@ -1223,6 +1223,83 @@ fn discarding_the_running_session_leaves_the_mirror_on_discarded() {
         .expect("作废之后可以开始新计时");
 }
 
+/// **R13 的反向**：作废一条**不是**镜像的会话时不得抢走 `live`。
+///
+/// 与 `tests/reconcile.rs::reconciling_another_session_does_not_clobber_the_live_mirror`
+/// 同形：无条件 `load_session`（Ruling 13 明文禁止、Task 2 犯过的那一版）会把 `live`
+/// 换到那条刚被作废的会话上，而 `load_session` 对 `discarded` 会话不报错、`active_ms`
+/// 也照样是 0——所以这条断言必须显式钉住「镜像还是 A，且还是 `running`」。
+#[test]
+fn discarding_another_session_does_not_clobber_the_live_mirror() {
+    let fx = fixture();
+    let db = seeded(&fx);
+    drop(db);
+
+    let running = started(&fx);
+    let mut state = lock_app(running.app());
+    let epoch = running.data_epoch().to_string();
+    let run = running.run_id().to_string();
+
+    // 本 run 的 A：协调器镜像的就是它。
+    let task_v = task_version(state.db());
+    state.start(start_request(&epoch, task_v)).unwrap();
+    let live_id = state.coordinator().live().unwrap().id.clone();
+    assert_eq!(
+        state.coordinator().live().unwrap().state,
+        SessionState::Running
+    );
+
+    // 同一个 run 里另一条可作废的 B（本 run 的会话不是门禁材料，所以不挡计时）：
+    // 这里手工造它的理由与 Task 2 的同形用例一致——它只需要「一条能被作废的会话」。
+    insert_session(
+        state.db(),
+        "s-b",
+        &run,
+        "FOREGROUND",
+        "recovering",
+        WALL - 2_000,
+        None,
+        1,
+    );
+    insert_interval(
+        state.db(),
+        "s-b-cand",
+        "s-b",
+        WALL - 2_000,
+        Some(WALL - 1_000),
+        None,
+        1,
+        None,
+    );
+
+    state
+        .discard_session(env_update(&epoch, 0), discard_request("s-b"))
+        .expect("作废别的会话");
+
+    // 命令本身生效了：B 整次作废。
+    let db = state.db();
+    assert_eq!(session(db, "s-b").state, "discarded");
+    assert_eq!(interval(db, "s-b-cand").voided_at, Some(WALL));
+
+    // 而镜像必须原样停在 A 上：既没被抢走，也没被换成已作废的 B。
+    {
+        let live = state.coordinator().live().expect("镜像还在");
+        assert_eq!(live.id, live_id, "作废别的会话不得把 live 换成它");
+        assert_eq!(
+            live.state,
+            SessionState::Running,
+            "正在计时那条的镜像必须原样保留"
+        );
+    }
+    let snapshot = state.snapshot().unwrap();
+    assert_eq!(
+        snapshot.session_id.as_deref(),
+        Some(live_id.as_str()),
+        "快照仍描述正在计时那条"
+    );
+    assert_eq!(snapshot.state, Some(SessionState::Running));
+}
+
 /// 重复作废（会话已经是 `discarded`、区间都已作废）⇒ `Unchanged`：
 /// 不写审计、不加 `revision`、不加 `row_version`、不移动 `ended_at`。
 #[test]
