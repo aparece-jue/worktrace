@@ -16,8 +16,8 @@
 - **平台验收：不在 P1/P2 的完成门槛内，尚未完成。** 分工见第七节。
 - **第四节的两处已在本次补齐**（用户裁定"都现在补"）：跨午夜含暂停由 **P2 验证事实、P5 验证分桶**
   两边承接；前台占用冲突改为业务事务内的领域检查、返回 `DOMAIN_ERROR`。详见第四节。
-- **两份计划自身的勾选项**：P1 计划 **24/24 全部勾选**；P2 计划 65 勾选、5 未勾，
-  而这 5 条**全部明确归后续计划**——P6 维护态期间禁止采样写入、P7/P8 平台接线与实机验收、
+- **两份计划自身的勾选项**：P1 计划 **24/24 全部勾选**；P2 计划**写记录时 65 勾 / 5 未勾**——其后加了 3 条已勾项、并把一条已完成项改成未勾，**本次回勾前是 67 勾 / 6 未勾**；本次把其中 1 条已完成的「P7 接线 `capture_error_response`」回勾后为 **68 勾 / 5 未勾**，
+  而写记录时那 5 条**全部明确归后续计划**——P6 维护态期间禁止采样写入、P7/P8 平台接线与实机验收、
   P3 的同 run 显式接受校正、P3/P7 的旧 running 启动扫描。**没有一条落在 P1/P2 自身范围内**。
 
 ## 二、02 §8 M01/M05 必测案例（14 条）
@@ -30,7 +30,7 @@
 | 4 | 并发 start | **已覆盖** | 服务占用领域冲突用例与并发唯一索引兜底用例 + `a_stale_epoch_request_writes_nothing` + `freezing_with_a_stale_version_is_refused` |
 | 5 | 跨午夜含暂停 | **已覆盖**（P2 事实 + P5 分桶） | P2：`pausing_across_midnight_keeps_pause_out_of_effort`（23:45 工作到 23:55 → 暂停跨午夜两小时 → 次日 01:55 再工作 30 分钟 → 结束；暂停不计入、两段各自不跨午夜）；域层公式：`a_session_crossing_midnight_splits_evenly`、`clipping_follows_the_spec_formula`；分桶归 P5（见 P5 计划「跨午夜与日界分桶」） |
 | 6 | 空范围 | 域层已覆盖；查询归 P5 | 零长度区间合法：`zero_length_intervals_are_valid_but_negative_ones_are_not`；裁剪公式同上；空查询范围属统计 → P5 |
-| 7 | 同名根标签 | P1 已建机制，行为归 P4 | `uq_tag_root ON tag(kind,name) WHERE parent_id IS NULL`（`schema_v1.rs:187`）；**无测试踩过** → P4 Task 3 |
+| 7 | 同名根标签 | P1 已建机制，行为归 P4 | `uq_tag_root ON tag(kind,name) WHERE parent_id IS NULL`（`schema_v1.rs:187`）；**无测试踩过** → P4 Task 3（其后：已有 `tests/tags.rs:451` 的 `duplicate_names_are_refused_within_a_kind_but_allowed_across_kinds` 覆盖根标签同名——同 kind 领域拒绝且零变化、跨 kind 各自成行） |
 | 8 | 历史工时重叠 | **已覆盖** | `rebased_clock_cannot_start_inside_confirmed_history` + `require_available_human_start`（在 start/resume 事务内） |
 | 9 | 强杀后十秒内重启 | 事实层已备；扫描归 P3 | `timer_anomaly.rs` 11 条（可信前缀、待确认余段、审计、幂等、字段级回滚）；启动扫描 → P3 Task 1 |
 | 10 | 运行/暂停时退出 | 归 P6/P7 | 显式退出原语与 `application_run` 生命周期 → P6；P7 接线 |
@@ -89,13 +89,13 @@
 
 | # | 约定 | 状态与证据 |
 | --- | --- | --- |
-| 1 | 分层与依赖方向 | ✓ `check-layers.ps1` 输出 domain / storage / services 三项 clean |
+| 1 | 分层与依赖方向 | ✓ `check-layers.ps1` 输出 domain / storage / services 三项 clean（当时；今天**六条**规则，另含 commands、platform、入口点） |
 | 2 | 工具链固定 | ✓ 全部命令在 `src-tauri/` 下跑；`rusqlite` 用 bundled，不依赖系统 SQLite |
-| 3 | 错误契约 | ✓ `error_contract.rs` 6 条，含 `errors_never_leak_paths_sql_or_payload`、`version_conflict_carries_numbers_but_not_in_message`、`domain_error_messages_are_user_facing_chinese` |
+| 3 | 错误契约 | ✓ `error_contract.rs` 6 条（当时；今天 **20 条**），含 `errors_never_leak_paths_sql_or_payload`、`version_conflict_carries_numbers_but_not_in_message`、`domain_error_messages_are_user_facing_chinese` |
 | 4 | 写事务信封 | ✓ `transaction_boundary.rs` 14 条：`one_business_write_bumps_revision_exactly_once`、`writing_a_checkpoint_does_not_bump_revision`、`a_stale_epoch_request_writes_nothing`、`a_failure_in_the_last_step_rolls_back_everything` |
 | 5 | 测试策略 | ✓ 时间一律 `FakeClock` 注入；库用 `tempfile` 或 `Db::open_in_memory()`（错误响应用例即用后者） |
 | 6 | 人工验收单列 | ✓ 平台项逐条列在第七节，不冒充已验收 |
-| 7 | 改动纪律 | ✓ 未碰前端与 `greet` |
+| 7 | 改动纪律 | ✓ 未碰前端与 `greet`（其后：`greet` 已由 P7 删除，提交 `12f0453`） |
 | 8 | 断言口径 | ✓ 见下 |
 
 **第 8 条（断言口径）的具体落点**：被拒命令四件事 —— `a_stale_epoch_request_writes_nothing`、
@@ -110,7 +110,7 @@ CHECK 边界 —— `the_boundary_at_2000ms_is_exact`；错误码一律断言 `c
 | --- | --- |
 | 崩溃启动扫描四类判定、`reconcile`/`correct`/`backfill`/`discard_session` | P3 |
 | 统计口径与日界裁剪、Today 聚合、导出、周回顾 | P5 |
-| 正式系统事件接线（锁屏/休眠/唤醒）、关窗后继续采样、单实例、`application_run` 生命周期、显式退出、WAL 一致备份、恢复后 epoch 切换、维护态隔离 | P6 / P7 |
+| 正式系统事件接线（锁屏/休眠/唤醒）、关窗后继续采样、单实例、`application_run` 生命周期、显式退出、WAL 一致备份、恢复后 epoch 切换、维护态隔离 | **实现 P6 / 实机 P8**——平台事件（锁屏/休眠/唤醒/改时）**实现归 P6**（P6 计划 Task 2 的「正式 OS 事件接线」条目）、**实机结论归 P8**（P8 计划 Task 5「V0.1 端到端人工验收」）；[`p7-acceptance`](p7-acceptance.md) §5.2 与文末「仍未达成 / 存疑」索引表已按此闭环 |
 | OS 磁盘耗尽、WAL 写失败、释放空间后的恢复 | P6 |
 | IPC 接线（含失败响应携带权威版本）、托盘、页面 | P7 / P8 |
 | 500 ppm 容差跨机器校准、改时/锁屏的实机复核 | P8 |
@@ -118,10 +118,13 @@ CHECK 边界 —— `the_boundary_at_2000ms_is_exact`；错误码一律断言 `c
 
 ## 八、证据与数字
 
-- **209 个测试** = 43 个库内单元测试（`src/`）+ 166 个集成测试（12 个套件）：
+- **209 个测试（当时）** = 43 个库内单元测试（`src/`）+ 166 个集成测试（**12 个套件**）：
   `domain_invariants` 18、`transaction_boundary` 14、`timer_clock` 12、`timer_anomaly` 11、
   `timer_commands` 30、`timer_regressions` 41、`timer_seams` 10、`timer_snapshot` 9、
   `error_contract` 6、`migrations` 6、`db_execution_boundary` 5、`timer_checkpoint` 4。
+  **2026-10-04 对照**：全仓 **28 个测试套件**、**408 条集成 + 57 单元 = 465 条 `#[test]`**
+  （`cargo test` 464 passed / 0 failed / 1 ignored）；`error_contract` 已从 6 条长到 **20 条**；
+  前端 13 文件 / 139 条。
 - 最近一次全量运行在本记录对应的合并状态上：`cargo test --offline` 209 passed / 0 failed；
   `cargo fmt --check`、`cargo clippy --offline --all-targets -- -D warnings`、
   `scripts/check-layers.ps1`、`git diff --check` 均通过。
@@ -145,4 +148,4 @@ CHECK 边界 —— `the_boundary_at_2000ms_is_exact`；错误码一律断言 `c
 
 ## 后续兼容更新（2026-10-03）
 
-本记录保留 P1/P2 当时的检查证据。P4 核心现已验收，全仓自动测试为 339 个；WriteEnvelope 已迁至 crate::envelope，原 list_tasks 已由 list_tasks_filtered 替代，错误权威载荷已扩展为 task/session/project/tag 的 records 列表。当前阶段状态和 P7 前补全门禁见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。P3 恢复服务和 P7 生产接线尚未完成；本记录中的“未推进 P4”等范围描述仅指当时验收轮次。
+本记录保留 P1/P2 当时的检查证据。P4 核心现已验收，全仓自动测试为 339 个；WriteEnvelope 已迁至 crate::envelope，原 list_tasks 已由 list_tasks_filtered 替代，错误权威载荷已扩展为 task/session/project/tag 的 records 列表。当前阶段状态和 P7 前补全门禁见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。P3 恢复服务和 P7 生产接线尚未完成；本记录中的“未推进 P4”等范围描述仅指当时验收轮次。（2026-10-04 后续：FOLLOW-04 → 357；P7 交付后 **Rust 464 passed / 0 failed / 1 ignored、前端 13 文件 / 139 条**；**P7 的 IPC/前端接线已完成**（FOLLOW-01），**实机验收仍未做**；P3 恢复服务仍未实施。）

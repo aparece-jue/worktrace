@@ -12,14 +12,14 @@
 
 **断言口径：** 见 [总纲](2026-10-03-v01-plan-index.md) §5 第 8 条。
 
-状态：核心已实施并验收；P1/P2 原验收基线为 209 个测试，P4 后全仓基线为 339 个测试。当前兼容契约与待办见[总纲 §10](2026-10-03-v01-plan-index.md)。上游：[总纲](2026-10-03-v01-plan-index.md)、[数据模型](../specs/2026-10-02-worktrace-architecture/02-data-model.zh.md)。本计划交付存储/领域基础，不代表应用验收完成。
+状态：核心已实施并验收；P1/P2 原验收基线为 209 个测试，P4 后全仓基线为 339 个测试（2026-10-04：Rust **464 passed / 0 failed / 1 ignored**、前端 **13 文件 / 139 条**；P7 已接线，实机未验收）。当前兼容契约与待办见[总纲 §10](2026-10-03-v01-plan-index.md)。上游：[总纲](2026-10-03-v01-plan-index.md)、[数据模型](../specs/2026-10-02-worktrace-architecture/02-data-model.zh.md)。本计划交付存储/领域基础，不代表应用验收完成。
 
 覆盖：F-001…F-005、F-008、F-014、F-015、F-017、F-019 的基础部分。不做 IPC、实时计时、HUD 或后续版本实体。
 
 ## Task 1：运行环境与共享错误
 
 - [x] 在 src-tauri 下记录实际 Rust/Cargo 版本，验证 SQLite bundled、UUID、错误派生、临时文件测试依赖，选定可编译版本并更新 Cargo.toml/Cargo.lock；不依据文档中的预设版本推断已经可用。
-- [x] 新建 domain/mod.rs、storage/mod.rs、platform/mod.rs、commands/mod.rs、error.rs；在 lib.rs 导出，保留 greet。
+- [x] 新建 domain/mod.rs、storage/mod.rs、platform/mod.rs、commands/mod.rs、error.rs；在 lib.rs 导出，保留 greet（其后：P7 已删除 `greet`，提交 `12f0453`）。
 - [x] error::AppError 提供稳定 code/message/脱敏 detail；storage 不依赖 commands。领域错误分别映射非法状态、占用冲突、待恢复、版本冲突，不把所有错误压成 DOMAIN_ERROR。
 - [x] crate::envelope::WriteEnvelope（P4 已迁移到 src/envelope.rs） 保存 expected_data_epoch 与 expected_row_version；新建只需 epoch，修改既有对象必须版本。关系增删的幂等操作单列，不伪造实体版本。
 - [x] tests/error_contract.rs：未知记录、非法状态、epoch/version 冲突均可区分；错误不包含数据库路径、SQL、业务正文。
@@ -33,6 +33,7 @@
 - [x] migrate 在一个事务内执行 DDL 和 user_version；失败回滚全部表和版本。现有库迁移前由初始化流程做一致备份，备份失败拒绝迁移；未来版本拒绝写入。
 - [x] 完整 DDL 以附录为起点，补全状态/质量组合、非负版本、允许 mode/kind、外键 RESTRICT 和服务校验。V0.1 不接受 Scheduled、BACKGROUND/PASSIVE/WAITING 写入，不建 Goal/Milestone/番茄钟表。
 - [x] tests/migrations.rs：空库初始化、重复启动、未来版本拒绝、故障中断后无半套表、备份失败不迁移。尚无 UI 时用临时文件验证。
+      **注（2026-10-04 登记，不改上方两条的勾选状态）**：上方 `:33` 那条的第二半（**迁移前一致备份**）当前**未实现**，已登记为 **P6** 的初始化编排条目——顺序固定为「单实例 → **迁移前一致备份** → 迁移」，**备份失败拒绝迁移**；本条 tests 里的「备份失败不迁移」同样等 P6 落地。依据：`src-tauri/src/storage/migrations.rs:9-11` 的现行注释正把这件事指向 P6 的初始化编排，而全仓无实现；勾选保留为历史事实。
 
 ## Task 3：领域不变量与时钟接缝
 

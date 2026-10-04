@@ -48,6 +48,7 @@
 > 门禁 357 → **393 → 394 passed / 0 failed**，六条分层规则见 Task 1（platform 与入口点两条
 > 正是本任务加的）。**唯一未勾**：平台事件适配——V0.1 里**没有任何平台事件源**（锁屏/休眠/
 > 唤醒/改时的监听器不存在），本任务只登记了实机步骤，**结论为空**，归 P8 复核。
+> **（归属已定：实现归 P6——见 P6 计划 Task 2 的「正式 OS 事件接线」；实机结论归 P8 复核。）**
 
 文件：`src-tauri/src/platform/single_instance.rs`（新建）、`src-tauri/src/platform/scheduler.rs`（新建）、`src-tauri/src/platform/mod.rs`（登记两个新模块）、`src-tauri/src/storage/run_repo.rs`（新建：`application_run` 原语）、`src-tauri/src/storage/session_repo.rs`（新增按 `run_id` 过滤的查询）、`src-tauri/src/storage/mod.rs`（登记）、`src-tauri/src/services/bootstrap.rs`（新建：唯一启动入口）、`src-tauri/src/services/events.rs`（新建：事件信封与去重）、`src-tauri/src/services/mod.rs`（登记）、`src-tauri/tests/startup_order.rs`、`src-tauri/tests/periodic_sampling.rs`、`src-tauri/tests/event_protocol.rs`、`src-tauri/tests/exit.rs`（四个都新建）。
 
@@ -61,7 +62,7 @@
 - [x] **P3 未完成时的开发验证库门禁（具体化）**：只在独立开发验证库演示；启动时按 **`run_id <> 当前 run`** 查三件事——未结束会话、待确认区间、不变量损坏——**命中任一 ⇒ 拒绝业务计时并提示需完成恢复**，不自动修复、不忽略历史。⚠️ **现有 `session_repo::running_foreground`（`src-tauri/src/storage/session_repo.rs:413`）不带 `run_id`**，需要一条按 `run_id <> ?` 过滤的新查询（本任务在 `storage/session_repo.rs` 新增，`tests/startup_order.rs` 覆盖）；待确认区间/不变量损坏所需的查询同样按现有仓储补齐。P3 完成后在**同一 bootstrap** 接入真实扫描（四类判定归 P3）。
 - [ ] **平台事件适配（未达成，见上方落地状态）**（正式锁屏/休眠/唤醒/时钟变更）：事件通知进入 P2 **同一串行入口**；晚到或边界不可信按 P2 恢复规则处理，**不另写一套判断**。到达延迟与"关窗后事件仍可达"属**实机步骤**（见文末「仍待与归属」），不在本任务用单元测试冒充。
 - [x] **测试**（`tests/{startup_order,periodic_sampling,event_protocol,exit}.rs`）：启动副作用次序（探针）；第二次启动**不打开库、不迁移、不建 `application_run`**；锁持有者被强杀后新进程能拿到锁；**无窗口引用时周期采样仍被驱动**且空闲不写库；事件四条去重规则各一例；显式退出事务结束 `running`/`paused` 且写 `clean_exit_at`，**`recovering` 行仍在**。
-- [x] **本阶段不做（依赖 P3/P5/P6）**：正式恢复扫描与四类判定（P3）；单实例/启动的故障路径硬化与锁异常释放（P6 Task 1）；维护态隔离与 P6 新增的维护态错误码（P6 Task 2/4）；备份与恢复（P6 Task 4）；平台事件实机验收（本文末登记，P8 复核）。
+- [x] **本阶段不做（依赖 P3/P5/P6）**：正式恢复扫描与四类判定（P3）；单实例/启动的故障路径硬化与锁异常释放（P6 Task 1）；维护态隔离与 P6 新增的维护态错误码（P6 Task 2/4）；备份与恢复（P6 Task 4）；平台事件实机验收（本文末登记；**实现归 P6**——P6 计划 Task 2 的「正式 OS 事件接线」，实机结论归 P8 复核）。
 
 ## Task 1：Tauri 命令接线与 DTO 形状
 
@@ -132,7 +133,7 @@
 - [x] 事件只作**缓存失效**，计时 tick 只更新**展示值**（00 §6）；两者都不触发业务判断。
 - [x] 窗口启动顺序：**先监听并暂存通知，再拉一致快照**（00 §5 规则 1），避免快照与通知之间丢事件。首次握手用 `services::handshake::get_revision`（`src-tauri/src/services/handshake.rs:25`，不要求已知 epoch），拿到 epoch 后再拉业务快照。
 - [x] 收到快照后丢弃**同 epoch 且 `revision <=` 快照版本**的通知；未知 epoch 的通知**只触发重新握手**，不直接接纳（规则 2）。
-- [x] 可见窗口**至多每 30 秒**校验 `get_revision`（返回 epoch+revision）；隐藏窗口在显示前校验（规则 4）。末次通知丢失仍要能收敛。**此 30 秒是前端校验 `get_revision` 的周期**，与 `Coordinator` 的 `HEARTBEAT_INTERVAL_MS = 30_000`（`src-tauri/src/services/timer/coordinator.rs:368`，**检查点**频率）**无关**：数字相同纯属巧合，改一个不影响另一个。
+- [x] 可见窗口**至多每 30 秒**校验 `get_revision`（返回 epoch+revision）；隐藏窗口在显示前校验（规则 4）。末次通知丢失仍要能收敛。**此 30 秒是前端校验 `get_revision` 的周期**，与 `Coordinator` 的 `HEARTBEAT_INTERVAL_MS = 30_000`（`src-tauri/src/services/timer/coordinator.rs:465`，**检查点**频率）**无关**：数字相同纯属巧合，改一个不影响另一个。
 - [x] 计时状态的前端判断顺序：先查 `data_epoch`、`run_id`、`session_version`，再比 `tick_seq`；**旧状态生成的 tick 即使序号较新也不能覆盖**暂停/切换后的展示（00 §5）。较新 `session_version` 的未知 tick 先触发计时快照，**不自行推导状态跃迁**。
 - [x] **TS 侧逐条引用 `services/events.rs` 的四条规则，并以 Rust 侧为规范文本**（`RevisionGate` 是那套规则的唯一规范实现，前端镜像不得自行解释或增删分支）；本阶段 Rust 侧只有测试在用 `RevisionGate`，**两侧的交叉校验机制归本任务**（评审 M2 的另一半）：至少要做到「改一条规则必须同时改两侧」，而不是靠人记得。
 - [x] 先用 `useSyncExternalStore` 等简单方案（00 §6）；**不得**把"不使用状态库"当成领域权威的必要条件——以后允许评估状态库，但业务规则不得因此搬到前端。
@@ -225,7 +226,7 @@
 - [ ] **不得把仓储/服务层测试标为"UI 已验收"**（P4 的约定，**前半已落实、后半未达成**）。
   验收记录已把「自动测试证明了什么」与「实机才能验什么」逐条分开（`docs/validation/p7-acceptance.md` §5.3），
   **但「人工验收记录能对上具体版本与机器」要等实机跑完才有**——当前实机结论为空，归 P8。
-- [x] **本阶段不做（依赖 P3/P5/P6）**：F-003/F-011 的完整联动（P8）；平台事件的实机验收——P7 只登记步骤，结论由实机跑出、P8 复核（见文末）；「多入口开发/打包路径」与 Windows 打包验证（00 §7，登记在文末）；维护态验收（P6）。
+- [x] **本阶段不做（依赖 P3/P5/P6）**：F-003/F-011 的完整联动（P8）；平台事件的实机验收——P7 只登记步骤，**实现归 P6**（P6 计划 Task 2 的「正式 OS 事件接线」），结论由实机跑出、P8 复核（见文末）；「多入口开发/打包路径」与 Windows 打包验证（00 §7，登记在文末）；维护态验收（P6）。
 
 ---
 
@@ -504,7 +505,7 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
 
 - **协议向量能把"两侧不一致"逼出来，但替代不了"同一条规则两处实现"的风险，而且完全
   不覆盖计时判据链**（评审的关键判断）：
-  - Rust 的 `Coordinator::is_stale_tick`（`src-tauri/src/services/timer/coordinator.rs:363`）
+  - Rust 的 `Coordinator::is_stale_tick`（`src-tauri/src/services/timer/coordinator.rs:368`）
     只判 `session_id` + `row_version`；前端的 `orderTimer`（`src/state/domainState.ts`）是
     **五级**判据（`data_epoch` → `run_id` → `session_id` → `session_version` → `tick_seq`）。
     两者**不是同一个函数**，没有共享向量、也没有 Rust 侧的对应断言——最密集的那半时序规则
@@ -584,7 +585,7 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
 > **口径订正（2026-10-04，本段不重写、保留为当时的记录）**：上面这条「页面的查询响应也是
 > 权威快照 ⇒ 推**全局**水位 ⇒ 于是页面不必各自维护第二份水位」**已被 Task 5 fix round 1
 > （`87e810b`）的「本视图水位」取代**——页面改用 `src/components/viewWatermark.ts`
-> （一个视图一份水位），**两页都不再调 `domainState.markApplied`**；
+> （一个视图一份水位），**三页都不再调 `domainState.markApplied`**（`Inbox.tsx` 于 fix round 2 的 **`e60192d`** 加入同一水位）；
 > `markApplied`/`isStaleResponse` 的文档收紧到「只给全量快照」。原因：`TaskQueryResult` /
 > `ProjectList` 是**过滤 + 分页后的局部视图**，不满足「已应用的是权威快照」这个前提，
 > 推平全局水位会让同 `revision` 的通知被判 `drop`、并让 30 秒校验失去判据。
@@ -634,8 +635,9 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
   推平 ⇒ 末次通知丢失时不再 `resync`（状态栏永久停在旧状态，连 `rehandshake()` 也救不回来）。
 - **修法**：新增 `src/components/viewWatermark.ts`——**一个视图一份水位**（epoch 那一半与
   `FreshnessGate::isStaleResponse` 同义；revision 那一半只比**本视图上屏过**的那一版，且只
-  前进）。`Tasks.tsx` 的主列表与筛选选项各一份、`Projects.tsx` 的项目列表与详情各一份，两页
-  都不再调 `domainState.markApplied`。`markApplied` / `isStaleResponse` 的文档收紧到「只给全量
+  前进）。`Tasks.tsx` 的主列表与筛选选项各一份、`Projects.tsx` 的项目列表与详情各一份——**fix
+  round 1 当时是这两页**都不再调 `domainState.markApplied`；`Inbox.tsx` 在 fix round 2
+  （`e60192d`）改用同一水位后**共三页**。`markApplied` / `isStaleResponse` 的文档收紧到「只给全量
   快照」，并把 I1 的两个后果写进警告（**行为不变**）。
 - **回归用例**（都带「怎么才会红」）：`Tasks.test.tsx` 的 I1-A（页面响应上屏后镜像水位仍是 5；
   同 revision 的通知仍必须让 `invalidated` 前进并触发重拉）、I1-C（辅助查询同理）；
@@ -792,7 +794,7 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
   3. **F-016 单实例唤起**：主窗关掉后再启动第二个实例 ⇒ 第二个进程自己退出、`application_run` 不增加、既有实例把主窗**重建**出来；主窗开着时 ⇒ 被**抬起**（不重建）。
 
   **为什么不能用单元测试代替**：集成测试进程里没有事件循环，也就没有窗口与托盘（`tauri::test` 的 mock 运行时本轮没有启用）。`tests/shell_lifecycle.rs` 钉住的是**决策函数与命令路径**（菜单映射、`should_prevent_exit`、`plan_activation`、托盘暂停/退出的库内证据、label 与配置一致性），钉不住「真实托盘图标/菜单交互」与「关窗后仍在计时」。**这一步的结论目前为空**，P8 复核。
-- **平台事件实机验收**（锁屏 / 休眠 / 唤醒 / 改时 / 关窗后采样 / 事件到达延迟）目前**无归属**：登记为「**P7 实机步骤 + P8 复核**」。`docs/validation/p2-clock-mapping.md` §6/§7（`:156`–`:172`）已声明这些**未验证、不得当成已验证**：探针是前台进程，证明不了关窗后仍采样，也证明不了系统事件的可靠性与到达延迟。
+- **平台事件实机验收**（锁屏 / 休眠 / 唤醒 / 改时 / 关窗后采样 / 事件到达延迟）**归属已定（2026-10-04）**：**实现归 P6**——P6 计划 Task 2 末新增「正式 OS 事件接线」（事件源本身；绑定 P7 已建立的 `platform/scheduler.rs` 的 `Scheduler`、`services/bootstrap.rs` 的 `sampling_action`→`lock_app` 单一串行边界、`services/events.rs` 的 `Broadcaster`，不新建第二套驱动）；**P7 只登记实机步骤，实机结论归 P8 复核**。`docs/validation/p2-clock-mapping.md` §6/§7（`:156`–`:172`）已声明这些**未验证、不得当成已验证**：探针是前台进程，证明不了关窗后仍采样，也证明不了系统事件的可靠性与到达延迟。
 - **「多入口开发/打包路径」与 Windows 打包验证**（`00-architecture.zh.md` §7 的待验证项）同样**无归属**：登记到 P8，与 R-04 的发布产物门禁一起做。
 - **`@mui/material` 与 `@emotion/*` 是模板遗留死依赖**（`src/App.tsx` 未使用，`package.json` 里仍在）：**只登记，不在 P7 删**——删依赖属清理任务且需用户确认。
 - **维护态错误码**：P6 Task 4 引入后，再登记为 Task 1 的透传项（P7 只登记、不实现）。
@@ -841,7 +843,7 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
 
 ## 开工前已核实（2026-10-04）
 
-- **复核基线**：仓库 HEAD `ae9ec00`（工作树干净），`src-tauri/` 镜像与之一致（仅 `main.rs` 未镜像、`tests/` 逐字节相同）；门禁 **357 passed**（据 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/progress.md` 第六轮记录，本次未重跑）。**本计划尚未实施**——本节只写复核过的事实，不含任何「已验证通过」的实施结论。
+- **复核基线**：仓库 HEAD `ae9ec00`（工作树干净），`src-tauri/` 镜像与之一致（仅 `main.rs` 未镜像、`tests/` 逐字节相同）；门禁 **357 passed**（据 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/progress.md` 第六轮记录，本次未重跑）。**本计划尚未实施**——本节只写复核过的事实，不含任何「已验证通过」的实施结论。**（2026-10-04 订正**：该句只描述本节的复核时点（HEAD `ae9ec00`）；P7 已交付并推送 `25850c8`，计划 67 已勾 / 9 未勾，未勾项全是实机项、无事件源项或依赖未实施的 P3。**）**
 - **符号面**：`handshake::get_revision`/`RevisionSnapshot`、`error_response::capture_error_response`、`WriteEnvelope`（crate 根）、`Coordinator::{start,pause,resume,finish,snapshot,heartbeat}`、四个读服务的入参与返回、`src-tauri/scripts/check-layers.ps1` 的四条规则**全部对上**；`AppError::code()` 只有五个码；P6 才引入的维护态错误码在本仓 0 命中（属 P6 Task 4）。
 - **改名与不一致（已按裁决写进本计划）**：分层脚本真名是 `src-tauri/scripts/check-layers.ps1`；`tauri.conf.json` 的 `identifier` 是 `com.worktrace.app`，与 `platform::paths::APP_ID = "com.worktrace.desktop"` 不一致；托盘需要 `tauri` 的 `tray-icon` feature。
 - **离线可行性（实测缓存，不是推断）**：DTO 生成器 `ts-rs`/`specta`/`typeshare` 在 Windows 与 WSL 两侧 cargo 缓存 **0 命中** ⇒ 不上生成器；`tray-icon`/`muda`/`tao` 在 Windows cargo 缓存与 `Cargo.lock` 里都在 ⇒ 托盘离线可行；`image` **不在** `Cargo.lock` ⇒ 不启用 `image-png`/`image-ico`；`D:\.pnpm-store\v11` 的 `index.db` 有 `vitest@5.0.1`、`jsdom@30.1.1`、`@testing-library/react@16.3.3`、`@vitejs/plugin-react@6.1.1` 的完整条目，`react-router`/`zustand`/`jotai`/`redux`/`@tanstack/*` 则是 **0 条目**。

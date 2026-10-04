@@ -18,7 +18,7 @@
 - **权威清单中属于 P4 的条目逐条有指名用例**（第二节）；04 §9 与 06 §4 的其余条目明确不属 P4（第三节、第四节）。
 - **不做的事一件没做**：标签权重规则（F-108）、Knowledge 与标签层级（F-107）、`time_block` 排期、
   Goal/Milestone、UI 页面——都在 V0.2 / P7（第七节）。
-- **P4 计划自身的勾选项**：33 条逐条落地，其中 4 条（验收与下游接口）在本记录完成；
+- **P4 计划自身的勾选项**：**34 条全勾**（勾选轨迹：`c312640` 上还全是空框 → `27f8a7a` 一次性勾上 33 条 → 最后 1 条「P7 接线前补齐接口兼容（总纲 §10）」在文档提交 `7ca05a4` 勾上；按复选框顺序第 33 条是说明文字而非待办），其中 4 条（验收与下游接口）在本记录完成；
   5 条「本轮开工审查补全」全部落地（含错误上下文载荷形状与 `set_task_project`）。
 - **整体评审（whole-branch review）已完成**：终评结论「**无 Critical，服务层可验收可合并**」，
   并在合并前处理掉 3 条 Important（一条计划点名的用例抓不住目标、一类「拿被测函数当 oracle」的
@@ -91,6 +91,9 @@ P4 **不涉及**这四项（DB 执行边界与单调/墙钟映射已由 P1/P2 �
 1. **界面**：Projects 页、标签选择器、筛选面板、Today 页 → **P7/P8**。P4 只交付服务与 DTO 载荷。
 2. **IPC 接线**：`capture_error_response` 的新形状（`targets: &[AuthorityTarget]` → `records`）需要
    P7 在命令层接上；`AuthorityTarget` 的 `Deserialize` 目前**无生产调用方**，就是为它的请求边界准备的。
+   （2026-10-04 注：**接线已完成**（P7 Task 1a，24/24 命令经 `commands/mod.rs` 的 `run_command`，失败映射
+   `src-tauri/src/commands/mod.rs:141`）；而「为 P7 请求边界准备」这个理由**与事实相反**——[`p7-acceptance`](p7-acceptance.md)
+   §6.6 第 32 条实测命令层 `target()` 只用 `AuthorityTarget::new`、从未从字符串解析，`Deserialize` 仍是零调用，归 P8。）
 3. **`start` 原子理清并启动**（F-002 的另一半）→ **P3/P7**；P4 的 `clarify_ready` 不替代它。
 4. **统计与导出**（F-010 的统计半边、F-018）→ **P5**；`task_change` 现有三种 JSON 形状，
    P5 取完成项**必须按形状过滤**（已集中登记在 `storage/mod.rs` 的模块文档）。
@@ -110,12 +113,12 @@ P4 **不涉及**这四项（DB 执行边界与单调/墙钟映射已由 P1/P2 �
 | `storage::daily_plan_repo` | `plan_for(conn, &LocalDate, tz_key)`、`add_to_plan`、`remove_from_plan` |
 | `storage::task_repo` | 新增 `set_task_project`、`ProjectFilter/TaskFilter/Page/TaskPage/list_tasks_filtered`；**删除** `list_tasks`（零调用） |
 | `storage` | `WriteOutcome<T>{Changed,Unchanged}`、`require_task` |
-| `services::catalog` | `parse_tag_kind`、`normalize_tag_name`、`normalize_project_name`、`parse_project_status`；`create_project`/`rename_project`/`archive_project`；**`list_projects(db, expected_data_epoch, Option<ProjectStatus>)`**（`None` 不限制状态、`Some(s)` 只列该状态）与 `list_selectable_projects(db, expected_data_epoch)`（仍只含 active）；`set_task_project(env, task_id, ProjectTarget)`；`create_tag`/`tag_task`/`untag_task`；**`list_tags(db, expected_data_epoch, Option<TagKind>)`**、**`tags_of_task(db, expected_data_epoch, task_id)`**；`create_task`（捕获）、`clarify_ready`、`list_tasks_filtered`（只读，返回 `epoch/revision`）。**写结果 DTO**（`ProjectChange`/`TaskProjectChange`/`TagChange`/`TaskTagsChange`/`TaskChange`）均含 `data_epoch: String` + `revision: i64`；**读结果信封** `ProjectList`/`TagList` = `{ items, data_epoch, revision }`（COMP-01，提交 `27f8a7a`）。四个读入口都收**请求带来的** `expected_data_epoch`，在同一个读事务内 `guard_epoch`。**注意两个枚举入口的用途**：`catalog::parse_project_status` 是**写路径**（额外拒绝 V0.1 不写的 `done`）；P7 若要**按 `done` 过滤项目列表**（读路径）必须用 `domain::project::ProjectStatus::parse`——`list_projects` 的 `status` 参数就是后者那种读语义 |
+| `services::catalog` | `parse_tag_kind`、`normalize_tag_name`、`normalize_project_name`、`parse_project_status`；`create_project`/`rename_project`/`archive_project`；**`list_projects(db, expected_data_epoch, Option<ProjectStatus>)`**（`None` 不限制状态、`Some(s)` 只列该状态）与 `list_selectable_projects(db, expected_data_epoch)`（仍只含 active）；`set_task_project(env, task_id, ProjectTarget)`；`create_tag`/`tag_task`/`untag_task`；**`list_tags(db, expected_data_epoch, Option<TagKind>)`**、**`tags_of_task(db, expected_data_epoch, task_id)`**；`create_task`（捕获）、`clarify_ready`、`list_tasks_filtered`（只读，返回 `epoch/revision`）。**写结果 DTO**（`ProjectChange`/`TaskProjectChange`/`TagChange`/`TaskTagsChange`/`TaskChange`）均含 `data_epoch: String` + `revision: i64`；**读结果信封** `ProjectList`/`TagList` = `{ items, data_epoch, revision }`（COMP-01，提交 `27f8a7a`）。四个读入口都收**请求带来的** `expected_data_epoch`，在同一个读事务内 `guard_epoch`。**注意两个枚举入口的用途**：`catalog::parse_project_status` 是**写路径**（额外拒绝 V0.1 不写的 `done`）；P7 若要**按 `done` 过滤项目列表**（读路径）必须用 `domain::project::ProjectStatus::parse`——`list_projects` 的 `status` 参数就是后者那种读语义。**2026-10-04 注**：P7 新增了 `catalog::parse_project_status_read`（`services/catalog.rs:111`），命令层读路径 `list_projects_impl` 用它（`src-tauri/src/commands/mod.rs:395`）来认 `done` |
 | `services::daily_plan` | `parse_local_date`、`normalize_timezone`（返回**存储键**）、`system_timezone_name`、`local_date_at`；`plan_for`（只读，返回 `tasks` + `data_epoch` + `revision`）、`add_to_plan`、`remove_from_plan`（写结果 `DailyPlanChange` 含 `data_epoch` + `revision`） |
 | `services::error_response` | `capture_error_response(db, error, targets: &[AuthorityTarget]) -> ErrorResponse`；`ErrorAuthority{data_epoch, revision, records: Vec<RecordVersion>}`、`RecordVersion{kind: AuthorityKind, id, row_version: Option<i64>}` |
 | `services::handshake` | **`get_revision(db) -> RevisionSnapshot { data_epoch, revision }`**（`Serialize`）：首次握手、恢复后重新握手与可见窗口周期校验的**唯一入口**。纯读（`unchecked_transaction` + `require_meta`，不采样、不 bump、不初始化库），**全仓唯一不要求 `expected_data_epoch` 的查询**——它正是产出 epoch 的那一个；它不代替业务快照。P7 顺序：先监听并暂存事件 → `get_revision` → 携该 epoch 拉业务一致快照；发生恢复则由业务查询的 `DATA_EPOCH_MISMATCH` 拒绝并重新握手。提交 `4649cb8`，用例 `tests/handshake.rs`（2 条） |
 | `envelope`（crate 根） | `WriteEnvelope::{for_create, for_update}`——IPC 层从 `crate::envelope` 引用 |
-| `services::timer::snapshot::TimerSnapshot` | **P7 Task 3 的契约补口（2026-10-04，非 P4 面，登记在此供 P7/P8 消费）**：新增 `task_id: Option<String>` + `task_row_version: Option<i64>`（仍是 `Serialize`，仍是 `services`）。**来龙去脉**：Task 3 接「继续」时发现缺口——`resume_timer` 要 `task_id` + `task_expected_version`（`ResumeRequest`，`resume` 用它 `guard_row_version_of_ro(conn,"task",…)` 并可能 `Ready → Doing`），但 `TimerSnapshot` 没有任何任务字段、24 条命令里也没有 session→task 的读路径（`TaskRow` 不带会话、`list_tasks` 不按会话筛、托盘只做 `pause`）⇒ **冷启动（重开窗口，F-009 的正常路径）或托盘暂停之后，前端构造不出这条请求**；前端徒手记身份只能覆盖"本窗口自己开的会话"，绕不过去，而为此新增命令要动命令面。**补法与边界**：空闲时两者一起是 `None`（JSON 里是 `null`，键始终存在，**不加** `skip_serializing_if`）；有会话时 `task_id` 取自会话行、`task_row_version` **每次采样重读任务行**（不缓存在协调器内存里——暂停期间改任务会 bump `task.row_version`，缓存会让「继续」拿旧版本撞 `VERSION_CONFLICT`）。**纯读**：不采样、不写库、不 bump `revision`、不新开事务，既有事务边界一处未动。契约同轮落地：三份快照重生成（`timer_snapshot`/`timer_snapshot_idle`/`command_outcome`，diff 只多这两行）+ `src/types/ipc.ts` + `snapshot-contract.test.ts` 键集合 + 4 处完整字面量夹具。**前端仍是「待接线」**：落点是 `src/components/timerRequests.ts` 的 `buildResumeRequest(snapshot, taskIdentity)`，把第二个入参换成快照两字段即可（本轮 24 条命令签名一条未动）。细节与两处反向验证见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task3-contract-report.md` |
+| `services::timer::snapshot::TimerSnapshot` | **P7 Task 3 的契约补口（2026-10-04，非 P4 面，登记在此供 P7/P8 消费）**：新增 `task_id: Option<String>` + `task_row_version: Option<i64>`（提交 `a0db688`）+ `task_title: Option<String>`（提交 `1f15b6b`）（仍是 `Serialize`，仍是 `services`）。**来龙去脉**：Task 3 接「继续」时发现缺口——`resume_timer` 要 `task_id` + `task_expected_version`（`ResumeRequest`，`resume` 用它 `guard_row_version_of_ro(conn,"task",…)` 并可能 `Ready → Doing`），但 `TimerSnapshot` 没有任何任务字段、24 条命令里也没有 session→task 的读路径（`TaskRow` 不带会话、`list_tasks` 不按会话筛、托盘只做 `pause`）⇒ **冷启动（重开窗口，F-009 的正常路径）或托盘暂停之后，前端构造不出这条请求**；前端徒手记身份只能覆盖"本窗口自己开的会话"，绕不过去，而为此新增命令要动命令面。**补法与边界**：空闲时三者一起是 `None`（JSON 里是 `null`，键始终存在，**不加** `skip_serializing_if`）；有会话时 `task_id` 取自会话行，`task_row_version` 与 `task_title` **每次采样重读任务行**（不缓存在协调器内存里——暂停期间改任务会 bump `task.row_version`、改标题会换 `task.title`，缓存会让「继续」拿旧值撞 `VERSION_CONFLICT` 或显示过期标题）。**纯读**：不采样、不写库、不 bump `revision`、不新开事务，既有事务边界一处未动。契约同轮落地：三份快照重生成（`timer_snapshot`/`timer_snapshot_idle`/`command_outcome`，`a0db688` 时 diff 只多两行；`1f15b6b` 补 `task_title` 后各再多一行）+ `src/types/ipc.ts` + `snapshot-contract.test.ts` 键集合 + 4 处完整字面量夹具。**前端已接线**（P7 Task 3 接线，提交 `94aa875`）：落点是 `src/components/timerRequests.ts` 的 `buildResumeRequest(snapshot)`——**单参**，`task_id`/`task_row_version`/`task_title` 三件都从快照取，任一缺失即返回 `null`（「继续」按钮不出现）。（本节原写「前端仍是『待接线』」与 `buildResumeRequest(snapshot, taskIdentity)`；P7 交付后按事实订正，本轮 24 条命令签名一条未动。）细节与两处反向验证见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task3-contract-report.md` |
 
 ## 九、证据与数字
 
@@ -204,7 +207,7 @@ SQL 全参数化（含分页）；FK 的 `ON DELETE RESTRICT` 未被破坏；`se
    `LocalDate::{year,month,day}`、`parse_project_status`、`system_timezone_name` 保留并登记「P4 内无生产消费者」。
    （本轮未新增零调用面：四个读入口都有测试消费者，`ProjectList`/`TagList` 是它们的返回类型。）
 4. **`daily_plan` 的 `(local_date, timezone)` 读索引**（需新迁移）与**容器拆分**
-   （`services/catalog.rs` 当前 665 行、四类职责，P7 再加任务命令时拆 `services/tasks.rs`）。
+   （`services/catalog.rs` 写这段时 665 行、四类职责；**今天 771 行、未拆**——已由 [`p7-acceptance`](p7-acceptance.md) §6.6 第 33 条登记为 **P8**（同处实测 `commands/mod.rs` 1338 行）；拆法见 Task 5 报告的建议）。
 5. **`WriteEnvelope::for_create` 的改名**（它在 4 处集合操作上语义错位）——P7 定 IPC 形状时一起做。
 
 ## 文档对齐后的兼容收尾
@@ -237,7 +240,7 @@ P4 核心验收结论保留；完整响应信封、完整项目列表服务以�
 
 **门禁**（提交 `27f8a7a` 上实跑）：`cargo test --offline` **350 passed / 0 failed**；`cargo fmt --check` EXIT 0；`cargo clippy --all-targets --offline -- -D warnings` 无告警；`scripts/check-layers.ps1` PASSED。**反向验证**：去掉 `list_projects` 的 `guard_epoch` ⇒ 两条读信封用例红；`Settled::read` 返回常量 epoch ⇒ 写结果用例红（`left: "not-the-epoch"`）。
 
-**仍未完成**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃、前端握手时序）与 UI 不在本轮范围；`create_task` 的 `Option<&str>` 与 `set_task_project` 的 `ProjectTarget` 两种入参形状仍并存。**FOLLOW-06 已收口**（提交 `6f29c92`）：计时命令必须先提交再应用内存，因此 `rebuild_from_committed` 改为在**同一个提交后读事务**内取齐 session / 前台会话 / 快照（含其 `revision`）/ `task_version`，`CommandOutcome.revision` 直接复用 `snapshot.revision`，不再另读；这条「提交后同一串行边界内重建」的例外已写进 00 §5 与总纲 §10，而不是让 P2 悄悄偏离统一口径。
+**仍未完成**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃、前端握手时序）与 UI 不在本轮范围；`create_task` 的 `Option<&str>` 与 `set_task_project` 的 `ProjectTarget` 两种入参形状仍并存。（2026-10-04 注：**P7 已交付接线与 UI**——24/24 命令经 `run_command`（`commands/mod.rs:141`）、前端握手/迟到响应丢弃与页面都在 P7 落地，见 [`p7-acceptance`](p7-acceptance.md)；**实机验收仍未做**。两种入参形状**至今仍并存**：`catalog::create_task` 收 `Option<&str>`、`set_task_project` 收 `ProjectTarget`，命令层 `CreateTaskRequest.project_id` 与 `SetTaskProjectRequest.project` 同样两式。）**FOLLOW-06 已收口**（提交 `6f29c92`）：计时命令必须先提交再应用内存，因此 `rebuild_from_committed` 改为在**同一个提交后读事务**内取齐 session / 前台会话 / 快照（含其 `revision`）/ `task_version`，`CommandOutcome.revision` 直接复用 `snapshot.revision`，不再另读；这条「提交后同一串行边界内重建」的例外已写进 00 §5 与总纲 §10，而不是让 P2 悄悄偏离统一口径。
 
 ## 2026-10-04 FOLLOW-04 收口：用户可见文案全中文 + 三条机器门禁（提交 a8c4376，复评 fix round 5181cd9）
 
@@ -249,7 +252,7 @@ P4 核心验收结论保留；完整响应信封、完整项目列表服务以�
 
 **门禁**（`tests/error_contract.rs`）：变体级（除 `UnknownEnumValue` 外，用户文案不得含 ASCII 字母；豁免理由写在断言处，另补会话状态五个取值逐一核对）、构造点级（扫 `src/**/*.rs`，内联字面量的 `EmptyText{field}`/`NotInThisVersion{what}`/`AppError::Domain{detail}` 必须含 CJK）、禁用子串（`no such`/`task.title`/`stopwatch with a budget`/checkpoint 三句不得回到 `src`）。**反向验证**：本批三处篡改分别打红对应规则（变体级在 `error_contract.rs:311`、构造点级在 `:468`、禁用子串在 `:503`），逐字还原后与备份 SHA-256 一致；复评 fix round 另做三处（见下）。含首轮的对照篡改共 7 处。详细交付与原始输出见[待评审清单的 FOLLOW-04 小节](p1-p4-review-backlog.md)。
 
-**仍未做**（按边界）：P7 的 IPC 接线与前端时序、`capture_error_response` 接线（FOLLOW-01 仍归 P7）；`tests/` 里两处**手造**的英文 detail 夹具保留（用途是证明两个 detail 可辨，扫描范围只覆盖 `src/**/*.rs`）。
+**仍未做**（按边界）：P7 的 IPC 接线与前端时序、`capture_error_response` 接线（FOLLOW-01 **已于 2026-10-04 由 P7 Task 1a 收口**，见[待评审清单](p1-p4-review-backlog.md)的 FOLLOW-01 行；写这一节时仍归 P7）；`tests/` 里两处**手造**的英文 detail 夹具保留（用途是证明两个 detail 可辨，扫描范围只覆盖 `src/**/*.rs`）。
 
 **复评与 fix round 1（提交 `5181cd9`，2026-10-04）**：独立复评结论「无 Critical，七处漏点全部真收口，两处清单外发现处理正确，4 处反向验证可信」，剩 1 条 Important + 3 条 Minor，已全部收掉（**只改 `tests/error_contract.rs`，生产代码一字未动**）：
 

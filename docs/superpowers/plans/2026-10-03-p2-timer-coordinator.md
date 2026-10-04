@@ -21,7 +21,7 @@
 文件：services/mod.rs、services/timer/{mod.rs,anchor.rs,snapshot.rs,coordinator.rs}、tests/timer_snapshot.rs。
 
 - [x] Coordinator 是唯一计时内存持有者；所有采样、命令、查询、系统事件串行进入同一执行边界。&mut self 只是内部约束，正式部署还需 P6/P7 单实例与调度接线。
-- [x] ClockSample 一次生成事实与 DTO，不再次独立取墙钟。TimerSnapshot 包含 data_epoch、revision、run_id、session_id、session_version、tick_seq、as_of、active_ms、state、timer_kind、remaining_ms/overtime_ms；字段命名与 00 统一。
+- [x] ClockSample 一次生成事实与 DTO，不再次独立取墙钟。TimerSnapshot 包含 data_epoch、revision、run_id、session_id、session_version、tick_seq、as_of、active_ms、state、timer_kind、remaining_ms/overtime_ms；字段命名与 00 统一。（2026-10-04 注：本行写的是当时的 **12 个字段**；**今天 16 个字段**——另有 `pending_ms`（P2 Task 4，`9250a6f`）与 P7 加的 `task_id`/`task_row_version`（`a0db688`）/`task_title`（`1f15b6b`），见 `src-tauri/src/services/timer/snapshot.rs`。）
 - [x] snapshot/tick 接受同一个已验证采样；查询也需可变协调器入口，不能通过 &self 绕过检测。tick_seq 当前 run 内递增，新会话不清零；新 run 才重置。
 - [x] active_ms 为有效可信闭合区间和当前可信开放区间暂计之和；recovering 不叠加可疑 live。倒计时预算从数据库取得；正计时剩余/超时为 null。
 - [x] 取区间用 P1 已有的 `session_repo::intervals_of_session`——**它在 P1 里零调用零测试**（P1 交付时没有消费者），所以本任务要顺带把它测起来。详见 Task 3 的「扩展前先看这三条实测事实」。
@@ -118,7 +118,7 @@
 - [x] resume 双版本与所属任务校验；start/resume 拒绝归档项目及冲突人工归属；终结态 finish 不写库。
 - [x] 异常审计使用合法 JSON，原始墙钟与候选归属分开；检查点镜像随当前区间更新；pause 不写 session.ended_at；结束其它 paused 会话不会替换仍运行的前台镜像。
 - [x] CommandOutcome 返回目标任务提交后 task_version；快照可能指向另一条仍运行的前台会话，目标会话变更由 revision 失效后查询取得。
-- [ ] P7/P8 正式平台接线和实机验收；不计入本轮 P1/P2 核心完成声明。
+- [ ] P7/P8 正式平台接线和实机验收；不计入本轮 P1/P2 核心完成声明。**（2026-10-04 更新：Rust/前端接线已完成（P7）；只剩**实机验收**，归 P8——[`manual-shell.md`](../../../src-tauri/tests/manual-shell.md)、[`manual-sync.md`](../../../src-tauri/tests/manual-sync.md)。本行即与下一条（原 :133）合并后的口径。）**
 
 验证结果与保留项见 [P1/P2 稳定化记录](../../validation/p1-p2-stability.md)。下一阶段须在本轮核心检查通过、用户审核后再安排。
 
@@ -130,7 +130,7 @@
 
 - [x] 回归：暂停期间前调时钟后，校正只审计一次、版本更新，resume 后持续 running；校正审计失败不移动参照、不增加版本，重试后恢复。
 - [x] 回归：无时钟校正的长间隔保留长期累计偏差，新会话仍能检测它；单调钟倒退不作为墙钟校正；**未接受的墙钟异常**在 recovering 中持续拒绝 start/resume（对别的任务同样拒绝），长间隔或采样失败造成的 recovering **不拦别的任务**，重复事件保持幂等。
-- [ ] 正式平台接线和实机验证仍待完成。先稳定 P1/P2，不推进下一阶段。
+- [ ] （**已并入上一条 :121**）正式平台接线和实机验证仍待完成——其中**接线已完成（P7）**，**实机验收归 P8**（`manual-shell.md`/`manual-sync.md`）；本行保留为当时记录。先稳定 P1/P2，不推进下一阶段。
 
 
 ## 非运行态硬故障补全
@@ -162,7 +162,7 @@
 - [x] 装载旧 running 会话但无基线时统计返回 RECOVERY_REQUIRED，不按墙钟差补时；idle/paused 的展示墙钟回退不意味着工时可信。
 - [x] 临时文件库实际 SQLITE_FULL 验证 start 回滚、检查点保留/重试、异常恢复回滚/隔离；OS 磁盘耗尽及 WAL 写失败仍属平台验收。
 - [x] ErrorResponse 与服务层只读版本捕获已提供，覆盖恢复事务提交后的权威版本、元数据不可读、epoch 握手及脱敏。
-- [ ] P7 将所有失败响应接入 capture_error_response，捕获位于原事务结束后及同一串行边界；不得以 timer.snapshot 补版本。
+- [x] P7 将所有失败响应接入 capture_error_response，捕获位于原事务结束后及同一串行边界；不得以 timer.snapshot 补版本。（P7 Task 1a：24/24 经 `run_command`，`src-tauri/src/commands/mod.rs:141`；[总纲 §10](2026-10-03-v01-plan-index.md) 门禁第 4 项已勾）
 - [x] **跨 run 的开放区间不得以「可信」方式闭合**：`EndSessionFacts` 增加 `run_id`，`end_session_in_tx` 在版本校验**之前**用 `StaleRunContext` 校验（映射 `RECOVERY_REQUIRED`），与 `checkpoint_repo::write` 同一判据——写检查点早就拒绝跨 run 写入，闭合区间这条更重的路径不能反而放行。修复前实测：真实工作 60 秒 + 停机一小时 ⇒ `duration_ms = 3_660_000` 且 `needs_review = false`。回归 `cross_run_open_interval_cannot_be_closed_as_trusted_effort` 覆盖 `pause` 与 `finish` 两条路径。
 
 
@@ -173,7 +173,7 @@
 - [x] **故障恢复路径也走同一判据**：把守卫提成共用私有方法 `refuse_stale_run_session()`，`read_sample` 与 `retry_recovery` 的故障分支各调一次。为什么不能只放在 `read_sample`：`retry_recovery` 必须绕开 `refuse_if_faulted` 才能重试恢复事务，所以它**自己取样本**——只在 `read_sample` 里放守卫，08 §1 那句「**所有**采样入口在采样与异常事务之前拒绝旧 running 行」就不成立。
   修复前探针实测：`retry_recovery` 以本 run 身份分割了上一个 run 的开放区间（`ended_at` 被写成候选终点、`needs_review = true`、审计 0 → 1、revision 1 → 2），与 02 §4 的启动扫描分工、P7「发现旧 run 的开放区间要拒绝、**不自动修复**」都冲突。
   回归 `retry_recovery_refuses_a_cross_run_running_session`；**反向验证**：去掉那一行调用 ⇒ 回归失败（`retry_recovery` 返回 `Ok`）。
-- [ ] 旧 running 会话须先由 P3/P7 启动扫描恢复；paused 的 run_id 归一仍按既有 P3 规则，不改变为自动继续。
+- [ ] 旧 running 会话须先由 P3/P7 启动扫描恢复；paused 的 run_id 归一仍按既有 P3 规则，不改变为自动继续。（2026-10-04 注：P7 Task 0 已落地**检测门禁**——`src-tauri/src/services/bootstrap.rs` 的 `scan_recovery`（启动第 ④ 步，`:698`）+ `guard_business_timing`（`:465`），只挡 `start`/`resume`、命中不自动修复；**四类判定与恢复仍归 P3**。）
 
 
 ## 验收核对补全：前台占用错误码与跨午夜事实

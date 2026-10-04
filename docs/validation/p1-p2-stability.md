@@ -102,7 +102,7 @@ system_pause 的 boundary 在范围校验后使用观察当前样本前的检测
 
 新增三个临时文件库集成测试：限制 SQLite max_page_count，并用容量写入实际触发 SQLITE_FULL（断言 DiskFull 码），分别验证 start 字段级回滚、心跳检查点不前移且释放容量后可重试、恢复审计失败整体回滚且隔离直至恢复成功。这是 SQLite 容量故障验证，不冒充 OS 磁盘耗尽、WAL 写失败或真实平台验收。
 
-新增 ErrorResponse 安全 DTO 与 services/error_response.rs：原操作结束后在同一串行服务边界调用，从一个只读事务读取 epoch/revision 及请求目标 task/session 版本；不调用会采样的 snapshot，错误文案不携带内部诊断。读取失败不返回部分版本上下文，requires_handshake=true；epoch 不匹配也要求重新握手。P7 IPC 尚未接线，需由其调用此服务捕获并序列化错误响应，不能宣称生产 IPC 已接入。
+新增 ErrorResponse 安全 DTO 与 services/error_response.rs：原操作结束后在同一串行服务边界调用，从一个只读事务读取 epoch/revision 及请求目标 task/session 版本；不调用会采样的 snapshot，错误文案不携带内部诊断。读取失败不返回部分版本上下文，requires_handshake=true；epoch 不匹配也要求重新握手。P7 IPC 尚未接线，需由其调用此服务捕获并序列化错误响应，不能宣称生产 IPC 已接入。（2026-10-04 注：P7 Task 1a 已接线——24/24 命令经 `src-tauri/src/commands/mod.rs` 的 `run_command`，失败映射在 `:141`；本节其余内容保持当时口径。）
 
 本轮新增 6 个测试，回归共 37 个，全库共 202 个。
 
@@ -159,7 +159,7 @@ LiveSession 增加持久化 run_id，统一 read_sample 在采样/异常事务�
 02 §8 的 14 条、04 §9 的 6 条、06 §4 的前两项技术验证，以及 §5 第 1–8 条横切约定，
 逐条映射到可指名的测试或明确归属的后续计划。要点：
 
-- **P1 计划 24/24 全勾；P2 计划 65 勾、5 未勾，且 5 条全部明确归 P3/P6/P7/P8**，没有一条落在 P1/P2 自身范围内。
+- **P1 计划 24/24 全勾；P2 计划写记录时 65 勾、5 未勾（本次回勾前 67/6，回勾 1 条已完成的 P7 接线后 68/5），且当时那 5 条全部明确归 P3/P6/P7/P8**，没有一条落在 P1/P2 自身范围内。
 - 核对中补齐了 04 §9「重复提交」的缺口：`replaying_the_same_start_request_is_refused_without_a_second_session`
   （重放同一条 `start` ⇒ `VERSION_CONFLICT`、会话数为 1、revision 不再增加、第一次的会话原样保留）。
   回归因此为 41 个，全库为 **206** 个。
@@ -204,4 +204,4 @@ revision），并断言仍留在故障态等真正的恢复路径。
 
 ## 后续兼容更新（2026-10-03）
 
-本记录保留 P1/P2 当时的检查证据。P4 核心现已验收，全仓自动测试为 339 个；WriteEnvelope 已迁至 crate::envelope，原 list_tasks 已由 list_tasks_filtered 替代，错误权威载荷已扩展为 task/session/project/tag 的 records 列表。当前阶段状态和 P7 前补全门禁见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。P3 恢复服务和 P7 生产接线尚未完成；本记录中的“未推进 P4”等范围描述仅指当时验收轮次。
+本记录保留 P1/P2 当时的检查证据。P4 核心现已验收，全仓自动测试为 339 个；WriteEnvelope 已迁至 crate::envelope，原 list_tasks 已由 list_tasks_filtered 替代，错误权威载荷已扩展为 task/session/project/tag 的 records 列表。当前阶段状态和 P7 前补全门禁见[总纲 §10](../superpowers/plans/2026-10-03-v01-plan-index.md)。P3 恢复服务和 P7 生产接线尚未完成；本记录中的“未推进 P4”等范围描述仅指当时验收轮次。（2026-10-04 后续：FOLLOW-04 → 357；P7 交付后 **Rust 464 passed / 0 failed / 1 ignored、前端 13 文件 / 139 条**；**P7 的 IPC/前端接线已完成**（FOLLOW-01），**实机验收仍未做**；P3 恢复服务仍未实施。）

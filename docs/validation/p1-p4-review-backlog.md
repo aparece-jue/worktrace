@@ -7,7 +7,7 @@
 
 | 编号 | 优先级 | 问题与证据 | 影响 | 建议与验收要求 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| COMP-01 | P2 | P2 TimerSnapshot 带 data_epoch/revision；P4 catalog 的 ProjectChange、TaskProjectChange、TagChange、TaskTagsChange、TaskChange 及 DailyPlanChange 仅带 revision；list_selectable_projects/list_tags/tags_of_task 返回裸列表。见 src-tauri/src/services/catalog.rs、services/daily_plan.rs | 对外响应不能统一执行旧 epoch/旧 revision 丢弃协议；多窗口和恢复接线存在缺口。当前尚未接 IPC，不声称已经发生缓存错乱 | 写结果的数据与 epoch/revision 在同一写事务取得，提交后返回；业务读结果在同一读事务取得数据和元数据。不得由 IPC 层提交后补读。明确查询请求的 epoch 校验及首次握手方式；覆盖一致快照、旧 epoch 拒绝及 P7 迟到响应丢弃 | 已修复（2026-10-04，提交 27f8a7a；门禁 350 passed / 0 failed）。查询请求的 epoch 校验已在服务侧统一（只吃请求带来的期望值）；**首次握手方式已由 00 §5 规则 1（`docs/superpowers/specs/2026-10-02-worktrace-architecture/00-architecture.zh.md:61`）与 P7 计划（`docs/superpowers/plans/2026-10-03-p7-shell-and-ui.md:108`/`:110`）定义**：窗口先监听并暂存通知、再拉含 epoch/revision 的一致快照；可见窗口至多每 30 秒校验 `get_revision`。P7 只负责**实现**它。回归验证见下方 |
+| COMP-01 | P2 | P2 TimerSnapshot 带 data_epoch/revision；P4 catalog 的 ProjectChange、TaskProjectChange、TagChange、TaskTagsChange、TaskChange 及 DailyPlanChange 仅带 revision；list_selectable_projects/list_tags/tags_of_task 返回裸列表。见 src-tauri/src/services/catalog.rs、services/daily_plan.rs | 对外响应不能统一执行旧 epoch/旧 revision 丢弃协议；多窗口和恢复接线存在缺口。当前尚未接 IPC，不声称已经发生缓存错乱（写于 2026-10-03；P7 接线已于 2026-10-04 完成，见 FOLLOW-01） | 写结果的数据与 epoch/revision 在同一写事务取得，提交后返回；业务读结果在同一读事务取得数据和元数据。不得由 IPC 层提交后补读。明确查询请求的 epoch 校验及首次握手方式；覆盖一致快照、旧 epoch 拒绝及 P7 迟到响应丢弃 | 已修复（2026-10-04，提交 27f8a7a；门禁 350 passed / 0 failed）。查询请求的 epoch 校验已在服务侧统一（只吃请求带来的期望值）；**首次握手方式已由 00 §5 规则 1（`docs/superpowers/specs/2026-10-02-worktrace-architecture/00-architecture.zh.md:61`）与 P7 计划（`docs/superpowers/plans/2026-10-03-p7-shell-and-ui.md:108`/`:110`）定义**：窗口先监听并暂存通知、再拉含 epoch/revision 的一致快照；可见窗口至多每 30 秒校验 `get_revision`。P7 只负责**实现**它。回归验证见下方 |
 | COMP-02 | P2 | task_repo::create_task 只拒绝 archived，Some(_) 放行 done；set_task_project 拒绝 done；require_active_project 拒绝所有非 active，却都提示“已归档”。见 src-tauri/src/storage/task_repo.rs | 可以创建归属 done 项目但随后无法计时的任务；新建与重新绑定规则不同，拒绝理由不准确。V0.1 无 done 创建入口，但 schema/读模型允许该状态 | 新建任务归属、重新绑定、start/resume 均仅允许 active；archived/done 历史可读。done 使用准确的中文拒绝理由。补新建、绑定、开始/恢复路径测试，拒绝时断言 revision、版本、审计和相关字段零变化 | 已修复（2026-10-04，提交 9e7a89a：**340 passed（当时）**；追加「无法识别 `project.status`」用例后 341，COMP-01/COMP-03 收尾后当前 350 passed / 0 failed），回归验证见下方 |
 | COMP-03 | P2 | project_repo::list_projects 支持完整/按状态查询；catalog 只提供 active 的 list_selectable_projects，注释引导完整列表直接调用仓储。见 src-tauri/src/services/catalog.rs、storage/project_repo.rs | Projects 页查询归档历史缺少符合 commands→services 分层的服务入口 | 补完整项目列表服务及可选状态过滤，保留 active 选择入口，统一 COMP-01 响应信封；验证归档/done 历史可读、选择列表只含 active，命令层不直调仓储 | 已修复（2026-10-04，提交 27f8a7a；门禁 350 passed / 0 failed），回归验证见下方 |
 
@@ -17,13 +17,13 @@
 
 | 编号 | 事项 | 当前状态与后续归属 |
 | --- | --- | --- |
-| FOLLOW-01 | P7 统一接入 capture_error_response | 服务已实现，生产 IPC 尚未接入。在原事务结束后、同一串行边界捕获；按 kind/id 匹配 records，不按请求下标；读取失败要求整份重新握手，不用 timer.snapshot 补错误版本 |
-| FOLLOW-02 | error_response.rs 的返回顺序注释 | 文件开头仍写“按同一份顺序逐条返回”，实际按 kind 白名单分组、组内保持请求顺序。实际实现符合 P4 计划；2026-10-04 已修正注释，返回顺序未改变 |
-| FOLLOW-03 | P3 扫描版本与审计规则 | 文档已明确：扫描查询零写；实际修改 session 状态/run_id/区间事实时修改对象版本，并在同一批事务增加一次 revision、记审计。paused 重绑定适用；recovering 保持原恢复归属直至 reconcile。P3 尚未实施，后续按真实扫描测试验证 |
+| FOLLOW-01 | P7 统一接入 capture_error_response | **已接入**（P7 Task 1a，提交 `12f0453` + `695cd57`）：24/24 命令经 `src-tauri/src/commands/mod.rs` 的 `run_command`，失败在持锁、原事务结束后调 `capture_error_response`（`src-tauri/src/commands/mod.rs:141`）；两处**边界**：（a）计时族命令提交后重建失败会返回 `Err`，该笔已提交的写不发 `domain.changed`；（b）包装层的逐条 `targets` **无用例**（见 [`p7-acceptance`](p7-acceptance.md) §6.5 第 22 条与 [P7 计划](../superpowers/plans/2026-10-03-p7-shell-and-ui.md)）。其余口径不变：在原事务结束后、同一串行边界捕获；按 kind/id 匹配 records，不按请求下标；读取失败要求整份重新握手，不用 timer.snapshot 补错误版本 |
+| FOLLOW-02 | error_response.rs 的返回顺序注释 | 文件开头**原写**“按同一份顺序逐条返回”（已于 2026-10-04 修正为按 kind 白名单分组、组内保持请求顺序）。实际实现符合 P4 计划；返回顺序未改变 |
+| FOLLOW-03 | P3 扫描版本与审计规则 | 文档已明确：扫描查询零写；实际修改 session 状态/run_id/区间事实时修改对象版本，并在同一批事务增加一次 revision、记审计。paused 重绑定适用；recovering 保持原恢复归属直至 reconcile。P3 尚未实施，后续按真实扫描测试验证（2026-10-04 核：仍准确——源码里没有 `reconcile`/`correct`/`backfill`/`discard_session` 的生产实现；P7 Task 0 只加了启动**检测**门禁，不做恢复） |
 | FOLLOW-04 | 中文错误提示一致性 | 已修复（2026-10-04，提交 **a8c4376**，复评 fix round 提交 **5181cd9**，门禁 **357 passed / 0 failed**）：`DomainError` 新增 `UnknownSession`/`UnknownInterval`（变体清单 26 → 28），`task_repo`/`session_repo`/`checkpoint_repo`/`coordinator` 的列名与英文文案全部改成中文领域变体，会话状态补 `zh_session_state`，零调用的 `guard_row_version_of` 删除；「用户可见文案必须是中文」已变成三条机器门禁（变体级 / 构造点级 / 禁用子串），复评 I1 又补上**变体清单的编译期证人**（穷尽 match）与三张映射表的 ALL 循环覆盖，共 7 处篡改反向验证。Storage.detail 仅诊断（保留英文），Domain.detail 会进入用户 message，不能混用 |
-| FOLLOW-05 | 平台验收 | 正式系统事件、锁屏/休眠/改时、多窗口/托盘、备份恢复及跨机器容差验证由 P6/P7/P8 承接；自动测试不能替代实机验收 |
+| FOLLOW-05 | 平台验收 | 正式系统事件、锁屏/休眠/改时、多窗口/托盘、备份恢复及跨机器容差验证由 P6/P7/P8 承接；自动测试不能替代实机验收。**登记处**：P7 的自动化半边见 [`p7-acceptance`](p7-acceptance.md) §5.1；只有实机能验的逐条清单（含「平台事件实机验收」）见同文件 §5.2 与文末「仍未达成 / 存疑」索引表（该表已写明**实现归 P6、实机结论归 P8**）；P6 见 [`2026-10-03-p6-platform-closure.md`](../superpowers/plans/2026-10-03-p6-platform-closure.md)（Task 2 的「正式 OS 事件接线」条目）、P8 见 [`2026-10-03-p8-stats-recovery-export-ui.md`](../superpowers/plans/2026-10-03-p8-stats-recovery-export-ui.md)（Task 5「V0.1 端到端人工验收」）。其中 P7 的 IPC/前端接线已完成（见 FOLLOW-01），**实机验收仍未做** |
 | FOLLOW-06 | P2 提交后重建的一致读 | 已修复（2026-10-04）：rebuild_from_committed 在提交后开启一个读事务，session、区间、前台会话、快照元数据和 task_version 均在同一读快照内取得；CommandOutcome.revision 复用 snapshot.revision，不再另读。保留同次采样及提交后失败进入 RECOVERY_REQUIRED 的原规则。这是计时结果的明确例外：提交后应用内存/重建响应，不要求在业务写事务内生成最终展示快照。 |
-| FOLLOW-07 | commands 分层门禁 | 已修复（2026-10-04）：check-layers.ps1 增加 src/commands 对 storage::、rusqlite、Connection 的检查；正常通过，并须执行反向注入验证。命令层继续只调用服务，不接受连接。 |
+| FOLLOW-07 | commands 分层门禁 | 已修复（2026-10-04）：check-layers.ps1 增加 src/commands 对 storage::、rusqlite、Connection 的检查；正常通过，并须执行反向注入验证。命令层继续只调用服务，不接受连接。（2026-10-04 核：仍准确；今天 `check-layers.ps1` 共**六条**规则——commands/domain/storage/services/platform/入口点，后两条由 P7 Task 0 补上，见 [`p7-acceptance`](p7-acceptance.md) §3.1） |
 
 ## 三、已核对合理的边界（避免后续误当冲突）
 
@@ -31,7 +31,7 @@
 - 今日计划是人工选择集合，不自动改变任务状态、不建立排期、不启动计时。
 - P2 finish 只结束会话；P3 transition_task 才负责任务完成/取消及会话原子联动。
 - 标签/今日计划增删是 epoch-only 显式集合操作；不增加 task.row_version，真实变化增加全局 revision 并写审计；重复增删无变化。
-- P3 尚未实施，恢复确认、历史修正、补录及任务完成联动不能按“已交付”评审。
+- P3 尚未实施，恢复确认、历史修正、补录及任务完成联动不能按“已交付”评审（2026-10-04 核：仍有效）。
 
 ## 四、证据与范围
 
@@ -86,7 +86,7 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 
 **首次握手时序已定，服务入口现已补齐**：00 §5 规则 1 与 P7 计划已经定义好形状——窗口**先监听并暂存通知，再拉**含 epoch/revision 的一致快照；可见窗口至多每 30 秒校验 `get_revision`（`00-architecture.zh.md:61`、`2026-10-03-p7-shell-and-ui.md:108`/`:110`）。本轮已统一服务侧的 epoch 校验口径（所有查询只接受**请求带来的**期望值，`guard_epoch` 在同一个读事务内跑），P7 负责实现上述握手与迟到响应丢弃。
 
-**仍未做**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃、先监听后拉的握手时序）与 UI 不在本轮范围。
+**仍未做**：P7 的 IPC 接线（命令层构造 `WriteEnvelope`、接线 `capture_error_response`、迟到响应丢弃、先监听后拉的握手时序）与 UI 不在本轮范围。（2026-10-04 注：本轮之后 P7 已交付这些接线与 UI；实机验收归 P8。本行保留为当时口径。）
 
 **本轮登记的新遗留**：
 
@@ -95,7 +95,7 @@ FOLLOW-02 的返回顺序注释已修（`error_response.rs`，同一提交 9e7a8
 
 ## 首次握手与 P2 快照收口（2026-10-04）
 
-新增 services::handshake::get_revision(db) -> RevisionSnapshot {data_epoch,revision}，不需要 expected_data_epoch，纯读、不采样、不初始化库、不增加 revision。P7 先监听并缓冲事件，再调用此入口获得库身份，随后携该 epoch 拉业务一致快照；期间发生恢复则业务查询返回 DATA_EPOCH_MISMATCH，重新握手。get_revision 不是包含全部业务数据的快照，窗口仍需拉取所需业务视图，并保留事件缓冲与版本丢弃协议。周期校验与恢复后重新握手复用同一入口，生产 IPC 尚未接线。
+新增 services::handshake::get_revision(db) -> RevisionSnapshot {data_epoch,revision}，不需要 expected_data_epoch，纯读、不采样、不初始化库、不增加 revision。P7 先监听并缓冲事件，再调用此入口获得库身份，随后携该 epoch 拉业务一致快照；期间发生恢复则业务查询返回 DATA_EPOCH_MISMATCH，重新握手。get_revision 不是包含全部业务数据的快照，窗口仍需拉取所需业务视图，并保留事件缓冲与版本丢弃协议。周期校验与恢复后重新握手复用同一入口，生产 IPC 尚未接线。（2026-10-04 注：P7 Task 1a 已接线——24/24 命令经 `run_command`，失败映射在 `src-tauri/src/commands/mod.rs:141`；「尚未」只对写这一节时成立。）
 
 历史 FOLLOW-06 所谓“提交后只读一次”不准确：原实现 build 和随后 require_meta 各读一次元数据，且实体分次读取。现改为一个提交后读事务，并直接复用 snapshot.revision。历史记录中的未完成说法以本节和最新表格为准。
 
