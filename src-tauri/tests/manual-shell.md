@@ -6,6 +6,10 @@
 > 所以 `tests/shell_lifecycle.rs` 只能钉住**决策函数与命令路径**，钉不住这些现象。
 >
 > 每一步记**观察到的现象**（数字、截图路径、SQL 结果），不要只写「通过」。
+>
+> **双窗口同步实验（Task 6a）在另一份**：[`manual-sync.md`](manual-sync.md)——两个窗口之间的
+> 三种竞态（末次事件丢失 / 旧响应晚到 / 乱序跳号）与 30 秒收敛的步骤、记录模板都在那里，
+> 本文档只管外壳侧（托盘、关窗、单实例）。两份互相引用。
 
 ## 0. 环境
 
@@ -156,7 +160,13 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
 
 ## 5. Task 6b 追加（占位，由 6b 填写）
 
+- [ ] **Task 6a 的双窗口同步实机实验**：步骤、判据与记录模板见
+  [`manual-sync.md`](manual-sync.md)（第二个窗口 `sync-lab` 与三个 dev 注入开关属
+  `src-tauri/` 侧，**尚未落地**——见那份文档 §1）。**自动化那半边已完成**
+  （`src/state/__tests__/dualContextSync.test.ts`，提交 `b7b9250`）：它证明的是
+  「同一套规则在两个上下文里各自成立」，**真实双 WebView 的广播时序仍须真机跑**。
 - [ ] 时序验证：窗口 A 暂停 → 窗口 B 的展示在 30 秒内收敛；窗口 B 隐藏后重新显示时先校验再展示
+  → 步骤见 [`manual-sync.md`](manual-sync.md) §2.4 / §2.5
 - [ ] F-001 / F-002：捕获、理清、计时非法请求
-- [ ] F-020 界面侧：多窗口一致性
+- [ ] F-020 界面侧：多窗口一致性（判据与自动化对照见 [`manual-sync.md`](manual-sync.md) §4）
 - [ ] 对照总纲 §5 第 9 条的权威清单逐条确认（写明「已核对 / 不适用」）
