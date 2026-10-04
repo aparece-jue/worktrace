@@ -43,12 +43,14 @@ use std::thread::ThreadId;
 use rusqlite::Connection;
 
 use crate::domain::session::SessionState;
+use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
 use crate::platform::clock::Clock;
 use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
+use crate::services::recovery::{ReconcileReport, ReconcileRequest};
 use crate::services::timer::coordinator::{
     CommandOutcome, Coordinator, ResumeRequest, SessionRequest, StartRequest,
 };
@@ -59,6 +61,7 @@ use crate::storage::meta;
 use crate::storage::migrations::migrate;
 use crate::storage::run_repo;
 use crate::storage::session_repo::{self, InvariantFault};
+use crate::storage::WriteOutcome;
 
 /// 周期采样一拍的默认间隔（毫秒）。
 ///
@@ -346,6 +349,13 @@ pub struct AppState {
     db: Db,
     coordinator: Coordinator,
     recovery: RecoveryScan,
+    /// 上一次恢复扫描**失败**的标记（P3 S1）。启动成功时一定是 `false`。
+    ///
+    /// 为什么必须是独立的一位：[`AppState::recovery`] 是「上一次**成功**扫描的结论」。
+    /// 扫描查询失败时那份结论不再代表今天的事实，直接拿它放行就是把「不知道有没有
+    /// 未处理的恢复事实」当成「没有」。所以失败时置真、**原样保留**旧快照，
+    /// 由 [`AppState::guard_business_timing`] 先看这一位再走原有门禁。
+    recovery_scan_failed: bool,
 }
 
 /// 命令、托盘与采样共用的句柄。
@@ -466,12 +476,54 @@ impl AppState {
     /// 业务计时（`start`/`resume`）的门禁。
     ///
     /// **只挡「开始新计时」**：查询（`snapshot`/`tick`）照常可用——用户要能看到
-    /// 「有什么在等恢复」，把他挡在界面外面不如告诉他发生了什么。
+    /// 「有什么在等恢复」，把他挡在界面外面不如告诉他发生了什么。恢复入口
+    /// （`reconcile` / `discard_session` / `retry_recovery`）也不受它限制，
+    /// 否则门禁自己就成了死锁。
+    ///
+    /// **先看「上次扫描是否失败」再看快照**（P3 S1）：失败的扫描没有结论，
+    /// 旧快照只是历史快照，不能拿它放行。
     pub fn guard_business_timing(&self) -> Result<(), AppError> {
+        if self.recovery_scan_failed {
+            return Err(AppError::RecoveryRequired);
+        }
         if self.recovery.requires_recovery() {
             return Err(AppError::RecoveryRequired);
         }
         Ok(())
+    }
+
+    /// 重扫恢复事实并替换门禁快照（P3 S1）。`start`/`resume` 读的就是这个字段。
+    ///
+    /// 服务层事务**提交之后**、仍持同一把锁时调用；返回重扫结论——
+    /// `requires_recovery()` 仍为真时 `start`/`resume` 继续拒绝（判据不变），
+    /// 那**不是**失败：调用方照常拿到快照。
+    ///
+    /// **失败也闭环**：三条只读查询失败时置 [`AppState::recovery_scan_failed`]、
+    /// **不替换**旧快照、返回 [`AppError::RecoveryRequired`]——旧快照是上一次成功扫描的
+    /// 结论，不能当这次的结果。扫描查询本身是幂等的，再次扫描成功就清标记；
+    /// 清标记**不要求重做**任何已提交的用户命令（已提交事实保留，不重复审计、不重复加版本）。
+    pub fn rescan_recovery(&mut self) -> Result<RecoveryScan, AppError> {
+        let AppState {
+            db,
+            coordinator,
+            recovery,
+            recovery_scan_failed,
+        } = self;
+        let run_id = coordinator.run_id().to_string();
+        match scan_recovery(db.connection(), &run_id) {
+            Ok(scan) => {
+                // 成功才替换快照并清标记：两者同一步完成，不留「新快照 + 旧标记」的中间态。
+                *recovery = scan.clone();
+                *recovery_scan_failed = false;
+                Ok(scan)
+            }
+            Err(_) => {
+                // 底层诊断（SQLite 原文）在这里没地方落：契约只要求按码分支，
+                // 用户看到的是 RECOVERY_REQUIRED 那句话。失败的**结论**留在标记里。
+                *recovery_scan_failed = true;
+                Err(AppError::RecoveryRequired)
+            }
+        }
     }
 
     /// 开始计时（先过恢复门禁）。
@@ -609,6 +661,44 @@ impl AppState {
             clean_exit_recorded,
         })
     }
+
+    /// 对账（确认 / 丢弃不确定区间）的命令入口（P3 S2）。`env` 的版本位是**会话**版本。
+    ///
+    /// 服务在自己的事务里做完校验、写入、审计与恰好一次 `revision`；**提交之后**由这里
+    /// 做两件内存收尾：
+    /// 1. [`AppState::rescan_recovery`]（S1）重算门禁——事实刚变，快照必须跟着变；
+    /// 2. `Coordinator::load_session` 按已提交事实刷新镜像，**不留一个继续按旧状态
+    ///    出快照的 `live`**（采样线程每一拍都出快照）。
+    ///
+    /// 两处失败都映射 [`AppError::RecoveryRequired`]（P2 的提交后约定）：事务已经落库，
+    /// 缺的是「让内存与事实重新对上」，不是「再试一次」——重发一条对账命令会撞上
+    /// 「会话已经不是 `recovering`」的前置。
+    pub fn reconcile(
+        &mut self,
+        env: WriteEnvelope,
+        req: ReconcileRequest,
+    ) -> Result<WriteOutcome<ReconcileReport>, AppError> {
+        let (now, run_id) = {
+            let coordinator = &self.coordinator;
+            (coordinator.wall_ms()?, coordinator.run_id().to_string())
+        };
+        let session_id = req.session_id.clone();
+        let outcome = {
+            let AppState { db, .. } = self;
+            crate::services::recovery::reconcile(db, env, req, now, &run_id)?
+        };
+
+        // 提交之后的第一步：门禁重算（失败 ⇒ 标记挡住计时，旧快照不动）。
+        self.rescan_recovery()?;
+
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        coordinator
+            .load_session(db.connection(), &session_id)
+            .map_err(|_| AppError::RecoveryRequired)?;
+        Ok(outcome)
+    }
 }
 
 /// 一次显式退出的结果。
@@ -724,6 +814,8 @@ pub fn startup(
             db,
             coordinator,
             recovery: recovery.clone(),
+            // 启动能走到这里就说明第 ④ 步的扫描成功了：没有「扫描失败」的遗留。
+            recovery_scan_failed: false,
         }),
         holder: Mutex::new(None),
     });

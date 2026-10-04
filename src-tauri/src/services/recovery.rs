@@ -38,38 +38,46 @@
 //! 系统事务**不开 epoch 守卫**（没有客户端请求），照 `AppState::explicit_exit`
 //! 里开事务那段的写法。
 //!
-//! # `time_edit` 的两种形状（取数据前先按 `change` 过滤）
+//! # `time_edit` 的形状（取数据前先按 `reason` / `change` 过滤）
 //!
-//! 与 `task_change` 的三种形状同一约定：两种都进同一张表，所以「有没有审计行」
-//! 回答不了任何业务问题。
+//! 四种形状都进同一张表，所以「有没有审计行」回答不了任何业务问题：
 //!
 //! - `"change": "normalize_crashed_interval"`：`after_json` 带 `candidate_end` 与
 //!   `candidate_end_source` ∈ {`last_checkpoint`, `interval_start`}；
-//! - `"change": "rebind_run"`：只改会话归属，**没有**候选终点来源（不改区间事实）。
+//! - `"change": "rebind_run"`：只改会话归属，**没有**候选终点来源（不改区间事实）；
+//! - `"change": "reconcile_confirm"`（`reason = "reconcile:confirm"`）：确认的端点是
+//!   **用户给定的值**，不是推导出来的候选 ⇒ **不写** `candidate_end_source`；
+//! - `"change": "reconcile_discard_uncertain"`（`reason = "reconcile:discard_uncertain"`）：
+//!   只作废，同样不推导候选端点。
 //!
-//! 两种形状的 `before_json`/`after_json` 都带 `session` 与 `intervals`
-//! （逐字段的区间前后值），改动前的开放事实原样留在 `before_json` 里。
+//! 四种形状的 `before_json`/`after_json` 都带 `session` 与 `intervals`
+//! （逐字段的区间前后值，含 `voided_at`），改动前的事实原样留在 `before_json` 里。
 //!
 //! # 本模块不做的事
 //!
-//! 不解门禁——那是 S1 `AppState::rescan_recovery`（Task 2/Task 4）在 `reconcile` /
-//! `discard_session` 提交后干的；也不重建协调器镜像：启动路径上扫描发生在协调器
-//! 创建之前（`live` 还是 `None`），旧协调器整体丢弃，扫描**不去修一个还活着的
-//! `live`**。
+//! **不解门禁**——那是 S1 `AppState::rescan_recovery`（提交之后由 `AppState` 调）干的；
+//! [`reconcile`] 是**用户命令**：它自己拥有事务、恰好加一次 `revision`，但 `AppState.recovery`
+//! 这份门禁快照不归它改。也不重建协调器镜像：提交后的 `load_session` 同样在 `AppState` 里。
+//!
+//! [`attention_overview`] 是**只读**入口（同一读事务信封），不写任何事实。
 
 use rusqlite::Transaction;
 
 use crate::domain::error::DomainError;
+use crate::domain::interval::{IntervalRange, IntervalSet};
 use crate::domain::session::{SessionAttention, SessionState};
+use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
 use crate::storage::db::{map_sqlite, Db};
+use crate::storage::guards::{guard_epoch, guard_row_version};
+use crate::storage::meta::require_meta;
 use crate::storage::session_repo::{
     self, fault_reason, IntervalRow, InvariantFault, SessionRow, SessionStateUpdate,
 };
 use crate::storage::time_edit_repo::{self, TimeEdit};
 use crate::storage::WriteOutcome;
 
-use super::tx::settle;
+use super::tx::{settle, write_tx};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 扫描结论（§0.5 钉死的 DTO 形状；P8 的 IPC 包装与快照 fixture 照抄）
@@ -132,6 +140,43 @@ pub struct PendingIntervalItem {
     pub sampled_end_wall_at: Option<i64>,
     /// 恒为 `true`（这个列表就是待确认集合）。
     pub needs_review: bool,
+}
+
+/// 全局待确认概览（R7；§0.5 钉死的第四个 DTO）。P8 的「恢复确认」入口与 P5 的
+/// 排除口径都读它。
+///
+/// # 作用域（口径写在这里，`tests/reconcile.rs` 用测试钉住）
+///
+/// `items` 是**三者的并集**，每个会话只出现一次，按 `(started_at, id)` 升序：
+///
+/// 1. **不变量损坏**的会话（[`session_repo::invariant_faults`]，**不分状态、不分 run**）；
+/// 2. **有未作废待确认区间**的会话（[`session_repo::pending_intervals`]，**不分状态、不分 run**）；
+/// 3. **不属于当前 run 的未结束会话**（[`session_repo::unfinished_sessions`]，与门禁同口径）。
+///
+/// **为什么必须带上 1、2 两条终态分支**（Task 1 评审 m2）：门禁那三条查询都不筛会话
+/// 状态——一个 `finished`/`discarded` 会话只要还挂着不变量损坏、或还挂着未作废的待确认
+/// 区间（`ended_at` 已闭合的候选也算），门禁就一直是关的。若列表只遍历未结束会话，
+/// 用户会看到「门禁关着，但列表里没有任何待处理项」。取并集之后
+/// **门禁关着 ⇒ 列表非空**；反过来不成立（当前 run 自己的 `recovering` 会话也进列表，
+/// 而它不是门禁材料）。
+///
+/// **正在计时的会话不进列表**：当前 run 的 `running` 会话在既没有损坏、又没有待确认
+/// 区间时属于计时快照（`TimerSnapshot`），不属于恢复概览——两者在界面上是两块
+/// （P7 计划的「恢复提示与时钟校正」第 1 条）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionOverview {
+    /// 需要用户处理或诊断的会话（口径见类型文档）。
+    pub items: Vec<SessionAttentionItem>,
+    /// 待确认区间总数（含终点未知的零长度候选）= `items` 里区间数之和。
+    pub pending_intervals: usize,
+    /// 有未作废待确认区间的会话数。
+    pub pending_sessions: usize,
+    /// 第 1 类（隔离）会话数。
+    pub fault_sessions: usize,
+    /// 这次读看到的库身份。
+    pub data_epoch: String,
+    /// 这次读看到的业务版本。读**不**改它。
+    pub revision: i64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,6 +377,367 @@ pub fn scan_at_startup(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 对账（P3 Task 2，S2 的服务半部）：确认或丢弃不确定区间
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 对账动作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileAction {
+    /// 确认：给出**全部**待确认区间的新起止（缺一条、多一条都整条拒绝）。
+    Confirm,
+    /// 丢弃不确定区间：作废该会话**全部**待确认区间，保留此前的可信前缀。
+    /// 不接受区间列表（一次一条会重新引入「作废哪一条」的歧义）；
+    /// 它**不能**用来作废整次会话——那是 `discard_session`。
+    DiscardUncertain,
+}
+
+/// 对账之后会话停在哪个状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileTargetState {
+    Paused,
+    Finished,
+}
+
+impl ReconcileTargetState {
+    fn as_state(self) -> SessionState {
+        match self {
+            Self::Paused => SessionState::Paused,
+            Self::Finished => SessionState::Finished,
+        }
+    }
+}
+
+/// 用户确认的一段区间。起止都是**用户给定的值**，不是候选端点推导出来的
+/// （所以审计里没有 `candidate_end_source`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedRange {
+    pub interval_id: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+}
+
+/// 一次对账请求。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileRequest {
+    pub session_id: String,
+    pub action: ReconcileAction,
+    pub target_state: ReconcileTargetState,
+    /// `Confirm` 必填，且必须**恰好覆盖**该会话的全部待确认区间
+    /// （待确认集合为空时必须是空列表）；`DiscardUncertain` 必须为空。
+    pub ranges: Vec<ConfirmedRange>,
+}
+
+/// 一次对账的结果：会话 + 该会话**全部**区间（不只是被处理的那几条）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileReport {
+    pub session: SessionRow,
+    pub intervals: Vec<IntervalRow>,
+    pub revision: i64,
+    pub data_epoch: String,
+}
+
+/// 用户命令：一次事务处理该会话的**全部**待确认区间。
+///
+/// 前置与判据（Task 2）：
+/// - 会话必须存在、版本匹配（`env.expected_row_version`）；
+/// - **命中第 1 类（不变量损坏）一律拒绝**：损坏不是「不确定」，确认一下就好的说法
+///   会把损坏洗成事实，所以文案指向诊断；
+/// - 只接 `recovering`（R6）：`paused`/`running` 想改事实要先 `finish` 再走 `correct`，
+///   `paused` + 待确认那一类的出口是 `discard_session`（Task 4），不在这里放宽；
+/// - `Confirm`：每条 `ended_at >= started_at`（零长度合法）、`ended_at <= now`
+///   （未来的「已发生工时」不是事实）、`ranges` 两两不重叠（[`IntervalSet`]）、
+///   且**逐条**与全部有效人工区间不重叠（S7，跨会话，端点相接不算）；
+/// - `DiscardUncertain`：`ranges` 必须为空，作废集合由服务从库里取。
+///
+/// **写之前的全部校验都在写之前**：所以「整条命令拒绝」就是零变化——不会出现
+/// 「前两条确认了、第三条被拒」。事务由本函数拥有，`settle` 保证恰好一次 `revision`。
+///
+/// 幂等：重复调用会先撞上「非 `recovering`」的前置（确认之后会话已经停在
+/// `paused`/`finished`），所以 `Unchanged` 没有可达输入——本函数只产出 `Changed`。
+/// 这是「不重复审计、不重复加版本」的实现方式：第二次请求被拒绝，而不是被当成又一笔写。
+///
+/// `current_run_id` 由调用方（`AppState::reconcile`）从协调器取：会话收尾要把
+/// `run_id` 切到**本次 run**，而服务层够不着协调器；原始恢复归属保留在 `time_edit` 里。
+pub fn reconcile(
+    db: &mut Db,
+    env: WriteEnvelope,
+    req: ReconcileRequest,
+    now: i64,
+    current_run_id: &str,
+) -> Result<WriteOutcome<ReconcileReport>, AppError> {
+    let expected_version = env.expected_row_version.ok_or_else(|| AppError::Domain {
+        detail: "缺少记录版本，无法安全地处理这条会话。".into(),
+    })?;
+
+    let tx = write_tx(db, &env)?;
+
+    let session =
+        session_repo::get_session(&tx, &req.session_id)?.ok_or(DomainError::UnknownSession)?;
+    guard_row_version(session.row_version, expected_version)?;
+
+    // 第 1 类：不变量损坏只诊断，不允许「确认一下就修好」。
+    if session_repo::invariant_faults(&tx, None)?
+        .iter()
+        .any(|fault| fault.session_id == req.session_id)
+    {
+        return Err(AppError::Domain {
+            detail: "这个会话的计时记录已损坏，无法通过确认修复，请查看诊断信息。".into(),
+        });
+    }
+
+    if session.state != SessionState::Recovering {
+        return Err(AppError::Domain {
+            detail: "只有待确认状态的会话能确认或丢弃不确定区间；正在计时或已暂停的会话请先结束计时，或改用作废整次记录。".into(),
+        });
+    }
+
+    let before_intervals = session_repo::intervals_of_session(&tx, &req.session_id)?;
+    let pending: Vec<&IntervalRow> = before_intervals
+        .iter()
+        .filter(|interval| interval.needs_review && interval.voided_at.is_none())
+        .collect();
+
+    match req.action {
+        ReconcileAction::Confirm => validate_confirm(&tx, &pending, &req.ranges, now)?,
+        ReconcileAction::DiscardUncertain => {
+            if !req.ranges.is_empty() {
+                return Err(AppError::Domain {
+                    detail: "丢弃不确定区间时由服务取出全部待确认区间，不能指定区间列表。".into(),
+                });
+            }
+        }
+    }
+
+    match req.action {
+        ReconcileAction::Confirm => {
+            for range in &req.ranges {
+                session_repo::confirm_interval(
+                    &tx,
+                    &range.interval_id,
+                    range.started_at,
+                    range.ended_at,
+                    // 零长度合法：`duration_ms = 0`（半开区间的空集）。
+                    range.ended_at - range.started_at,
+                )?;
+            }
+        }
+        ReconcileAction::DiscardUncertain => {
+            for interval in &pending {
+                session_repo::void_interval(&tx, &interval.id, now)?;
+            }
+        }
+    }
+
+    // 会话收尾。`ended_at` 只在 `Finished` 时写：`Paused` 传 `None`，
+    // `update_session_state` 的 `COALESCE` 保持原值。
+    let after_intervals = session_repo::intervals_of_session(&tx, &req.session_id)?;
+    let ended_at = match req.target_state {
+        ReconcileTargetState::Finished => Some(finished_end(&after_intervals, session.started_at)),
+        ReconcileTargetState::Paused => None,
+    };
+    let updated = session_repo::update_session_state(
+        &tx,
+        &req.session_id,
+        expected_version,
+        req.target_state.as_state(),
+        SessionStateUpdate {
+            ended_at,
+            // 02 §4/§10：恢复归属切到本次 run，原始归属留在下面的审计里。
+            run_id: Some(current_run_id),
+            needs_review: Some(false),
+        },
+    )?;
+
+    record_edit(
+        &tx,
+        &ScanEdit {
+            change: match req.action {
+                ReconcileAction::Confirm => "reconcile_confirm",
+                ReconcileAction::DiscardUncertain => "reconcile_discard_uncertain",
+            },
+            before: &session,
+            after: &updated,
+            before_intervals: &before_intervals,
+            after_intervals: &after_intervals,
+            // Ruling 8：端点由用户给定，没有「候选推导」，所以没有 candidate_* 键。
+            candidate: None,
+            reason: match req.action {
+                ReconcileAction::Confirm => "reconcile:confirm",
+                ReconcileAction::DiscardUncertain => "reconcile:discard_uncertain",
+            },
+        },
+        now,
+    )?;
+
+    // `Changed` 是这一条命令唯一的取值（前置已经排除了「什么都不用改」的输入），
+    // 但写的形状仍然走 `settle`：它负责「恰好一次 revision」与同事务读回版本。
+    let outcome = settle(
+        &tx,
+        WriteOutcome::Changed(ReconcileReport {
+            session: updated,
+            intervals: after_intervals,
+            // 下面由 `settle` 的结果填权威值。
+            revision: 0,
+            data_epoch: String::new(),
+        }),
+    )?
+    .map(|(mut report, settled)| {
+        report.revision = settled.revision;
+        report.data_epoch = settled.data_epoch;
+        report
+    });
+    tx.commit().map_err(map_sqlite)?;
+    Ok(outcome)
+}
+
+/// `Confirm` 的逐条校验（全部通过之后调用方才开始写）。
+fn validate_confirm(
+    tx: &Transaction<'_>,
+    pending: &[&IntervalRow],
+    ranges: &[ConfirmedRange],
+    now: i64,
+) -> Result<(), AppError> {
+    // 逐一对应：缺一条、多一条、外来会话的区间、重复 id、指向非待确认行，全都
+    // 会在这一步失配 ⇒ 整条命令拒绝（零变化）。
+    let mut expected: Vec<&str> = pending
+        .iter()
+        .map(|interval| interval.id.as_str())
+        .collect();
+    let mut given: Vec<&str> = ranges
+        .iter()
+        .map(|range| range.interval_id.as_str())
+        .collect();
+    expected.sort_unstable();
+    given.sort_unstable();
+    if expected != given {
+        return Err(AppError::Domain {
+            detail: "确认的区间必须与该会话的全部待确认区间一一对应，请刷新后重试。".into(),
+        });
+    }
+
+    let mut confirmed = IntervalSet::new();
+    for range in ranges {
+        let interval = IntervalRange::new(range.started_at, range.ended_at)?;
+        if range.ended_at > now {
+            return Err(AppError::Domain {
+                detail: "确认的结束时刻不能晚于当前时间。".into(),
+            });
+        }
+        // 两两不许重叠（半开：端点相接允许），命中即 `OverlappingInterval`。
+        confirmed.insert(interval)?;
+        // 与全部有效人工区间不重叠（跨会话），端点相接不算重叠。
+        session_repo::require_no_human_overlap(tx, interval.start, interval.end, None)?;
+    }
+    Ok(())
+}
+
+/// `target_state = Finished` 时会话的结束时刻，**一条口径**：
+/// `COALESCE((SELECT MAX(ended_at) FROM work_interval WHERE session_id = ? AND voided_at IS NULL
+/// AND ended_at IS NOT NULL), session.started_at)`。
+///
+/// `voided_at IS NULL` 排除刚被作废的段、`ended_at IS NOT NULL` 排除仍无终点的段、
+/// 兜底到会话起点保证 `ck_session_range`（一条可用区间都没有的会话也要能结束）。
+fn finished_end(intervals: &[IntervalRow], session_started_at: i64) -> i64 {
+    intervals
+        .iter()
+        .filter(|interval| interval.voided_at.is_none())
+        .filter_map(|interval| interval.ended_at)
+        .max()
+        .unwrap_or(session_started_at)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 全局待确认概览（R7，只读）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 全局待确认概览：形状与作用域见 [`AttentionOverview`]。
+///
+/// 纯读：不开写事务、不加 `revision`。为了「数据与元数据出自同一读事务」，这里显式
+/// 开一个只读事务，`guard_epoch` 在事务内跑（形状抄 `catalog::list_projects`）。
+///
+/// `current_run_id` 由调用方从协调器取（`AppState::coordinator().run_id()`）：
+/// `is_current_run` 要用它分组，而服务层够不着协调器。
+pub fn attention_overview(
+    db: &Db,
+    expected_data_epoch: &str,
+    current_run_id: &str,
+) -> Result<AttentionOverview, AppError> {
+    let tx = db
+        .connection()
+        .unchecked_transaction()
+        .map_err(map_sqlite)?;
+    guard_epoch(&tx, expected_data_epoch)?;
+
+    // 一份谓词两个入口（S9）：`None` = 不限 run（故障与待确认是全局事实），
+    // `Some(当前 run)` = 排除当前 run（未结束会话与门禁同口径）。
+    let faults = session_repo::invariant_faults(&tx, None)?;
+    let pending = session_repo::pending_intervals(&tx, None)?;
+    let unfinished = session_repo::unfinished_sessions(&tx, Some(current_run_id))?;
+
+    let mut candidates: Vec<SessionRow> = Vec::new();
+    for session in unfinished {
+        push_unique(&mut candidates, session);
+    }
+    for id in faults
+        .iter()
+        .map(|fault| fault.session_id.as_str())
+        .chain(pending.iter().map(|interval| interval.session_id.as_str()))
+    {
+        if candidates.iter().any(|known| known.id == id) {
+            continue;
+        }
+        // 只有真读到了行才建条目：故障/待确认查询带 JOIN，理论上可能出现孤儿区间
+        // （`work_interval.session_id` 有外键，正常路径不会有）。
+        if let Some(session) = session_repo::get_session(&tx, id)? {
+            push_unique(&mut candidates, session);
+        }
+    }
+    candidates.sort_by(|a, b| (a.started_at, &a.id).cmp(&(b.started_at, &b.id)));
+
+    let items: Vec<SessionAttentionItem> = candidates
+        .iter()
+        .map(|session| {
+            let fault_reason = faults
+                .iter()
+                .find(|fault| fault.session_id == session.id)
+                .map(|fault| fault.reason.to_string());
+            let attention = if fault_reason.is_some() {
+                SessionAttention::InvariantBroken
+            } else {
+                // 未结束的别的 run 会话（例如没有余段的 `recovering`）也要有人处理，
+                // 所以与「有待确认区间」共用同一个标记，不用 `None`（那是「正常」）。
+                SessionAttention::NeedsReview
+            };
+            let intervals = pending
+                .iter()
+                .filter(|interval| interval.session_id == session.id)
+                .map(pending_item)
+                .collect();
+            item(session, current_run_id, attention, fault_reason, intervals)
+        })
+        .collect();
+
+    let meta = require_meta(&tx)?;
+    // 读事务什么都没写：直接结束它（回滚一个只读事务不改变任何事实）。
+    drop(tx);
+
+    Ok(AttentionOverview {
+        pending_intervals: pending.len(),
+        pending_sessions: items
+            .iter()
+            .filter(|item| !item.intervals.is_empty())
+            .count(),
+        fault_sessions: items
+            .iter()
+            .filter(|item| item.fault_reason.is_some())
+            .count(),
+        items,
+        data_epoch: meta.data_epoch,
+        revision: meta.revision,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 内部
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -392,6 +798,7 @@ fn edit_json(
             "duration_ms": i.duration_ms,
             "sampled_end_wall_at": i.sampled_end_wall_at,
             "needs_review": i.needs_review,
+            "voided_at": i.voided_at,
         })).collect::<Vec<_>>(),
     });
     if let Some((end, source)) = candidate {
@@ -407,17 +814,29 @@ fn pending_items(
     session_id: &str,
 ) -> Result<Vec<PendingIntervalItem>, AppError> {
     Ok(session_repo::intervals_of_session(tx, session_id)?
-        .into_iter()
+        .iter()
         .filter(|interval| interval.needs_review && interval.voided_at.is_none())
-        .map(|interval| PendingIntervalItem {
-            id: interval.id,
-            started_at: interval.started_at,
-            ended_at: interval.ended_at,
-            duration_ms: interval.duration_ms,
-            sampled_end_wall_at: interval.sampled_end_wall_at,
-            needs_review: interval.needs_review,
-        })
+        .map(pending_item)
         .collect())
+}
+
+/// 一行区间 → 展示口径的待确认条目（扫描与全局概览共用同一份字段映射）。
+fn pending_item(interval: &IntervalRow) -> PendingIntervalItem {
+    PendingIntervalItem {
+        id: interval.id.clone(),
+        started_at: interval.started_at,
+        ended_at: interval.ended_at,
+        duration_ms: interval.duration_ms,
+        sampled_end_wall_at: interval.sampled_end_wall_at,
+        needs_review: interval.needs_review,
+    }
+}
+
+/// 往候选集合里加一条会话，按 id 去重（三个来源的并集里同一条只能出现一次）。
+fn push_unique(candidates: &mut Vec<SessionRow>, row: SessionRow) {
+    if !candidates.iter().any(|known| known.id == row.id) {
+        candidates.push(row);
+    }
 }
 
 fn item(

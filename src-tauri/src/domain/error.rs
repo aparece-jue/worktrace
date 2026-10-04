@@ -34,7 +34,7 @@ pub enum DomainError {
     IntervalOpenInWrongState { state: &'static str },
     /// 区间为负：`ended_at < started_at`。
     NegativeInterval { started_at: i64, ended_at: i64 },
-    /// 区间与同会话的另一段有效区间重叠（半开区间，端点相接不算重叠）。
+    /// 区间与另一段有效人工区间（**可跨会话**）重叠（半开区间，端点相接不算重叠）。
     OverlappingInterval {
         existing_start: i64,
         existing_end: i64,

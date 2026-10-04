@@ -567,6 +567,138 @@ pub fn require_available_human_start(conn: &Connection, start: i64) -> Result<()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 人工时间的重叠校验与区间事实写入口（P3 Task 2，S7/S8）
+//
+// 服务层**不写 SQL**：确认、作废、重叠校验各是一条命名原语。三条都取调用方的
+// `&Transaction`（读入口取 `&Connection`，`Transaction` 自动 `Deref`），不自行
+// begin/commit、不自行加 revision——事务与版本归服务层。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `[start, end)` 是否与**全部有效人工区间**相交（半开，端点相接不算）。
+///
+/// 口径（02 §3/§6、08 §1）：
+/// - 只算 **FOREGROUND** 会话的区间（`BACKGROUND`/`PASSIVE`/`WAITING` 这类机器时间
+///   按独立口径，不参与人工时间的互斥）；
+/// - 只算**有效**区间：`voided_at IS NULL` 且 `needs_review = 0`。
+///   **待确认的候选范围不是已确认的重叠事实**（08 §1 原文：「候选时长只是证据，
+///   确认时仍要重新校验冲突」），所以 `needs_review = 1` 的行不参与——它们正是
+///   本次要确认或作废的对象；
+/// - **正在计时（`ended_at IS NULL`）的区间也算**：它还没有终点，但起点已经落在
+///   时间轴上。确认一段与它相交的时间会造出两段互相覆盖的人工区间，而
+///   「恢复确认不允许与后来已记录人工时间重叠」（02 §3 原文）正是要挡住这件事。
+///   它的右端点未知，所以命中时给的是 [`AppError::Domain`] 的整句中文，
+///   **不**编一个假的 `existing_end` 去凑 [`DomainError::OverlappingInterval`]。
+///
+/// `exclude_interval` 供 `correct` 排除被修正的那一段自身（否则它会与自己相撞）。
+pub fn require_no_human_overlap(
+    conn: &Connection,
+    start: i64,
+    end: i64,
+    exclude_interval: Option<&str>,
+) -> Result<(), AppError> {
+    // 半开相交：`existing.started_at < end AND start < existing.ended_at`。
+    // 没有终点的行按「延伸到未来」处理，所以只要 `existing.started_at < end` 就算相交。
+    let hit = conn
+        .query_row(
+            "SELECT i.started_at, i.ended_at FROM work_interval i \
+               JOIN work_session s ON s.id = i.session_id \
+              WHERE s.mode = 'FOREGROUND' AND i.voided_at IS NULL AND i.needs_review = 0 \
+                AND (?3 IS NULL OR i.id <> ?3) \
+                AND i.started_at < ?2 \
+                AND (i.ended_at IS NULL OR ?1 < i.ended_at) \
+              ORDER BY i.started_at, i.id LIMIT 1",
+            rusqlite::params![start, end, exclude_interval],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()
+        .map_err(map_sqlite)?;
+    match hit {
+        None => Ok(()),
+        Some((existing_start, Some(existing_end))) => Err(DomainError::OverlappingInterval {
+            existing_start,
+            existing_end,
+        }
+        .into()),
+        Some(_) => Err(AppError::Domain {
+            detail: "与一段正在计时的区间重叠，请先把它停下来再确认。".into(),
+        }),
+    }
+}
+
+/// 确认一段待确认区间：写入用户给定的起止与由起止算出的时长，清 `needs_review`。
+///
+/// - 只接受 `needs_review = 1 AND voided_at IS NULL` 的行。已作废、或本来就已确认的行
+///   一律拒绝：那是把两类事实混在一起（[`DomainError::PendingAndVoided`]）。
+///   服务层已经用「待确认集合逐一对应」挡住了这两种输入，这里是原语自己的契约。
+/// - `voided_at` 保持 `NULL`、`sampled_end_wall_at` **保持原值**：确认只补终点与时长，
+///   不改采样留痕。
+/// - 时长由调用方按 `ended_at - started_at` 给（服务已校验 `ended_at >= started_at`）；
+///   仓储不读时钟、不推算工时。
+pub fn confirm_interval(
+    tx: &Transaction<'_>,
+    interval_id: &str,
+    started_at: i64,
+    ended_at: i64,
+    duration_ms: i64,
+) -> Result<IntervalRow, AppError> {
+    let before = get_interval(tx, interval_id)?.ok_or(DomainError::UnknownInterval)?;
+    if before.voided_at.is_some() || !before.needs_review {
+        return Err(DomainError::PendingAndVoided.into());
+    }
+
+    let changed = tx
+        .execute(
+            "UPDATE work_interval
+                SET started_at = ?1, ended_at = ?2, duration_ms = ?3, needs_review = 0
+              WHERE id = ?4 AND needs_review = 1 AND voided_at IS NULL",
+            rusqlite::params![started_at, ended_at, duration_ms, interval_id],
+        )
+        .map_err(map_sqlite)?;
+    if changed == 0 {
+        return Err(DomainError::PendingAndVoided.into());
+    }
+
+    get_interval(tx, interval_id)?.ok_or_else(|| AppError::Storage {
+        detail: "interval vanished after confirm".into(),
+    })
+}
+
+/// 作废一段区间（软删除，保留审计）：`voided_at = …`、清 `needs_review`。
+///
+/// 按「时长是否已知」处理端点（S8 / 2026-10-04 复审补正）：
+/// - `duration_ms IS NOT NULL`（可信闭合）⇒ 起止与时长**原样保留**；
+/// - `duration_ms IS NULL`（候选段，终点本来就未知）⇒ `ended_at` 清回 `NULL`。
+///   给未确认的候选补 0 时长就是造数，而既有 `ck_interval_duration` 不豁免作废行
+///   （「已作废 + 已闭合 + 无时长」直接违反 CHECK）。修改前的候选端点完整记在
+///   `time_edit.before_json` 里。
+///
+/// 已经作废的行再作废一次是幂等的：`voided_at` 保留第一次的时刻（与
+/// `run_repo::mark_clean_exit` 同一口径），不覆盖历史。
+pub fn void_interval(
+    tx: &Transaction<'_>,
+    interval_id: &str,
+    voided_at: i64,
+) -> Result<IntervalRow, AppError> {
+    let before = get_interval(tx, interval_id)?.ok_or(DomainError::UnknownInterval)?;
+    if before.voided_at.is_some() {
+        return Ok(before);
+    }
+
+    tx.execute(
+        "UPDATE work_interval
+            SET voided_at = ?1, needs_review = 0,
+                ended_at = CASE WHEN duration_ms IS NULL THEN NULL ELSE ended_at END
+          WHERE id = ?2",
+        rusqlite::params![voided_at, interval_id],
+    )
+    .map_err(map_sqlite)?;
+
+    get_interval(tx, interval_id)?.ok_or_else(|| AppError::Storage {
+        detail: "interval vanished after void".into(),
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 恢复扫描用的查询（P7 Task 0；P3 Task 1 泛化成「可选 run 过滤」）
 //
 // **为什么必须能按 `run_id` 过滤**：既有的 `running_foreground`（本文件上文）不带
