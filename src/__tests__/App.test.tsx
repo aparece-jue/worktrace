@@ -123,7 +123,7 @@ afterEach(async () => {
 });
 
 describe("应用外壳", () => {
-  it("挂载：渲染标题与三个区域、导航两项、收件箱页，且命令集合恰好是那四条", async () => {
+  it("挂载：渲染标题与三个区域、导航四项、收件箱页，且命令集合恰好是那四条", async () => {
     const called = scriptShell();
 
     const { container } = render(<App />);
