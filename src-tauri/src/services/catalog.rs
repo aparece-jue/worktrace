@@ -128,7 +128,12 @@ pub fn parse_project_status_read(raw: &str) -> Result<ProjectStatus, AppError> {
 /// 用枚举表达「绑定 / 解除」，**不用 `Option<Option<String>>`**：后者让「没有提供」
 /// 与「解除关联」在类型上长得一样，读代码的人得去翻调用点才知道收到的是哪一种。
 /// 本命令没有第三态——「这次不改归属」的调用方不该调用这个入口。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Deserialize`（P7 Task 1）是 IPC 形状：绑定 `{"bind":"<project_id>"}`、
+/// 解除 `"clear"`（单元变体的外部标签）。它与筛选用的 [`ProjectSelector`] 是**两个**
+/// 枚举，不能合并：那边问「列哪些」（含 `"any"`），这边问「改成什么」（没有「不限制」）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ProjectTarget {
     /// 绑定到指定项目（必须存在且 `active`）。
     Bind(String),

@@ -193,6 +193,24 @@ impl Coordinator {
         self.tick_seq
     }
 
+    /// 取一次墙钟毫秒（Unix 毫秒）。**不推进任何采样/检测状态**：样本用完即弃，
+    /// 不喂给锚点，也不改 `last_verdict`。
+    ///
+    /// 谁用它：命令层给写服务准备 `now`（`created_at` / `updated_at` / 审计行）。
+    /// 服务层不得自取时间（分层门禁禁 `std::time`），命令层也不该另起一个时间源——
+    /// 时间只有这一条接缝（`AppState::now_ms`）。
+    ///
+    /// 读不到时钟时按基础设施失败报（与启动路径同一口径：
+    /// `services::bootstrap::startup` 对同一个 `SampleError` 也是 `AppError::Storage`）。
+    pub fn wall_ms(&self) -> Result<i64, AppError> {
+        self.clock
+            .sample()
+            .map(|sample| sample.wall_ms)
+            .map_err(|_| AppError::Storage {
+                detail: "clock sample unavailable for a write command".to_string(),
+            })
+    }
+
     pub fn live(&self) -> Option<&LiveSession> {
         self.live.as_ref()
     }

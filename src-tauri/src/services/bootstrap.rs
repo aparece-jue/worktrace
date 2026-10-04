@@ -48,7 +48,7 @@ use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
 use crate::services::timer::coordinator::{
-    CommandOutcome, Coordinator, ResumeRequest, StartRequest,
+    CommandOutcome, Coordinator, ResumeRequest, SessionRequest, StartRequest,
 };
 use crate::services::timer::primitives::{end_session_in_tx, EndSessionFacts};
 use crate::services::timer::snapshot::TimerSnapshot;
@@ -341,6 +341,27 @@ impl AppState {
         &self.coordinator
     }
 
+    /// 取一次墙钟毫秒：写命令的 `created_at` / `updated_at` 与审计行用它。
+    ///
+    /// 为什么要有这个入口：服务层**不得自取时间**（分层门禁禁 `std::time`），
+    /// 而时间只该从协调器这一条时钟接缝出来（生产 `SystemClock`、测试 `FakeClock`）。
+    /// 命令层若自己 `SystemClock::new()`，同一个进程里就有两个时间源。
+    ///
+    /// 采样**用完即弃**：它不喂给锚点/检测器，也不推进任何采样状态。
+    pub fn now_ms(&self) -> Result<i64, AppError> {
+        self.coordinator.wall_ms()
+    }
+
+    /// 写服务要的可变库句柄（`services::catalog` / `services::daily_plan` 的写入口）。
+    ///
+    /// **不绕过任何门禁**：恢复门禁挂在 [`AppState::start`] / [`AppState::resume`] 上，
+    /// 而协调器仍然只有只读访问器 [`AppState::coordinator`]——拿到 `&mut Db` 也拿不到
+    /// 可以随便动的计时状态（Task 0 收口时私有化字段，堵的是 `&mut Coordinator`，
+    /// 不是业务写本身）。
+    pub fn db_mut(&mut self) -> &mut Db {
+        &mut self.db
+    }
+
     pub fn recovery(&self) -> &RecoveryScan {
         &self.recovery
     }
@@ -372,6 +393,22 @@ impl AppState {
             db, coordinator, ..
         } = self;
         coordinator.resume(db, req)
+    }
+
+    /// 暂停（**不过**恢复门禁：它不是「开始新计时」，而是把一个正在跑的会话停下来）。
+    pub fn pause(&mut self, req: SessionRequest) -> Result<CommandOutcome, AppError> {
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        coordinator.pause(db, req)
+    }
+
+    /// 结束计时（同为「停止」类，不过恢复门禁）。
+    pub fn finish(&mut self, req: SessionRequest) -> Result<CommandOutcome, AppError> {
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        coordinator.finish(db, req)
     }
 
     /// 查询快照（无新计时，不受恢复门禁限制）。
