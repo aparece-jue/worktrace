@@ -162,9 +162,11 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
 
 - [ ] **Task 6a 的双窗口同步实机实验**：步骤、判据与记录模板见
   [`manual-sync.md`](manual-sync.md)（第二个窗口 `sync-lab` 与三个 dev 注入开关属
-  `src-tauri/` 侧，**尚未落地**——见那份文档 §1）。**自动化那半边已完成**
-  （`src/state/__tests__/dualContextSync.test.ts`，提交 `b7b9250`）：它证明的是
+  `src-tauri/` 侧，**已落地**（`c22eb8e` / `2660303` / `34d84e5`，门禁 464 passed）——
+  见那份文档 §1，§2.1–§2.5 现在都能跑）。**自动化那半边已完成**
+  （`src/state/__tests__/dualContextSync.test.ts`，提交 `b7b9250`，fix round 1 `684d495`）：它证明的是
   「同一套规则在两个上下文里各自成立」，**真实双 WebView 的广播时序仍须真机跑**。
+  **本节的全部结论当前为空**，由 P8 执行与复核（见 `docs/validation/p7-acceptance.md` §5.2）。
 - [ ] 时序验证：窗口 A 暂停 → 窗口 B 的展示在 30 秒内收敛；窗口 B 隐藏后重新显示时先校验再展示
   → 步骤见 [`manual-sync.md`](manual-sync.md) §2.4 / §2.5
 - [ ] F-001 / F-002：捕获、理清、计时非法请求

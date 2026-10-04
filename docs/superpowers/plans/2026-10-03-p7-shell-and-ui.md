@@ -169,6 +169,8 @@
 > 下面两条前置（第二个窗口 `sync-lab`、三个 dev 注入开关）属 `src-tauri/` 侧，**由 Rust
 > 侧另行落地**——本轮硬约束是不改 `src-tauri/` 的 Rust 生产代码；在它们落地之前
 > `manual-sync.md` §2.1–§2.4 只能读、不能跑。
+> **（2026-10-04 已落地**：`c22eb8e` / `2660303` / `34d84e5`，门禁 **464 passed / 0 failed**；
+> 上面那句「只能读、不能跑」已经解除，§2 七步现在都能做——见文末「Task 6a 前置件的落地」。）**
 
 - [ ] **第二个窗口**：label **`sync-lab`**，由 Rust 侧用 `WebviewWindowBuilder` 创建（实验时开，不做成 `tauri.conf.json` 的静态窗口）；**`src-tauri/capabilities/default.json` 的 `windows` 必须包含 `sync-lab`**，否则该窗口的 JS 无权限调命令（现在只有 `"main"`）。
 - [ ] 验证"先监听后快照"。三种竞态**用明确的注入手段造**（不能只写"人为制造"）：
@@ -535,6 +537,15 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
   「页面（Task 3/5）应用自己那份带 epoch 查询响应时会用 `markApplied`」那句的落地；
   于是页面不必各自维护第二份水位。**辅助查询（标签 / 可选项目）不进水位**：让它推水位会把
   一条正在飞的主列表响应按"更旧"丢掉，界面就停在加载态（代码注释里写明）。
+
+> **口径订正（2026-10-04，本段不重写、保留为当时的记录）**：上面这条「页面的查询响应也是
+> 权威快照 ⇒ 推**全局**水位 ⇒ 于是页面不必各自维护第二份水位」**已被 Task 5 fix round 1
+> （`87e810b`）的「本视图水位」取代**——页面改用 `src/components/viewWatermark.ts`
+> （一个视图一份水位），**两页都不再调 `domainState.markApplied`**；
+> `markApplied`/`isStaleResponse` 的文档收紧到「只给全量快照」。原因：`TaskQueryResult` /
+> `ProjectList` 是**过滤 + 分页后的局部视图**，不满足「已应用的是权威快照」这个前提，
+> 推平全局水位会让同 `revision` 的通知被判 `drop`、并让 30 秒校验失去判据。
+> 详见文末「Task 5 fix round 1」。
 - **项目页**（`src/pages/Projects.tsx`，F-004）：列表用 `list_projects(status=null)`——
   归档与 `done` 的历史照样读得到；创建 / 改名 / 归档都提交 epoch 与**列表里那一行的项目
   版本**，归档先确认（Popconfirm），命令成功之后**当场重拉列表**（"确认归档后更新列表"
@@ -678,6 +689,57 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
 - **本阶段不做**：`src-tauri/src/platform/sync_lab.rs` 与三个 dev 注入命令（Rust 侧，
   本轮硬约束）；「多入口开发/打包路径」与 Windows 打包验证（**仍归 P8**，见「仍待与归属」，
   本轮未动那条登记）；维护态下的多窗口行为（P6）。
+  **（2026-10-04 订正**：前半句的「本轮不做」是 Task 6a 那一轮的硬约束，**现已落地**——
+  `c22eb8e`（`sync_lab.rs`）/ `2660303`（三条 dev 注入命令），见下一节。**）**
+
+## Task 6a 前置件的落地（2026-10-04）：真实双窗口的器材
+
+细节、逐条对照与原始输出见
+`.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task6a-prereq-report.md`。三个提交，
+每个提交前都跑过 `.dsh_tmp/p4-gate.ps1`：
+
+| # | 短 SHA | 标题 | 门禁（提交前那一次） |
+| --- | --- | --- | --- |
+| ① | `c22eb8e` | P7 Task 6a 前置（1/3）：第二个窗口 sync-lab（配置与主窗同源，仅实验时开） | **458 passed / 0 failed**、fmt/clippy/layers 全 0 |
+| ② | `2660303` | P7 Task 6a 前置（2/3）：三个 dev 注入开关（仅 debug）+ 开窗命令 + 守卫用例 | **464 passed / 0 failed**、fmt/clippy/layers 全 0 |
+| ③ | `34d84e5` | P7 Task 6a 前置（3/3）：`manual-sync.md` §1 改成「已落地」，并写清控制台入口命令 | 同 ②（只动 `.md`） |
+
+**最终门禁（HEAD `34d84e5`，Task 6b 于 2026-10-04 复跑确认）**：`cargo fmt --check` EXIT 0；
+`cargo test --offline` **464 passed / 0 failed**（基线 457 ⇒ +7；**另有 1 ignored**，
+是 `tests/startup_order.rs` 那个被另一个用例当子进程拉起的 helper 入口——前置件报告里
+写的「0 ignored」不准确，Task 6b 的验收记录已订正）；
+`cargo clippy --all-targets --offline -- -D warnings` EXIT 0；`scripts/check-layers.ps1`
+六条规则全 clean；`git status --porcelain` 空。**`Cargo.lock` / `Cargo.toml` 一行未动**
+（零新增 crate、零新增 feature）。
+
+- **第二个窗口 `sync-lab`**：`src-tauri/src/platform/sync_lab.rs:39`（label 常量）/`:56`
+  （`open_sync_lab`）。用 `WebviewWindowBuilder` 在**实验时**创建，**不做成** `tauri.conf.json`
+  的静态窗口（所以 `manual-shell.md` 的既有验收步骤不受影响）；配置与主窗**同源**——
+  读 `tauri.conf.json` 里 `main` 那一份、**只改 label**（入口 URL/标题/尺寸全一样，
+  以后给主窗加字段这条断言自动跟上）。登记进 `capabilities/default.json` 的
+  `windows: ["main","sync-lab"]`（不登记的话那个窗口的 JS 连事件都订阅不上）。
+  一致性由 `tests/shell_lifecycle.rs::the_experiment_window_is_opened_on_demand_from_the_main_window_config`
+  读那两个文件核对。
+- **三条 debug-only 注入开关 + 一条开窗命令**（`src/commands/dev.rs`）：
+  `__p7_drop_next_event(kind)`（`dev.rs:138`，**按事件名筛**）、
+  `__p7_delay_next_query_ms(command, ms)`（`dev.rs:154`，按**调用方窗口 label + 命令名**两个键，
+  先取数据再 sleep）、`__p7_replay_event(revision)`（`dev.rs:179`，参数是**旧 `revision`**，
+  只读 + 广播）、`__p7_open_sync_lab()`（`dev.rs:229`）。
+  **两道编译期守卫**：`commands/mod.rs:110` 的 `#[cfg(debug_assertions)] pub mod dev;` +
+  `lib.rs` 注册表里那四条**逐条**带守卫 ⇒ 发布构建里它们不是「关掉」而是**不存在**；
+  `tests/dev_injections.rs`（6 条）读源码核对，另跑过一次
+  `cargo check --offline --lib --release`（EXIT 0，93 s）做发布档位的编译探针
+  （**建议归 P8 的发布产物门禁 R-04，本轮没塞进共享门禁**）。
+- **命令层唯一的侵入**：命令包装多一个 `window: tauri::WebviewWindow` 参数，`run_command`
+  多收 `(command, window)` 两个键（发布构建里只用于对齐调用形状）。命令体（`*_impl`）与
+  全部业务逻辑一行未改，`tests/ipc_commands.rs` 的 24 条逐条覆盖不受影响。
+- **实机入口**：`manual-sync.md` §1「控制台怎么调」——页面**没有** `window.__TAURI__`，
+  用 `__TAURI_INTERNALS__.invoke(...)`（开窗、丢一条事件、延迟一次响应、重播旧 revision
+  四条命令逐条给了可复制的写法），窗口身份读
+  `window.__TAURI_INTERNALS__.metadata.currentWindow.label`。**§2.1–§2.5 现在都能跑；
+  结论为空，由 P8 执行与复核。**
+- **仍未做**：`manual-sync.md` §2.5 那两条「不可直接观察」（隐藏窗口是否仍每 30 秒轮询、
+  显示前校验）**仍没有计数出口**，文档已标「存疑」；维护态下的多窗口行为（P6）。
 
 ## 仍待与归属（2026-10-04 登记）
 
