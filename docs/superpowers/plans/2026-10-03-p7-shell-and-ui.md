@@ -136,7 +136,7 @@
 - [ ] **托盘 feature 的文件与离线可行性**：`src-tauri/Cargo.toml:21` 的 `tauri = { version = "2", features = [] }` 改为 `features = ["tray-icon"]`。**离线可行**（Windows 侧 cargo 缓存已有 `tray-icon-0.24.2/0.25.1`、`muda`、`tao`；`Cargo.lock` 里也已有 `tray-icon 0.25.1`/`muda 0.20.0`——可选依赖本来就在解析图里），**构建只在 Windows 侧跑**。**托盘图标用 `app.default_window_icon()`**，**不启用 `image-png`/`image-ico`**：`image` crate 不在 `Cargo.lock`，离线取不到。
 - [ ] **F-009 窗口独立性**：关闭或隐藏所有窗口时核心继续运行；重开窗口**立即拉快照**而不是等下一次通知。托盘菜单的动作与界面动作走**同一批命令**，不另开路径。
 - [ ] 显示 HUD 的托盘项属 V0.1b，本计划**不加**该菜单项。
-- [ ] **退出流程（R6 裁决）**：托盘"退出"走 **Task 0 建立的显式退出入口**（`services/bootstrap.rs` → `storage/run_repo.rs` 写 `clean_exit_at`），**一个事务**里结束 `running`/`paused` 会话、保存 revision、停定时器；**`recovering` 记录保留不清**（02 §4）。不是直接杀进程，也不在托盘回调里跑长事务。
+- [ ] **退出流程（R6 裁决）**：托盘"退出"走 **Task 0 建立的显式退出入口**（`services/bootstrap.rs` → `storage/run_repo.rs` 写 `clean_exit_at`）：**先停定时器（不进事务）**，其余四项——结束 `running`/`paused` 会话、写 `clean_exit_at`、保存 revision、清活动阶段——在**同一个事务**内完成；**`recovering` 记录保留不清**（02 §4）。「停定时器」为什么不在事务里见 Task 0 第 4 条（2026-10-04 订正：此行原先与那里矛盾）。不是直接杀进程，也不在托盘回调里跑长事务。
 - [ ] `capabilities/default.json`：这份名单现在只有 `"windows": ["main"]`——**主窗之外的新窗口必须逐个加进来**，否则它的 JS 没有任何权限。Task 6a 的 `sync-lab` 窗口要在这里登记（见 Task 6a）。
 - [ ] 测试（能自动化的部分）：托盘动作与界面动作调用同一命令；关窗不触发退出；重开窗口触发快照。**其余必须人工验收。**
 - [ ] **本阶段不做（依赖 P3/P5/P6）**：托盘"完成"的启用与 F-003 完整联动（P8，依赖 P3）；维护态下的托盘禁用（P6）。
@@ -195,7 +195,31 @@
 
 ## 已实现的接入基座（2026-10-04）
 
-首次与恢复后身份握手、周期版本校验统一调用 services::handshake::get_revision(db)，无需 expected_data_epoch；业务查询仍必须带握手得到的 epoch。顺序为监听并缓冲事件→握手→业务快照；epoch 变化时丢弃旧请求结果并重新握手。get_revision 仅返回身份/版本，不代替完整业务视图。P2 命令结果在提交后从一个读事务重建，结果 revision 与 snapshot.revision 相同。分层脚本已检查 commands 禁止依赖 storage/rusqlite/Connection；IPC 和事件协议仍待本阶段实现。
+首次与恢复后身份握手、周期版本校验统一调用 services::handshake::get_revision(db)，无需 expected_data_epoch；业务查询仍必须带握手得到的 epoch。顺序为监听并缓冲事件→握手→业务快照；epoch 变化时丢弃旧请求结果并重新握手。get_revision 仅返回身份/版本，不代替完整业务视图。P2 命令结果在提交后从一个读事务重建，结果 revision 与 snapshot.revision 相同。分层脚本已检查 commands 禁止依赖 storage/rusqlite/Connection；IPC 与事件协议当时仍待实现（2026-10-04 晚订正：**IPC 的 Rust 半边已落地**，见下一节；事件**发送侧**仍未接线）。
+
+## Task 1 的 Rust 半边已实现（2026-10-04 晚）
+
+**前端（Task 1b）要消费的 IPC 契约已冻在代码里**，细节与逐条验证见
+`.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task1a-report.md`：
+
+- **24 条命令**（`src-tauri/src/commands/mod.rs`，全部注册进 `lib.rs`）：`get_revision`；
+  项目 `list_projects`/`list_selectable_projects`/`create_project`/`rename_project`/`archive_project`；
+  标签 `list_tags`/`create_tag`/`tags_of_task`/`tag_task`/`untag_task`；
+  任务 `list_tasks`/`create_task`/`clarify_ready`/`set_task_project`；
+  今日计划 `plan_for`/`add_to_plan`/`remove_from_plan`；
+  计时 `timer_snapshot`/`timer_tick`/`start_timer`/`pause_timer`/`resume_timer`/`finish_timer`。
+- **每条命令只收一个参数 `request`**，字段名就是 Rust 结构体里的 snake_case；
+  `mode`/`timer_kind`/`statuses` 一律是**字符串**，非法取值拿 `DOMAIN_ERROR`
+  （不依赖 serde 的枚举反序列化）。三值项目选择器 `"any"`/`"none"`/`{"id":"…"}`；
+  改归属是二值的 `{"bind":"…"}`/`"clear"`。
+- **响应 DTO 的形状快照**在仓库根 `src/types/__snapshots__/*.json`（15 份），由
+  `src-tauri/tests/ipc_snapshots.rs` 逐字节钉住；重生成用
+  `WORKTRACE_UPDATE_IPC_SNAPSHOTS=1 cargo test --offline --test ipc_snapshots`。
+  快照按 LF 存放（`.gitattributes` 钉了 `text eol=lf`——本仓库 `core.autocrlf=true`）。
+- **事件频道名 `worktrace:event`**（`lib.rs` 的 `EVENT_CHANNEL`），Task 2 的 `domainState` 按它订阅。
+- **仍未接线**：命令层**不发 `domain.changed`**——00 §5 的「一次业务写一条通知」目前只有
+  发送出口、没有生产发送方，`timer.tick` 由周期采样驱动发出。Task 2/6a 之前要补：写命令提交后、
+  仍在同一临界区内广播。**登记，不是已完成。**
 
 ## 仍待与归属（2026-10-04 登记）
 
