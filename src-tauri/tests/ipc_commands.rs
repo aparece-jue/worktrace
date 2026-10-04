@@ -2,7 +2,8 @@
 //!
 //! `#[tauri::command]` 生成的包装（`spawn_blocking` + `State`）要 Tauri 运行时才能调，
 //! 所以本文件调的是 `commands::*_impl`——命令体本身：解析请求 → 调服务 → 返回响应。
-//! 包装只剩一行转发，于是「走对服务、带对信封、给对 targets、返回对类型」都能在这里断言。
+//! 包装只剩一行转发，于是「走对服务、带对信封、返回对类型」都能在这里断言
+//! （**`targets` 不在其中**，理由见下面「给对 targets」那一条）。
 //! 一个 `finish_timer` 里误调 `app.pause` 的复制粘贴错误，会在
 //! [`finish_timer_impl_finishes_the_session_instead_of_pausing_it`] 当场失败。
 //!
@@ -13,8 +14,13 @@
 //! - **带对信封**：`expected_data_epoch` 给错 ⇒ `DATA_EPOCH_MISMATCH`；更新类命令的
 //!   `expected_row_version` 给旧值 ⇒ `VERSION_CONFLICT`（说明请求里的 epoch/版本真的被
 //!   当成了期望值，而不是「读出来再跟自己比」）；新建类命令不带版本也照样成功；
-//! - **给对 targets**：`authority` 的逐条断言在 `tests/ipc_snapshots.rs` 与
-//!   `tests/error_contract.rs`；这里只保证命令层把请求里的 id 交给了服务（看得到行为差别）；
+//! - **给对 targets**：**本文件不覆盖**（2026-10-04 订正）。`targets` 只活在
+//!   `#[tauri::command]` 包装里（命令体拿不到它），要观测 `authority.records` 就得有
+//!   Tauri 运行时——`tauri/test` 的 `mock_builder`，本轮没有启用。原先这里写「逐条断言在
+//!   `tests/ipc_snapshots.rs` 与 `tests/error_contract.rs`」**不实**：那两份覆盖的是
+//!   `capture_error_response` 这个**机制**（喂显式 targets）与一份**样例**
+//!   `ErrorResponse`，都不是「逐条命令的 targets」。**登记为遗留**，见
+//!   `docs/superpowers/plans/2026-10-03-p7-shell-and-ui.md` 的「遗留与边界」一节；
 //! - 时钟是冻结的 `FakeClock`（`WALL`），所以写命令落库的 `created_at` / `updated_at`
 //!   逐字可断言——`AppState::now_ms()` 走的就是这条时钟接缝。
 //!
