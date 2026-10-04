@@ -24,6 +24,17 @@
 //! [`ErrorResponse`]（`code`/`message`/`authority`/`requires_handshake`）。
 //! 前端只按 `code` 分支，`message` 直接用（R8）。
 //!
+//! # 命令体与包装分开（P7 Task 1 fix round 1，评审 I6）
+//!
+//! 每条命令都是**一对**：`#[tauri::command] pub async fn x(…)`（IPC 包装：取锁、
+//! 跑阻塞段、把错误映射成 [`ErrorResponse`]）与 `pub fn x_impl(…)`（命令体：解析请求 →
+//! 调服务 → 返回响应）。包装只有一行转发。
+//!
+//! 为什么分开：`#[tauri::command]` 生成的包装要 Tauri 运行时才能调，而命令体只需要一个
+//! `&mut AppState`——分开之后 `tests/ipc_commands.rs` 能**逐条**覆盖 24 条命令
+//! （不需要 `tauri::test`，因此也不需要动 `Cargo.toml`）。一个 `finish_timer` 里误调
+//! `app.pause` 的复制粘贴错误，现在会当场断言失败。
+//!
 //! # 请求形状：枚举一律是字符串
 //!
 //! `mode` / `timer_kind` / `statuses` 在 IPC 里都是**字符串**，命令体显式过
@@ -77,13 +88,7 @@ where
     let app = Arc::clone(state.app());
     match tauri::async_runtime::spawn_blocking(move || {
         let mut guard = lock_app(&app);
-        // 分开两步写：`body` 的可变借用必须在 `capture_error_response` 借用同一个
-        // `guard` 之前结束（写成一条表达式会被临时值的生命周期绊住）。
-        let outcome = body(&mut guard);
-        match outcome {
-            Ok(value) => Ok(value),
-            Err(error) => Err(capture_error_response(guard.db(), &error, &targets)),
-        }
+        body(&mut guard).map_err(|error| capture_error_response(guard.db(), &error, &targets))
     })
     .await
     {
@@ -261,7 +266,12 @@ pub struct StartTimerRequest {
 pub async fn get_revision(
     state: State<'_, RunningApp>,
 ) -> Result<handshake::RevisionSnapshot, ErrorResponse> {
-    run_command(&state, Vec::new(), |app| handshake::get_revision(app.db())).await
+    run_command(&state, Vec::new(), get_revision_impl).await
+}
+
+/// [`get_revision`] 的命令体（IPC 包装只做转发）。
+pub fn get_revision_impl(app: &mut AppState) -> Result<handshake::RevisionSnapshot, AppError> {
+    handshake::get_revision(app.db())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -275,14 +285,22 @@ pub async fn list_projects(
     request: ListProjectsRequest,
 ) -> Result<catalog::ProjectList, ErrorResponse> {
     run_command(&state, Vec::new(), move |app| {
-        let status = match request.status.as_deref() {
-            // 读路径：`done` 是库里合法的值，这里必须读得懂（写路径才拒绝它）。
-            Some(raw) => Some(catalog::parse_project_status_read(raw)?),
-            None => None,
-        };
-        catalog::list_projects(app.db(), &request.expected_data_epoch, status)
+        list_projects_impl(app, request)
     })
     .await
+}
+
+/// [`list_projects`] 的命令体（IPC 包装只做转发）。
+pub fn list_projects_impl(
+    app: &mut AppState,
+    request: ListProjectsRequest,
+) -> Result<catalog::ProjectList, AppError> {
+    let status = match request.status.as_deref() {
+        // 读路径：`done` 是库里合法的值，这里必须读得懂（写路径才拒绝它）。
+        Some(raw) => Some(catalog::parse_project_status_read(raw)?),
+        None => None,
+    };
+    catalog::list_projects(app.db(), &request.expected_data_epoch, status)
 }
 
 /// 新建任务时可选的项目：**只列 active**（F-004）。归档/done 从这里消失，
@@ -293,9 +311,17 @@ pub async fn list_selectable_projects(
     request: EpochRequest,
 ) -> Result<catalog::ProjectList, ErrorResponse> {
     run_command(&state, Vec::new(), move |app| {
-        catalog::list_selectable_projects(app.db(), &request.expected_data_epoch)
+        list_selectable_projects_impl(app, request)
     })
     .await
+}
+
+/// [`list_selectable_projects`] 的命令体（IPC 包装只做转发）。
+pub fn list_selectable_projects_impl(
+    app: &mut AppState,
+    request: EpochRequest,
+) -> Result<catalog::ProjectList, AppError> {
+    catalog::list_selectable_projects(app.db(), &request.expected_data_epoch)
 }
 
 /// 新建项目。同名项目允许存在（schema 没有唯一索引，F-004 也没要求）。
@@ -305,12 +331,20 @@ pub async fn create_project(
     request: CreateProjectRequest,
 ) -> Result<catalog::ProjectChange, ErrorResponse> {
     run_command(&state, Vec::new(), move |app| {
-        let now = app.now_ms()?;
-        let env = WriteEnvelope::for_create(request.expected_data_epoch);
-        let change = catalog::create_project(app.db_mut(), env, &request.name, now)?.into_value();
-        Ok(change)
+        create_project_impl(app, request)
     })
     .await
+}
+
+/// [`create_project`] 的命令体（IPC 包装只做转发）。
+pub fn create_project_impl(
+    app: &mut AppState,
+    request: CreateProjectRequest,
+) -> Result<catalog::ProjectChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_create(request.expected_data_epoch);
+    let change = catalog::create_project(app.db_mut(), env, &request.name, now)?.into_value();
+    Ok(change)
 }
 
 /// 重命名项目。改成同名 ⇒ 幂等：不写库、不加 `revision`，返回当前行。
@@ -321,15 +355,22 @@ pub async fn rename_project(
 ) -> Result<catalog::ProjectChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Project, &request.project_id)];
     run_command(&state, targets, move |app| {
-        let now = app.now_ms()?;
-        let env =
-            WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-        let change =
-            catalog::rename_project(app.db_mut(), env, &request.project_id, &request.name, now)?
-                .into_value();
-        Ok(change)
+        rename_project_impl(app, request)
     })
     .await
+}
+
+/// [`rename_project`] 的命令体（IPC 包装只做转发）。
+pub fn rename_project_impl(
+    app: &mut AppState,
+    request: RenameProjectRequest,
+) -> Result<catalog::ProjectChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
+    let change =
+        catalog::rename_project(app.db_mut(), env, &request.project_id, &request.name, now)?
+            .into_value();
+    Ok(change)
 }
 
 /// 归档项目（F-004）。已归档 ⇒ 幂等。
@@ -340,14 +381,21 @@ pub async fn archive_project(
 ) -> Result<catalog::ProjectChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Project, &request.project_id)];
     run_command(&state, targets, move |app| {
-        let now = app.now_ms()?;
-        let env =
-            WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-        let change =
-            catalog::archive_project(app.db_mut(), env, &request.project_id, now)?.into_value();
-        Ok(change)
+        archive_project_impl(app, request)
     })
     .await
+}
+
+/// [`archive_project`] 的命令体（IPC 包装只做转发）。
+pub fn archive_project_impl(
+    app: &mut AppState,
+    request: ArchiveProjectRequest,
+) -> Result<catalog::ProjectChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
+    let change =
+        catalog::archive_project(app.db_mut(), env, &request.project_id, now)?.into_value();
+    Ok(change)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,14 +408,19 @@ pub async fn list_tags(
     state: State<'_, RunningApp>,
     request: ListTagsRequest,
 ) -> Result<catalog::TagList, ErrorResponse> {
-    run_command(&state, Vec::new(), move |app| {
-        let kind = match request.kind.as_deref() {
-            Some(raw) => Some(catalog::parse_tag_kind(raw)?),
-            None => None,
-        };
-        catalog::list_tags(app.db(), &request.expected_data_epoch, kind)
-    })
-    .await
+    run_command(&state, Vec::new(), move |app| list_tags_impl(app, request)).await
+}
+
+/// [`list_tags`] 的命令体（IPC 包装只做转发）。
+pub fn list_tags_impl(
+    app: &mut AppState,
+    request: ListTagsRequest,
+) -> Result<catalog::TagList, AppError> {
+    let kind = match request.kind.as_deref() {
+        Some(raw) => Some(catalog::parse_tag_kind(raw)?),
+        None => None,
+    };
+    catalog::list_tags(app.db(), &request.expected_data_epoch, kind)
 }
 
 /// 新建标签。
@@ -376,21 +429,26 @@ pub async fn create_tag(
     state: State<'_, RunningApp>,
     request: CreateTagRequest,
 ) -> Result<catalog::TagChange, ErrorResponse> {
-    run_command(&state, Vec::new(), move |app| {
-        let now = app.now_ms()?;
-        let env = WriteEnvelope::for_create(request.expected_data_epoch);
-        let change = catalog::create_tag(
-            app.db_mut(),
-            env,
-            &request.kind,
-            &request.name,
-            request.parent_id.as_deref(),
-            now,
-        )?
-        .into_value();
-        Ok(change)
-    })
-    .await
+    run_command(&state, Vec::new(), move |app| create_tag_impl(app, request)).await
+}
+
+/// [`create_tag`] 的命令体（IPC 包装只做转发）。
+pub fn create_tag_impl(
+    app: &mut AppState,
+    request: CreateTagRequest,
+) -> Result<catalog::TagChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_create(request.expected_data_epoch);
+    let change = catalog::create_tag(
+        app.db_mut(),
+        env,
+        &request.kind,
+        &request.name,
+        request.parent_id.as_deref(),
+        now,
+    )?
+    .into_value();
+    Ok(change)
 }
 
 /// 某个任务身上的标签。写路径（打标/去标）不用它——它们在同一个写事务里读回集合。
@@ -400,9 +458,17 @@ pub async fn tags_of_task(
     request: TaskTagsRequest,
 ) -> Result<catalog::TagList, ErrorResponse> {
     run_command(&state, Vec::new(), move |app| {
-        catalog::tags_of_task(app.db(), &request.expected_data_epoch, &request.task_id)
+        tags_of_task_impl(app, request)
     })
     .await
+}
+
+/// [`tags_of_task`] 的命令体（IPC 包装只做转发）。
+pub fn tags_of_task_impl(
+    app: &mut AppState,
+    request: TaskTagsRequest,
+) -> Result<catalog::TagList, AppError> {
+    catalog::tags_of_task(app.db(), &request.expected_data_epoch, &request.task_id)
 }
 
 /// 打标：把**一个**标签加到**一个**任务上。
@@ -418,14 +484,19 @@ pub async fn tag_task(
         target(AuthorityKind::Task, &request.task_id),
         target(AuthorityKind::Tag, &request.tag_id),
     ];
-    run_command(&state, targets, move |app| {
-        let now = app.now_ms()?;
-        let env = WriteEnvelope::for_create(request.expected_data_epoch);
-        let change = catalog::tag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?
-            .into_value();
-        Ok(change)
-    })
-    .await
+    run_command(&state, targets, move |app| tag_task_impl(app, request)).await
+}
+
+/// [`tag_task`] 的命令体（IPC 包装只做转发）。
+pub fn tag_task_impl(
+    app: &mut AppState,
+    request: TaskTagRequest,
+) -> Result<catalog::TaskTagsChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_create(request.expected_data_epoch);
+    let change =
+        catalog::tag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?.into_value();
+    Ok(change)
 }
 
 /// 去标。口径与 [`tag_task`] 完全对称，包括「本来就不在集合里 ⇒ 幂等」。
@@ -438,15 +509,19 @@ pub async fn untag_task(
         target(AuthorityKind::Task, &request.task_id),
         target(AuthorityKind::Tag, &request.tag_id),
     ];
-    run_command(&state, targets, move |app| {
-        let now = app.now_ms()?;
-        let env = WriteEnvelope::for_create(request.expected_data_epoch);
-        let change =
-            catalog::untag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?
-                .into_value();
-        Ok(change)
-    })
-    .await
+    run_command(&state, targets, move |app| untag_task_impl(app, request)).await
+}
+
+/// [`untag_task`] 的命令体（IPC 包装只做转发）。
+pub fn untag_task_impl(
+    app: &mut AppState,
+    request: TaskTagRequest,
+) -> Result<catalog::TaskTagsChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_create(request.expected_data_epoch);
+    let change = catalog::untag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?
+        .into_value();
+    Ok(change)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -462,11 +537,16 @@ pub async fn list_tasks(
     state: State<'_, RunningApp>,
     request: catalog::TaskQueryRequest,
 ) -> Result<catalog::TaskQueryResult, ErrorResponse> {
-    run_command(&state, Vec::new(), move |app| {
-        let query = catalog::TaskQuery::try_from(request)?;
-        catalog::list_tasks_filtered(app.db(), query)
-    })
-    .await
+    run_command(&state, Vec::new(), move |app| list_tasks_impl(app, request)).await
+}
+
+/// [`list_tasks`] 的命令体（IPC 包装只做转发）。
+pub fn list_tasks_impl(
+    app: &mut AppState,
+    request: catalog::TaskQueryRequest,
+) -> Result<catalog::TaskQueryResult, AppError> {
+    let query = catalog::TaskQuery::try_from(request)?;
+    catalog::list_tasks_filtered(app.db(), query)
 }
 
 /// 捕获一个任务（F-002 的 Inbox 入口）。空标题被服务拒绝。
@@ -476,19 +556,27 @@ pub async fn create_task(
     request: CreateTaskRequest,
 ) -> Result<catalog::TaskChange, ErrorResponse> {
     run_command(&state, Vec::new(), move |app| {
-        let now = app.now_ms()?;
-        let env = WriteEnvelope::for_create(request.expected_data_epoch);
-        let change = catalog::create_task(
-            app.db_mut(),
-            env,
-            &request.title,
-            request.project_id.as_deref(),
-            now,
-        )?
-        .into_value();
-        Ok(change)
+        create_task_impl(app, request)
     })
     .await
+}
+
+/// [`create_task`] 的命令体（IPC 包装只做转发）。
+pub fn create_task_impl(
+    app: &mut AppState,
+    request: CreateTaskRequest,
+) -> Result<catalog::TaskChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_create(request.expected_data_epoch);
+    let change = catalog::create_task(
+        app.db_mut(),
+        env,
+        &request.title,
+        request.project_id.as_deref(),
+        now,
+    )?
+    .into_value();
+    Ok(change)
 }
 
 /// 理清为待办（F-002）。只接受没有在计时的 `Inbox` / `Clarifying`（P3 的状态编排
@@ -499,14 +587,18 @@ pub async fn clarify_ready(
     request: ClarifyReadyRequest,
 ) -> Result<catalog::TaskChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
-    run_command(&state, targets, move |app| {
-        let now = app.now_ms()?;
-        let env =
-            WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-        let change = catalog::clarify_ready(app.db_mut(), env, &request.task_id, now)?;
-        Ok(change)
-    })
-    .await
+    run_command(&state, targets, move |app| clarify_ready_impl(app, request)).await
+}
+
+/// [`clarify_ready`] 的命令体（IPC 包装只做转发）。
+pub fn clarify_ready_impl(
+    app: &mut AppState,
+    request: ClarifyReadyRequest,
+) -> Result<catalog::TaskChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
+    let change = catalog::clarify_ready(app.db_mut(), env, &request.task_id, now)?;
+    Ok(change)
 }
 
 /// 改任务的归属（绑定到 active 项目 / 解除关联）。同值 ⇒ 幂等。
@@ -517,15 +609,22 @@ pub async fn set_task_project(
 ) -> Result<catalog::TaskProjectChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     run_command(&state, targets, move |app| {
-        let now = app.now_ms()?;
-        let env =
-            WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-        let change =
-            catalog::set_task_project(app.db_mut(), env, &request.task_id, request.project, now)?
-                .into_value();
-        Ok(change)
+        set_task_project_impl(app, request)
     })
     .await
+}
+
+/// [`set_task_project`] 的命令体（IPC 包装只做转发）。
+pub fn set_task_project_impl(
+    app: &mut AppState,
+    request: SetTaskProjectRequest,
+) -> Result<catalog::TaskProjectChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
+    let change =
+        catalog::set_task_project(app.db_mut(), env, &request.task_id, request.project, now)?
+            .into_value();
+    Ok(change)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -539,10 +638,15 @@ pub async fn plan_for(
     request: daily_plan::DailyPlanQuery,
 ) -> Result<daily_plan::DailyPlanView, ErrorResponse> {
     let targets = Vec::new();
-    run_command(&state, targets, move |app| {
-        daily_plan::plan_for(app.db(), request)
-    })
-    .await
+    run_command(&state, targets, move |app| plan_for_impl(app, request)).await
+}
+
+/// [`plan_for`] 的命令体（IPC 包装只做转发）。
+pub fn plan_for_impl(
+    app: &mut AppState,
+    request: daily_plan::DailyPlanQuery,
+) -> Result<daily_plan::DailyPlanView, AppError> {
+    daily_plan::plan_for(app.db(), request)
 }
 
 /// 把一个任务加入今日计划。重复加入 ⇒ 幂等。
@@ -552,21 +656,26 @@ pub async fn add_to_plan(
     request: PlanMutationRequest,
 ) -> Result<daily_plan::DailyPlanChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
-    run_command(&state, targets, move |app| {
-        let now = app.now_ms()?;
-        let env = WriteEnvelope::for_create(request.expected_data_epoch);
-        let change = daily_plan::add_to_plan(
-            app.db_mut(),
-            env,
-            &request.task_id,
-            &request.date,
-            &request.timezone,
-            now,
-        )?
-        .into_value();
-        Ok(change)
-    })
-    .await
+    run_command(&state, targets, move |app| add_to_plan_impl(app, request)).await
+}
+
+/// [`add_to_plan`] 的命令体（IPC 包装只做转发）。
+pub fn add_to_plan_impl(
+    app: &mut AppState,
+    request: PlanMutationRequest,
+) -> Result<daily_plan::DailyPlanChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_create(request.expected_data_epoch);
+    let change = daily_plan::add_to_plan(
+        app.db_mut(),
+        env,
+        &request.task_id,
+        &request.date,
+        &request.timezone,
+        now,
+    )?
+    .into_value();
+    Ok(change)
 }
 
 /// 把一个任务从今日计划里移除。口径与 [`add_to_plan`] 对称。
@@ -577,20 +686,28 @@ pub async fn remove_from_plan(
 ) -> Result<daily_plan::DailyPlanChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     run_command(&state, targets, move |app| {
-        let now = app.now_ms()?;
-        let env = WriteEnvelope::for_create(request.expected_data_epoch);
-        let change = daily_plan::remove_from_plan(
-            app.db_mut(),
-            env,
-            &request.task_id,
-            &request.date,
-            &request.timezone,
-            now,
-        )?
-        .into_value();
-        Ok(change)
+        remove_from_plan_impl(app, request)
     })
     .await
+}
+
+/// [`remove_from_plan`] 的命令体（IPC 包装只做转发）。
+pub fn remove_from_plan_impl(
+    app: &mut AppState,
+    request: PlanMutationRequest,
+) -> Result<daily_plan::DailyPlanChange, AppError> {
+    let now = app.now_ms()?;
+    let env = WriteEnvelope::for_create(request.expected_data_epoch);
+    let change = daily_plan::remove_from_plan(
+        app.db_mut(),
+        env,
+        &request.task_id,
+        &request.date,
+        &request.timezone,
+        now,
+    )?
+    .into_value();
+    Ok(change)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -603,13 +720,23 @@ pub async fn remove_from_plan(
 /// 不是纯读。
 #[tauri::command]
 pub async fn timer_snapshot(state: State<'_, RunningApp>) -> Result<TimerSnapshot, ErrorResponse> {
-    run_command(&state, Vec::new(), |app| app.snapshot()).await
+    run_command(&state, Vec::new(), timer_snapshot_impl).await
+}
+
+/// [`timer_snapshot`] 的命令体（IPC 包装只做转发）。
+pub fn timer_snapshot_impl(app: &mut AppState) -> Result<TimerSnapshot, AppError> {
+    app.snapshot()
 }
 
 /// 推进一步：与快照同形，另外让 `tick_seq` 前进一步（前端据此丢弃旧 tick）。
 #[tauri::command]
 pub async fn timer_tick(state: State<'_, RunningApp>) -> Result<TimerSnapshot, ErrorResponse> {
-    run_command(&state, Vec::new(), |app| app.tick()).await
+    run_command(&state, Vec::new(), timer_tick_impl).await
+}
+
+/// [`timer_tick`] 的命令体（IPC 包装只做转发）。
+pub fn timer_tick_impl(app: &mut AppState) -> Result<TimerSnapshot, AppError> {
+    app.tick()
 }
 
 /// 开始计时。开始新计时要过恢复门禁（有别的 run 的未闭合/待确认记录 ⇒
@@ -620,19 +747,24 @@ pub async fn start_timer(
     request: StartTimerRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
-    run_command(&state, targets, move |app| {
-        let req = StartRequest {
-            expected_data_epoch: request.expected_data_epoch,
-            task_id: request.task_id.clone(),
-            task_expected_version: request.task_expected_version,
-            mode: parse_session_mode(&request.mode)?,
-            timer_kind: parse_timer_kind(&request.timer_kind)?,
-            target_duration_ms: request.target_duration_ms,
-            expected_interval_ms: request.expected_interval_ms,
-        };
-        app.start(req)
-    })
-    .await
+    run_command(&state, targets, move |app| start_timer_impl(app, request)).await
+}
+
+/// [`start_timer`] 的命令体（IPC 包装只做转发）。
+pub fn start_timer_impl(
+    app: &mut AppState,
+    request: StartTimerRequest,
+) -> Result<CommandOutcome, AppError> {
+    let req = StartRequest {
+        expected_data_epoch: request.expected_data_epoch,
+        task_id: request.task_id.clone(),
+        task_expected_version: request.task_expected_version,
+        mode: parse_session_mode(&request.mode)?,
+        timer_kind: parse_timer_kind(&request.timer_kind)?,
+        target_duration_ms: request.target_duration_ms,
+        expected_interval_ms: request.expected_interval_ms,
+    };
+    app.start(req)
 }
 
 /// 暂停（会话与会话版本由快照给出）。暂停值冻结，不在前端算。
@@ -642,7 +774,15 @@ pub async fn pause_timer(
     request: SessionRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Session, &request.session_id)];
-    run_command(&state, targets, move |app| app.pause(request)).await
+    run_command(&state, targets, move |app| pause_timer_impl(app, request)).await
+}
+
+/// [`pause_timer`] 的命令体（IPC 包装只做转发）。
+pub fn pause_timer_impl(
+    app: &mut AppState,
+    request: SessionRequest,
+) -> Result<CommandOutcome, AppError> {
+    app.pause(request)
 }
 
 /// 继续计时。**两份版本**：任务与会话各自有自己的并发版本。
@@ -655,7 +795,15 @@ pub async fn resume_timer(
         target(AuthorityKind::Task, &request.task_id),
         target(AuthorityKind::Session, &request.session_id),
     ];
-    run_command(&state, targets, move |app| app.resume(request)).await
+    run_command(&state, targets, move |app| resume_timer_impl(app, request)).await
+}
+
+/// [`resume_timer`] 的命令体（IPC 包装只做转发）。
+pub fn resume_timer_impl(
+    app: &mut AppState,
+    request: ResumeRequest,
+) -> Result<CommandOutcome, AppError> {
+    app.resume(request)
 }
 
 /// 结束计时。到点只提示、不自动完成（F-003 的完整联动归 P8）。
@@ -665,5 +813,13 @@ pub async fn finish_timer(
     request: SessionRequest,
 ) -> Result<CommandOutcome, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Session, &request.session_id)];
-    run_command(&state, targets, move |app| app.finish(request)).await
+    run_command(&state, targets, move |app| finish_timer_impl(app, request)).await
+}
+
+/// [`finish_timer`] 的命令体（IPC 包装只做转发）。
+pub fn finish_timer_impl(
+    app: &mut AppState,
+    request: SessionRequest,
+) -> Result<CommandOutcome, AppError> {
+    app.finish(request)
 }
