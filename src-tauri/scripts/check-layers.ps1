@@ -31,6 +31,15 @@
 # Doc links inside `//!` comments name services::bootstrap on purpose and are
 # stripped like every other comment line.
 #
+# P7 Task 1 fix round tightened that pattern to the bare module WORD (word
+# boundaries): the `crate::`-prefixed form missed the synonymous spellings the same
+# review named -- `use crate::{services::x};` and `use crate::services as _;` have no
+# `crate::services::` substring at all. The other four rules already match the bare
+# module name; this one now matches `services`/`storage`/`commands` wherever they
+# appear as words, so every spelling is covered. Verified to have zero false
+# positives in src/platform: every hit there sits in a comment (stripped), and
+# identifiers such as `storage_path` are not matched because `_` is a word character.
+#
 # Why a real script instead of an inline snippet in the plan:
 #   A plain grep also matches the doc comments that *state* the rule, so the
 #   check reported a "leak" on every module header. A gate that always fails
@@ -88,10 +97,22 @@ function Test-EntryPointLeak {
         [string]$Label
     )
 
+    # `main.rs` is not mirrored into the WSL workspace, so ONE missing file is expected
+    # when this script runs against the mirror -- it gets a warning. ZERO is not
+    # expected: the rule would then scan nothing and still print "clean", so a renamed
+    # or moved entry point would silently stop being checked (a false clean). Fail loudly.
+    $present = @($Files | Where-Object { Test-Path $_ })
+    if ($present.Count -eq 0) {
+        throw ("no entry point to scan (all missing: {0})" -f ($Files -join ', '))
+    }
+    if ($present.Count -lt $Files.Count) {
+        $missing = @($Files | Where-Object { -not (Test-Path $_) })
+        Write-Host ("  (${Label}: scanning {0}; missing {1} -- only the mirror lacks main.rs)" -f `
+            ($present -join ', '), ($missing -join ', '))
+    }
+
     $lines = @()
-    foreach ($f in $Files) {
-        # main.rs is not mirrored into the workspace, so a missing file is fine.
-        if (-not (Test-Path $f)) { continue }
+    foreach ($f in $present) {
         if (Get-Command rg -ErrorAction SilentlyContinue) {
             $raw = & rg -n --no-heading $Pattern $f
             if ($LASTEXITCODE -gt 1) { throw "search failed: rg exit $LASTEXITCODE" }
@@ -131,13 +152,15 @@ $ok = (Test-LayerLeak 'src/storage' 'platform::|commands::|services::'  'storage
 # Both rules share this one check so the three output lines keep their shape.
 $ok = (Test-LayerLeak 'src/services' 'std::time|SystemTime|Instant::now|commands::' 'services') -and $ok
 
-# platform must not reach up into any sibling layer (P7 Task 0, review I4).
-$ok = (Test-LayerLeak 'src/platform' 'crate::services::|crate::storage::|crate::commands::' 'platform') -and $ok
+# platform must not reach up into any sibling layer (P7 Task 0, review I4; the
+# pattern was widened in the P7 Task 1 fix round -- see the header comment).
+$ok = (Test-LayerLeak 'src/platform' '\b(services|storage|commands)\b' 'platform') -and $ok
 
 # One startup entry, machine-checked: lib.rs / main.rs wire the app, they do not
 # open the database, migrate it or build an application_run themselves. That order
 # lives in services/bootstrap.rs only (P7 Task 0 requirement 1; the next task is
 # exactly the one that rewrites lib.rs, so the rule has to exist before it does).
+# Missing files: one is normal (the mirror has no main.rs), zero is an error.
 $ok = (Test-EntryPointLeak @('src/lib.rs', 'src/main.rs') 'Db::open|migrate\(|run_repo::' 'entry points') -and $ok
 
 if (-not $ok) {

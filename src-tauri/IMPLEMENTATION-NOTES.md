@@ -118,13 +118,16 @@
   （后四个在本机两侧缓存 0 命中）。锁由**内核**在进程被杀时释放，
   不需要「清理陈旧 PID 文件」那套启发式（`tests/startup_order.rs` 用子进程 + 强杀实测过）。
 - **「唤起既有主窗」是通知，与锁分离**：拿锁失败的进程写一次同目录的
-  `instance.notify`（`platform/single_instance.rs`），既有实例消费它。
-  通知失败**不改变**「退出」这个决定。
+  `instance.notify`（`platform/single_instance.rs`）。**交付边界**（2026-10-04 订正）：
+  Task 0 只交付**发送侧**（`request_activation`）与**接收原语**
+  （`take_activation_request`）——把请求变成「抬起主窗」的消费侧需要窗口对象，归
+  **Task 4**，所以 `take_activation_request` 现在还没有生产调用者：这是分割点，
+  不是遗漏（与计划 Task 0 第 2 条同一口径）。通知失败**不改变**「退出」这个决定。
 - **周期采样驱动是一个不挂在任何窗口上的线程**（`platform/scheduler.rs`，F-009）：
   窗口对象根本传不进它的签名。空闲（无活动会话）时它只读不写——由
   `tests/periodic_sampling.rs` 用三件事钉住：**App 自己那条连接上的**
   `SELECT total_changes()`、全表行数、`revision`。
   ⚠️ `total_changes()` 是**连接级**计数：在测试里新开一条连接取它恒为 0，等于没有断言
-  （本轮评审抓到的注水；修法是 `Harness::app_total_changes()`——在锁内、在 App 的连接上取，
+  （本轮评审抓到的注水；修法是 `Rig::app_total_changes()`——在锁内、在 App 的连接上取，
   并做过反向验证：临时让空闲路径写一行，该断言确实变红）。
 

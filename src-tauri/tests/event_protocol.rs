@@ -212,6 +212,10 @@ fn the_outlet_forwards_every_call_and_counts_diagnostics() {
         .iter()
         .map(|e| e.revision)
         .collect();
-    assert_eq!(seen, vec![1, 2, 3], "广播顺序就是提交顺序");
+    assert_eq!(
+        seen,
+        vec![1, 2, 3],
+        "出口按调用顺序转发（本条只证明接口形状：不证明提交顺序，也不证明失败不回滚）"
+    );
     assert_eq!(broadcaster.diagnostics().out_of_order, 0);
 }

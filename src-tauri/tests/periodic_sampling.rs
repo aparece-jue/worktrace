@@ -85,6 +85,11 @@ struct SeenAtEmit {
     observed_revision: i64,
     /// 广播那一刻，库里**已经提交**的检查点的最大 `elapsed_ms`。
     committed_checkpoint_elapsed_ms: Option<i64>,
+    /// **这一拍自己**报出的进度（`payload.active_ms`）。
+    ///
+    /// 配对断言要的就是它：只有把「这一拍报的进度」与「同一拍广播时库里已提交的进度」
+    /// 对起来，才能证明广播发生在本拍的提交之后（见下面那条用例）。
+    active_ms: Option<i64>,
 }
 
 impl PostCommitSink {
@@ -122,6 +127,7 @@ impl EventSink for PostCommitSink {
             revision: envelope.revision,
             observed_revision,
             committed_checkpoint_elapsed_ms,
+            active_ms: envelope.payload["active_ms"].as_i64(),
         });
         Ok(())
     }
@@ -490,11 +496,27 @@ fn commands_and_sampling_share_one_serial_boundary() {
 // 广播的两条性质：走真实路径（sampling_action）
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// **提交之后才广播，而且与提交同处一条串行边界。**
+/// **广播发生在本拍提交之后，而且与提交同处一条串行边界。**
 ///
-/// 判据是「广播那一刻，库里已经能看到刚提交的心跳」：出口用另一条连接回读，
-/// 未提交的数据在它眼里不存在。若把广播挪到提交之前（或挪出临界区再补一次读），
-/// 这条断言会红。
+/// 判据是**配对**的：出口在广播**当时**用另一条连接回读「那一刻库里已提交的检查点
+/// 进度」（未提交的数据在它眼里不存在）。于是要求：
+///
+/// > 凡这一拍自己报出的 `active_ms` 已经越过 30 秒心跳线的观察，
+/// > 同一拍读到的那份已提交进度也必须 ≥ 30 秒。
+///
+/// 即：客户端看到的那份进度，在它被广播出去的时候就已经落库了。
+///
+/// # 为什么必须配对（fix round 2 订正，评审 I2 遗留）
+///
+/// 旧写法只断言「**至少有一次**广播发生在带进度的检查点提交之后」。这条在实现被改坏
+/// 之后**照样成立**：心跳一旦提交，`MAX(elapsed_ms)` 就停在 30_000，而采样每 10ms
+/// 广播一次——之后随便哪一拍都能满足它。同理 `observed_revision >= envelope.revision`
+/// 在本场景**恒真**（心跳不加 revision，提交前读到的也是同一个值），等于没断言。
+/// 现在改成：那一拍自己的进度 ↔ 同一拍读到的已提交进度，并且 revision 要求**相等**
+/// （本用例没有别的写者，同一临界区里读到的必须是同一个值）。
+///
+/// 把广播挪到本拍心跳提交之前（`sampling_action` 先 `tick` 并广播、再跑
+/// `sample_tick`），`active_ms >= 30_000` 的第一条观察就会红——本轮实测见实施报告。
 #[test]
 fn a_tick_is_broadcast_after_the_commit_inside_the_same_boundary() {
     let fx = fixture(&["t1"]);
@@ -505,25 +527,35 @@ fn a_tick_is_broadcast_after_the_commit_inside_the_same_boundary() {
     // 推进 30 秒：心跳到期。采样驱动会在**同一临界区**里「写检查点 → 提交 → 广播 tick」。
     rig.clock.lock().unwrap().advance_both(30_000);
 
-    let saw_committed_heartbeat = rig.wait_until(|| {
+    let reached = rig.wait_until(|| {
         sink.seen()
             .iter()
-            .any(|s| s.committed_checkpoint_elapsed_ms.unwrap_or(0) >= 30_000)
+            .any(|seen| seen.active_ms.unwrap_or(0) >= 30_000)
     });
     assert!(
-        saw_committed_heartbeat,
-        "至少有一次广播发生在「带进度的检查点已提交」之后：{:?}",
+        reached,
+        "推进 30 秒之后总该有一拍报出 >= 30_000 的 active_ms：{:?}",
         sink.seen()
     );
 
+    let mut checked = 0;
     for seen in sink.seen() {
-        assert!(
-            seen.observed_revision >= seen.revision,
-            "广播必须发生在提交之后：包里是 revision {}，广播当时库里已经是 {}（{seen:?}）",
-            seen.revision,
-            seen.observed_revision
+        // 配对：这一拍报出的进度不能领先于同一拍已提交的进度。
+        if seen.active_ms.unwrap_or(0) >= 30_000 {
+            checked += 1;
+            assert!(
+                seen.committed_checkpoint_elapsed_ms.unwrap_or(0) >= 30_000,
+                "这一拍报出了 >= 30 秒的进度，广播那一刻库里却看不到对应的心跳检查点——\
+                 广播跑到了本拍心跳提交之前（{seen:?}）"
+            );
+        }
+        assert_eq!(
+            seen.observed_revision, seen.revision,
+            "广播必须发生在提交之后，且本用例没有别的写者：包里与库里应当读到同一个 \
+             revision（{seen:?}）"
         );
     }
+    assert!(checked > 0, "配对断言至少要真的检查到一条观察");
 }
 
 /// **两个写者 + 采样驱动同时广播，出口看到的 revision 序列单调非降。**
@@ -531,10 +563,15 @@ fn a_tick_is_broadcast_after_the_commit_inside_the_same_boundary() {
 /// 每个写者都在**同一把锁**下完成「提交 + 广播」——这正是生产接线的形状
 /// （`sampling_action` 与 Task 1 的命令都要这样）。把广播挪到锁外面，
 /// 这里就会看到 revision 倒退。
+///
+/// fix round 2 订正：加上 `start` 之后会话是活动的，采样驱动**真的在广播 tick**
+/// （在此之前夹具没有活动会话，采样一拍都不发声，这条用例其实只覆盖了两个写者）。
 #[test]
 fn two_writers_and_the_sampler_never_let_the_outlet_see_a_backwards_revision() {
     let (rig, sink) = rig_recording(&["t1"]);
     rig.wait_for_ticks(1);
+    // 让采样驱动真的有东西可播：空闲采样不广播（F-009 的「不空转」那条）。
+    rig.start("t1").unwrap();
     let broadcaster = Arc::clone(rig.running.broadcaster());
 
     std::thread::scope(|scope| {
