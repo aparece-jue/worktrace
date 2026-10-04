@@ -1678,6 +1678,49 @@ fn a_failed_rescan_keeps_the_gate_closed_until_a_later_scan_succeeds() {
         .expect("重扫成功之后门禁必须放开");
 }
 
+/// S1 的另一半：扫描失败时**旧快照必须原样保留**（既不清空、也不替换成空结论）。
+///
+/// 上一个用例用的是干净库（旧快照本来就是空的），只证到「不得谎报」；
+/// 这里让失败前的快照**非默认**，才真的把「保留」钉住。
+#[test]
+fn a_failed_rescan_preserves_a_non_default_snapshot() {
+    let fx = fixture();
+    let db = seeded(&fx);
+    crashed_recovering(&db, "s-rec");
+    drop(db);
+
+    let running = started(&fx);
+    let mut state = lock_app(running.app());
+    let before = state.recovery().clone();
+    assert_eq!(before.unfinished_sessions, ["s-rec"]);
+    assert_eq!(before.pending_intervals, ["s-rec-cand", "s-rec-unknown"]);
+    assert!(before.requires_recovery());
+
+    // 让三条扫描查询失败（改表名 ⇒ no such table）。
+    state
+        .db()
+        .connection()
+        .execute_batch("ALTER TABLE work_interval RENAME TO work_interval_hidden;")
+        .unwrap();
+
+    let error = state.rescan_recovery().unwrap_err();
+    assert_code(&error, "RECOVERY_REQUIRED");
+    assert_eq!(
+        state.recovery(),
+        &before,
+        "扫描失败不得替换（更不得清空）上一次成功扫描的结论"
+    );
+    assert_eq!(state.recovery().unfinished_sessions, ["s-rec"]);
+    assert_eq!(
+        state.recovery().pending_intervals,
+        ["s-rec-cand", "s-rec-unknown"]
+    );
+    assert_code(
+        &state.guard_business_timing().unwrap_err(),
+        "RECOVERY_REQUIRED",
+    );
+}
+
 #[test]
 fn rescan_recovery_reports_the_new_facts_and_preserves_the_committed_ones() {
     let fx = fixture();
@@ -1718,6 +1761,126 @@ fn rescan_recovery_reports_the_new_facts_and_preserves_the_committed_ones() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 提交后的镜像刷新（计划「新增-2」）：只刷新协调器正镜像的那条
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 对账**别的**会话时不得抢走 `live`：正在计时那条的内存镜像与心跳必须原样保留。
+#[test]
+fn reconciling_another_session_does_not_clobber_the_live_mirror() {
+    let fx = fixture();
+    let db = seeded(&fx);
+    drop(db);
+
+    let running = started(&fx);
+    let mut state = lock_app(running.app());
+    let epoch = running.data_epoch().to_string();
+    let run = running.run_id().to_string();
+
+    // 正在计时的 B：本 run 的会话，协调器镜像的就是它。
+    state.start(start_request(&epoch)).unwrap();
+    let live_id = state.coordinator().live().unwrap().id.clone();
+    assert_eq!(
+        state.coordinator().live().unwrap().state,
+        SessionState::Running
+    );
+
+    // 同一个 run 里另一条会话 A 变 `recovering`（门禁只数**别的** run，所以它不挡计时；
+    // 这也正是「本 run 有 recovering + 用户合法 start 了另一条」的可达位移）。
+    insert_session(
+        state.db(),
+        "s-a",
+        &run,
+        "FOREGROUND",
+        "recovering",
+        WALL - 2_000,
+        None,
+        1,
+    );
+
+    state
+        .reconcile(env(&epoch, 0), discard("s-a", ReconcileTargetState::Paused))
+        .unwrap();
+
+    let live = state.coordinator().live().expect("镜像还在");
+    assert_eq!(live.id, live_id, "对账别的会话不得把 live 换成它");
+    assert_eq!(
+        live.state,
+        SessionState::Running,
+        "正在计时那条的镜像必须原样保留"
+    );
+    assert_eq!(session(state.db(), "s-a").state, "paused");
+}
+
+/// 被改动的会话**正是**镜像那条时，必须按已提交事实刷新它——不能继续按旧状态出快照。
+#[test]
+fn reconciling_the_mirrored_session_refreshes_its_live_state() {
+    let fx = fixture();
+    let db = seeded(&fx);
+    drop(db);
+
+    let running = started(&fx);
+    let mut state = lock_app(running.app());
+    let epoch = running.data_epoch().to_string();
+
+    // A 由本 run 自己 `start`：镜像就是它。
+    state.start(start_request(&epoch)).unwrap();
+    let live_id = state.coordinator().live().unwrap().id.clone();
+    let (open_id, started_at): (String, i64) = state
+        .db()
+        .connection()
+        .query_row(
+            "SELECT id, started_at FROM work_interval
+              WHERE session_id = ?1 AND ended_at IS NULL AND voided_at IS NULL",
+            [&live_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+
+    // 模拟 P2 的异常分支：库里 A 已经是 `recovering` + 一段待确认区间，
+    // 而内存镜像还停在 `running`（这就是「留了一个按旧状态出快照的 live」）。
+    state
+        .db()
+        .connection()
+        .execute(
+            "UPDATE work_interval SET ended_at = started_at, needs_review = 1
+              WHERE id = ?1",
+            [&open_id],
+        )
+        .unwrap();
+    state
+        .db()
+        .connection()
+        .execute(
+            "UPDATE work_session SET state = 'recovering', needs_review = 1,
+                                    row_version = row_version + 1
+              WHERE id = ?1",
+            [&live_id],
+        )
+        .unwrap();
+    let version = session(state.db(), &live_id).row_version;
+
+    state
+        .reconcile(
+            env(&epoch, version),
+            confirm(
+                &live_id,
+                ReconcileTargetState::Paused,
+                &[(&open_id, started_at, started_at)],
+            ),
+        )
+        .unwrap();
+
+    let live = state.coordinator().live().expect("镜像还在");
+    assert_eq!(live.id, live_id);
+    assert_eq!(
+        live.state,
+        SessionState::Paused,
+        "镜像必须按已提交事实刷新，不能继续停在 running"
+    );
+    assert_eq!(live.row_version, version + 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // attention_overview（R7）：作用域口径
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1730,6 +1893,18 @@ fn attention_overview_keeps_the_live_session_out_and_the_terminal_ones_in() {
     let fx = fixture();
     let db = seeded(&fx);
     crashed_recovering(&db, "s-rec");
+    // P2 的既有形态：`recovering` 却**没有**待确认区间（候选终点正好落在检查点上）。
+    // 它照样让门禁关着，所以必须出现在列表里——否则就是「门禁关着但列表是空的」（m2 的洞）。
+    insert_session(
+        &db,
+        "s-empty",
+        OLD_RUN,
+        "FOREGROUND",
+        "recovering",
+        WALL - 14_000,
+        None,
+        1,
+    );
     // 终态会话 + 已闭合的待确认区间：门禁会数它，列表里必须有它（m2）。
     insert_session(
         &db,
@@ -1814,7 +1989,7 @@ fn attention_overview_keeps_the_live_session_out_and_the_terminal_ones_in() {
         .collect();
     assert_eq!(
         ids,
-        ["s-rec", "s-fin", "s-bad"],
+        ["s-rec", "s-empty", "s-fin", "s-bad"],
         "按 started_at, id 升序；正在计时的 s-live 不在里面"
     );
 
@@ -1862,14 +2037,30 @@ fn attention_overview_keeps_the_live_session_out_and_the_terminal_ones_in() {
     assert!(rec.intervals[1].needs_review);
     assert_eq!(rec.intervals[1].sampled_end_wall_at, None);
 
-    let fin = &overview.items[1];
+    // 第三支（不属于当前 run 的未结束会话）**单独承重**：它一个区间都没有，
+    // 只可能由 `unfinished_sessions(Some(current_run))` 带进列表。
+    let empty = &overview.items[1];
+    assert_eq!(empty.session_id, "s-empty");
+    assert_eq!(empty.state, SessionState::Recovering);
+    assert_eq!(empty.run_id, OLD_RUN);
+    assert!(!empty.is_current_run);
+    assert_eq!(empty.attention, SessionAttention::NeedsReview);
+    assert_eq!(empty.fault_reason, None);
+    assert!(
+        empty.intervals.is_empty(),
+        "没有区间也必须在列表里：门禁数的是它的「未结束」"
+    );
+    assert_eq!(empty.session_row_version, 0);
+    assert!(empty.session_needs_review);
+
+    let fin = &overview.items[2];
     assert_eq!(fin.state, SessionState::Finished);
     assert_eq!(fin.attention, SessionAttention::NeedsReview);
     assert_eq!(fin.fault_reason, None);
     assert_eq!(fin.intervals.len(), 1);
     assert_eq!(fin.intervals[0].ended_at, Some(WALL - 11_500));
 
-    let bad = &overview.items[2];
+    let bad = &overview.items[3];
     assert_eq!(bad.state, SessionState::Discarded);
     assert_eq!(bad.attention, SessionAttention::InvariantBroken);
     assert_eq!(

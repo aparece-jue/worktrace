@@ -667,8 +667,14 @@ impl AppState {
     /// 服务在自己的事务里做完校验、写入、审计与恰好一次 `revision`；**提交之后**由这里
     /// 做两件内存收尾：
     /// 1. [`AppState::rescan_recovery`]（S1）重算门禁——事实刚变，快照必须跟着变；
-    /// 2. `Coordinator::load_session` 按已提交事实刷新镜像，**不留一个继续按旧状态
-    ///    出快照的 `live`**（采样线程每一拍都出快照）。
+    /// 2. **当且仅当被改动的会话正是协调器此刻镜像的那条**时 `Coordinator::load_session`
+    ///    刷新它，**不留一个继续按旧状态出快照的 `live`**（采样线程每一拍都出快照）。
+    ///
+    /// 第 2 步为什么带条件（计划「新增-2」的原文是「**改到协调器正镜像的会话时**」）：
+    /// 无条件刷新会把 `live` 换成另一条会话。可达位移——本 run 的 A 变成 `recovering`
+    /// （门禁只数**别的** run，所以它不挡计时），用户合法地 `start` 了 B；此时对账 A 会让
+    /// 镜像停在 A（`paused`），而 B 的 `live_ms` 与心跳检查点从此失去内存镜像，
+    /// 直到 B 自己的下一条命令把它重新载入——正在计时的会话会静默跟着错的会话。
     ///
     /// 两处失败都映射 [`AppError::RecoveryRequired`]（P2 的提交后约定）：事务已经落库，
     /// 缺的是「让内存与事实重新对上」，不是「再试一次」——重发一条对账命令会撞上
@@ -691,12 +697,22 @@ impl AppState {
         // 提交之后的第一步：门禁重算（失败 ⇒ 标记挡住计时，旧快照不动）。
         self.rescan_recovery()?;
 
-        let AppState {
-            db, coordinator, ..
-        } = self;
-        coordinator
-            .load_session(db.connection(), &session_id)
-            .map_err(|_| AppError::RecoveryRequired)?;
+        // `live()` 是只读访问器；先问清楚「镜像的是不是这条」，再决定要不要刷新。
+        let mirrored = {
+            let AppState { coordinator, .. } = self;
+            coordinator
+                .live()
+                .map(|live| live.id == session_id)
+                .unwrap_or(false)
+        };
+        if mirrored {
+            let AppState {
+                db, coordinator, ..
+            } = self;
+            coordinator
+                .load_session(db.connection(), &session_id)
+                .map_err(|_| AppError::RecoveryRequired)?;
+        }
         Ok(outcome)
     }
 }
