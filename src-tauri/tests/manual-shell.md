@@ -20,6 +20,7 @@
 | 提交（`git rev-parse --short HEAD`） | |
 | 构建与启动方式（`pnpm tauri dev` / `pnpm tauri build` + 安装包） | |
 | 库路径（`%APPDATA%\com.worktrace.desktop\worktrace.db`） | |
+| **本次验收的库是否为干净库**（是 / 否，判据见下） | |
 | 验收人 / 日期 | |
 
 读库用另一条连接（应用运行中也能读）：`sqlite3 "%APPDATA%\com.worktrace.desktop\worktrace.db"`。
@@ -34,6 +35,29 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
 托盘动作、唤醒接收、退出结果），而 release 的 Windows 子系统没有控制台
 （`src/main.rs` 的 `windows_subsystem = "windows"`），输出会被**丢弃**。所以验收用
 `pnpm tauri dev`，或者把二进制重定向：`worktrace.exe > log.txt 2>&1`。正式诊断日志归 P6。
+
+**开跑前先确认库是干净的**（P7 Task 0 的**开发验证库门禁**）：启动时 `services/bootstrap.rs` 的
+`scan_recovery`（`:313`）按 **`run_id <> 当前 run`** 查三件事——未结束会话（`state NOT IN
+('finished','discarded')`）、待确认区间（`needs_review = 1 AND voided_at IS NULL`）、不变量损坏
+（`running` 带待确认区间 / `running` 无开放区间 / 非 `running` 却有开放区间）；**命中任一**，
+`guard_business_timing`（`:465`）就把 `start`/`resume`（`:473`/`:482`）拒成 `RECOVERY_REQUIRED`
+（界面文案：「存在待确认的计时记录，请先处理恢复再继续。」）。**这是已知限制**——**产品内的
+解除入口归 P3**（`reconcile` + 门禁解除）：上一次运行若不是正常退出（进程被杀、断电、直接关掉
+控制台），§1/§2 的「开始计时」会直接失败却看不出原因。所以**验收请用干净库**，或先确认库里
+没有上面三类「非当前 run」的事实；跑一遍下面两条查询（用 §0 上面取到的 run id），**有输出就是脏库**：
+
+```sql
+SELECT 'unfinished_session', id, state, run_id FROM work_session
+ WHERE run_id <> '<上面取到的 run id>' AND state NOT IN ('finished','discarded');
+SELECT 'pending_interval', i.id FROM work_interval i JOIN work_session s ON s.id = i.session_id
+ WHERE i.needs_review = 1 AND i.voided_at IS NULL AND s.run_id <> '<上面取到的 run id>';
+```
+
+（第三类「不变量损坏」不会被这两条查出来，但同样会拒绝计时——判据就是上面括号里那三条。
+P3 落地前这三类都只能靠换库绕开。）**绕开**：换一个**新库路径**——把
+`%APPDATA%\com.worktrace.desktop\worktrace.db` 改名或删除后重启（应用会重新建库并跑迁移）；
+或在应用关闭时清理旧 run 的未收尾事实后重启。**「本次验收的库是否为干净库」要填进 §0 表格**
+（是 / 否），否则将来分不清「步骤失败」是产品问题还是环境问题。
 
 ## 1. F-011 托盘：四项 + 一个预留项
 
@@ -56,6 +80,22 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
 7. **怎么算不通过**：可点项不是恰好四项（多、少，或 P8 那一项可点）；点禁用项有任何反应
    （菜单关闭、窗口变化、控制台出现命令）；**没有计时**时点「暂停」却让 `revision` **+1**、
    或让 `work_session` 多出一行；重复点「暂停」出现第二条 `domain.changed`。
+
+> **`domain.changed` 怎么看**（第 6 步与上面这条判据都靠它）：在**该窗口**的 DevTools 控制台
+> 执行一次下面的订阅——之后每来一条通知打一行「事件名 + revision」，点「暂停」前后各数一次：
+>
+> ```js
+> await __TAURI_INTERNALS__.invoke("plugin:event|listen", {
+>   event: "worktrace:event", target: { kind: "Any" },
+>   handler: __TAURI_INTERNALS__.transformCallback((e) =>
+>     console.log("[event]", e.payload.event, "rev", e.payload.revision)),
+> });
+> ```
+>
+> 走的就是前端自己那条订阅（`src/ipc.ts` 的 `listen("worktrace:event", …)`；页面没有
+> `window.__TAURI__`，只有 `__TAURI_INTERNALS__`）。不想开控制台就用**库里的 `revision`** 兜底：
+> 每条 `domain.changed` 都带写入后的 `revision`，而 `timer.tick` **不加 `revision`**（§2A 第 3 步）
+> ——所以第 6 步的「`revision` 不变」与「没有第二条 `domain.changed`」是同一件事。
 
 ## 2. F-009：关掉全部窗口后托盘仍可用、计时继续
 

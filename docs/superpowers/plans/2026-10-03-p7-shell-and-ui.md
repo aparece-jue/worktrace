@@ -213,7 +213,7 @@
 - [ ] 验证"先监听后快照"（**注入手段已落地、实机未跑**）。三种竞态**用明确的注入手段造**（不能只写"人为制造"）：
   - **(a) 末次事件丢失**：`services/events.rs` 的广播出口加 `#[cfg(debug_assertions)]` 丢弃开关（dev 命令 `__p7_drop_next_event`），丢一次通知后确认展示在 30 秒 `get_revision` 周期内仍收敛；
   - **(b) 旧响应晚到**：dev 命令 `__p7_delay_next_query_ms(ms)` 让窗口 B 的下一次查询延迟返回（**先取数据再 `sleep`，绝不跨 `await` 持 `Connection`**），A 窗口在延迟窗口内先暂停再继续，B 的旧响应必须被丢弃、不覆盖新状态；
-  - **(c) 乱序通知**：dev 命令 `__p7_replay_event(seq)` 用旧 `event_seq` 重播一条通知，验证同 epoch 且 `revision <=` 已应用版本的通知被丢弃。
+  - **(c) 乱序通知**：dev 命令 `__p7_replay_event(revision: <旧 revision>)` 用旧 `revision` 重播一条通知，验证同 epoch 且 `revision <=` 已应用版本的通知被丢弃。
   三条注入**只在 debug 构建编译**（`#[cfg(debug_assertions)]`），并加一条测试断言发布 handler 列表里没有它们。
 - [ ] 记录机器/系统版本与观察结果到 `src-tauri/tests/manual-shell.md`（**未做**：无实机记录；记录模板在 `manual-sync.md` §0/§3）。
 
@@ -731,6 +731,10 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
   `event_seq`）。**自动化那半边证明的是「同一套规则在两个上下文里各自成立」**；
   **真实双 WebView 的事件广播时序仍须真机跑**（集成测试进程没有事件循环，也没有第二个
   WebView）——这份单测不得当成实机结论（总纲 §5 第 9 条）。
+  **（2026-10-04 订正**：本段「两个前置件**尚未落地**」只描述 fix round 1 当时的时点，
+  **两个前置件现已落地**——`c22eb8e`（第二个窗口 `sync_lab.rs`）/ `2660303`（三条 dev 注入
+  命令），见「Task 6a 前置件的落地」；同段「`capabilities/default.json` 的 `windows`…
+  现在只有 `"main"`」也已不是现状（现为 `["main","sync-lab"]`）。**）**
 - **本阶段不做**：`src-tauri/src/platform/sync_lab.rs` 与三个 dev 注入命令（Rust 侧，
   本轮硬约束）；「多入口开发/打包路径」与 Windows 打包验证（**仍归 P8**，见「仍待与归属」，
   本轮未动那条登记）；维护态下的多窗口行为（P6）。
@@ -770,7 +774,7 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
   `__p7_delay_next_query_ms(command, ms)`（`dev.rs:154`，按**调用方窗口 label + 命令名**两个键，
   先取数据再 sleep）、`__p7_replay_event(revision)`（`dev.rs:179`，参数是**旧 `revision`**，
   只读 + 广播）、`__p7_open_sync_lab()`（`dev.rs:229`）。
-  **两道编译期守卫**：`commands/mod.rs:110` 的 `#[cfg(debug_assertions)] pub mod dev;` +
+  **两道编译期守卫**：`commands/mod.rs:109` 的 `#[cfg(debug_assertions)]` 守卫 + `:110` 的 `pub mod dev;` +
   `lib.rs` 注册表里那四条**逐条**带守卫 ⇒ 发布构建里它们不是「关掉」而是**不存在**；
   `tests/dev_injections.rs`（6 条）读源码核对，另跑过一次
   `cargo check --offline --lib --release`（EXIT 0，93 s）做发布档位的编译探针
@@ -795,7 +799,7 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
 
   **为什么不能用单元测试代替**：集成测试进程里没有事件循环，也就没有窗口与托盘（`tauri::test` 的 mock 运行时本轮没有启用）。`tests/shell_lifecycle.rs` 钉住的是**决策函数与命令路径**（菜单映射、`should_prevent_exit`、`plan_activation`、托盘暂停/退出的库内证据、label 与配置一致性），钉不住「真实托盘图标/菜单交互」与「关窗后仍在计时」。**这一步的结论目前为空**，P8 复核。
 - **平台事件实机验收**（锁屏 / 休眠 / 唤醒 / 改时 / 关窗后采样 / 事件到达延迟）**归属已定（2026-10-04）**：**实现归 P6**——P6 计划 Task 2 末新增「正式 OS 事件接线」（事件源本身；绑定 P7 已建立的 `platform/scheduler.rs` 的 `Scheduler`、`services/bootstrap.rs` 的 `sampling_action`→`lock_app` 单一串行边界、`services/events.rs` 的 `Broadcaster`，不新建第二套驱动）；**P7 只登记实机步骤，实机结论归 P8 复核**。`docs/validation/p2-clock-mapping.md` §6/§7（`:156`–`:172`）已声明这些**未验证、不得当成已验证**：探针是前台进程，证明不了关窗后仍采样，也证明不了系统事件的可靠性与到达延迟。
-- **「多入口开发/打包路径」与 Windows 打包验证**（`00-architecture.zh.md` §7 的待验证项）同样**无归属**：登记到 P8，与 R-04 的发布产物门禁一起做。
+- **「多入口开发/打包路径」与 Windows 打包验证**（`00-architecture.zh.md` §7 的待验证项）在 P7 交付时**未归属**，**现已登记到 P8**（与 R-04 的发布产物门禁一起做）。
 - **`@mui/material` 与 `@emotion/*` 是模板遗留死依赖**（`src/App.tsx` 未使用，`package.json` 里仍在）：**只登记，不在 P7 删**——删依赖属清理任务且需用户确认。
 - **维护态错误码**：P6 Task 4 引入后，再登记为 Task 1 的透传项（P7 只登记、不实现）。
 

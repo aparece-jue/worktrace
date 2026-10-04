@@ -200,7 +200,7 @@ SQL 全参数化（含分页）；FK 的 `ON DELETE RESTRICT` 未被破坏；`se
    26 → 28），`guard_row_version_of` 删除；`done` 那两项由提交 `9e7a89a` 先行处理。本条目关闭。
 2. **口径已定、代码已补全（P7 前门禁，2026-10-04 收口）**：所有对外写结果都回 `data_epoch`/`revision`（P2 计时快照早已回、P4 的 11 个写入口由提交 `27f8a7a` 补齐）；
    项目/标签/任务标签读服务统一为「同一个读事务里 `guard_epoch` 并返回 `{items, data_epoch, revision}`」这一种 epoch 契约（`list_tasks_filtered` 与 `plan_for` 是样板，未改）。
-   **仍未收口的一项**：同一列两种入参形状（`create_task` 的 `Option<&str>` vs `set_task_project` 的 `ProjectTarget`）——这属接口造型，留待 P7 定 IPC 形状时一并处理，不属 COMP-01/COMP-03。
+   **仍未收口的一项**：同一列两种入参形状（`create_task` 的 `Option<&str>` vs `set_task_project` 的 `ProjectTarget`）——这属接口造型，**P7 交付后仍未合并**（两者今天并存：`catalog::create_task`（`services/catalog.rs:540`）收 `Option<&str>`、`set_task_project`（`:326`）收 `ProjectTarget`）；**待重新指派归属**（建议随 P8 的界面收尾处理），不属 COMP-01/COMP-03。
 3. **零调用公开面**：`guard_row_version_of`（建议直接删，而不是翻译它的英文）**已于 2026-10-04 删除**
    （提交 `a8c4376`：生产零调用、不存在时的 detail 是整句英文；测试改走 `task_repo::get_task` +
    `guards::guard_row_version`，「未知记录 vs 版本冲突」的区分断言未削弱）；`AuthorityTarget::new`、
