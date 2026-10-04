@@ -184,6 +184,10 @@ describe("迟到响应丢弃", () => {
     expect(gate.isUnknownEpoch({ data_epoch: EPOCH, revision: 1 })).toBe(false);
 
     gate.markApplied({ data_epoch: EPOCH, revision: 5 });
+    // 区分性断言：同 epoch 的**旧版本**不是"未知 epoch"。把规则②的 `<=` 折进
+    // isUnknownEpoch 的错误实现（"同 epoch 且版本不新 ⇒ 未知 ⇒ 重新握手"）会在这里红，
+    // 而上下这几条断言仍然全绿——它们分辨不出"未知 epoch"与"同 epoch 的旧 revision"。
+    expect(gate.isUnknownEpoch({ data_epoch: EPOCH, revision: 4 })).toBe(false);
     expect(gate.isUnknownEpoch({ data_epoch: EPOCH, revision: 6 })).toBe(false);
     expect(gate.isUnknownEpoch({ data_epoch: "other", revision: 1 })).toBe(true);
     // 规则②对未知 epoch 恒为 false ⇒ 调用方**必须**先问规则①，

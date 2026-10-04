@@ -1,0 +1,99 @@
+{
+  "protocol": "revision-gate",
+  "normative": "src-tauri/src/services/events.rs 的 RevisionGate（00 §5 的四条去重规则）",
+  "read_by": [
+    "src-tauri/tests/revision_gate_vectors.rs",
+    "src/state/__tests__/revision-protocol.test.ts"
+  ],
+  "note": [
+    "这是一份**两侧共读**的协议向量：Rust 的 RevisionGate 与 TS 的 createFreshnessGate",
+    "replay 同一串步骤、断言同一串判决。改一侧的规则会让另一侧红——不靠人记得。",
+    "step 的 op：apply_snapshot（expect: cache_invalidated|applied|stale_ignored）、",
+    "notification（expect: apply|drop|rehandshake|resync）、",
+    "query_response（expect: accept|drop|rehandshake，带 required）、",
+    "state（断言闸门当前的 epoch/applied/seen，没有 expect 字段）。",
+    "expect 里的取值与 Rust 的枚举变体逐字对应（CacheInvalidated -> cache_invalidated）。",
+    "刻意**不含**「还没应用过任何快照时的通知」：Rust 在那格判 Rehandshake，前端按",
+    "isUnknownEpoch 的既定语义不判未知（启动顺序让它不可达），两侧的唯一差异由",
+    "src/__tests__/ipc.test.ts 与 src/state/__tests__/domainState.test.ts 单独钉住。"
+  ],
+  "cases": [
+    {
+      "name": "规则①：新 epoch 的权威快照让全部缓存失效；旧 epoch 的通知只触发重新握手",
+      "steps": [
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 10, "expect": "cache_invalidated" },
+        { "op": "notification", "epoch": "e1", "revision": 11, "expect": "apply" },
+        { "op": "apply_snapshot", "epoch": "e2", "revision": 1, "expect": "cache_invalidated" },
+        { "op": "state", "epoch": "e2", "applied": 1, "seen": 1 },
+        { "op": "notification", "epoch": "e1", "revision": 12, "expect": "rehandshake" },
+        { "op": "notification", "epoch": "epoch-unknown", "revision": 1, "expect": "rehandshake" },
+        { "op": "state", "epoch": "e2", "applied": 1, "seen": 1 },
+        { "op": "notification", "epoch": "e2", "revision": 2, "expect": "apply" },
+        { "op": "state", "epoch": "e2", "applied": 1, "seen": 2 }
+      ]
+    },
+    {
+      "name": "规则②：同 epoch 的通知按水位判（等于也丢），重复到达同样丢",
+      "steps": [
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 5, "expect": "cache_invalidated" },
+        { "op": "notification", "epoch": "e1", "revision": 5, "expect": "drop" },
+        { "op": "notification", "epoch": "e1", "revision": 4, "expect": "drop" },
+        { "op": "notification", "epoch": "e1", "revision": 6, "expect": "apply" },
+        { "op": "notification", "epoch": "e1", "revision": 6, "expect": "drop" },
+        { "op": "state", "epoch": "e1", "applied": 5, "seen": 6 }
+      ]
+    },
+    {
+      "name": "规则④：跳号要求取新快照，缺口不会被迟到的通知掩盖，快照把它拉回连续",
+      "steps": [
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 10, "expect": "cache_invalidated" },
+        { "op": "notification", "epoch": "e1", "revision": 11, "expect": "apply" },
+        { "op": "notification", "epoch": "e1", "revision": 13, "expect": "resync" },
+        { "op": "notification", "epoch": "e1", "revision": 12, "expect": "resync" },
+        { "op": "notification", "epoch": "e1", "revision": 14, "expect": "resync" },
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 14, "expect": "applied" },
+        { "op": "notification", "epoch": "e1", "revision": 15, "expect": "apply" },
+        { "op": "state", "epoch": "e1", "applied": 14, "seen": 15 }
+      ]
+    },
+    {
+      "name": "规则③（快照半边）：同版本快照是合法的，旧于水位的快照不覆盖",
+      "steps": [
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 10, "expect": "cache_invalidated" },
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 10, "expect": "applied" },
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 4, "expect": "stale_ignored" },
+        { "op": "state", "epoch": "e1", "applied": 10, "seen": 10 },
+        { "op": "notification", "epoch": "e1", "revision": 10, "expect": "drop" },
+        { "op": "state", "epoch": "e1", "applied": 10, "seen": 10 }
+      ]
+    },
+    {
+      "name": "规则③（查询响应）：比已应用/所需版本旧时不得覆盖，未握手过要重新握手",
+      "steps": [
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 10, "expect": "cache_invalidated" },
+        { "op": "query_response", "epoch": "e1", "revision": 9, "required": 10, "expect": "drop" },
+        { "op": "query_response", "epoch": "e1", "revision": 10, "required": 10, "expect": "accept" },
+        { "op": "query_response", "epoch": "e1", "revision": 11, "required": 12, "expect": "drop" },
+        { "op": "query_response", "epoch": "e1", "revision": 12, "required": 12, "expect": "accept" },
+        {
+          "op": "query_response",
+          "epoch": "epoch-unknown",
+          "revision": 12,
+          "required": 12,
+          "expect": "rehandshake"
+        },
+        { "op": "state", "epoch": "e1", "applied": 10, "seen": 10 }
+      ]
+    },
+    {
+      "name": "规则④：快照自己也会把已见版本推高，紧跟着的通知不算跳号",
+      "steps": [
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 10, "expect": "cache_invalidated" },
+        { "op": "notification", "epoch": "e1", "revision": 11, "expect": "apply" },
+        { "op": "apply_snapshot", "epoch": "e1", "revision": 12, "expect": "applied" },
+        { "op": "notification", "epoch": "e1", "revision": 13, "expect": "apply" },
+        { "op": "state", "epoch": "e1", "applied": 12, "seen": 13 }
+      ]
+    }
+  ]
+}
