@@ -25,7 +25,8 @@
   零新增依赖：`Cargo.lock` 在整轮里**逐字节未变**（实测 `git diff --stat ae9ec00..34d84e5 --
   src-tauri/Cargo.lock` 无输出）；`src-tauri/Cargo.toml` **只改了一行依赖声明**——
   `tauri` 的 feature 列表加 `tray-icon`（+5/−1，无增删依赖行，见 §3.1）；
-  `package.json` 只加了 4 个钉版本的 devDependency 与一条 `test` 脚本（+5/−1）。
+  `package.json` 只加了 **3 个**钉版本的 devDependency（`vitest@5.0.1`、`jsdom@30.1.1`、
+  `@testing-library/react@16.3.3`；`@vitejs/plugin-react` 本来就在）与一条 `test` 脚本（+5/−1）。
 - **V0.1 的桌面外壳在单窗口下「能用」**：能捕获、理清、开始/暂停/继续/结束计时、管项目与标签、
   按 GTD 三列表筛任务；关掉全部窗口后进程与托盘留下、周期采样继续（**这一条的设计与决策函数
   有断言，实机结论为空**，见第五节）。
@@ -34,12 +35,16 @@
   自动化那半边（`dualContextSync.test.ts`，6 条）证明的是「同一套规则在两个各自独立的 JS
   上下文里各自成立」，**证不了真实双 WebView 的广播时序**。
 - **外壳人工验收（F-009 / F-011 / F-016）的实机结论同样为空。** 步骤与判据在
-  `src-tauri/tests/manual-shell.md` §1–§3，由 P8 执行与复核。
+  `src-tauri/tests/manual-shell.md` §1–§4，由 P8 执行与复核。
   **本记录不把任何仓储/服务层测试标为「UI 已验收」**（P4 的约定，见第五节）。
 - **权威清单里与 P7 相关的条目逐条核对完毕**（§5 第 9 条，见第七节），其余条目明确不属 P7。
 - **诚实登记的缺口一处不少**：托盘「完成」项、视图跳转、动态菜单标签、项目详情分页、
   `useRunningTaskId` 的 `mode` 判别、`Drop for Scheduler` 的持锁边界、维护态、统计与导出、
   备份恢复——逐条列在第六节，每条都写明归属与「现在没做的后果」。
+- **P7 整分支评审：可宣告完成、0 Critical**（2026-10-04）。评审对**本记录**做了 12 条抽查
+  （**8 条一致、4 条记录错**）并指出第六节**漏登 6 条**已登记的遗留；**fix round 1 已逐条
+  订正与补登**（4 条见 §3.1/§3.2 与文末「推送状态」，漏登的见 §6.6 第 29–36 条），
+  另补写了 `manual-shell.md` §4 的 F-001/F-002 走查步骤。
 - **三处「自报证据」在独立评审判定下站不住，已订正并重做**（Task 0 的两条注水证据、
   Task 6a 的三条反向验证声明、Task 1a 的枚举大小写措辞）。逐条见第八节——**这是本记录最该被
   读的一节**：它说明本计划的绿灯是怎么被反复敲过的。
@@ -171,8 +176,9 @@ Rust **458 → 464** passed / 0 failed。
 ### Task 6b 外壳人工验收与完成门槛（本记录）
 
 **提交**：见文末「提交链」。**交付**：本记录、计划 checkbox 的逐条勾选与归属、
-`manual-sync.md` §2.2 的判据订正、完成门槛的真跑数字。
-**实机验收结论：空。** 步骤就位（`manual-shell.md` §1–§3、`manual-sync.md` §0–§5），
+`manual-sync.md` §2.2 的判据订正（+ §2.6 收尾关窗）、`manual-shell.md` §4 的 F-001/F-002
+走查步骤、完成门槛的真跑数字，以及**整分支评审 fix round 1**（4 条记录错订正 + 8 条补登）。
+**实机验收结论：空。** 步骤就位（`manual-shell.md` §1–§4、`manual-sync.md` §0–§5），
 执行与复核归 P8。
 
 ---
@@ -210,7 +216,7 @@ LAYER CHECK PASSED
   a_killed_lock_holder_releases_the_lock 拉起"]`——它是**被另一个用例当子进程拉起的入口**，
   不是被跳过的覆盖。**订正一处**：Task 6a 前置件报告里写的「464 passed / 0 failed /
   **0 ignored**」不准确，真实是 **1 ignored**（上面那条，P1 起就在，与本轮无关）。
-- **六条分层规则**全部 clean（`scripts/check-layers.ps1:156`–`:178`，逐条**裸词 + `-CaseSensitive`**）：
+- **六条分层规则**全部 clean（`src-tauri/scripts/check-layers.ps1:156`–`:178`，逐条**裸词 + `-CaseSensitive`**）：
   commands 禁 `\b(storage|rusqlite|Connection)\b`；domain 禁
   `\b(rusqlite|platform|storage|commands|services)\b|std::fs`；storage 禁
   `\b(platform|commands|services)\b`；services 禁 `std::time|SystemTime|Instant::now|\bcommands\b`；
@@ -221,8 +227,11 @@ LAYER CHECK PASSED
   （原先 `use crate::{storage as db};` 能绕过去）。
 - 测试数轨迹（**P7 起点 357 → 终点 464**，逐轮的原始输出见各任务报告与 `progress.md`）：
   357 → 393（Task 0）→ 394（Task 0 fix）→ 404（Task 1a）→ 431（Task 1a fix）→ 437（Task 1b）
-  → 449（Task 4）→ 452（Task 4 fix）→ 456（Task 3 契约）→ 458（Task 6a 前置 1/3）→
-  **464（Task 6a 前置 2/3，本记录复跑一致）**。
+  → 449（Task 4）→ 452（Task 4 fix）→ **456（`a0db688`，Task 3 契约：`task_id`/`task_row_version`）
+  → 457（`1f15b6b`，再补 `task_title` + 一条 `the_snapshot_task_title_tracks_a_rename_and_is_not_cached`）**
+  → 458（`c22eb8e`，Task 6a 前置 1/3）→ **464（`2660303`，Task 6a 前置 2/3，本记录复跑一致）**。
+  ⚠️ 本记录早先写的「456 → 458」漏了 `1f15b6b` 那一格，把 `task_title` 的那条用例算到了前置件头上——
+  **已按 `git show --stat 1f15b6b` 实测订正**。
 - **零新增 crate**：`Cargo.lock` 在 `ae9ec00..34d84e5` **逐字节未变**（`git diff --stat` 无输出）。
   `src-tauri/Cargo.toml` **改了一行**：Task 4 启用 `tauri` 已有的 `tray-icon` feature
   （`tauri = { version = "2", features = ["tray-icon"] }`，+5/−1）——可选依赖本来就在解析图里，
@@ -283,6 +292,7 @@ cd 'D:\ProJect\worktrace'; pnpm test; pnpm build
 | Task 5 | 达成计划原文，**1 条 Important（水位语义）** | 修复轮 `87e810b`+`77deb3d` 收口，**133** 条全绿 |
 | Task 6a | 自动化半边达成、可以收；**3 条自报反向验证实跑证伪** | 修复轮 `684d495` 订正 + round 2 反向验证 8 处 |
 | Task 6a 前置 | 本轮由 Task 6b 复核：数字对得上（464），**一处「0 ignored」需订正** | 见 §3.1 |
+| **P7 整分支** | **可宣告完成、0 Critical**（2026-10-04）。评审对**本记录**做了 **12 条抽查：8 条一致、4 条记录错**，并指出第六节**漏登 6 条**已登记的遗留；另有 2 条「只登记不删」类 | **fix round 1 已逐条订正与补登**：4 条记录错见 §3.1 / §3.2 / 文末「推送状态」；6 条漏登 + 2 条顺带登记见 §6.6（第 29–36 条）；并补写了 `manual-shell.md` §4 的 F-001/F-002 走查步骤 |
 
 ---
 
@@ -521,7 +531,7 @@ interface ViewWatermark {
 | **双窗口竞态 (a)(b)(c)** | `manual-sync.md` §2.1–§2.3 | **未跑**。真实双 WebView 的广播时序、真实 IPC 下「旧响应晚到」长什么样 |
 | **跨窗口 30 秒收敛 / 显示前校验** | `manual-sync.md` §2.4–§2.5 | **未跑**；§2.5 的两条还**没有可观察通道**，已标「不可观察 / 存疑」，不得凭感觉判通过 |
 | **F-020 界面侧（多窗口一致性）** | `manual-sync.md` §2.0 / §4 | **未跑**。自动化那半边只证明「规则在两个上下文里各自成立」，**真实双 WebView 的展示是否一致仍须真机看** |
-| **F-001 / F-002 与计时非法请求的实机走查** | `manual-shell.md` §5（判据对照在 `manual-sync.md` §4） | **未跑**。自动用例覆盖了展示与转发（`Inbox.test.tsx` 13 条、`Timer.test.tsx` 8 条），但**外壳人工验收不能用单元测试代替**（总纲 §5 第 6 条 / 08 §6） |
+| **F-001 / F-002 与计时非法请求的实机走查** | **`manual-shell.md` §4**（Task 6b 补写的七步；判据对照在 `manual-sync.md` §4） | **未跑**。自动用例覆盖了展示与转发（`Inbox.test.tsx` 13 条、`Timer.test.tsx` 8 条），但**外壳人工验收不能用单元测试代替**（总纲 §5 第 6 条 / 08 §6） |
 | **平台事件实机验收**（锁屏 / 休眠 / 唤醒 / 改时 / 关窗后采样 / 事件到达延迟） | 登记在计划文末「仍待与归属」 | **未跑、且仍无归属**：P7 只登记步骤，结论由实机跑出、P8 复核。`docs/validation/p2-clock-mapping.md` §6/§7 已声明这些**未验证、不得当成已验证** |
 | **多入口开发/打包路径 + Windows 打包验证**（00 §7） | 登记在计划文末 | **未做**，归 P8，与 R-04 的发布产物门禁一起 |
 
@@ -604,6 +614,22 @@ P4 的约定在 P7 继续有效，并且**这一条正是 P7 最容易违反的�
 | 26 | **前端镜像 `worktrace-web/` 不是测试环境** | 镜像曾缺 15 份快照 fixture，直接跑 `pnpm test` 会**假 4 红**（控制器已补齐，现 0 缺失）。评审/实施一律用 `git archive` 完整导出到工作区外再装依赖；**绝不在仓库目录跑 `pnpm install`**（会把 Windows 侧装的 `node_modules` 重链成 linux 原生二进制） |
 | 27 | **`dist` 的 728 kB 单 chunk 告警** | 既存（antd 体积），P7 未做代码分割 |
 | 28 | **术语「上下文」vs「情境」** | 用户文案按 `99-glossary.zh.md` §5 用「上下文」，04 F-005 与计划写「情境」。**仍待用户拍**；若改，`zh_kind`、`error_contract` 的逐字断言、`tags.rs` 两条 needle 共 5 处一起改 |
+
+### 6.6 整分支评审补登（2026-10-04 fix round 1，共 8 条）
+
+> 前 5 条是**计划与 P4/Task 0 账本里已经登记、但本记录初版漏登**的；后 3 条是同一轮评审
+> 顺手点出的「只登记、不删」类。全部**只登记**，本轮不动代码。
+
+| # | 项 | 事实 | 归属 |
+| --- | --- | --- | --- |
+| 29 | **计时判据链的「同一条规则两处实现」仍是待定项** | 前端 `orderTimer`（`src/state/domainState.ts`）是**五级**判据（`data_epoch` → `run_id` → `session_id` → `session_version` → `tick_seq`）；Rust 的 `Coordinator::is_stale_tick`（`src-tauri/src/services/timer/coordinator.rs:368`）只判 `session_id` + `row_version`，**不是同一个函数、没有共享向量、Rust 侧也没有对应断言**，而且它在**生产路径上零调用**（`src/` 里只在 `events.rs:377` 的注释里被提到，唯一的调用方是 `tests/timer_snapshot.rs:212`–`:220`）。计划（「遗留与边界（Task 2 fix round 1 登记）」一节）明写「**要不要给计时判据链也造一份两侧共读的向量，是一个待定项**：要么把 `is_stale_tick` 扩成同一条链，要么承认它是展示侧独有、在 P8 的实机验收里覆盖」 | **待定**：计划明写是待定项，本记录不替它拍板。**P8 的双窗口实机验收正落在这一格** |
+| 30 | **「`applied == None` 时的通知」两侧都没覆盖** | 协议向量（`src/types/__vectors__/revision-gate.json`）刻意不含这一格，而 **Rust 侧 `tests/event_protocol.rs` 也没覆盖**：该文件里 **3 个用例、共 12 处 `gate.on_notification`**（实测 `grep -c`；计划里写作「三处」，那指的是**用例数**，不是调用点数），**每一处都跟在 `apply_snapshot` 之后** ⇒ `epoch == None ⇒ Rehandshake` 这条分支目前**两侧都只有「前端的不判未知」这一半**有断言 | P8（或给两侧各补一例；本条与第 29 条同源，都是「规则镜像」的边界） |
+| 31 | **`SessionAttention` 零调用** | `src-tauri/src/domain/session.rs:179` 的 `SessionAttention`（`InvariantBroken`/`NeedsReview`）**全仓零调用**（`grep -rn SessionAttention src/` 只命中定义处）。它是 P3 四类判定的候选类型，Task 0 的门禁**没有**用它（避免为尚未存在的服务造临时实现），Task 0 报告 §「遗留」第 7 条登记过。按纪律**只登记不删** | P3（四类判定接入时决定去留） |
+| 32 | **`AuthorityTarget::Deserialize` 零调用，且注释的理由与事实相反** | `src-tauri/src/error.rs:246` 给 `AuthorityTarget` 派生了 `Deserialize`，其上方注释（`:244`–`:245`）说「`Deserialize` 是给 P7 的 IPC 用的：没有它，命令层只好再写一份『字符串 → 种类』的 match」——**而 P7 的 IPC 路径一次都没用它**：`commands/mod.rs:177`–`:178` 的 `target()` 只调 `AuthorityTarget::new`，`kind` 在命令层是**枚举字面量**，从来没有从字符串解析过。P4 账本记的是「`AuthorityTarget::Deserialize`/`new` 生产零调用（**P7 定了再收**）」——P7 只收掉了 `new` 那一半 | P8：要么删掉 `Deserialize` 与那段理由，要么等真的出现字符串入口再用（**注释该改，因为它现在说的是假的**） |
+| 33 | **两个文件该拆了** | `src-tauri/src/services/catalog.rs` **771 行**、`src-tauri/src/commands/mod.rs` **1338 行**（实测 `wc -l`）。P4 账本与 Task 5 报告都记过「`catalog.rs` 已四类职责，**P7 再加任务命令时建议拆 `services/tasks.rs`**」——而 P7 真的加了 24 条 IPC 命令与全部请求 DTO ⇒ `commands/mod.rs` 现在是「命令骨架 + 请求 DTO + 24 条包装/命令体 + 托盘入口」一肩挑，**P8 还要往这里加命令** | P8（下一个加命令的人先拆；拆法见 Task 5 报告的建议） |
+| 34 | **`BroadcastDiagnostics::dropped` 只有测试消费、实机没有出口** | `src-tauri/src/services/events.rs:130`–`:134` 的注释说这个计数是「为了**让实机实验**（`tests/manual-sync.md` §2.1/§2.3.1）能分辨『开关没生效』与『规则没成立』」——但 `diagnostics()`（`:237`）**没有任何生产消费者**，唯一读 `dropped` 的是 `tests/dev_injections.rs:338`/`:356`。⇒ **实机操作者读不到这个数**，注释里那句用途目前兑现不了；`manual-sync.md` §2.2 的「注入没生效就记『注入未生效』」同样只能靠现象判断 | P8（给 DevTools 加一条读 `diagnostics()` 的 dev 命令，或把注释改成事实） |
+| 35 | **跨语言的三对常量没有任何机械检查** | 事件频道名与两个事件名在两侧**各定义一份**：`worktrace:event` 在 `src-tauri/src/lib.rs:74`（Rust `const`）与 `src/ipc.ts:66`（TS `export const`）；`domain.changed` / `timer.tick` 在 `src-tauri/src/services/events.rs:46`/`:48` 与 `src/types/ipc.ts:97`/`:98`。**单侧改名是静默的**：Rust 换了频道名 ⇒ 前端一个事件都收不到；TS 换了事件名 ⇒ 镜像永远不失效——两侧都不会红。现有的 TS↔快照检查（15 份）**不含事件信封**，向量文件 `revision-gate.json` 里也没有这些名字 | P8（**不要现在造生成器**：一条「读两侧源码比对这三个字面量」的用例就够，与 `snapshot-contract.test.ts` 同一种做法） |
+| 36 | **死组件与残留文件（只登记，不删）** | ① `src/components/{FloatingInput,FloatingSelect,DockviewDemo}.tsx`（+同名 `.css`）**没有任何代码引用**：`grep -rn <名字> --include=*.ts --include=*.tsx src/` 排除自身后为 **0 命中**；文档/计划里提到它们的只有 `src/components/README.md`（仍在教怎么 import，**与现状不符**）与 `DockviewDemo` 在 P8 计划/ADR 里（作为「不进发布产物」的对象，见 ②）。② `DockviewDemo` 有特殊身份：ADR-012 的 R-04 要求它**不进发布产物**，P8 计划里已有一条构建后检查（含「故意 import 一次确认门禁会红」的反向验证）。③ 仓库根有两个被 `.gitignore` 的 `*.log` 忽略的 stray：`.p7t3-baseline-test.log`、`.p7t2-test-raw.log`（`git status --ignored` 实测）。按工作区纪律「发现无关文件**只报告不删**」 | P8（`DockviewDemo` 与 R-04 一起处理；其余是清理任务，**删文件/删依赖都需用户确认**） |
 
 ---
 
@@ -714,6 +740,30 @@ I4（分层门禁**没有 platform 规则**——而 Task 4 的托盘正是 plat
    在 `c22eb8e`/`2660303`/`34d84e5` 落地后，这两处引用块仍写「尚未落地」。本轮一并订正
    （只改状态与指向，**步骤、判据、记录表一字未动**）。
 
+### 8.7 整分支评审对本记录的抽查与 fix round 1（2026-10-04）
+
+**评审结论：P7 可宣告完成、0 Critical。** 它对本记录做了 **12 条抽查**：**8 条一致、
+4 条记录错**；另指出第六节**漏登 6 条**已在计划/P4/Task 0 账本里登记的遗留。
+**4 条记录错逐条如下**（都已订正，订正处见括号）：
+
+| # | 本记录原先写的 | 实测 | 根因 |
+| --- | --- | --- | --- |
+| 1 | `package.json` 加了 **4 个**钉版本 devDependency | **3 个**（`vitest@5.0.1`、`jsdom@30.1.1`、`@testing-library/react@16.3.3`；`@vitejs/plugin-react` 本来就在）：`git diff ae9ec00..HEAD -- package.json` 只有 3 行新增依赖 | 把「计划里要装的 4 个包」当成了「新增的 4 个」——计划那一条写的确实是 4 个包名（§1、§3.1 已订正） |
+| 2 | 测试数轨迹「**456 → 458**（前置 1/3）」 | **456（`a0db688`）→ 457（`1f15b6b`，补 `task_title` + 一条用例）→ 458（`c22eb8e`）**：`git show --stat 1f15b6b` 里 `tests/timer_snapshot.rs` 新增了 `the_snapshot_task_title_tracks_a_rename_and_is_not_cached` | 把 `task_title` 那一格算到了前置件头上（§3.1 已订正） |
+| 3 | `scripts/check-layers.ps1:156`–`:178` | **`src-tauri/scripts/check-layers.ps1:156`–`:178`**（行号本身是对的，路径漏了 `src-tauri/` 前缀） | 沿用计划里的简写（§3.1 已订正） |
+| 4 | 「推送状态」段整段过期：`origin/dev == 94aa875`、17 提交未 push、本轮不 push；且「勾上 **61** 条」 | `origin/dev == 67cf055`，`ae9ec00..67cf055` 的 **64 个提交全部已推送**（写完那段之后确实推过一次）；计划里现在是 **67 条已勾 / 9 条未勾**（本轮**新勾 61 条**，HEAD 时是 6 勾 / 70 未勾） | 写的是**开工时**的快照，之后没回头复核；「61」是**新勾数**、被写成了总数（文末「推送状态」与 §2 Task 6b 已订正；「61 = 新勾数」这一层在 `p7-task6b-report.md` 里写明） |
+
+**漏登的 6 条 + 顺带 2 条**已补进 §6.6（第 29–36 条）。另外按评审的点名，
+**补写了 `manual-shell.md` §4「F-001 / F-002 与计时非法请求（Task 6b 走查）」**
+（七步 + 判据 + 「怎么算不通过」）——原先本记录把这项的「步骤在哪」指向 `manual-shell.md` §5，
+而 §5 只有 checkbox、没有步骤，属于**指向了一个不存在的东西**。
+`manual-sync.md` 也补了 §2.6「收尾：关掉实验窗口 `sync-lab`」（否则 `manual-shell.md` §2
+的「关掉全部窗口」前提会看到两个窗），以及计划 Task 4 那条过期的「11 条」→ **14 条**。
+
+**这一节的教训**：评审抽查的 4 条里，**3 条是「写了就不再看」的事实性陈述**（版本轨迹、
+路径、推送状态），1 条是**把计划里的目标值当成了实测值**。验收记录的价值全在「可复核」上，
+所以每一条数字都该带**能复跑的命令或提交号**——fix round 1 之后本记录的每处订正都附了命令。
+
 ---
 
 ## 九、与规划的关系：P7 完成意味着什么、P8 的入口条件
@@ -745,7 +795,7 @@ I4（分层门禁**没有 platform 规则**——而 Task 4 的托盘正是 plat
    （`commands` 层的命令体复用）；「完成」项已留位（禁用态）。
 6. **显式退出入口**：`RunningApp::shutdown()` 是唯一入口。**P8 新增退出路径时必须显式调它**
    （`RunEvent::Exit` 不兜底；`Drop for Scheduler` 不查持锁，见 §6.5 第 19 条）。
-7. **实机验收的待办清单**：`manual-shell.md` §1–§3（F-009/F-011/F-016）与
+7. **实机验收的待办清单**：`manual-shell.md` §1–§4（F-011 / F-009 / F-016 / F-001·F-002）与
    `manual-sync.md` §2.1–§2.5（双窗口竞态 + 时序），**结论一栏仍是空的**——
    P8 执行、填表、复核；`manual-sync.md` §3 与 §5 的记录表已经排好。
 8. **门禁**：`.dsh_tmp/p4-gate.ps1`（Rust 六条规则）+ Windows 侧 `pnpm test` / `pnpm build`；
@@ -756,7 +806,7 @@ I4（分层门禁**没有 platform 规则**——而 Task 4 的托盘正是 plat
 
 ---
 
-## 提交链（P7：`ae9ec00` → `34d84e5`）
+## 提交链（P7：`ae9ec00` → `67cf055`）
 
 | 阶段 | 提交 |
 | --- | --- |
@@ -770,12 +820,14 @@ I4（分层门禁**没有 platform 规则**——而 Task 4 的托盘正是 plat
 | Task 5 | `f7a423b` / `1bb275f` / `f574659` / `db60a7c` / `44e06b4`（计划）/ `2cb637d`；fix round 1 `87e810b` / `77deb3d` |
 | Task 6a | `b7b9250` / `7111c8f` / `98f8217`（计划）；fix round 1 `684d495` / `ec45527` / `d4e042d`（计划） |
 | Task 6a 前置件 | `c22eb8e` / `2660303` / `34d84e5` |
-| Task 6b | `44d63f1`（两处文档同步）/ `d3eac98`（完成门槛与计划勾选）/ `75afe46`（本记录）/ 其后的自查订正提交；细节见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task6b-report.md` |
+| Task 6b | `44d63f1`（两处文档同步）/ `d3eac98`（完成门槛与计划勾选）/ `75afe46`（本记录）/ `67cf055`（自查订正）/ fix round 1 的文档提交（整分支评审的 4 条记录错 + 8 条补登 + `manual-shell.md` §4）；细节见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task6b-report.md` |
 
-**推送状态**（`git rev-parse origin/dev` 实测）：`origin/dev == 94aa875`；
-`ae9ec00..94aa875` 的 **43 个提交已推送**，`94aa875..HEAD` 的 **17 个提交尚未 push**
-（Task 5 之后全部，含 Task 6a、Task 6a 前置件）；**Task 6b 自己的 3 个文档提交在其后，
-同样未 push**。本轮按纪律不 push。
+**推送状态**（2026-10-04 整分支评审 fix round 1 时实测）：`origin/dev == 67cf055` ——
+`ae9ec00..67cf055` 的 **64 个提交全部已推送**（含 Task 6b 自己的 4 个文档提交
+`44d63f1` / `d3eac98` / `75afe46` / `67cf055`）。**`67cf055` 之后的提交尚未推送**：
+`e60192d`（另一位实施者的 Task 5 fix round 2）与本记录 fix round 1 的文档提交在其后。
+（本节早先写的是「`origin/dev == 94aa875`、17 个提交未 push、本轮按纪律不 push」——
+那是 Task 6b **开工时**的快照；写完那段之后确实推送过一次，**该段已按实测订正**。）
 
 ## 仍未达成 / 存疑（一句话索引）
 

@@ -152,13 +152,53 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
    **不得**给本次 run 写下 `clean_exit_at`（它连库都不打开）：
    `SELECT clean_exit_at FROM application_run WHERE id = '<上面取到的 run id>'` 仍为 NULL → 现象：
 
-## 4. 结论
+## 4. F-001 / F-002 与计时非法请求（Task 6b 走查）
 
-- [ ] 全部通过
-- [ ] 不通过（附现象与复现步骤）：
-- 未覆盖 / 存疑：
+> **为什么单列一节**：计划 Task 6b 把「F-001/F-002（捕获、理清、计时非法请求）」列进
+> **外壳人工验收**，并写明「不能用单元测试代替（08 §6）」。它的自动化半边在
+> `src/pages/__tests__/Inbox.test.tsx`（13 条）与 `Timer.test.tsx`（8 条）——那些钉的是
+> **展示与转发**；这一节走的是**真实窗口里的那条路**：真 IPC、真事务、真错误响应。
+>
+> 每一步记**现象**（界面文案逐字抄、SQL 结果、控制台报错），不要只写「通过」。
 
-## 5. Task 6b 追加（占位，由 6b 填写）
+1. **F-001 捕获（成功路径）**：在收件箱输入一句话，回车。
+   - [ ] 新任务**当场**出现在列表里（不刷新、不切页）
+   - [ ] `SELECT title, status FROM task ORDER BY created_at DESC LIMIT 1` ⇒ 标题逐字一致、
+     `status = 'Inbox'`
+   - [ ] `SELECT revision FROM app_meta WHERE singleton = 1` 恰好 +1
+   - 现象：
+2. **F-001 空标题（拒绝路径）**：清空输入框，直接回车。
+   - [ ] 界面上出现一句**可理解的中文提示**（逐字抄下来）；**没有**新任务、`revision` 不变
+   - [ ] 提示文案与 Rust 的 `ErrorResponse.message` 一致（前端不自己编文案，R8）
+   - 现象：
+3. **F-002 理清**：对刚捕获的那条点「理清为待办」。
+   - [ ] 该行状态变成 `Ready`（界面与 `SELECT status FROM task WHERE id = …` 一致）
+   - [ ] `revision` 恰好 +1；`task_change` 多一行
+   - [ ] 点第二条的「理清」**不出现**在不允许的状态上（入口只出现在 02 §5 允许的跃迁上）
+   - 现象：
+4. **开始计时只发一条命令**：在 `Ready` 行上点「开始」。
+   - [ ] 任务直接进入 `Doing`（不是先 `Ready` 停一拍再变）
+   - [ ] DevTools 的 Network/控制台里**只有一条** `start_timer`（`Inbox → Ready → Doing`
+     两步跃迁在 Rust 的**同一个事务**里）
+   - [ ] 计时页立刻有这条会话；`SELECT COUNT(*) FROM work_session` +1、`work_interval` +1
+   - 现象：
+5. **计时非法请求（服务拒绝时文案正确）**：在计时页/收件箱构造一次必败的请求，例如
+   先点「暂停」把会话置 `paused`，再在另一个窗口（或重开后）用**过期的会话版本**点「继续」。
+   - [ ] 界面按 R8 展示 **Rust 给的 `message`**（逐字抄），不是「未知错误」、也不是前端自造的话
+   - [ ] 冲突类失败（`VERSION_CONFLICT`）触发**刷新**且**不重发**那条命令；库里 `revision` 不变
+   - [ ] 需要重新握手的失败（`requires_handshake`）走一次 `get_revision`，不自动重试非幂等命令
+   - 现象：
+6. **归档项目不出现在选择列表**（P4 的保证在真界面上的样子）：归档一个项目，回到收件箱/项目页。
+   - [ ] 新建任务的项目选择器里**没有**它；若前端漏过滤而发出请求，服务会拒绝
+     且界面显示那条 `message`
+   - 现象：
+7. **怎么算不通过**：任何一条的界面文案与 `message` 不一致、命令被发了两次、
+   或「点完没反应」而没有提示。
+
+## 5. Task 6b 追加（实机未跑；结论由 P8 填）
+
+> 这一节是 Task 6b 的**待办清单**，不是记录。每一项的**步骤与判据**都在别的节里，
+> 这里只汇总「还有哪些没跑」——**全部未勾**，由 P8 执行后逐条打勾并附现象。
 
 - [ ] **Task 6a 的双窗口同步实机实验**：步骤、判据与记录模板见
   [`manual-sync.md`](manual-sync.md)（第二个窗口 `sync-lab` 与三个 dev 注入开关属
@@ -169,6 +209,14 @@ SELECT id FROM application_run ORDER BY started_at DESC LIMIT 1;
   **本节的全部结论当前为空**，由 P8 执行与复核（见 `docs/validation/p7-acceptance.md` §5.2）。
 - [ ] 时序验证：窗口 A 暂停 → 窗口 B 的展示在 30 秒内收敛；窗口 B 隐藏后重新显示时先校验再展示
   → 步骤见 [`manual-sync.md`](manual-sync.md) §2.4 / §2.5
-- [ ] F-001 / F-002：捕获、理清、计时非法请求
+- [ ] F-001 / F-002：捕获、理清、计时非法请求 → **步骤与判据见本文档 §4**（Task 6b 补写）
 - [ ] F-020 界面侧：多窗口一致性（判据与自动化对照见 [`manual-sync.md`](manual-sync.md) §4）
 - [ ] 对照总纲 §5 第 9 条的权威清单逐条确认（写明「已核对 / 不适用」）
+  → **这一条已由 Task 6b 核对完**：见 `docs/validation/p7-acceptance.md` §7
+
+## 6. 结论
+
+- [ ] 全部通过
+- [ ] 不通过（附现象与复现步骤）：
+- 未覆盖 / 存疑：
+- 验收人 / 日期（与 §0 的提交号一起填）：

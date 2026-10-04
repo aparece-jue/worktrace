@@ -176,7 +176,7 @@
 - [x] 显示 HUD 的托盘项属 V0.1b，本计划**不加**该菜单项。
 - [x] **退出流程（R6 裁决）**：托盘"退出"走 **Task 0 建立的显式退出入口**（`services/bootstrap.rs` → `storage/run_repo.rs` 写 `clean_exit_at`）：**先停定时器（不进事务）**，其余四项——结束 `running`/`paused` 会话、写 `clean_exit_at`、保存 revision、清活动阶段——在**同一个事务**内完成；**`recovering` 记录保留不清**（02 §4）。「停定时器」为什么不在事务里见 Task 0 第 4 条（2026-10-04 订正：此行原先与那里矛盾）。不是直接杀进程，也不在托盘回调里跑长事务。**P7 的落法**：`commands::tray_quit_impl` 内部就是 `RunningApp::shutdown()`（唯一入口），托盘只是它的第二个调用方；执行切到 `spawn_blocking`，不在 UI 回调里开事务。**退出事务失败时**（例如库里有一条结束不了的会话）记诊断并**以非零码退出**——事务已回滚、库是一致的，这一次 run 以「没有 `clean_exit_at`」结束正是恢复扫描的输入（F-015），把用户困在没有窗口的托盘里更糟。
 - [x] `capabilities/default.json`：这份名单现在只有 `"windows": ["main"]`——**主窗之外的新窗口必须逐个加进来**，否则它的 JS 没有任何权限。Task 6a 的 `sync-lab` 窗口要在这里登记（见 Task 6a）。**主窗重建后 label 不变**（`platform::window::MAIN_WINDOW_LABEL`），所以重建出来的窗口照样在这份名单里；「label 与配置/权限名单一致」由 `tests/shell_lifecycle.rs` 读两个文件核对。
-- [x] 测试（能自动化的部分）：托盘动作与界面动作调用同一命令；关窗不触发退出；重开窗口触发快照。**其余必须人工验收。****P7 实际钉住的**（`tests/shell_lifecycle.rs`，11 条）：菜单四项 + 预留禁用项 + id↔动作一一对应；`should_prevent_exit` 两个分支；`plan_activation` 四格真值表；主窗 label 与 `tauri.conf.json`/`capabilities` 一致；托盘暂停与 IPC 暂停**效果逐项相等**、没有会话/已暂停时零写入零广播；托盘退出走显式退出入口（`clean_exit_at` 落库、`recovering` 保留、先停定时器）；没有窗口对象时采样照跑。「重开窗口立即拉快照」的 Rust 半边 = `Rebuild` 分支（全新页面加载 ⇒ 前端挂载时先握手再拉快照），前端那一半在 Task 2。
+- [x] 测试（能自动化的部分）：托盘动作与界面动作调用同一命令；关窗不触发退出；重开窗口触发快照。**其余必须人工验收。****P7 实际钉住的**（`tests/shell_lifecycle.rs`，**14 条**——原文写的「11 条」已过期：Task 4 之后是 13 条，Task 6a 前置件 `c22eb8e` 又加 1 条，2026-10-04 实测 14 条 `#[test]`）：菜单四项 + 预留禁用项 + id↔动作一一对应；`should_prevent_exit` 两个分支；`plan_activation` 四格真值表；主窗 label 与 `tauri.conf.json`/`capabilities` 一致；托盘暂停与 IPC 暂停**效果逐项相等**、没有会话/已暂停时零写入零广播；托盘退出走显式退出入口（`clean_exit_at` 落库、`recovering` 保留、先停定时器）；没有窗口对象时采样照跑。「重开窗口立即拉快照」的 Rust 半边 = `Rebuild` 分支（全新页面加载 ⇒ 前端挂载时先握手再拉快照），前端那一半在 Task 2。
 - [x] **本阶段不做（依赖 P3/P5/P6）**：托盘"完成"的启用与 F-003 完整联动（P8，依赖 P3）；维护态下的托盘禁用（P6）。
 
 ## Task 5：Projects 与轻量 GTD 列表
@@ -219,7 +219,7 @@
 ### 6b 时序验证、外壳人工验收与完成门槛
 
 - [ ] **时序验证（实机未跑）**：窗口 A 暂停 → 窗口 B 的展示在 30 秒内收敛（规则 4 的 `get_revision` 校验）；窗口 B 在隐藏后重新显示时先校验再展示。
-- [ ] **外壳人工验收（实机未跑）**（不能用单元测试代替，08 §6）：F-001/F-002（捕获、理清、计时非法请求）；F-003/F-011 完整联动由 P8 验收；F-009（关掉全部窗口后托盘可用、计时继续；重开立即拉快照）；F-020 的界面侧（多窗口一致性）。
+- [ ] **外壳人工验收（实机未跑）**（不能用单元测试代替，08 §6）：F-001/F-002（捕获、理清、计时非法请求——**步骤与判据已由 Task 6b 补写在 `src-tauri/tests/manual-shell.md` §4**）；F-003/F-011 完整联动由 P8 验收；F-009（关掉全部窗口后托盘可用、计时继续；重开立即拉快照）；F-020 的界面侧（多窗口一致性）。
 - [x] 对照 [总纲](2026-10-03-v01-plan-index.md) §5 第 9 条的权威清单逐条确认与本计划相关的条目，并在验收记录里写明「已核对 / 不适用」。
 - [x] 完成门槛：`cargo fmt --check`、`cargo test`、`cargo clippy --all-targets` 全绿；前端 `tsc`、`pnpm build` 与 `pnpm test` 通过；分层检查 **`src-tauri/scripts/check-layers.ps1`** 通过（现查**六条**规则：commands 禁 `storage::|rusqlite|Connection`、domain 禁 `rusqlite|std::fs|platform::|storage::|commands::|services::`、storage 禁 `platform::|commands::|services::`、services 禁 `std::time|SystemTime|Instant::now|commands::`（含 `services/` 不得直接取时间）、**platform 禁 `crate::services::|crate::storage::|crate::commands::`**（P7 Task 0 加的第五条：托盘"复用同一批命令"正是 platform→services 反向边的入口）、以及**入口点规则**：`lib.rs`/`main.rs` 禁 `Db::open|migrate(|run_repo::`（把"唯一启动入口"从约定变成机器检查））；**P1/P2/P4 测试无回归**。
 - [ ] **不得把仓储/服务层测试标为"UI 已验收"**（P4 的约定，**前半已落实、后半未达成**）。
