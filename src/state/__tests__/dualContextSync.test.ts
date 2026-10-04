@@ -26,6 +26,16 @@
  *
  * 每条用例的注释里都写明**把实现改坏成什么样它会红**；其中 (a)(b)(c) 各做过一次反向
  * 验证，原始输出见 `.superpowers/sdd/2026-10-03-p4-projects-tags-today/p7-task6a-report.md`。
+ *
+ * ## fix round 1（2026-10-04）：替身跟上新页面契约
+ *
+ * Task 5 的评审 I1 把页面从"推全局水位"改成"**本视图水位**"
+ * （`src/components/viewWatermark.ts`：页面查询是过滤 + 分页后的局部视图，不许推
+ * `domainState.markApplied`）。本实验的 `createScreen` 当时还是旧口径，四处断言也跟着旧
+ * 契约走——**替身落后于生产契约**，已按新契约对齐：旧响应由**本视图水位**判过期，
+ * 全局水位只由真正的快照（`get_revision` / `timer_snapshot`）推进。等价的新断言：
+ * `screen.watermark()`（本视图水位）到第 6 版 + `state.getView().revision`（全局水位）
+ * **仍是第 5 版**——后者正是"局部视图不推全局水位"这条契约的判据。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -52,6 +62,14 @@ import {
 
 let lab: SyncLab | null = null;
 
+/**
+ * 当前实验台。`vi.waitFor` 的回调是异步闭包，TS 在它里面收窄不了模块级的 `let lab`。
+ */
+function rig(): SyncLab {
+  if (lab === null) throw new Error("实验台还没建起来");
+  return lab;
+}
+
 afterEach(async () => {
   if (lab !== null) await disposeSyncLab(lab);
   lab = null;
@@ -60,12 +78,13 @@ afterEach(async () => {
 
 describe("双窗口同步实验：两个上下文 + 一个假后端", () => {
   it("场景 1：A 写之后 B 失效并重新取数（跨上下文一致）；事件不推水位，旧响应不覆盖新状态", async () => {
-    // 反向验证（三条，任一即红）：
-    // ① 把 `domainState.onDomainChanged` 的 `apply` 分支去掉 ⇒ "invalidated 1" 与
-    //    B 屏上那条新任务同时红（事件不再让缓存失效）；
-    // ② 把事件的 `revision` 直接并进视图/水位（"载荷并进镜像"）⇒ 中间那两条
-    //    "水位仍是 5 / 屏上仍是旧列表" 红；
-    // ③ 去掉 `domainState.isStaleResponse`（或让它恒 false）⇒ 场景 3 的 dropped 红。
+    // 反向验证（三条，任一即红；fix round 1 后逐条实跑，原始输出见报告「fix round 1」节）：
+    // ① **不失效**：`domainState.onDomainChanged` 的 `apply` 分支不再 `publish`
+    //    ⇒ "invalidated 1"、被扣住的那次重拉、B 屏上那条新任务同时红；
+    // ② **载荷并进镜像**：把事件的 `revision` 直接并进视图（`publish({ revision: … })`）
+    //    ⇒ 中间那句"全局水位仍是 5"红；
+    // ③ **水位推平**：`ViewWatermark.applied` 空实现（本视图水位不前进）
+    //    ⇒ 场景 3 的 `dropped`/`shown` 红。
     lab = await createSyncLab();
 
     // 两个上下文各自握手、各自读首屏：同一个后端，同一份真相。
@@ -85,19 +104,19 @@ describe("双窗口同步实验：两个上下文 + 一个假后端", () => {
     const { change, delivery } = await lab.writeFromA("买牛奶");
     expect(delivery).toBe("delivered");
     expect(change.revision).toBe(START_REVISION + 1);
-    await lab.settle();
+    // 等那条被扣住的响应真的到达扣留点：**条件驱动**（`vi.waitFor`），不靠"冲几轮微任务"。
+    await vi.waitFor(() => expect(rig().b.screen.held()).toBe(1));
 
     // B：收到通知 ⇒ **只作缓存失效**。水位没有被事件推走（载荷不并进镜像），屏上还是旧列表。
     expect(lab.b.state.getView().invalidated).toBe(1);
     expect(lab.b.state.getView().revision).toBe(START_REVISION);
     expect(lab.b.screen.shown()).toMatchObject({ titles: ["写周报"], revision: START_REVISION });
-    expect(lab.b.screen.held()).toBe(1);
     expect(lab.b.calls.listTasks).toBe(2); // 首屏 + 这次重拉
 
     release();
     await lab.settle();
 
-    // B 自己拉回来的那份才推水位 ⇒ 两个上下文收敛到同一份真相。
+    // B 自己拉回来的那份 ⇒ 两个上下文收敛到同一份真相（屏上内容 + 本视图水位）。
     expect(lab.b.screen.dropped()).toBe(0);
     expect(lab.b.screen.applied()).toBe(2);
     expect(lab.b.screen.shown()).toMatchObject({
@@ -105,16 +124,26 @@ describe("双窗口同步实验：两个上下文 + 一个假后端", () => {
       revision: START_REVISION + 1,
       total: 2,
     });
-    expect(lab.b.state.getView().revision).toBe(START_REVISION + 1);
+    // 推的是**本视图水位**（页面契约 `src/components/viewWatermark.ts`）：页面那条
+    // `list_tasks` 是过滤 + 分页后的局部视图，不许推全局水位（Task 5 fix round 1 / I1）。
+    expect(lab.b.screen.watermark()).toEqual({ data_epoch: EPOCH, revision: START_REVISION + 1 });
+    // 全局水位仍停在握手那一版：局部视图上屏**不**推它。推了会吞掉同 `revision` 的失效
+    // 通知、并让 30 秒校验失去判据 —— 这条就是新契约的判据（旧口径下这里会变成第 6 版）。
+    expect(lab.b.state.getView().revision).toBe(START_REVISION);
     expect(lab.a.screen.shown()?.titles).toEqual(["写周报", "买牛奶"]);
-    expect(lab.a.state.getView().revision).toBe(START_REVISION + 1);
+    expect(lab.a.screen.watermark()).toEqual({ data_epoch: EPOCH, revision: START_REVISION + 1 });
+    expect(lab.a.state.getView().revision).toBe(START_REVISION);
   });
 
   it("场景 2：(a) 末次事件丢失 ⇒ 仍在 30 秒校验周期内收敛（假时钟，不等真的 30 秒）", async () => {
     // 反向验证：把 `domainState.verify()` 里"版本比已见版本靠前 ⇒ resync"那句去掉
-    // （或把 `startPolling` 的 30 秒轮询摘掉）⇒ "第 30 秒收敛"整段红：B 会永远停在旧列表。
-    // 另一条：把 `VERIFY_INTERVAL_MS` 改成 60_000 ⇒ "29.999 秒不动"仍绿，
-    // 但第 30 秒那条红（说明这条用例验的确实是"至多 30 秒"这个上界）。
+    // ⇒ "第 30 秒收敛"整段红：B 会永远停在旧列表（fix round 1 实跑：场景 2/5 同时红）。
+    //
+    // ⚠️ **「30 秒」这个数值不在这里钉**（订正，评审实跑证伪）：本用例 advance 的是 import
+    // 进来的那个常量**本身**，是纯相对计时——把 `VERIFY_INTERVAL_MS` 改成 60_000 / 1_000 /
+    // 31_000，下面六条断言照样全绿。常量值由既有的
+    // `domainState.test.ts` 的 `expect(VERIFY_INTERVAL_MS).toBe(30_000)` 钉住，不是本轮的功劳。
+    // 这里钉的是**路径**：通知丢了以后，靠周期校验收敛（而不是靠别的通知/重试）。
     vi.useFakeTimers();
     lab = await createSyncLab();
     expect(lab.b.screen.shown()?.titles).toEqual(["写周报"]);
@@ -150,29 +179,30 @@ describe("双窗口同步实验：两个上下文 + 一个假后端", () => {
   });
 
   it("场景 3：(b) 旧响应晚到 ⇒ 被丢弃，不覆盖已经上屏的新状态", async () => {
-    // 反向验证：把 `createScreen` 里那句 `isStaleResponse` 去掉（页面不再过水位），
-    // 或让 `FreshnessGate.isStaleResponse` 恒 false ⇒ `dropped()` 0、屏上被旧列表覆盖 ⇒ 全红。
-    // 把 `markApplied` 改成空实现 ⇒ 水位不前进 ⇒ 旧响应判不出过期 ⇒ 同样红。
+    // 反向验证（fix round 1 后实跑，原始输出见报告）：
+    // ① **水位推平**：`src/components/viewWatermark.ts` 的 `applied` 空实现（本视图水位
+    //    永不前进）⇒ 那条旧响应判不出过期、直接上屏 ⇒ `dropped()` 0、`shown()` 被打回旧列表；
+    // ② 同理，把 `isStale` 改成恒 false（或让 `createScreen` 不过水位）⇒ 同上。
     lab = await createSyncLab();
 
     // B 先发一条查询（等价于页面自己那次重拉）：数据按**发起那一刻**的真相取好
     // （第 5 版、只有"写周报"），然后被扣住——它要在 A 写完之后才回到这一页。
     const release = lab.b.screen.holdNextRead();
     const inflight = lab.b.screen.reload();
-    await lab.settle();
-    expect(lab.b.screen.held()).toBe(1);
+    await vi.waitFor(() => expect(rig().b.screen.held()).toBe(1));
     expect(lab.b.calls.listTasks).toBe(2);
 
     const { change } = await lab.writeFromA("买牛奶");
     await lab.settle();
-    // B 收到通知后重拉，拿到第 6 版并**上屏**（水位随之上到第 6 版）。
+    // B 收到通知后重拉，拿到第 6 版并**上屏**（本视图水位随之上到第 6 版）。
     expect(lab.b.screen.shown()).toMatchObject({
       titles: ["写周报", "买牛奶"],
       revision: change.revision,
     });
-    expect(lab.b.state.getView().revision).toBe(change.revision);
+    expect(lab.b.screen.watermark()).toEqual({ data_epoch: EPOCH, revision: change.revision });
+    expect(lab.b.state.getView().revision).toBe(START_REVISION); // 全局水位没被页面推走
 
-    // 现在才放行那条旧响应（第 5 版、旧列表）：它回答的已经不是现在这个世界。
+    // 现在才放行那条旧响应（第 5 版、旧列表）：它比**本视图已上屏**的那份旧。
     release();
     await inflight;
     await lab.settle();
@@ -183,13 +213,20 @@ describe("双窗口同步实验：两个上下文 + 一个假后端", () => {
       titles: ["写周报", "买牛奶"],
       revision: change.revision,
     });
-    expect(lab.b.state.getView().revision).toBe(change.revision);
+    expect(lab.b.screen.watermark()).toEqual({ data_epoch: EPOCH, revision: change.revision });
+    expect(lab.b.state.getView().revision).toBe(START_REVISION);
   });
 
   it("场景 4：(c) 通知跳号 ⇒ 取新快照并收敛；迟到的补号通知不改变最终状态", async () => {
     // 反向验证：把闸门④（`revision > seen + 1 ⇒ resync`）删掉 ⇒ 跳到第 7 版那条会被
-    // 当成连续的一条接纳，"取新快照"与"水位到 7"同时红；把闸门②（`<= 已应用水位 ⇒ drop`）
-    // 删掉 ⇒ 迟到的第 6 版会被接纳（`invalidated` 再涨一次）⇒ 后半段红。
+    // 当成连续的一条接纳：`timerSnapshot` 计数（唯一能分开"取新快照"与"就地接纳"的判据）
+    // 与"水位到 7"同时红（fix round 1 实跑：`expected 1 to be 2`）。
+    //
+    // ⚠️ **订正（评审实跑证伪）**：这里原先写"把闸门②删掉 ⇒ 后半段红"——**不成立**。
+    // `onNotification` 里闸门②（`<= applied.revision`）**不可达**：`applySnapshot` 恒有
+    // `seen >= applied.revision`（`seen = max(seen, revision)`，`markApplied` 走同一条路），
+    // 所以②能挡的通知③（`<= seen`）一定也挡得住。迟到的第 6 版是被**闸门③**挡下的；
+    // ②只在文档里对照（黑盒用例杀不掉它，这是它的性质，不是覆盖缺口）。
     lab = await createSyncLab();
 
     // 真相连写两条（第 6、7 版），但第 6 版那条通知被扣住：
@@ -216,7 +253,8 @@ describe("双窗口同步实验：两个上下文 + 一个假后端", () => {
     const snapshotsAfterResync = lab.b.calls.timerSnapshot;
     const invalidatedAfterResync = lab.b.state.getView().invalidated;
 
-    // 迟到的第 6 版现在才投出来：同 epoch 且 `revision <=` 已应用水位 ⇒ 丢弃。
+    // 迟到的第 6 版现在才投出来：同 epoch 且 `revision <=` 已应用水位 / 已见版本 ⇒ 丢弃
+    // （这一格两者都在它之上，真正挡下它的是**闸门③**；闸门②在 `onNotification` 里不可达）。
     expect(lab.bus.releaseHeld()).toBe(1);
     await lab.settle();
 
@@ -229,19 +267,34 @@ describe("双窗口同步实验：两个上下文 + 一个假后端", () => {
     });
   });
 
-  it("场景 4 附加：重复通知（同版本再来一条）不再失效、也不再取快照", async () => {
-    // 反向验证：把闸门③（`revision <= seen ⇒ drop`）删掉 ⇒ `invalidated` 涨到 2 ⇒ 红。
+  it("场景 4 附加：重复通知由**闸门③**单独挡下（`applied` 还在第 5 版时也只有它能挡）", async () => {
+    // 反向验证（fix round 1 实跑）：只把闸门③（`revision <= seen ⇒ drop`）删掉 ⇒ 下面
+    // `invalidated` 涨到 2、`timerSnapshot` 也多一次 ⇒ 红。只删闸门②**不会**红——
+    // 这一格 `applied` 还是 5，`6 <= 5` 为假（而且②本来就不可达，见场景 4 头的订正）。
     lab = await createSyncLab();
+
+    // 让这次重拉**不落地**：B 的本视图水位与全局水位都停在第 5 版，屏上也还是旧列表。
+    const release = lab.b.screen.holdNextRead();
     const { envelope } = await lab.writeFromA("买牛奶");
-    await lab.settle();
-    expect(lab.b.state.getView().invalidated).toBe(1);
+    await vi.waitFor(() => expect(rig().b.screen.held()).toBe(1));
 
+    // 事件已经把 `seen` 推到第 6 版（闸门记下了这一版），但 `applied` 仍是第 5 版
+    // （镜像视图的 `revision` 就是 `applied` 的投影）：重播同一条 rev 6 时闸门② 的
+    // `6 <= 5` 不成立 —— 唯一能挡下它的是闸门③（`6 <= seen`）。
+    expect(lab.b.state.getView().invalidated).toBe(1);
+    expect(lab.b.state.getView().revision).toBe(START_REVISION);
     const snapshots = lab.b.calls.timerSnapshot;
-    expect(lab.bus.broadcast(envelope)).toBe("delivered"); // 同一条真的又投了一次
-    await lab.settle();
 
-    expect(lab.b.state.getView().invalidated).toBe(1);
-    expect(lab.b.calls.timerSnapshot).toBe(snapshots);
+    expect(lab.bus.broadcast(envelope)).toBe("delivered"); // 同一条 rev 6 又真的投了一次
+    await lab.settle();
+    expect(lab.b.state.getView().invalidated).toBe(1); // 闸门③ ⇒ drop
+    expect(lab.b.calls.timerSnapshot).toBe(snapshots); // 也没有因此取快照
+
+    release();
+    await lab.settle();
+    // 被扣住的那次重拉照常落地（它比本视图水位新），两个上下文仍一致。
+    expect(lab.b.screen.shown()?.titles).toEqual(["写周报", "买牛奶"]);
+    expect(lab.b.screen.watermark()).toEqual({ data_epoch: EPOCH, revision: START_REVISION + 1 });
   });
 
   it("场景 5：A 暂停之后 B 的展示在 30 秒校验周期内收敛（同一套假时钟）", async () => {

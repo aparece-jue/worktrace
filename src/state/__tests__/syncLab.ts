@@ -28,7 +28,9 @@
  */
 
 import { mockIPC, clearMocks } from "@tauri-apps/api/mocks";
+import { vi } from "vitest";
 
+import { createViewWatermark } from "../../components/viewWatermark";
 import {
   EVENT_DOMAIN_CHANGED,
   type CommandOutcome,
@@ -39,7 +41,15 @@ import {
   type TaskRow,
   type TimerSnapshot,
 } from "../../types/ipc";
-import { createTask, getRevision, listTasks, pauseTimer, startEventSession, timerSnapshot } from "../../ipc";
+import {
+  createTask,
+  getRevision,
+  listTasks,
+  pauseTimer,
+  startEventSession,
+  timerSnapshot,
+  type VersionStamp,
+} from "../../ipc";
 import { createDomainState, type DomainState } from "../domainState";
 import { transport, type Delivery, type EventTransport } from "./syncLabBus";
 
@@ -210,6 +220,15 @@ export interface LabScreen {
   /** 现在被扣住、还没交回的响应数（注入 (b) 生效的证据）。 */
   held(): number;
   /**
+   * **本视图水位**的投影（页面里那份 `listWatermark` 的等价物）：与传给
+   * `ViewWatermark.applied()` 的是同一个戳。
+   *
+   * 它是投影、不是真对象的读口（`ViewWatermark` 只有 `isStale`/`applied` 两个方法）：
+   * 判断"这份响应旧不旧"用的始终是真对象，所以"把水位推平"（`applied` 空实现）这类变异
+   * 由 {@link LabScreen.dropped} 与 {@link LabScreen.shown} 抓住，不由这个投影抓。
+   */
+  watermark(): VersionStamp | null;
+  /**
    * **注入 (b)：旧响应晚到**——把这一页的**下一次**查询响应扣住。
    *
    * 语义与真实竞态一致：请求照发、数据按**发起那一刻**的真相取好（所以它可能比
@@ -239,19 +258,31 @@ export interface LabWindow {
 }
 
 /**
- * 页面同构的消费者：`invalidated` 一变就重拉，旧响应按镜像那把水位判过期，
- * **上屏之后**才 `markApplied`。
+ * 页面同构的消费者：`invalidated` 一变就重拉，旧响应按**本视图水位**判过期，
+ * **上屏之后**才推进本视图水位。
  *
- * ⚠️ 这里用的是**全局**水位（`isStaleResponse` + `markApplied`）——Task 5 fix round 1
- * 的评审 I1 判定「过滤 + 分页的局部视图不该推全局水位」（会吞掉同 revision 的失效通知、
- * 让 30 秒校验失去判据），页面侧已改成本地水位（`src/components/viewWatermark.ts`）。
- * **本实验的行为本轮不动**：场景 1/3 的收敛断言（`getView().revision` 随这一页的读回前进）
- * 依赖这条旧口径，改成局部水位要连断言一起改——登记给 Task 6a / P8 对齐，不在这里半改。
+ * ⚠️ **与 `src/pages/Tasks.tsx` 的 `load()` 同源——改页面必须同步改这里。**
+ * 用的是同一份 `src/components/viewWatermark.ts` 契约（一个视图一个实例，页面里是
+ * `useState(createViewWatermark)[0]`）：页面那条 `list_tasks` 是**过滤 + 分页后的局部
+ * 视图**，不许推全局水位（P7 Task 5 fix round 1 / I1：推了会吞掉同 `revision` 的失效
+ * 通知，并让 30 秒校验失去判据）。
  *
- * 判据与 `src/pages/Tasks.tsx` 的 `load()` 曾是同一套（少了"问题身份"那一半——本实验里
- * 这一页只有一个问题：当前全部任务）。
+ * ⚠️ 这里少了页面那条「问题身份」判据（判据①：响应回答的是不是**现在这个问题**）——
+ * 本实验的页面只有一个问题（当前全部任务），没有第二个筛选可切。页面里判据①挡的是
+ * "切换筛选后旧筛选的迟到响应"，与本实验要验的**版本**判据不是同一条。
+ *
+ * 本轮之前这里用的是全局 `isStaleResponse` + `markApplied`（旧口径），场景 1/3 的四处
+ * 断言也跟着旧契约走——**替身落后于生产契约**正是评审预测的那处耦合，已按新契约对齐。
  */
 function createScreen(state: DomainState, calls: LabCalls): LabScreen {
+  /**
+   * 这一页自己的水位（页面里那份 `listWatermark` 的等价物）。
+   *
+   * `heldStamp` 只是它的**投影**（与传给 `applied()` 的是同一个戳），用来给断言一个
+   * 可读出口；判断"旧不旧"用的始终是 `watermark` 这个真对象。
+   */
+  const watermark = createViewWatermark();
+  let heldStamp: VersionStamp | null = null;
   let shown: { titles: string[]; revision: number; total: number } | null = null;
   let applied = 0;
   let dropped = 0;
@@ -288,12 +319,15 @@ function createScreen(state: DomainState, calls: LabCalls): LabScreen {
       await gate.promise;
       gated -= 1;
     }
-    // 判据②：这条响应是不是回答"现在这个世界"（比 `data_epoch`/`revision`）。
-    if (state.isStaleResponse(result, epoch)) {
+    // 判据②：这条响应是不是比**本视图已上屏的那一份**更旧（比 `data_epoch`/`revision`，
+    // 不比到达顺序）。用的是本视图水位，不是全局那把。
+    if (watermark.isStale(result, epoch)) {
       dropped += 1;
       return;
     }
-    state.markApplied(result);
+    // 「收到」≠「用上」：真的上屏之后才推进本视图水位。
+    watermark.applied(result);
+    heldStamp = { data_epoch: result.data_epoch, revision: result.revision };
     applied += 1;
     shown = { titles: result.tasks.map((row) => row.title), revision: result.revision, total: result.total };
   }
@@ -311,6 +345,7 @@ function createScreen(state: DomainState, calls: LabCalls): LabScreen {
     dropped: () => dropped,
     failed: () => failed,
     held: () => gated,
+    watermark: () => heldStamp,
     holdNextRead() {
       let release!: () => void;
       const promise = new Promise<void>((resolve) => {
@@ -362,8 +397,8 @@ export interface SyncLab {
   bus: EventTransport;
   a: LabWindow;
   b: LabWindow;
-  /** 冲掉链上的微任务（本实验的异步路径全是 promise，没有定时器）。 */
-  settle(ticks?: number): Promise<void>;
+  /** 冲掉链上的异步续体（按**宏任务轮次**，不是数微任务个数——见 `flush` 的注释）。 */
+  settle(turns?: number): Promise<void>;
   /** 一条 `domain.changed` 信封（同 epoch 的下一版）。 */
   envelope(revision: number, payload: unknown): EventEnvelope;
   /** A 发一条业务写命令（`create_task`）+ 命令层那条广播（载荷就是响应 DTO）。 */
@@ -372,9 +407,26 @@ export interface SyncLab {
   pauseFromA(): Promise<{ outcome: CommandOutcome; envelope: EventEnvelope; delivery: Delivery }>;
 }
 
-/** 冲掉链上的微任务（本实验的异步路径全是 promise，没有定时器）。 */
-async function flush(ticks = 30): Promise<void> {
-  for (let index = 0; index < ticks; index += 1) await Promise.resolve();
+/**
+ * 冲掉链上的异步续体。
+ *
+ * ⚠️ **按宏任务轮次冲，不是数微任务个数**：回到宏任务之前，微任务队列一定被跑空，
+ * 所以生产代码里多一层 `await` 不会让这里假红（旧版写死 30 个 `await Promise.resolve()`，
+ * 那是个隐式深度上限——评审 Minor）。假时钟下用 `advanceTimersByTimeAsync(0)` 转同一轮。
+ *
+ * 需要"等到某个条件成立"的地方（例如被扣住的响应真的到达扣留点）**用 `vi.waitFor` 断言**，
+ * 不要靠多冲几轮。
+ */
+async function flush(turns = 3): Promise<void> {
+  for (let index = 0; index < turns; index += 1) {
+    if (vi.isFakeTimers()) {
+      await vi.advanceTimersByTimeAsync(0);
+    } else {
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    }
+  }
 }
 
 /**
