@@ -391,6 +391,19 @@ resolve，镜像却永久停在 idle（StrictMode 的 mount→cleanup→mount �
 
 **异常路径**：托盘「退出」的事务失败（例如库里有一条结束不了的会话）⇒ 记诊断并**以非零码退出**。此时事务已回滚、库是一致的，这一次 run 以「没有 `clean_exit_at`」结束正是恢复扫描的输入（F-015）；把用户困在一个没有窗口的托盘里更糟。**不做**：退出失败的用户可见提示（P6/P8）、托盘在维护态下的禁用（P6）、菜单里的「完成」（P8，依赖 P3）、把当前任务标题做成动态菜单项与视图跳转（需要前端的视图/路由，P8）。
 
+## Task 4 fix round 1（2026-10-04）
+
+**状态**：`4050c8f` 落地，门禁 `452 passed / 0 failed`（+3 条用例）、`clippy -D warnings` 0、`check-layers.ps1` PASSED、`Cargo.lock` 未变。独立评审给的必改两条 + 顺带四条全部落地。
+
+- **I1 自死锁防线（必改）**：`shutdown`/`stop` 放宽到 `&self` 之后，「先取锁、再调退出」也能编译——而退出要先 `join` 采样线程、采样线程每一拍都要取那把锁 ⇒ **静默卡死**（评审用 rustc + `timeout` 复现过）。现在串行边界是 `AppBoundary`（`Mutex<AppState>` + **持锁线程 id**），`lock_app` 返回 `AppGuard`（`Deref`/`DerefMut` + `Drop` 清位）；`shutdown` 用 `holds_app_lock` 检测「调用线程自己就是持锁者」，命中即 `AppError::Storage`（`detail` 说清正确姿势），**拒绝时不碰任何东西**。**没有**改成外面套 `Mutex`，也**没有**恢复 `&mut`（评审已验证：先 `Arc::clone` 再持锁，旧屏障照样编译通过——它只是减速带）。
+- **I2 托盘路由表（必改）**：`lib.rs` 抽出 `pub fn tray_dispatch(action) -> TrayDispatch`（`Window`/`Pause`/`Quit`），`on_tray_action` 只 match 它。原先把 `Pause` 接到 `Quit` 上不会有任何用例变红，而「托盘动作与界面动作走同一批命令」这条要求的接缝正是这几行。
+- **M1 并发 `stop` 的语义**：`JoinHandle` 只能被取走一次，第二个调用者拿不到句柄就直接返回会让「返回 ⇒ 线程已退出」不成立。补完成位（线程退出前置位、panic 展开由 RAII 兜底），第二个调用者等它。
+- **M2/M3 验收判据**：`manual-shell.md` 补「诊断走 `println!`/`eprintln!`、release 的 Windows 子系统没有控制台 ⇒ 用 `pnpm tauri dev` 或重定向」；「窗口立即出现」改成可操作判据（先暂停再重开，第一眼就该是 `paused`）并写明 Rust 半边与前端半边的分工。
+- **M4 退出语义**：`RunEvent::Exit` **不**兜底再调一次显式退出（`App::run` 最终 `process::exit`，`Drop` 不会跑），注释里写明「写 `clean_exit_at` 只发生在显式退出路径上」以及 P8 新增退出入口时必须显式调 `shutdown()`。
+- **C1 判据纠错（评审列在必改之前，会让 F-009 假通过）**：`manual-shell.md` 原先要求观察「`revision` 只按心跳前进」——**心跳不加 revision**（`services/timer/coordinator.rs` 的 `heartbeat` 原文），操作者会看到 revision 不动而误记「通过」；而且**界面秒数是从 `started_at` 算出来的**，采样线程死了也照样「继续走」。现改为两条真判据：① `revision` **不变**（正确现象）；② `interval_checkpoint` 的 `wall_at`/`elapsed_ms` 在关窗 60 秒后**前进 ≥ 20 秒**（该表以 `interval_id` 为主键做 upsert，**行数不会涨，必须读列值**）。另补本次 `run id` 的取值 SQL。
+
+**反向验证（原始输出见 `p7-task4-report.md` 的 fix round 1 一节）**：拆掉 I1 防线 ⇒ 对应用例**卡死**（`running 1 test` + 「has been running for over 60 seconds」，90 秒未返回被 kill）；对调 `Pause`/`Quit` ⇒ 对应用例 FAILED（`left: Quit / right: Pause`）。
+
 ## 仍待与归属（2026-10-04 登记）
 
 - **F-009 / F-011 / F-016 的实机验收**（2026-10-04 Task 4 登记）：**步骤已就位**——`src-tauri/tests/manual-shell.md`（Task 4 建立，Task 6b 一起用），分三节：
