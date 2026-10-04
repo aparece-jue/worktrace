@@ -52,6 +52,7 @@ use crate::platform::single_instance::{self, InstanceLock};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
 use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditReport};
 use crate::services::recovery::{DiscardSessionRequest, ReconcileReport, ReconcileRequest};
+use crate::services::tasks::{TaskTransitionReport, TransitionTaskRequest};
 use crate::services::timer::coordinator::{
     CommandOutcome, Coordinator, ResumeRequest, SessionRequest, StartRequest,
 };
@@ -824,6 +825,26 @@ impl AppState {
                 .map_err(|_| AppError::RecoveryRequired)?;
         }
         Ok(outcome)
+    }
+
+    /// 任务状态编排的命令入口（P3 S2）。`env` 的版本位是**任务**版本。
+    ///
+    /// 整条链路都在**同一把锁**里跑（命令层在 `AppGuard` 内调用它，这就是「同一串行
+    /// 边界」的保证）：服务自己完成「只读预检 → S3 取样与检测 → 一个用户事务
+    /// （会话联动 + 任务跃迁 + 审计 + 恰好一次 `revision`）→ 提交后按需重建镜像」。
+    ///
+    /// 包装只把三个字段解构出来，**不额外取时间、不额外取样**：提交后收尾要用样本与
+    /// 归属终点，两者都来自 S3 的那一次采样（R10：`report.revision`/`data_epoch`
+    /// 只来自那次写事务，`rebuild_from_committed` 的返回值不进 DTO）。
+    pub fn transition_task(
+        &mut self,
+        env: WriteEnvelope,
+        req: TransitionTaskRequest,
+    ) -> Result<WriteOutcome<TaskTransitionReport>, AppError> {
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        crate::services::tasks::transition_task(db, coordinator, env, req)
     }
 }
 

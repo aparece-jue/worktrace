@@ -719,6 +719,40 @@ impl Coordinator {
     }
 }
 
+/// 组合服务在**自己的串行边界里**取样所需的一组事实（P3 Task 6 的 S3）。
+///
+/// 四个字段都出自**同一次采样**：[`ClockSample`] 原样交给提交后收尾
+/// （`rebuild_from_committed` 要用它算暂计），`attributed_at` 是会话结束的归属终点，
+/// `wall_ms` 是同事务的 `updated_at` / 审计 `created_at` / `sampled_end_wall_at`，
+/// `run_id` 是跨 run 判据要的**本次 run**。
+pub struct BoundaryFacts {
+    pub sample: ClockSample,
+    pub wall_ms: i64,
+    pub attributed_at: i64,
+    pub run_id: String,
+}
+
+/// 组合服务（任务状态编排）的取样接缝：取一次样本、观察一次。
+///
+/// 判为异常时**先提交独立系统恢复事务**，随后返回 [`AppError::RecoveryRequired`]：
+/// 原用户命令不执行、不再加 `revision`（总纲 §9）。
+///
+/// 为什么必须是一个**组合**方法，而不是把 `sample_and_detect` 与 `attribute` 放宽成
+/// `pub(crate)` 让调用方自己拼：`observe` 每一拍采样只能看一次（同一个采样看两次，
+/// 第二次的增量恒为 0，会把刚判出来的异常覆盖成 `Trusted`），把两半拆到两个模块调用
+/// 正是那个静默 bug 的入口；`read_sample` 又是唯一带「故障态 + 跨 run」判据的采样入口。
+impl Coordinator {
+    pub fn boundary_facts(&mut self, db: &mut Db) -> Result<BoundaryFacts, AppError> {
+        let sample = self.sample_and_detect(db)?;
+        Ok(BoundaryFacts {
+            sample,
+            wall_ms: sample.wall_ms,
+            attributed_at: self.attribute(sample),
+            run_id: self.run_id.clone(),
+        })
+    }
+}
+
 impl Coordinator {
     /// 暂停。用已验证的单调差闭合当前区间。
     pub fn pause(&mut self, db: &mut Db, req: SessionRequest) -> Result<CommandOutcome, AppError> {
