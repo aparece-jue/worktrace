@@ -14,6 +14,7 @@ use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::services::bootstrap::{
     lock_app, startup, NoProbe, RunningApp, SharedApp, Startup, StartupConfig,
 };
+use worktrace_lib::services::events::{EventEnvelope, EventSink};
 use worktrace_lib::services::timer::coordinator::StartRequest;
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
@@ -23,13 +24,33 @@ const WALL: i64 = 1_700_000_000_000;
 /// 采样节拍：测试里压到 10ms，免得每个用例都等一秒。
 const INTERVAL_MS: u64 = 10;
 
+#[derive(Default)]
+struct RecordingSink {
+    events: Mutex<Vec<EventEnvelope>>,
+}
+
+impl EventSink for RecordingSink {
+    fn broadcast(&self, envelope: &EventEnvelope) -> Result<(), String> {
+        self.events.lock().unwrap().push(envelope.clone());
+        Ok(())
+    }
+}
+
+impl RecordingSink {
+    fn events(&self) -> Vec<EventEnvelope> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
 struct Harness {
     /// 先声明：Drop 时先停采样线程、再删临时目录。
     running: Box<RunningApp>,
     app: SharedApp,
+    sink: Arc<RecordingSink>,
     clock: Arc<Mutex<FakeClock>>,
     db_path: PathBuf,
     epoch: String,
+    run_id: String,
     _dir: tempfile::TempDir,
 }
 
@@ -55,12 +76,14 @@ fn harness(tasks: &[&str]) -> Harness {
     drop(db);
 
     let clock = Arc::new(Mutex::new(FakeClock::new(WALL, 0)));
+    let sink = Arc::new(RecordingSink::default());
     let mut config = StartupConfig::new(&db_path, &lock_path);
     config.sampling_interval_ms = INTERVAL_MS;
 
     let running = match startup(
         config,
         Box::new(Arc::clone(&clock)),
+        Arc::clone(&sink) as Arc<dyn EventSink>,
         &NoProbe,
         &|| -> Result<(), AppError> { Ok(()) },
     )
@@ -72,13 +95,16 @@ fn harness(tasks: &[&str]) -> Harness {
 
     let app = Arc::clone(running.app());
     let epoch = running.data_epoch().to_string();
+    let run_id = running.run_id().to_string();
 
     Harness {
         running,
         app,
+        sink,
         clock,
         db_path,
         epoch,
+        run_id,
         _dir: dir,
     }
 }
@@ -152,7 +178,7 @@ fn the_sampler_keeps_ticking_with_no_window_anywhere() {
     assert_eq!(h.running.sampling_errors(), 0, "空闲采样不该报错");
 }
 
-/// 空闲（无活动会话）**不产生任何写入**。
+/// 空闲（无活动会话）**不产生任何写入**，也不广播 tick。
 #[test]
 fn idle_sampling_writes_nothing_and_notifies_nothing() {
     let h = harness(&[]);
@@ -176,6 +202,50 @@ fn idle_sampling_writes_nothing_and_notifies_nothing() {
         h.scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
         before_revision,
         "空闲不得制造 revision"
+    );
+    assert!(
+        h.sink.events().is_empty(),
+        "没有活动会话就没有 tick 通知：{:?}",
+        h.sink.events()
+    );
+}
+
+/// 有活动会话时，采样驱动自己跑出 tick 通知（走同一条串行边界）。
+#[test]
+fn an_active_session_is_ticked_and_broadcast_by_the_scheduler() {
+    let h = harness(&["t1"]);
+    h.start("t1").unwrap();
+    let revision_after_start = h.scalar("SELECT revision FROM app_meta WHERE singleton = 1");
+    assert_eq!(
+        revision_after_start, 1,
+        "start 是一次业务写，恰好加一次 revision"
+    );
+
+    let got_tick = h.wait_until(|| {
+        h.sink
+            .events()
+            .iter()
+            .any(|e| e.event == "timer.tick" && e.payload["session_id"].is_string())
+    });
+    assert!(got_tick, "有活动会话时采样驱动应当广播 timer.tick");
+
+    let tick = h
+        .sink
+        .events()
+        .into_iter()
+        .find(|e| e.event == "timer.tick" && e.payload["session_id"].is_string())
+        .unwrap();
+    assert_eq!(tick.data_epoch, h.epoch);
+    assert_eq!(tick.payload["run_id"], h.run_id);
+    assert!(
+        tick.payload["tick_seq"].as_u64().unwrap() >= 1,
+        "tick 的序号应当已经前进：{tick:?}"
+    );
+    assert_eq!(tick.revision, revision_after_start);
+    assert_eq!(
+        h.scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
+        revision_after_start,
+        "tick 不加业务 revision"
     );
 }
 

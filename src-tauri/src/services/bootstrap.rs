@@ -46,6 +46,7 @@ use crate::platform::clock::Clock;
 use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
+use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
 use crate::services::timer::coordinator::{
     CommandOutcome, Coordinator, ResumeRequest, StartRequest,
 };
@@ -190,6 +191,7 @@ pub enum Startup {
 /// 一次成功启动之后核心持有的东西。
 pub struct RunningApp {
     app: SharedApp,
+    broadcaster: Arc<Broadcaster>,
     sampling: Scheduler,
     /// 持有到进程退出：**Drop 即释放**（被强杀时由内核释放）。
     _lock: InstanceLock,
@@ -203,6 +205,10 @@ impl RunningApp {
     /// 共享的 `AppState`：命令（Task 1）与托盘（Task 4）都从这里取。
     pub fn app(&self) -> &SharedApp {
         &self.app
+    }
+
+    pub fn broadcaster(&self) -> &Arc<Broadcaster> {
+        &self.broadcaster
     }
 
     pub fn run_id(&self) -> &str {
@@ -471,12 +477,14 @@ pub struct ExitReport {
 ///
 /// - `clock`：协调器的时间来源（生产 `SystemClock`，测试 `FakeClock`）。
 ///   **采样在③之前取一次**：`application_run.started_at` 与归属基线用同一个样本。
+/// - `sink`：事件广播出口（生产接 Tauri 的 emit，测试接记录器）。
 /// - `probe`：启动次序观察者。
 /// - `open_window`：第⑥步。真实接线里它创建/显示窗口；**失败即启动失败**
 ///   （采样驱动会被停掉，不留一个跑着的后台线程）。
 pub fn startup(
     config: StartupConfig,
     clock: Box<dyn Clock + Send>,
+    sink: Arc<dyn EventSink>,
     probe: &dyn StartupProbe,
     open_window: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<Startup, AppError> {
@@ -545,11 +553,13 @@ pub fn startup(
         coordinator,
         recovery: recovery.clone(),
     }));
+    let broadcaster = Arc::new(Broadcaster::new(sink));
     let sampling_errors = Arc::new(AtomicU64::new(0));
     let mut sampling = Scheduler::spawn(config.sampling_interval_ms, {
         let app = Arc::clone(&app);
+        let broadcaster = Arc::clone(&broadcaster);
         let errors = Arc::clone(&sampling_errors);
-        move || sampling_action(&app, &errors)
+        move || sampling_action(&app, &broadcaster, &errors)
     });
     probe.step(StartupStep::SamplingStarted);
 
@@ -562,6 +572,7 @@ pub fn startup(
 
     Ok(Startup::Running(Box::new(RunningApp {
         app,
+        broadcaster,
         sampling,
         _lock: lock,
         run_id,
@@ -571,15 +582,24 @@ pub fn startup(
     })))
 }
 
-/// 采样驱动的一拍：**在串行边界内**心跳 + 取计时快照。
+/// 采样驱动的一拍：**在串行边界内**取快照，有活动会话才广播。
 ///
-/// 空闲（没有活动会话）时只读不写（`sample_tick` 的两次调用都不写库）。
-fn sampling_action(app: &SharedApp, errors: &AtomicU64) {
+/// 空闲（没有活动会话）时：不广播、不写库（`sample_tick` 的读不算写）。
+/// 广播留在临界区内完成，所以「广播顺序 = 提交顺序」。
+fn sampling_action(app: &SharedApp, broadcaster: &Broadcaster, errors: &AtomicU64) {
     let mut state = lock_app(app);
-    if state.sample_tick().is_err() {
-        // 采样失败（含恢复语义）只记诊断：下一拍还会再试，
-        // 把用户命令或进程拖死都不是它的职责。
-        errors.fetch_add(1, Ordering::SeqCst);
+    match state.sample_tick() {
+        Ok(snapshot) => {
+            if snapshot.session_id.is_some() {
+                // 失败只记诊断（`Broadcaster` 内部计数），不回滚任何已提交业务。
+                broadcaster.emit(EventEnvelope::timer_tick(&snapshot));
+            }
+        }
+        Err(_) => {
+            // 采样失败（含恢复语义）只记诊断：下一拍还会再试，
+            // 把用户命令或进程拖死都不是它的职责。
+            errors.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 

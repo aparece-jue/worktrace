@@ -5,16 +5,30 @@
 //! Task 4 的托盘「退出」与 P8 都复用这一条入口，所以这里的断言就是那条入口的契约。
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::services::bootstrap::{startup, NoProbe, RunningApp, Startup, StartupConfig};
+use worktrace_lib::services::events::{EventEnvelope, EventSink};
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
 use worktrace_lib::storage::migrations::migrate;
 
 const WALL: i64 = 1_700_000_000_000;
+
+#[derive(Default)]
+struct RecordingSink {
+    events: Mutex<Vec<EventEnvelope>>,
+}
+
+impl EventSink for RecordingSink {
+    fn broadcast(&self, envelope: &EventEnvelope) -> Result<(), String> {
+        self.events.lock().unwrap().push(envelope.clone());
+        Ok(())
+    }
+}
 
 struct Harness {
     running: Box<RunningApp>,
@@ -40,6 +54,7 @@ fn harness() -> Harness {
     let running = match startup(
         config,
         Box::new(FakeClock::new(WALL, 0)),
+        Arc::new(RecordingSink::default()) as Arc<dyn EventSink>,
         &NoProbe,
         &|| -> Result<(), AppError> { Ok(()) },
     )

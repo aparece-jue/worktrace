@@ -20,6 +20,7 @@ use worktrace_lib::platform::single_instance::{self, InstanceLock};
 use worktrace_lib::services::bootstrap::{
     lock_app, scan_recovery, startup, Startup, StartupConfig, StartupProbe, StartupStep,
 };
+use worktrace_lib::services::events::{EventEnvelope, EventSink};
 use worktrace_lib::services::timer::coordinator::StartRequest;
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
@@ -47,6 +48,18 @@ impl RecordingProbe {
     }
 }
 
+#[derive(Default)]
+struct RecordingSink {
+    events: Mutex<Vec<EventEnvelope>>,
+}
+
+impl EventSink for RecordingSink {
+    fn broadcast(&self, envelope: &EventEnvelope) -> Result<(), String> {
+        self.events.lock().unwrap().push(envelope.clone());
+        Ok(())
+    }
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     db_path: PathBuf,
@@ -64,9 +77,11 @@ fn fixture() -> Fixture {
 
 fn started(fx: &Fixture) -> Box<worktrace_lib::services::bootstrap::RunningApp> {
     let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
     let outcome = startup(
         StartupConfig::new(&fx.db_path, &fx.lock_path),
         Box::new(FakeClock::new(WALL, 0)),
+        sink,
         &probe,
         &|| -> Result<(), AppError> { Ok(()) },
     )
@@ -82,6 +97,7 @@ fn started(fx: &Fixture) -> Box<worktrace_lib::services::bootstrap::RunningApp> 
 fn a_successful_start_records_the_fixed_side_effect_order() {
     let fx = fixture();
     let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
     let window_calls = Arc::new(AtomicUsize::new(0));
     let open_window = {
         let counter = Arc::clone(&window_calls);
@@ -94,6 +110,7 @@ fn a_successful_start_records_the_fixed_side_effect_order() {
     let running = match startup(
         StartupConfig::new(&fx.db_path, &fx.lock_path),
         Box::new(FakeClock::new(WALL, 0)),
+        sink,
         &probe,
         &open_window,
     )
@@ -148,9 +165,11 @@ fn a_second_startup_notifies_the_existing_instance_and_touches_no_database() {
         .expect("测试自己先持锁，模拟既有实例");
 
     let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
     let outcome = startup(
         StartupConfig::new(&fx.db_path, &fx.lock_path),
         Box::new(FakeClock::new(WALL, 0)),
+        sink,
         &probe,
         &|| -> Result<(), AppError> { Ok(()) },
     )
@@ -188,10 +207,12 @@ fn a_second_startup_notifies_the_existing_instance_and_touches_no_database() {
 fn a_failing_window_open_aborts_the_start_and_releases_the_lock() {
     let fx = fixture();
     let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
 
     let err = match startup(
         StartupConfig::new(&fx.db_path, &fx.lock_path),
         Box::new(FakeClock::new(WALL, 0)),
+        sink,
         &probe,
         &|| -> Result<(), AppError> {
             Err(AppError::Storage {
