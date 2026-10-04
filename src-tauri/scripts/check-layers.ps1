@@ -1,6 +1,7 @@
 # Layering gate (P1 执行与完成门槛).
 #
 # Rules (01 section 2 / plan index section 9):
+#   commands must not touch storage::, rusqlite or Connection
 #   domain   must not touch rusqlite, std::fs, platform::, storage::, commands::
 #            or services::
 #   storage  must not touch platform::, commands:: or services::
@@ -73,6 +74,7 @@ function Test-LayerLeak {
 }
 
 $ok = $true
+$ok = (Test-LayerLeak 'src/commands' 'storage::|rusqlite|\bConnection\b' 'commands') -and $ok
 $ok = (Test-LayerLeak 'src/domain'  'rusqlite|std::fs|platform::|storage::|commands::|services::' 'domain')  -and $ok
 $ok = (Test-LayerLeak 'src/storage' 'platform::|commands::|services::'  'storage') -and $ok
 
