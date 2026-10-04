@@ -251,8 +251,13 @@
 - **TS ↔ 快照的机械检查**（Task 1 的 D1 那条验收项）：`src/types/__tests__/snapshot-contract.test.ts`
   读 `src/types/__snapshots__/*.json`，断言每个响应 DTO 的**键集合**（编译期 `keyof` 对齐 +
   运行期与快照相等，含嵌套行类型与 `authority.records`）与**字面量联合**（快照里出现过的
-  取值必须落在 TS 的取值域里）。反向验证：改 TS 的枚举串 ⇒ `pnpm test` 红；
-  改 TS 的字段名 ⇒ `pnpm build`（`tsc`）红。
+  取值必须落在 TS 的取值域里）。快照集合与登记表**逐份比对**（多一份、少一份都红）。
+  反向验证：改 TS 的枚举串 ⇒ `pnpm test` 红；改 TS 的字段名 ⇒ `pnpm build`（`tsc`）红；
+  往目录里丢第 16 份快照 ⇒ `pnpm test` 红。
+- **请求 DTO 的 Rust→TS 机械联系**（2026-10-04 fix round 1，评审 I1）：
+  `src-tauri/tests/ipc_requests.rs` 给 **18 个请求 DTO** 各钉一份「字段一个不少」的 JSON
+  样本并逐个断言取值（`Option` 字段也要断言——serde 默认忽略未知字段，只 `unwrap()`
+  挡不住字段改名），另有一条「必填字段缺失必须被拒」的对手用例。
 - **外壳冒烟用例**：`@tauri-apps/api/mocks` 的 `mockIPC` 记账，断言应用能挂载、三个区域都在、
   且一个命令都没被调用。
 
@@ -278,14 +283,32 @@
   见 `services/timer/coordinator.rs` 那段约定）。命令因此返回 `Err`，命令层的 `announce`
   不会被执行——**这一次已提交的写没有对应通知**。这是 00 §5「一次业务写对应一条
   `domain.changed`」的一个已知例外，**本轮不改代码**（要改就得让"提交成功"与"响应成功"
-  解耦，那是 P6 的故障路径范围）。自愈路径：后续 `timer.tick` 带新的 `revision`，
-  客户端的 30 秒 `get_revision` 校验也会收敛；且 `requires_handshake` 为 **false**
-  （`capture_error_response` 只在 `DataEpochMismatch` 或权威捕获失败时置真），
+  解耦，那是 P6 的故障路径范围）。**收敛路径（2026-10-04 fix round 1 订正）**：靠可见窗口
+  那个 30 秒的 `get_revision`——它直读 `app_meta`、**不经协调器**
+  （`services::handshake::get_revision`），所以故障态照样能拿到新 `revision`。原先这里写
+  「后续 `timer.tick` 带新的 `revision`」**不成立**：`Coordinator::tick`/`snapshot` 第一句就是
+  `refuse_if_faulted()`，故障态下它们只返回 `RECOVERY_REQUIRED`。协调器解锁要等**下一次成功
+  重建**（`rebuild_from_committed` 成功才清 `faulted`；P3 的对账入口 `retry_recovery` 也走
+  同一条恢复路径）——那属 P3/P6 范围。实质结论不变：无通知，且 `requires_handshake` 为
+  **false**（`capture_error_response` 只在 `DataEpochMismatch` 或权威捕获失败时置真），
   客户端不会因此重新握手。
-- **TS ↔ 快照检查盖不住「Rust 新增枚举变体」**：快照里只有**样例值**（例如 `task.status`
-  只有 `"Ready"`），所以新变体在它进入某份快照之前，`snapshot-contract.test.ts` 看不出来。
-  覆盖整个取值域的那一半靠 `src/types/ipc.ts` 的 `as const` 数组与 Rust 的 `ALL` 常量人工对齐
-  ——这是「不上 DTO 生成器」的已知代价（D1 裁决），不是遗漏。
+- **请求 DTO 的 TS→Rust 方向仍然只能人工对齐**（2026-10-04 fix round 1，评审 I1）：
+  Rust→TS 那一半现在有机械联系了——`tests/ipc_requests.rs` 给 **18 个请求 DTO** 各钉了一份
+  「字段一个不少」的 JSON 样本（Rust 改字段名/删必填字段/加必填字段 ⇒ 立刻红）。
+  但 `src/types/ipc.ts` 的**请求**接口没有任何东西去核对它：TS 侧把 `expected_row_version`
+  写成 `expected_revision`、或者少写一个字段，`tsc` 与 `vitest` 都不会红，
+  要等运行期那条命令退化成 `TRANSPORT_ERROR` 才暴露。补齐它要么上 DTO 生成器（D1 已否决，
+  离线取不到），要么给请求也造一套「TS 声明 ↔ Rust 样本」的镜像检查——**登记为遗留**。
+- **TS ↔ 快照检查盖不住的两件事**（2026-10-04 fix round 1，评审 M6/M7）：
+  ① **枚举取值域两个方向都盖不住**：快照里只有**样例值**（例如 `task.status` 只有 `"Ready"`），
+  所以（a）Rust 新增变体在它进入某份快照之前看不出来，（b）**TS 侧写错一个从未出现在快照里的
+  取值同样无人发现**（只有快照用过的那些值会被核对）。整个取值域靠 `src/types/ipc.ts` 的
+  `as const` 数组与 Rust 的 `ALL` 常量人工对齐——这是「不上 DTO 生成器」的已知代价（D1 裁决），
+  不是遗漏；
+  ② **键集合断言只比 `keyof`，不含值类型与可选性**：接口字段的**名字**被两侧钉死了，
+  但把 `pending_ms: number | null` 写成 `pending_ms: string | null`（或把可选写成必填）
+  不会红，要到消费点才报类型错。它与 ① 合起来说明这份检查的边界是「键与已出现的取值」，
+  不是「完整类型等价」。
 
 ## 开工前已核实（2026-10-04）
 
