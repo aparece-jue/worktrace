@@ -55,6 +55,8 @@ function scriptShell(): string[] {
           run_id: "run-1",
           session_id: null,
           session_version: null,
+          task_id: null,
+          task_row_version: null,
           tick_seq: 1,
           as_of: AT,
           active_ms: 0,

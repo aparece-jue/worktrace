@@ -131,6 +131,10 @@ fn unknown_enum_value(field: &'static str, value: &str) -> AppError {
 #[derive(Debug, Clone)]
 pub struct LiveSession {
     pub id: String,
+    /// 会话所属任务。会话一生不变（`work_session.task_id` 没有更新路径），所以它是
+    /// **身份**的一部分：放进内存镜像不构成第二份真相源。任务行的 `row_version` 则相反，
+    /// 会在暂停期间被别的写命令 bump，所以它**不**缓存在这里（见 `build`）。
+    pub task_id: String,
     /// 持久化会话归属的运行代次；旧 running 行必须先由启动扫描恢复。
     pub run_id: String,
     pub row_version: i64,
@@ -296,6 +300,7 @@ impl Coordinator {
         self.last_checkpoint_monotonic = None;
         self.live = Some(LiveSession {
             id: row.id,
+            task_id: row.task_id,
             run_id: row.run_id,
             row_version: row.row_version,
             state: row.state,
@@ -399,6 +404,19 @@ impl Coordinator {
             ));
         };
 
+        // 任务身份（P7 Task 3 的契约补口）：`resume` 要 `task_id` + `task_expected_version`，
+        // 所以快照必须带上会话所属任务与**当前**的任务版本。任务行**每次采样重读**，
+        // 不缓存在 `LiveSession` 里——暂停期间改标题会 bump `task.row_version`，缓存的值
+        // 会让前端拿着过期版本去撞 `VERSION_CONFLICT`。
+        //
+        // 纯读：不采样（样本由入口传入）、不写库、不 bump revision，也不新开事务——
+        // 就用调用方给的这个连接（`rebuild_from_committed` 里是它那个读事务）。
+        // 任务行读不到时只让**版本**是 `None`（`task_id` 仍如实给出）：一次查询不该因为
+        // 一条脏数据把整个计时展示打没；前端的「继续」按钮要求两者同时可得，于是它会跟着
+        // 不出现，而不是"点了再失败"。正常路径下这里不可能为空——`work_session.task_id`
+        // 是 `ON DELETE RESTRICT` 的外键，仓里也没有删任务的口。
+        let task_row_version = task_repo::get_task(conn, &live.task_id)?.map(|t| t.row_version);
+
         // 暂计只加**当前可信开放区间**：非 running、没有基线、或没有开放区间都不加。
         let live_ms = match (&self.anchor_state, &live.open_interval, live.state) {
             (Some(a), Some((_, started_at)), SessionState::Running) => {
@@ -420,6 +438,9 @@ impl Coordinator {
             run_id: self.run_id.clone(),
             session_id: Some(live.id),
             session_version: Some(live.row_version),
+            // 与会话身份同源、同时机：两者都来自这一次采样，不来自调用方传值。
+            task_id: Some(live.task_id),
+            task_row_version,
             tick_seq: self.tick_seq,
             as_of,
             active_ms,

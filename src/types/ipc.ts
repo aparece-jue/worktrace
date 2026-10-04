@@ -205,6 +205,20 @@ export interface TimerSnapshot {
   run_id: string;
   session_id: string | null;
   session_version: number | null;
+  /**
+   * 当前会话所属的任务；无会话时为 `null`。
+   *
+   * `resume_timer` 要 `task_id` + `task_expected_version`，而「这条会话属于哪个任务」
+   * 没有第二条读路径（`TaskRow` 不带会话、24 条命令里没有 session→task 的查询）——
+   * 冷启动（重开窗口）或托盘暂停之后，只有快照能给出任务身份。
+   */
+  task_id: string | null;
+  /**
+   * 任务行的并发版本（`task.row_version`）：直接填 `ResumeRequest.task_expected_version`。
+   *
+   * Rust 侧**每次采样重读**（暂停期间改任务会 bump 它），所以这里拿到的总是当前值。
+   */
+  task_row_version: number | null;
   tick_seq: number;
   as_of: number;
   active_ms: number;

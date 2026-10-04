@@ -53,6 +53,8 @@ function sample(tickSeq: number): TimerSnapshot {
     run_id: RUN,
     session_id: "session-1",
     session_version: 1,
+    task_id: "task-1",
+    task_row_version: 1,
     tick_seq: tickSeq,
     as_of: AT,
     active_ms: tickSeq * 1_000,

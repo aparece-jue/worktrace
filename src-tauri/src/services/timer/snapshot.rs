@@ -27,6 +27,24 @@ pub struct TimerSnapshot {
     pub session_id: Option<String>,
     /// 会话的乐观并发版本；无会话时为 `None`。
     pub session_version: Option<i64>,
+    /// 当前会话所属的任务；无会话时为 `None`。
+    ///
+    /// **快照为什么必须带任务身份**：`resume_timer` 要 `task_id` +
+    /// `task_expected_version`（[`super::coordinator::ResumeRequest`]），而「这个会话属于哪个
+    /// 任务」在 24 条命令里**没有第二条读路径**——`TaskRow` 不带会话，`list_tasks` 也不按会话
+    /// 筛，托盘只做 `pause`。于是冷启动（重开窗口，F-009 的正常路径）或托盘暂停之后，
+    /// 本窗口不是这条会话的发起方，只有快照能给出任务身份；没有它，「继续」按钮的请求
+    /// **根本构造不出来**。
+    ///
+    /// 与 `session_id` 同一口径：无会话即 `None`；有会话时取自会话行的 `task_id`，
+    /// 与会话本身同一次读快照。
+    pub task_id: Option<String>,
+    /// 任务行的乐观并发版本（`task.row_version`）；无会话时为 `None`。
+    ///
+    /// 供前端直接填 `ResumeRequest::task_expected_version`，不必再查一次任务。
+    /// **每次采样重读任务行**，不在协调器内存里缓存：暂停期间改标题会 bump 任务的
+    /// `row_version`，缓存的值会让「继续」拿着过期版本去撞 `VERSION_CONFLICT`。
+    pub task_row_version: Option<i64>,
     /// 当前 run 内递增。**新会话不清零，新 run 才重置**（00 §5）。
     pub tick_seq: u64,
     /// 本次采样的归属挂钟时刻 `A(M)`。
@@ -61,6 +79,10 @@ impl TimerSnapshot {
             run_id,
             session_id: None,
             session_version: None,
+            // 空闲快照没有会话，也就没有任务身份可给——两个字段必须一起是 `None`：
+            // 前端的「继续」按钮要求 `task_id` 与 `task_row_version` 同时可得。
+            task_id: None,
+            task_row_version: None,
             tick_seq,
             as_of,
             active_ms: 0,

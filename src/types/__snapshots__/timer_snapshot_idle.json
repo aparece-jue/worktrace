@@ -10,6 +10,8 @@
   "session_id": null,
   "session_version": null,
   "state": null,
+  "task_id": null,
+  "task_row_version": null,
   "tick_seq": 43,
   "timer_kind": null
 }
