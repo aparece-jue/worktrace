@@ -141,14 +141,78 @@ fn transition_error(from: TaskStatus, to: TaskStatus, cause: TransitionCause) ->
     TaskTransition::new(from, to, cause).expect_err("这三个跃迁都必须被拒绝")
 }
 
-/// **`DomainError` 的文案是给用户看的**，不是日志。
-///
-/// 因为 `AppError::Domain { detail }` 的 `message()` 会把 detail 原样拼进去。
-/// 这一条曾经是坏的：全部 14 个变体都是英文技术串，用户会看到
-/// 「操作不被允许：an interval is already open」。
-#[test]
-fn domain_error_messages_are_user_facing_chinese() {
-    let cases: Vec<DomainError> = vec![
+// ─────────────────────────────────────────────────────────────────────────────
+// 变体清单的**编译期证人**（评审 I1）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `Display` 有编译期强制（每个变体必须写 arm），但**用例清单是手写的**——新增变体却
+// 忘了登记，测试照样全绿。FOLLOW-04 自己就新加了两个变体，正是这个洞的实证。
+//
+// 这里补一个证人：宏从一份**标签清单**展开出 `Variant`（变体键）、`Variant::ALL`
+// 与 `variant_of`——后者的 `match` **没有通配 arm**，于是「新增 `DomainError` 变体却
+// 不在这里补一行」= **编译失败**（E0004，指向 `domain_error_variants!` 展开处）。
+//
+// 用例清单 `representative_cases()` 仍是**显式**写出来的（保持可读、可注释），由下面的
+// 覆盖率断言与证人对齐：同一个变体登记两次 ⇒ 第一条断言红；漏登记某个变体 ⇒ 第二条
+// 断言红并点名缺了谁。这样两条性质分别落在编译期与运行期，没有「两份清单都忘了改」
+// 的静默通道——标签清单漏改根本编译不过，用例清单漏改运行必红。
+macro_rules! domain_error_variants {
+    ($( $tag:ident ),+ $(,)?) => {
+        /// `DomainError` 的变体键。
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        enum Variant {
+            $( $tag ),+
+        }
+
+        impl Variant {
+            /// 全部变体（声明序 = 标签清单序），供覆盖率断言遍历。
+            const ALL: &'static [Variant] = &[ $( Variant::$tag ),+ ];
+        }
+
+        /// 穷尽取证：**没有通配 arm**。
+        fn variant_of(e: &DomainError) -> Variant {
+            match e {
+                $( DomainError::$tag { .. } => Variant::$tag, )+
+            }
+        }
+    };
+}
+
+domain_error_variants! {
+    IllegalTransition,
+    ReopenMustBeExplicit,
+    NotInThisVersion,
+    IntervalAlreadyOpen,
+    NoOpenInterval,
+    IntervalOpenInWrongState,
+    NegativeInterval,
+    OverlappingInterval,
+    TrustedIntervalWithoutDuration,
+    PendingAndVoided,
+    EmptyText,
+    UntrustedSample,
+    UnknownEnumValue,
+    StaleRunContext,
+    // P4 Task 2（项目服务与任务归属）新增的五个变体。
+    UnknownTask,
+    UnknownProject,
+    ProjectArchived,
+    TaskNotInClarifying,
+    TaskHasRunningSession,
+    // P4 Task 3（标签与幂等关联）新增的两个变体。
+    UnknownTag,
+    TagNameTaken,
+    // P4 Task 5（任务筛选、捕获与理清为待办）新增的两个变体。
+    ContextTagRequired,
+    TaskNotClarifiable,
+    // FOLLOW-04（用户可见文案一致性）新增的两个变体。
+    UnknownSession,
+    UnknownInterval,
+}
+
+/// 每个变体一条**代表实例**，与上面的标签清单一一对应（少一条或多一条，覆盖率断言红）。
+fn representative_cases() -> Vec<DomainError> {
+    vec![
         DomainError::IllegalTransition {
             from: "Inbox",
             to: "Doing",
@@ -190,27 +254,32 @@ fn domain_error_messages_are_user_facing_chinese() {
             expected: "run-1".into(),
             actual: "run-2".into(),
         },
-        // P4 Task 2（项目服务与任务归属）新增的五个变体。
         DomainError::UnknownTask,
         DomainError::UnknownProject,
         DomainError::ProjectArchived,
         DomainError::TaskNotInClarifying { status: "Doing" },
         DomainError::TaskHasRunningSession,
-        // P4 Task 3（标签与幂等关联）新增的两个变体。
         DomainError::UnknownTag,
         DomainError::TagNameTaken {
             kind: "Domain",
             name: "写作".into(),
         },
-        // P4 Task 5（任务筛选、捕获与理清为待办）新增的两个变体。
         DomainError::ContextTagRequired { kind: "Domain" },
         DomainError::TaskNotClarifiable { status: "Doing" },
-        // FOLLOW-04（用户可见文案一致性）新增的两个变体。
         DomainError::UnknownSession,
         DomainError::UnknownInterval,
-        // 三条**走真实跃迁校验入口**造出来的错误（不是手写字面量）：
-        // 手写 `what: "Scheduled"` 的用例对 M2 那种「构造时塞了内部枚举名」的毛病
-        // 恒真——只有从入口造出来的错误才带着映射表的结果。
+    ]
+}
+
+/// 三条**走真实跃迁校验入口**造出来的错误（不是手写字面量）：
+/// 手写 `what: "Scheduled"` 的用例对 M2 那种「构造时塞了内部枚举名」的毛病
+/// 恒真——只有从入口造出来的错误才带着映射表的结果。
+///
+/// 它们与 `representative_cases()` 里的 `IllegalTransition` / `ReopenMustBeExplicit` /
+/// `NotInThisVersion` **同变体**，所以只接在用例列表后面跑规则，不参与「一变体一条」的
+/// 覆盖率断言。
+fn entry_point_cases() -> Vec<DomainError> {
+    vec![
         transition_error(
             TaskStatus::Ready,
             TaskStatus::Scheduled,
@@ -226,8 +295,37 @@ fn domain_error_messages_are_user_facing_chinese() {
             TaskStatus::Ready,
             TransitionCause::User,
         ),
-    ];
-    assert_eq!(cases.len(), 28, "28 个变体都要覆盖，加了新的记得补进来");
+    ]
+}
+
+/// **`DomainError` 的文案是给用户看的**，不是日志。
+///
+/// 因为 `AppError::Domain { detail }` 的 `message()` 会把 detail 原样拼进去。
+/// 这一条曾经是坏的：全部 14 个变体都是英文技术串，用户会看到
+/// 「操作不被允许：an interval is already open」。
+#[test]
+fn domain_error_messages_are_user_facing_chinese() {
+    // ⓞ 覆盖率（评审 I1）：代表清单必须与变体清单**一一对应**。
+    // 「同一个变体登记两次」⇒ 第一条断言红；「漏登记某个变体」⇒ 第二条断言红并点名；
+    // 「新增变体却没进证人清单」⇒ 编译期就过不去（`variant_of` 的穷尽 match）。
+    let representatives = representative_cases();
+    let mut keys: Vec<Variant> = representatives.iter().map(variant_of).collect();
+    let total = keys.len();
+    keys.sort_unstable();
+    keys.dedup();
+    assert_eq!(keys.len(), total, "同一个变体在清单里登记了两次：{keys:?}");
+    assert_eq!(
+        keys.as_slice(),
+        Variant::ALL,
+        "代表清单与变体清单不一致：缺 {:?}",
+        Variant::ALL
+            .iter()
+            .filter(|v| !keys.iter().any(|k| k == *v))
+            .collect::<Vec<_>>()
+    );
+
+    let mut cases = representatives;
+    cases.extend(entry_point_cases());
 
     for e in cases {
         // ④ 的豁免在 `into()` 之前判：`UnknownEnumValue` 需要回显非法取值与列名。
@@ -305,13 +403,97 @@ fn domain_error_messages_are_user_facing_chinese() {
         // 以及测试里 `NotInThisVersion { what: "pomodoro" }` 这种非生产取值。
         //
         // 豁免 `UnknownEnumValue`：它要回显**非法取值**与**列名**（「「state」里是一个
-        // 无法识别的值 "???"。」），回显是诊断所需，写进豁免说明而不是放宽整条规则；
-        // 它的生产构造点（`services::daily_plan`）用的是中文列名「时区」。
+        // 无法识别的值 "???"。」），回显是诊断所需，写进豁免说明而不是放宽整条规则。
+        //
+        // **别把「列名是中文」当成豁免的前提**：`UnknownEnumValue` 在生产里还有 6 处
+        // **英文列名**的构造点——`storage/task_repo.rs:47`（`task.status`）、
+        // `storage/project_repo.rs:50`（`project.status`）、
+        // `storage/session_repo.rs:61/63/65`（`work_session.mode`/`state`/`timer_kind`）、
+        // `storage/tag_repo.rs:51`（`tag.kind`）。它们安全的真实原因是**去向**：
+        // 这 6 处经 `task_repo::enum_error` → `rusqlite::Error::FromSqlConversionFailure`
+        // → `storage/db.rs::map_sqlite` 降级成 `AppError::Storage` 的 detail，
+        // 而 Storage 的 `message()` 是固定的一句中文，detail **永不进用户文案**
+        // （佐证：`tests/transaction_boundary.rs::an_unknown_enum_value_fails_loudly_and_names_the_column`
+        // 断的就是 `STORAGE_ERROR` + detail 含列名与脏值）。
+        // 只有 `services/daily_plan.rs:108` 把它当 **Domain** 用，那里的列名是中文「时区」。
         if !echoes_the_bad_value {
             assert!(
                 !user_text.chars().any(|c| c.is_ascii_alphabetic()),
                 "除 UnknownEnumValue 外的用户文案不得含 ASCII 字母：{user_text}"
             );
+        }
+    }
+}
+
+/// `zh_status` **十个取值一个不漏**：任务状态名会出现在 `IllegalTransition`、
+/// `ReopenMustBeExplicit`、`NotInThisVersion`、`TaskNotInClarifying`、`TaskNotClarifiable`
+/// 的句子里——它们共用同一张映射表，漏一个，用户就会读到那个英文取值。
+///
+/// 与下面的会话状态/标签类别两条同一形状，是变体级规则（④）的补强：④ 只覆盖用例里
+/// 登记的那几个取值，而本轮实测 `Clarifying` 从未被任何用例渲染过（`zh_kind` 当时也只
+/// 覆盖到 4 类里的 1 类）。
+#[test]
+fn every_task_status_renders_in_chinese_without_the_raw_value() {
+    for status in TaskStatus::ALL {
+        // 逐个走携带任务状态的**全部**变体：任何一条漏翻译都会在这里现形。
+        let shown = [
+            DomainError::IllegalTransition {
+                from: status.as_str(),
+                to: status.as_str(),
+            }
+            .to_string(),
+            DomainError::ReopenMustBeExplicit {
+                from: status.as_str(),
+            }
+            .to_string(),
+            DomainError::NotInThisVersion {
+                what: status.as_str(),
+            }
+            .to_string(),
+            DomainError::TaskNotInClarifying {
+                status: status.as_str(),
+            }
+            .to_string(),
+            DomainError::TaskNotClarifiable {
+                status: status.as_str(),
+            }
+            .to_string(),
+        ];
+        for text in shown {
+            assert!(
+                !text.chars().any(|c| c.is_ascii_alphabetic()),
+                "任务状态 {} 没进中文映射表，用户会读到：{text}",
+                status.as_str()
+            );
+            assert!(!text.contains(status.as_str()), "不得漏出内部取值：{text}");
+        }
+    }
+}
+
+/// `zh_kind` **四个取值一个不漏**（`Domain`/`Activity`/`Context`/`Report`）。
+///
+/// 与上面两条同一形状；术语以 99-glossary §5 为准（领域/活动/上下文/汇报）。
+#[test]
+fn every_tag_kind_renders_in_chinese_without_the_raw_value() {
+    for kind in TagKind::ALL {
+        let shown = [
+            DomainError::TagNameTaken {
+                kind: kind.as_str(),
+                name: "写作".into(),
+            }
+            .to_string(),
+            DomainError::ContextTagRequired {
+                kind: kind.as_str(),
+            }
+            .to_string(),
+        ];
+        for text in shown {
+            assert!(
+                !text.chars().any(|c| c.is_ascii_alphabetic()),
+                "标签类别 {} 没进中文映射表，用户会读到：{text}",
+                kind.as_str()
+            );
+            assert!(!text.contains(kind.as_str()), "不得漏出内部取值：{text}");
         }
     }
 }
@@ -461,9 +643,9 @@ fn inline_user_facing_error_literals_are_chinese() {
         ("AppError::Domain", "detail:", "操作不被允许：{detail}"),
     ];
 
-    let mut scanned = 0usize;
+    let mut scanned = [0usize; 3];
     for (path, code) in src_rust_sources() {
-        for (variant, field, template) in patterns {
+        for (index, (variant, field, template)) in patterns.iter().enumerate() {
             for (line, literal) in inline_literals(&code, variant, field) {
                 assert!(
                     literal.chars().any(is_cjk),
@@ -474,11 +656,23 @@ fn inline_user_facing_error_literals_are_chinese() {
                     template,
                     literal
                 );
-                scanned += 1;
+                scanned[index] += 1;
             }
         }
     }
-    assert!(scanned > 0, "一个字面量都没扫到，门禁等于空转");
+    // **逐模式自证**（评审 Minor ①）：全局计数盖不住「其中一个模式因为拼写或匹配逻辑
+    // 坏掉而静默命中 0」，所以每个模式各自 > 0。
+    //
+    // 当前真实分布（FOLLOW-04 收口时实测）：`EmptyText` 10 / `NotInThisVersion` 6 /
+    // `AppError::Domain` 26，共 42。数字变小通常说明构造点被删或匹配坏了，变大说明新增了
+    // 构造点——两种都该回来看一眼，但**不写死**（构造点会随功能增减）。
+    for (pattern, count) in patterns.iter().zip(scanned.iter()) {
+        assert!(
+            *count > 0,
+            "模式 {:?} 一个字面量都没扫到，门禁对它等于空转",
+            pattern.0
+        );
+    }
 }
 
 /// **禁用子串**：本次收口删掉的英文片段不得回到 `src`。
