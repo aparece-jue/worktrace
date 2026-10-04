@@ -14,9 +14,11 @@
  *    （三个条件放进**同一条**查询，交集在服务端算）。
  * 3. **旧响应不得覆盖新结果**：`load()` 里按顺序问两条判据——
  *    ① 这条响应回答的是不是**现在这个问题**（条件 + 分页窗口的身份，**不是到达顺序**）；
- *    ② 它是不是**比已应用水位更旧**（`data_epoch` / `revision`，走
- *    `domainState.isStaleResponse`，用的是本上下文唯一那把水位）。
- *    两条都过了才上屏；**上屏之后**才 `markApplied`（"收到" ≠ "用上"，见 `src/ipc.ts`）。
+ *    ② 它是不是**比本视图已上屏的那份更旧**（`data_epoch` / `revision`，走
+ *    {@link createViewWatermark}：**本页自己**的水位，不是全局那把——理由是
+ *    `list_tasks` 只是"过滤 + 分页后的局部视图"，推全局水位会吞掉同版本的失效通知、
+ *    并让 30 秒校验失去判据，详见 `src/components/viewWatermark.ts` 的模块头与评审 I1）。
+ *    两条都过了才上屏；**上屏之后**才推进本视图水位（"收到" ≠ "用上"）。
  * 4. **改条件就重置分页**：状态 / 项目 / 情境任一变化都把页号归 1（`resetPage`），
  *    否则新条件会带着旧 `offset` 去查——那正是"改变条件后列表对不上"的来源。
  *
@@ -30,7 +32,7 @@ import { Empty, Flex, Pagination, Segmented, Select, Space, Tag, Typography } fr
 
 import { listSelectableProjects, listTags, listTasks, toIpcError } from "../ipc";
 import { ErrorNotice } from "../components/ErrorNotice";
-import { domainState } from "../state/domainState";
+import { createViewWatermark } from "../components/viewWatermark";
 import { useDataEpoch, useInvalidation } from "../state/hooks";
 import type { ProjectRow, ProjectSelector, TagRow, TaskRow, TaskStatus } from "../types/ipc";
 
@@ -88,6 +90,16 @@ export function Tasks() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  /**
+   * **本页两条查询各自**的视图水位（评审 I1）：主列表一份、筛选选项一份。
+   *
+   * 分开是必须的：它们是两个问题、两条读路径，一个的版本比另一个新并不代表另一个的数据旧。
+   * `useState(createViewWatermark)[0]` 只借它拿一个**稳定实例**（工厂只跑一次），
+   * 它本身不是会变的状态、也不触发重渲染。
+   */
+  const [listWatermark] = useState(createViewWatermark);
+  const [optionsWatermark] = useState(createViewWatermark);
+
   /** 现在这个问题：三个筛选条件 + 分页窗口。 */
   const question = [status, projectId, contextId ?? "", page].join("|");
   /**
@@ -116,8 +128,8 @@ export function Tasks() {
    * 筛选用的两个下拉：只含 `active` 的项目（`list_selectable_projects`，服务端保证）
    * 与 `Context` 类标签（`list_tags` 的 `kind` 过滤在服务端）。
    *
-   * 它们**不进水位**（不 `markApplied`）：这是辅助数据，让它推水位会把一条正在飞的
-   * 主列表响应按"更旧"丢掉，界面就会停在加载态。主列表那一份才代表"屏幕上的数据是第几版"。
+   * 它们有**自己那一份**水位（`optionsWatermark`），与主列表互不影响：两条读路径的版本
+   * 各自前进，谁都别拿自己的版本去判对方旧。
    */
   const loadOptions = useCallback(async (): Promise<void> => {
     if (epoch === null) return;
@@ -126,14 +138,16 @@ export function Tasks() {
         listTags({ expected_data_epoch: epoch, kind: "Context" }),
         listSelectableProjects({ expected_data_epoch: epoch }),
       ]);
-      if (domainState.isStaleResponse(tags, epoch)) return;
-      if (domainState.isStaleResponse(selectable, epoch)) return;
+      if (optionsWatermark.isStale(tags, epoch)) return;
+      if (optionsWatermark.isStale(selectable, epoch)) return;
+      optionsWatermark.applied(tags);
+      optionsWatermark.applied(selectable);
       setContexts(tags.items);
       setProjects(selectable.items);
     } catch (cause) {
       setError(toIpcError(cause).message);
     }
-  }, [epoch]);
+  }, [epoch, optionsWatermark]);
 
   /** 主查询：一条 `list_tasks`，三个条件 + 分页窗口全在请求里（交集在服务端算）。 */
   const load = useCallback(async (): Promise<void> => {
@@ -148,17 +162,17 @@ export function Tasks() {
         offset: (page - 1) * PAGE_SIZE,
         expected_data_epoch: epoch,
       });
-      // 判据②：世界变没变（比 epoch / revision，不比到达顺序）。
-      if (domainState.isStaleResponse(result, epoch)) return;
+      // 判据②：比**本视图**已上屏的那一份旧（epoch 变了也算），不比到达顺序。
+      if (listWatermark.isStale(result, epoch)) return;
       // 判据①：这条响应回答的是不是现在这个问题。
       if (asked !== questionRef.current) return;
-      // 「收到」≠「用上」：真的上屏之后才推水位，此后更旧的响应会被判据②挡掉。
-      domainState.markApplied(result);
+      // 「收到」≠「用上」：真的上屏之后才推进本视图水位，此后更旧的响应会被判据②挡掉。
+      listWatermark.applied(result);
       setView({ question: asked, tasks: result.tasks, total: result.total });
     } catch (cause) {
       setError(toIpcError(cause).message);
     }
-  }, [epoch, status, projectId, contextId, page, question]);
+  }, [epoch, status, projectId, contextId, page, question, listWatermark]);
 
   useEffect(() => {
     void loadOptions();

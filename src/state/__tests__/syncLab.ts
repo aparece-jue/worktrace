@@ -242,7 +242,13 @@ export interface LabWindow {
  * 页面同构的消费者：`invalidated` 一变就重拉，旧响应按镜像那把水位判过期，
  * **上屏之后**才 `markApplied`。
  *
- * 判据与 `src/pages/Tasks.tsx` 的 `load()` 一致（少了"问题身份"那一半——本实验里
+ * ⚠️ 这里用的是**全局**水位（`isStaleResponse` + `markApplied`）——Task 5 fix round 1
+ * 的评审 I1 判定「过滤 + 分页的局部视图不该推全局水位」（会吞掉同 revision 的失效通知、
+ * 让 30 秒校验失去判据），页面侧已改成本地水位（`src/components/viewWatermark.ts`）。
+ * **本实验的行为本轮不动**：场景 1/3 的收敛断言（`getView().revision` 随这一页的读回前进）
+ * 依赖这条旧口径，改成局部水位要连断言一起改——登记给 Task 6a / P8 对齐，不在这里半改。
+ *
+ * 判据与 `src/pages/Tasks.tsx` 的 `load()` 曾是同一套（少了"问题身份"那一半——本实验里
  * 这一页只有一个问题：当前全部任务）。
  */
 function createScreen(state: DomainState, calls: LabCalls): LabScreen {

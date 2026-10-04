@@ -36,6 +36,9 @@ const events = vi.hoisted(() => {
         listeners.delete(id);
       };
     },
+    emit(payload: unknown) {
+      for (const handler of [...listeners.values()]) handler({ payload });
+    },
     reset() {
       listeners.clear();
     },
@@ -46,8 +49,8 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 
 import { Projects } from "../Projects";
 import { domainState } from "../../state/domainState";
-import type { TaskQueryResult } from "../../types/ipc";
-import { EPOCH, createBackend, failure, project, task, type Backend } from "./fakeBackend";
+import { EVENT_DOMAIN_CHANGED, type ProjectList, type TaskQueryResult } from "../../types/ipc";
+import { AT, EPOCH, createBackend, failure, project, task, type Backend } from "./fakeBackend";
 import { installJsdomBridges } from "./jsdomBridges";
 
 let backend: Backend;
@@ -66,6 +69,19 @@ async function mountProjects(): Promise<RenderResult> {
 function lastRequest(command: string): unknown {
   const found = [...backend.requests].reverse().find((entry) => entry.command === command);
   return found?.request;
+}
+
+/** 一条 `domain.changed`（同 epoch 的下一版 ⇒ 闸门判 `apply`，页面只当作失效）。 */
+async function changed(revision: number): Promise<void> {
+  await act(async () => {
+    events.emit({
+      data_epoch: EPOCH,
+      event: EVENT_DOMAIN_CHANGED,
+      revision,
+      at: AT,
+      payload: {},
+    });
+  });
 }
 
 /** 在某一行里点一个按钮（项目行都是 `project-<id>`）。 */
@@ -113,6 +129,33 @@ describe("项目页：创建", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("请输入项目名称");
     expect(backend.count("create_project")).toBe(0);
     expect(backend.commands).not.toContain("create_project");
+  });
+});
+
+describe("项目页：旧响应与水位", () => {
+  it("I1：项目页的查询响应上屏**不推全局水位**——同 revision 的通知仍必须让它重拉", async () => {
+    // 反向验证：把 `loadProjects` 改回 `domainState.isStaleResponse` + `markApplied`
+    // ⇒ 全局水位被这条过滤视图推到第 6 版 ⇒ 同 revision(6) 的通知被判 drop ⇒
+    // 后两句红（失效计数不动、不再重拉）。
+    backend = createBackend();
+    const first = backend.holdNext<ProjectList>("list_projects");
+    await mountProjects();
+
+    backend.revision = 6;
+    backend.projects = [project({ id: "p-1", name: "项目甲" })];
+    await act(async () => {
+      first.resolve({ items: backend.projects, data_epoch: EPOCH, revision: 6 });
+    });
+    expect(await screen.findByText("项目甲")).not.toBeNull();
+    // 镜像那把水位是**权威快照**的水位：页面查询推不动它
+    expect(domainState.getView().revision).toBe(5);
+
+    const before = backend.count("list_projects");
+    const invalidated = domainState.getView().invalidated;
+    await changed(6);
+
+    expect(domainState.getView().invalidated).toBe(invalidated + 1);
+    await waitFor(() => expect(backend.count("list_projects")).toBe(before + 1));
   });
 });
 

@@ -135,22 +135,33 @@ export interface DomainState {
    *
    * 页面在响应回来时问一次：`true` ⇒ **丢弃，不要拿它覆盖已经显示的新状态**。
    * 只读：用的是本上下文**唯一那把**闸门（`FreshnessGate::isStaleResponse`，
-   * 闸门规则①/③的读侧一半），所以页面不必各自维护第二份水位、也不自己拼比较条件。
+   * 闸门规则①/③的读侧一半）。
+   *
+   * ⚠️ 它比的是**全局**水位，所以只适合"全量快照"型响应。页面的**过滤 / 分页**视图
+   * （`list_tasks` / `list_projects`）用自己那一份视图水位，见
+   * `src/components/viewWatermark.ts` 与 {@link markApplied} 的警告（评审 I1）。
    */
   isStaleResponse(stamp: VersionStamp, requestEpoch: string | null): boolean;
   /**
-   * 记下**已经上屏**的一份带 epoch 的业务响应（`FreshnessGate::markApplied`）。
+   * 记下**已经上屏**的一份**权威快照**（`FreshnessGate::markApplied`）。
    *
-   * 页面的查询响应也是权威快照——它回答的是"现在"——所以页面在**真的把结果用上之后**
-   * 调一次（"收到" ≠ "用上"，`src/ipc.ts` 的 `markApplied` 就是这么写的）。此后同 epoch
-   * 内更旧的响应会被 {@link isStaleResponse} 判过期而丢弃：这正是"旧响应不得覆盖新结果"
-   * 里**比 `data_epoch`/`revision`** 的那一半（另一半是页面自己那个"回答的是不是现在这个
-   * 问题"的身份判据，见 `src/pages/Tasks.tsx` 的判据①）。
+   * ⚠️ **只给全量快照用**（P7 Task 5 fix round 1，评审 I1）。全局水位的前提是
+   * 「已应用的是**权威快照**」——全量、含所有状态、能回答任何视图的问题。页面的
+   * `list_tasks` / `list_projects` 是**过滤 + 分页后的局部视图**，不满足这个前提：
+   * 拿它推全局水位会 ① 让**同 `revision`** 的 `domain.changed` 被判"快照已包含"而丢弃
+   * （失效计数不动 ⇒ 所有页面都不再重拉），② 让 30 秒校验的 `identity.revision >
+   * seenRevision()` 失去判据（`seen` 被推平 ⇒ 末次通知丢失时不再 `resync`，连
+   * `rehandshake()` 也救不回来）。**页面请用自己那一份视图水位**
+   * （`src/components/viewWatermark.ts`），不要走这里。
    *
-   * 只**前进**水位（同 epoch 内更旧或同版的标记不会把它拉回去，换 epoch 重新起算），
-   * 顺带把水位反映到视图的 `dataEpoch`/`revision` 两个字段上——它们本来就是
-   * "已应用的一致快照"的投影。除此之外不动任何状态：换 epoch 的整体失效仍由
-   * {@link verify} 那条路走，页面不该也不能用这个入口改库身份。
+   * 水位只**前进**（同 epoch 内更旧或同版是 `stale_ignored`，换 epoch 重新起算），顺带把
+   * 水位反映到视图的 `dataEpoch`/`revision` 两个字段上——它们本来就是"已应用的一致快照"
+   * 的投影。除此之外不动任何状态：换 epoch 的整体失效仍由 {@link verify} 那条路走，
+   * 调用方不该也不能用这个入口改库身份。
+   *
+   * 当前**生产调用者为 0**（镜像自己的快照走 `applyStamp`）；调用它的是 Task 6a 的
+   * 双窗口实验替身（`src/state/__tests__/syncLab.ts` 的 `createScreen`，它的收敛断言
+   * 依赖"读回推进全局水位"这条旧口径，登记给 6a/P8 一起对齐）。
    */
   markApplied(stamp: VersionStamp): void;
 }

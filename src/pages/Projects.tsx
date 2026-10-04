@@ -13,8 +13,10 @@
  *    决定行为（冲突刷新 + 展示 Rust 的 `message`），**不维护第二份「码 → 文案」表**。
  * 3. **写完当场重拉**：`run()` 在命令成功之后才 `loadProjects()` / `loadDetail()`——
  *    "确认归档后更新列表"不赌 `domain.changed` 到得比响应早。
- * 4. **旧响应不得覆盖新结果**：与任务页同一套判据——`isStaleResponse`（`data_epoch` /
- *    `revision`，不比到达顺序）+ 详情列表的"问题身份"（选中的是哪个项目）。
+ * 4. **旧响应不得覆盖新结果**：与任务页同一套判据——**本视图**水位（`data_epoch` /
+ *    `revision`，不比到达顺序，见 `src/components/viewWatermark.ts`）+ 详情列表的
+ *    "问题身份"（选中的是哪个项目）。**不推全局水位**：这两条查询都是过滤 / 分页后的
+ *    局部视图（评审 I1）。
  *
  * **项目详情的任务列表只列第一页**（服务端上限 100，`task_repo::require_page`）：
  * 04 §「V0.1 轻量 GTD 补充验收」把"稳定分页"要求挂在 F-002 的下一步/等待/阻塞列表上
@@ -37,7 +39,7 @@ import {
 } from "../ipc";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { reportCommandError } from "../components/commandError";
-import { domainState } from "../state/domainState";
+import { createViewWatermark } from "../components/viewWatermark";
 import { useDataEpoch, useInvalidation } from "../state/hooks";
 import type { ProjectRow, ProjectStatus, TaskRow } from "../types/ipc";
 
@@ -105,23 +107,28 @@ export function Projects() {
   }, [selected]);
 
   /**
-   * 项目列表（本页的**主查询**）。
+   * **本页两条查询各自**的视图水位（评审 I1）：项目列表一份、详情任务列表一份。
    *
-   * 它是这一页唯一推进水位的查询（`markApplied`）：它代表"屏幕上这份项目列表是第几版"。
-   * 辅助查询（详情的任务列表）不进水位——那是为了不让一条辅助响应把正在飞的主列表
-   * 按"更旧"丢掉，界面就会停在加载态。
+   * 与任务页同一条口径（`src/components/viewWatermark.ts` 的模块头写了为什么不推全局水位）：
+   * 这两条都是"过滤 / 分页后的局部视图"，推全局水位会吞掉同版本的失效通知、并让 30 秒校验
+   * 失去判据。分开两份是因为它们是两个问题：一个的版本新不代表另一个的数据旧。
    */
+  const [projectsWatermark] = useState(createViewWatermark);
+  const [detailWatermark] = useState(createViewWatermark);
+
+  /** 项目列表（本页的**主查询**）：`status: null` ⇒ 归档与 `done` 的历史都在里面。 */
   const loadProjects = useCallback(async (): Promise<void> => {
     if (epoch === null) return;
     try {
       const result = await listProjects({ expected_data_epoch: epoch, status: null });
-      if (domainState.isStaleResponse(result, epoch)) return;
-      domainState.markApplied(result);
+      // 判据：比**本视图**已上屏的那一份旧（epoch 变了也算）⇒ 丢弃，不覆盖新列表。
+      if (projectsWatermark.isStale(result, epoch)) return;
+      projectsWatermark.applied(result);
       setProjects(result.items);
     } catch (cause) {
       setError(toIpcError(cause).message);
     }
-  }, [epoch]);
+  }, [epoch, projectsWatermark]);
 
   /** 项目详情的任务列表：`statuses: []` = 不限制状态（归档项目的历史照样看得见）。 */
   const loadDetail = useCallback(async (): Promise<void> => {
@@ -135,13 +142,14 @@ export function Projects() {
         offset: 0,
         expected_data_epoch: epoch,
       });
-      if (domainState.isStaleResponse(result, epoch)) return;
+      if (detailWatermark.isStale(result, epoch)) return;
       if (asked !== selectedRef.current) return;
+      detailWatermark.applied(result);
       setDetail({ projectId: asked, tasks: result.tasks, total: result.total });
     } catch (cause) {
       setError(toIpcError(cause).message);
     }
-  }, [epoch, selected]);
+  }, [epoch, selected, detailWatermark]);
 
   useEffect(() => {
     void loadProjects();

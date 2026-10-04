@@ -52,7 +52,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 
 import { Tasks } from "../Tasks";
 import { domainState } from "../../state/domainState";
-import { EVENT_DOMAIN_CHANGED, type TaskQueryResult } from "../../types/ipc";
+import { EVENT_DOMAIN_CHANGED, type TagRow, type TaskQueryResult } from "../../types/ipc";
 import { AT, EPOCH, createBackend, failure, project, tag, task, type Backend } from "./fakeBackend";
 import { installJsdomBridges } from "./jsdomBridges";
 
@@ -276,6 +276,106 @@ describe("任务页：分页与计数", () => {
 });
 
 describe("任务页：旧响应与重复行", () => {
+  it("I1-A：页面查询响应到达**不推全局水位**——同 revision 的通知仍必须让它重拉", async () => {
+    // 反向验证（评审 I1 的探针 A）：把 `load()` 改回 `domainState.markApplied(result)`
+    // ⇒ 全局水位被这条**过滤 + 分页**的响应推到第 6 版 ⇒ 下面那条同 revision(6) 的
+    // `domain.changed` 被判"快照已包含"而 drop ⇒ 三句断言全红（失效计数不动、不再重拉、
+    // 视图水位被推走）。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-1", title: "第一版", status: "Ready" })];
+    const first = backend.holdNext<TaskQueryResult>("list_tasks");
+    await mountTasks();
+
+    // 页面读到第 6 版（写命令刚提交、它那条通知还在路上）
+    backend.revision = 6;
+    await act(async () => {
+      first.resolve({
+        tasks: [task({ id: "t-1", title: "第一版", status: "Ready" })],
+        total: 1,
+        data_epoch: EPOCH,
+        revision: 6,
+      });
+    });
+    expect(screen.getByText("第一版")).not.toBeNull();
+    // 镜像那把水位是**权威快照**的水位：仍是握手时的第 5 版，页面查询推不动它
+    expect(domainState.getView().revision).toBe(5);
+
+    const before = backend.count("list_tasks");
+    const invalidated = domainState.getView().invalidated;
+    // 那条写命令对应的通知现在才到，与页面刚上屏的响应**同版本**
+    await changed(6);
+
+    expect(domainState.getView().invalidated).toBe(invalidated + 1);
+    await waitFor(() => expect(backend.count("list_tasks")).toBe(before + 1));
+  });
+
+  it("I1-C：辅助查询（list_tags）上屏也不推全局水位——同 revision 的通知仍必须生效", async () => {
+    // 反向验证（评审 I1 的探针 C）：把辅助查询改回全局 `isStaleResponse` + `markApplied`
+    // ⇒ 第 6 版的 `list_tags` 响应把全局水位推到 6 ⇒ 紧随的第 6 版通知被 drop ⇒
+    // `list_tags` 不再重发、"办公室"永远出不来（后两句红）。
+    backend = createBackend();
+    const firstTags = backend.holdNext<{
+      items: TagRow[];
+      data_epoch: string;
+      revision: number;
+    }>("list_tags");
+    await mountTasks();
+
+    // 一条写命令提交（第 6 版），辅助查询这次拿到了情境标签——但它迟到了，先扣住
+    backend.revision = 6;
+    backend.tags = [tag({ id: "ctx-1", name: "办公室" })];
+    await act(async () => {
+      firstTags.resolve({ items: backend.tags, data_epoch: EPOCH, revision: 6 });
+    });
+    await waitFor(() =>
+      expect(selectRoot("context-select").className).not.toContain("ant-select-disabled"),
+    );
+
+    const before = backend.count("list_tags");
+    // 与上面那条响应**同版本**的通知：它必须仍然生效（重发一次辅助查询）
+    await changed(6);
+
+    await waitFor(() => expect(backend.count("list_tags")).toBe(before + 1));
+    expect(selectRoot("context-select").className).not.toContain("ant-select-disabled");
+  });
+
+  it("M5③：辅助查询的旧响应被**本视图**水位丢弃，不覆盖已经拿到的新选项", async () => {
+    // 反向验证：去掉 `loadOptions` 里那两句 `optionsWatermark.isStale` ⇒ 迟到的第 5 版
+    // 响应会把选项覆盖回只有"办公室"一份 ⇒ 最后那次 `pick("电脑")` 找不到选项，红。
+    backend = createBackend();
+    backend.tags = [tag({ id: "ctx-1", name: "办公室" })];
+    const firstOptions = backend.holdNext<{
+      items: TagRow[];
+      data_epoch: string;
+      revision: number;
+    }>("list_tags");
+    await mountTasks();
+
+    // 第 6 版：多了一个情境标签"电脑"；这条辅助查询被扣住
+    backend.revision = 6;
+    backend.tags = [
+      tag({ id: "ctx-1", name: "办公室" }),
+      tag({ id: "ctx-2", name: "电脑" }),
+    ];
+    await changed(6);
+    // 第 7 版：再来一个标签；这一次的辅助查询正常返回并上屏
+    backend.revision = 7;
+    backend.tags = [...backend.tags, tag({ id: "ctx-3", name: "电话" })];
+    await changed(7);
+    await waitFor(() => expect(backend.count("list_tags")).toBe(3));
+
+    // 扣住的第 5 版（只有"办公室"）现在才回来：本视图水位已经是 7 ⇒ 丢弃
+    await act(async () => {
+      firstOptions.resolve({ items: [tag({ id: "ctx-1", name: "办公室" })], data_epoch: EPOCH, revision: 5 });
+    });
+
+    // 第 7 版那份还在：能选中只存在于新响应里的"电脑"
+    await pick("context-select", "电脑");
+    await waitFor(() =>
+      expect(lastRequest("list_tasks")).toMatchObject({ context_tag_id: "ctx-2" }),
+    );
+  });
+
   it("同一筛选下旧响应晚到：按 data_epoch/revision 丢弃，不覆盖新结果", async () => {
     // 反向验证①：把 `load()` 里那句 `isStaleResponse` 去掉 ⇒ 旧响应（revision 5）
     // 会被上屏，下面「旧结果不出现」的断言立刻红。
