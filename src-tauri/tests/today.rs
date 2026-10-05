@@ -70,19 +70,33 @@ impl EventSink for NoSink {
     }
 }
 
-/// 取 Today 里某一类的那一列。三个取列分支钉住「字段 ↔ 类别」的对应关系：
-/// 换错字段会在每个用到它的用例上变红。
-fn column(view: &TodayView, class: StatsClass) -> &MeasureColumn {
-    match class {
-        StatsClass::Confirmed => &view.confirmed_human,
-        StatsClass::Live => &view.live_human,
-        StatsClass::Pending => &view.pending_human,
+/// 取 Today 里某一类某一 measure 的列。四类**都要在**：F-010 的三项数字是这三组里的
+/// `Human` 那三列，机器（后台 / 被动）与等待各自成列，谁也不并进谁（Ruling P5-15）。
+fn human(view: &TodayView, class: StatsClass) -> &MeasureColumn {
+    view.column(class, Measure::Human)
+}
+
+/// 三类各自固定四项、顺序与 [`Measure::ALL`] 一致，且五个口径字段与视图同源（02 §6）。
+fn assert_four_measures(view: &TodayView, class: StatsClass) {
+    let columns: &[MeasureColumn] = match class {
+        StatsClass::Confirmed => &view.confirmed,
+        StatsClass::Live => &view.live,
+        StatsClass::Pending => &view.pending,
+    };
+    let measures: Vec<Measure> = columns.iter().map(|column| column.measure).collect();
+    assert_eq!(
+        measures,
+        Measure::ALL.to_vec(),
+        "{class:?} 必须固定四项、顺序固定"
+    );
+    for column in columns {
+        assert_eq!(column.class, class);
+        assert_scope_fields(column, view);
     }
 }
 
-/// 三个数字都必须是**人工**列，且五个口径字段与视图同源（02 §6）。
+/// 五个口径字段与视图同源（02 §6）。
 fn assert_scope_fields(column: &MeasureColumn, view: &TodayView) {
-    assert_eq!(column.measure, Measure::Human, "Today 的三项都是人工口径");
     assert_eq!(column.timezone, view.timezone);
     assert_eq!(column.range, view.range);
     assert_eq!(column.as_of, view.as_of);
@@ -307,29 +321,27 @@ fn the_five_items_are_reported_separately_and_never_pre_summed() {
     // ③④⑤ 三项分别显示，各自等于自己那一段，**任何一个都不是三项之和**
     //    （1h + 5m + 10m = 4_500_000 从未出现）。
     assert_eq!(
-        column(&view, StatsClass::Confirmed).ms,
+        human(&view, StatsClass::Confirmed).ms,
         Some(HOUR),
         "已确认人工工时 = 那一条 09:00–10:00 的 1 小时"
     );
-    assert_eq!(column(&view, StatsClass::Confirmed).intervals, 1);
+    assert_eq!(human(&view, StatsClass::Confirmed).intervals, 1);
     assert_eq!(
-        column(&view, StatsClass::Live).ms,
+        human(&view, StatsClass::Live).ms,
         Some(300_000),
         "运行暂计 = 这条开放区间裁剪到今天的 5 分钟"
     );
-    assert_eq!(column(&view, StatsClass::Live).intervals, 1);
+    assert_eq!(human(&view, StatsClass::Live).intervals, 1);
     assert_eq!(
-        column(&view, StatsClass::Pending).ms,
+        human(&view, StatsClass::Pending).ms,
         Some(600_000),
         "待确认时间 = 那条候选端点之间裁剪到今天的 10 分钟"
     );
-    assert_eq!(column(&view, StatsClass::Pending).intervals, 1);
+    assert_eq!(human(&view, StatsClass::Pending).intervals, 1);
 
-    // 口径字段：五个都要有，且与视图同源
+    // 形状与口径字段：三类各自固定四项、顺序固定，五个口径字段与视图同源
     for class in [StatsClass::Confirmed, StatsClass::Live, StatsClass::Pending] {
-        let col = column(&view, class);
-        assert_eq!(col.class, class);
-        assert_scope_fields(col, &view);
+        assert_four_measures(&view, class);
     }
 
     // 视图自身的口径：日期、时区、真实日界、此刻、库身份与业务版本
@@ -345,6 +357,95 @@ fn the_five_items_are_reported_separately_and_never_pre_summed() {
     assert_eq!(view.as_of, SH_NOON + 300_000);
     assert_eq!(view.revision, h.revision());
     assert_eq!(view.data_epoch, h.epoch);
+}
+
+#[test]
+fn machine_and_waiting_time_is_listed_separately_and_never_added_into_human() {
+    let mut h = setup(SH_NOON);
+    h.task("t-all", "四类 measure", 1_000);
+    // **同一段时间**里并行发生的四类事实：人工 1h、后台 1h、被动 30min、等待 15min。
+    // 后台那 1h 与人工那 1h 完全重叠 ⇒ 「人工 + 机器 = 2h」这种相加在这里一眼可辨。
+    let from = SH_NOON - 2 * HOUR;
+    for (session_id, interval_id, mode, ms) in [
+        ("s-human", "i-human", "FOREGROUND", HOUR),
+        ("s-bg", "i-bg", "BACKGROUND", HOUR),
+        ("s-passive", "i-passive", "PASSIVE", 1_800_000),
+        ("s-waiting", "i-waiting", "WAITING", 900_000),
+    ] {
+        h.session(session_id, "t-all", mode, "finished", 0, from);
+        h.interval(
+            interval_id,
+            session_id,
+            from,
+            Some(from + ms),
+            Some(ms),
+            0,
+            None,
+        );
+    }
+
+    let view = h.today("Asia/Shanghai").unwrap();
+    for class in [StatsClass::Confirmed, StatsClass::Live, StatsClass::Pending] {
+        assert_four_measures(&view, class);
+    }
+
+    // F-010 的第三项：**人工只有 FOREGROUND** —— 1 小时，不是 2 小时（F-103 的核心）。
+    assert_eq!(
+        human(&view, StatsClass::Confirmed).ms,
+        Some(HOUR),
+        "1h 前台 + 1h 后台 ⇒ 人工 1h"
+    );
+    assert_ne!(
+        human(&view, StatsClass::Confirmed).ms,
+        Some(2 * HOUR),
+        "人工不是「人工 + 机器」"
+    );
+    // 机器分列：后台 1h、被动 30min，各自独立成列。
+    assert_eq!(
+        view.column(StatsClass::Confirmed, Measure::MachineBackground)
+            .ms,
+        Some(HOUR)
+    );
+    assert_eq!(
+        view.column(StatsClass::Confirmed, Measure::MachinePassive)
+            .ms,
+        Some(1_800_000)
+    );
+    // WAITING 单列：不并入人工，也不并入任何机器项。
+    assert_eq!(
+        view.column(StatsClass::Confirmed, Measure::Waiting).ms,
+        Some(900_000)
+    );
+
+    // 「没有任何把机器并进人工的字段」：四类逐项给出、两两不同，且**没有任何一列**
+    // 等于四项之和（那个和只出现在这条断言里，DTO 里没有对应字段）。
+    let confirmed: Vec<Option<i64>> = Measure::ALL
+        .iter()
+        .map(|measure| view.column(StatsClass::Confirmed, *measure).ms)
+        .collect();
+    assert_eq!(
+        confirmed,
+        vec![Some(HOUR), Some(HOUR), Some(1_800_000), Some(900_000)],
+        "四类的顺序与取值都必须各自独立"
+    );
+    let total: i64 = confirmed.iter().filter_map(|ms| *ms).sum();
+    assert_eq!(total, 9_900_000);
+    for column in &view.confirmed {
+        assert_ne!(
+            column.ms,
+            Some(total),
+            "{:?} 被算成了四项之和",
+            column.measure
+        );
+    }
+
+    // 另外两类同样按四类分列：此刻没有开放区间、也没有待确认。
+    for measure in Measure::ALL {
+        assert_eq!(view.column(StatsClass::Live, measure).ms, Some(0));
+        assert_eq!(view.column(StatsClass::Live, measure).intervals, 0);
+        assert_eq!(view.column(StatsClass::Pending, measure).intervals, 0);
+        assert_eq!(view.column(StatsClass::Pending, measure).ms, None);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -381,7 +482,7 @@ fn a_session_across_midnight_is_ten_minutes_on_each_local_day() {
         }
     );
     assert_eq!(
-        column(&day1, StatsClass::Confirmed).ms,
+        human(&day1, StatsClass::Confirmed).ms,
         Some(600_000),
         "第一天 23:50–24:00 是 10 分钟"
     );
@@ -400,7 +501,7 @@ fn a_session_across_midnight_is_ten_minutes_on_each_local_day() {
         }
     );
     assert_eq!(
-        column(&day2, StatsClass::Confirmed).ms,
+        human(&day2, StatsClass::Confirmed).ms,
         Some(600_000),
         "第二天 00:00–00:10 是 10 分钟"
     );
@@ -448,11 +549,11 @@ fn a_dst_transition_day_is_twenty_three_hours_and_keeps_its_own_bounds() {
         "夏令时切换日只有 23 小时"
     );
     assert_eq!(
-        column(&view, StatsClass::Confirmed).ms,
+        human(&view, StatsClass::Confirmed).ms,
         Some(2 * HOUR),
         "00:30→03:30 是真实 2 小时；次日那一段不算进今天"
     );
-    assert_eq!(column(&view, StatsClass::Confirmed).intervals, 1);
+    assert_eq!(human(&view, StatsClass::Confirmed).intervals, 1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -468,14 +569,14 @@ fn a_zero_length_pending_candidate_counts_as_one_interval_with_zero_ms() {
     h.interval("i-zero", "s-zero", SH_NOON, Some(SH_NOON), Some(0), 1, None);
 
     let view = h.today("Asia/Shanghai").unwrap();
-    let pending = column(&view, StatsClass::Pending);
+    let pending = human(&view, StatsClass::Pending);
     assert_eq!(
         pending.intervals, 1,
         "零长度候选也是一条待确认记录（按条数判有无）"
     );
     assert_eq!(pending.ms, Some(0), "它的跨度是 0 毫秒，不是「没有」");
-    assert_eq!(column(&view, StatsClass::Confirmed).ms, Some(0));
-    assert_eq!(column(&view, StatsClass::Live).ms, Some(0));
+    assert_eq!(human(&view, StatsClass::Confirmed).ms, Some(0));
+    assert_eq!(human(&view, StatsClass::Live).ms, Some(0));
 }
 
 #[test]
@@ -504,7 +605,7 @@ fn a_pending_candidate_without_a_known_endpoint_is_counted_but_gives_no_millisec
     );
 
     let view = h.today("Asia/Shanghai").unwrap();
-    let pending = column(&view, StatsClass::Pending);
+    let pending = human(&view, StatsClass::Pending);
     assert_eq!(pending.intervals, 1, "终点未知的候选照样是一条待确认记录");
     assert_eq!(pending.ms, None, "终点未知 ⇒ 不推算毫秒（02 §4）");
 }
@@ -597,20 +698,20 @@ fn an_app_without_any_session_returns_an_empty_view_instead_of_an_error() {
     assert!(view.tasks.is_empty(), "今天没选任何任务");
     assert!(view.current.is_none(), "没有活动会话");
     assert_eq!(
-        column(&view, StatsClass::Confirmed).ms,
+        human(&view, StatsClass::Confirmed).ms,
         Some(0),
         "空库的已确认人工工时是 0，不是缺失"
     );
-    assert_eq!(column(&view, StatsClass::Confirmed).intervals, 0);
-    assert_eq!(column(&view, StatsClass::Live).ms, Some(0));
-    assert_eq!(column(&view, StatsClass::Live).intervals, 0);
+    assert_eq!(human(&view, StatsClass::Confirmed).intervals, 0);
+    assert_eq!(human(&view, StatsClass::Live).ms, Some(0));
+    assert_eq!(human(&view, StatsClass::Live).intervals, 0);
     assert_eq!(
-        column(&view, StatsClass::Pending).intervals,
+        human(&view, StatsClass::Pending).intervals,
         0,
         "有没有待确认按条数判"
     );
     assert_eq!(
-        column(&view, StatsClass::Pending).ms,
+        human(&view, StatsClass::Pending).ms,
         None,
         "一条候选都没有 ⇒ 不给毫秒（零长度候选那条路径见另一个用例）"
     );
@@ -744,7 +845,7 @@ fn a_pure_read_does_not_advance_revision_but_a_business_write_does() {
         "纯读不前进：连续两次 Today 的 revision 相同"
     );
     assert_eq!(again.tasks, before.tasks);
-    assert_eq!(again.confirmed_human, before.confirmed_human);
+    assert_eq!(again.confirmed, before.confirmed);
 
     // 一次业务写：把任务选进今天（恰好一次 revision）。
     {
@@ -774,11 +875,18 @@ fn a_pure_read_does_not_advance_revision_but_a_business_write_does() {
     assert_eq!(task_ids(&after), ["t-1"], "写之后今天的列表里多了这个任务");
     // 信封里的 `revision` 会随业务写前进，所以这里比的是**数字**，不是整个列。
     assert_eq!(
-        after.confirmed_human.ms, before.confirmed_human.ms,
+        after.column(StatsClass::Confirmed, Measure::Human).ms,
+        before.column(StatsClass::Confirmed, Measure::Human).ms,
         "选进今天不是工时事实：三项数字不变"
     );
-    assert_eq!(after.live_human.ms, before.live_human.ms);
-    assert_eq!(after.pending_human.ms, before.pending_human.ms);
+    assert_eq!(
+        after.column(StatsClass::Live, Measure::Human).ms,
+        before.column(StatsClass::Live, Measure::Human).ms
+    );
+    assert_eq!(
+        after.column(StatsClass::Pending, Measure::Human).ms,
+        before.column(StatsClass::Pending, Measure::Human).ms
+    );
 }
 
 #[test]
@@ -819,12 +927,12 @@ fn the_current_task_and_run_state_come_from_the_same_sample() {
     assert_eq!(current.task_title, "正在做的任务");
     assert_eq!(current.state, SessionState::Running);
     assert_eq!(
-        column(&running_view, StatsClass::Live).intervals,
+        human(&running_view, StatsClass::Live).intervals,
         1,
         "开放区间算一条运行暂计"
     );
     assert_eq!(
-        column(&running_view, StatsClass::Live).ms,
+        human(&running_view, StatsClass::Live).ms,
         Some(0),
         "时钟还没走：暂计是 0 毫秒"
     );
@@ -853,9 +961,9 @@ fn the_current_task_and_run_state_come_from_the_same_sample() {
     assert_eq!(current.task_id, "t-1");
     assert_eq!(current.state, SessionState::Paused);
     assert_eq!(
-        column(&paused_view, StatsClass::Live).ms,
+        human(&paused_view, StatsClass::Live).ms,
         Some(0),
         "没有开放区间就没有运行暂计"
     );
-    assert_eq!(column(&paused_view, StatsClass::Live).intervals, 0);
+    assert_eq!(human(&paused_view, StatsClass::Live).intervals, 0);
 }

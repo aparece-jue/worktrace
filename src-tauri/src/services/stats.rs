@@ -718,13 +718,14 @@ pub struct CurrentTask {
 /// Today 一次返回（F-010 的五项，**分别显示、不预先相加**）。
 ///
 /// 五项 = [`Self::tasks`]（今日选择列表）、[`Self::current`]（当前任务与运行状态）、
-/// [`Self::confirmed_human`]（确认人工工时）、[`Self::live_human`]（运行暂计）、
-/// [`Self::pending_human`]（待确认时间）。**没有**合计字段：三段时间分属三类事实
+/// [`Self::confirmed`] / [`Self::live`] / [`Self::pending`] 三组里的 `Human` 列
+/// （确认人工工时 / 运行暂计 / 待确认时间）。**没有**合计字段：三段时间分属三类事实
 /// （02 §6「不得合并」），加起来既不是工时，也不是待办。
 ///
-/// 三项工时都是**人工**口径（`measure = Human`，即只算 `FOREGROUND`）：Today 是用户
-/// 自己的工作视图，F-103 禁止把并行的机器时长加进人工。机器（`BACKGROUND` /
-/// `PASSIVE`）与 `WAITING` 的今日分列在范围报表里（[`StatsSnapshot::report`]）。
+/// 三组工时都按 [`Measure::ALL`] **固定四项**给出（与 [`RangeReport`] 同形，取列用
+/// [`Self::column`]）：人工**只有** `FOREGROUND`，机器分 `BACKGROUND` / `PASSIVE`，
+/// `WAITING` 单列——**谁也不并进谁**（F-103）。机器与等待必须与人工出自**同一次查询**
+/// （同一个 `as_of`/`revision`），否则同一页上会出现两个水位。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TodayView {
     /// ① 今日选择列表：P4 的顺序（`task.created_at, task.id`）。**完成的任务保留在
@@ -732,14 +733,15 @@ pub struct TodayView {
     pub tasks: Vec<TaskRow>,
     /// ② 当前任务与运行状态；没有活动会话时为 `None`。
     pub current: Option<CurrentTask>,
-    /// ③ 确认人工工时：今日真实日界内已确认闭合（含 `recovering` 会话里已可信的前缀）。
-    pub confirmed_human: MeasureColumn,
-    /// ④ 运行暂计：当前开放区间裁剪到今日，终点取**同一次样本**的 `A(M)`。
-    pub live_human: MeasureColumn,
-    /// ⑤ 待确认时间：`intervals` **含零长度候选**，`ms` 只累加已知端点候选的跨度
+    /// ③ 已确认：今日真实日界内已确认闭合（含 `recovering` 会话里已可信的前缀），
+    /// 按 [`Measure::ALL`] 固定四项。`Human` 那一列就是 F-010 的「确认人工工时」。
+    pub confirmed: Vec<MeasureColumn>,
+    /// ④ 运行暂计：当前开放区间裁剪到今日（终点取**同一次样本**的 `A(M)`），固定四项。
+    pub live: Vec<MeasureColumn>,
+    /// ⑤ 待确认：固定四项。`intervals` **含零长度候选**，`ms` 只累加已知端点候选的跨度
     /// （全未知才是 `None`）⇒ 判「有没有待确认」要看 `intervals`，**不要**看
     /// `ms.is_some()`（Ruling P5-12）。
-    pub pending_human: MeasureColumn,
+    pub pending: Vec<MeasureColumn>,
     /// 这个视图算的是哪一天：**查询时区**的本地日期（`YYYY-MM-DD`，与 `LocalDate`
     /// 的落库形状逐字一致）。
     pub date: String,
@@ -747,12 +749,29 @@ pub struct TodayView {
     pub timezone: String,
     /// 今日的**真实**半开日界：`end` 是次日零点的换算结果，夏令时切换日是 23 / 25 小时。
     pub range: StatsRange,
-    /// 三个数字截至哪一刻（同一次样本的归属终点 `A(M)`）。
+    /// 这些数字截至哪一刻（同一次样本的归属终点 `A(M)`）。
     pub as_of: i64,
     /// 这些事实来自哪个库身份。
     pub data_epoch: String,
     /// 这些事实来自哪个业务版本（与五项出自**同一个读事务**）。
     pub revision: i64,
+}
+
+impl TodayView {
+    /// 取某一类某一 measure 的列（每一类固定四项，必定存在）。与
+    /// [`RangeReport::column`] 同一形状：消费者按 `class` + `measure` 取自己要显示的那一项，
+    /// 不必知道它在 `Vec` 里的位置，也没有任何「相加」的入口。
+    pub fn column(&self, class: StatsClass, measure: Measure) -> &MeasureColumn {
+        let columns: &[MeasureColumn] = match class {
+            StatsClass::Confirmed => &self.confirmed,
+            StatsClass::Live => &self.live,
+            StatsClass::Pending => &self.pending,
+        };
+        columns
+            .iter()
+            .find(|column| column.measure == measure)
+            .expect("每一类固定含全部 measure 列")
+    }
 }
 
 /// Today 聚合：一次返回 F-010 的五项（避免 N+1，00 §4）。
@@ -787,19 +806,20 @@ pub fn today(db: &Db, sample: StatsSample, query: &TodayQuery) -> Result<TodayVi
         },
     )?;
 
-    // 聚合在串行边界之外（Task 1 的分工）；这里只取人工那三列。
+    // 聚合在串行边界之外（Task 1 的分工）：三组列**原样**取自同一份报表，
+    // 不筛选、不合并、不相加（F-010 的五项就是三组里的 `Human` 那三列）。
     let report = snapshot.report()?;
     Ok(TodayView {
         tasks,
         current,
-        confirmed_human: report.column(StatsClass::Confirmed, Measure::Human).clone(),
-        live_human: report.column(StatsClass::Live, Measure::Human).clone(),
-        pending_human: report.column(StatsClass::Pending, Measure::Human).clone(),
+        confirmed: report.confirmed,
+        live: report.live,
+        pending: report.pending,
         date: date.to_string(),
-        timezone: report.timezone.clone(),
+        timezone: report.timezone,
         range: report.range,
         as_of: report.as_of,
-        data_epoch: report.data_epoch.clone(),
+        data_epoch: report.data_epoch,
         revision: report.revision,
     })
 }
