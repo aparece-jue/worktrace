@@ -389,6 +389,15 @@ fn the_export_carries_its_format_identity_units_and_the_same_data_watermark() {
     assert!(!doc["criteria"]["pending"].as_str().unwrap().is_empty());
     assert!(!doc["criteria"]["labels"].as_str().unwrap().is_empty());
     assert!(!doc["criteria"]["range_basis"].as_str().unwrap().is_empty());
+    // —— 两个时间的口径（Ruling P5-19）：`as_of` 是数据水位、`generated_at` 是文件产出时刻
+    assert!(
+        doc["criteria"]["watermarks"]
+            .as_str()
+            .unwrap()
+            .contains("generated_at"),
+        "口径里必须写清 generated_at 不代表数据更新到那一刻：{:?}",
+        doc["criteria"]["watermarks"]
+    );
 
     // —— 生成时间：**原样**是调用方传进来的那个值（服务层不读时钟）
     assert_eq!(doc["generated_at"], generated_at);
@@ -1300,8 +1309,8 @@ fn the_app_state_entry_point_exports_the_same_document_as_the_service() {
         "纯读不前进 revision"
     );
     assert_ne!(later.text, exported.text, "生成时间不同 ⇒ 文本不同");
-    // 两次导出之间会动的只有**时间水位**（`generated_at` 与每一处的 `as_of`，它们是
-    // 同一个采样时刻）；数字与口径必须逐字段一致。
+    // 两次导出之间会动的只有**时间水位**（`generated_at` 与每一处的 `as_of`）；数字与口径
+    // 必须逐字段一致。
     let mut aligned = later_doc.clone();
     let mut expected = doc.clone();
     normalize_watermarks(&mut aligned);
@@ -1309,5 +1318,61 @@ fn the_app_state_entry_point_exports_the_same_document_as_the_service() {
     assert_eq!(
         aligned, expected,
         "除时间水位（generated_at / as_of）外两份导出逐字段一致"
+    );
+}
+
+#[test]
+fn the_generated_time_is_the_wall_clock_and_not_the_data_watermark() {
+    let fixture = app_fixture();
+    let clock = Arc::new(Mutex::new(FakeClock::new(SH_MID, 0)));
+    let running = app_started(&fixture, Arc::clone(&clock));
+    let epoch = running.data_epoch().to_string();
+    let app = Arc::clone(running.app());
+
+    // 只拨**挂钟**、不动单调钟：数据的归属终点 `A(M)` 一动不动，
+    // 而「生成本刻」的墙钟前进 2 秒——两个字段从此不相等（Ruling P5-19）。
+    //
+    // 为什么是 2000ms 而不是「5 秒」：08 §1 的判据是「两差任一绝对值 **严格大于** 2000ms」
+    // 才算挂钟跳变（`platform::clock::THRESHOLD_MS`）。拨 5 秒会被判成跳变，
+    // `stats_sample` 会**先落恢复事务再拒绝**（`RECOVERY_REQUIRED`）——那是异常路径、
+    // 而且会写库，不是导出该走的正常路径。2000ms 恰好落在「不算越界」的那条边界上，
+    // 既能制造两个不同的时刻，也不惊动检测器。
+    clock.lock().unwrap().advance_wall(2_000);
+
+    let (exported, doc) = {
+        let mut guard = lock_app(&app);
+        let exported = guard
+            .export_json(&export_query(&epoch, SH_MID, SH_MID + DAY, "Asia/Shanghai"))
+            .expect("小幅改钟不该让导出失败");
+        let doc: Value = serde_json::from_str(&exported.text).unwrap();
+        (exported, doc)
+    };
+
+    // 生成时间 = 生成本刻的墙钟（平台时钟接缝），**不是**样本的 `as_of`。
+    assert_eq!(
+        doc["generated_at"],
+        SH_MID + 2_000,
+        "generated_at 是生成本刻的墙钟"
+    );
+    assert_eq!(
+        doc["as_of"], SH_MID,
+        "数字的归属终点不动：数字仍全部来自那一次样本"
+    );
+    assert_ne!(
+        doc["generated_at"], doc["as_of"],
+        "两个字段必须能表达不同的时刻，否则「生成时间」没有信息"
+    );
+    // 事实与版本没被这次读时钟带动。
+    assert_eq!(ms_of(&doc, "confirmed", "human"), Some(0));
+    assert_eq!(doc["revision"], 0);
+    assert_eq!(exported.revision, 0);
+    assert_eq!(doc["data_epoch"], epoch);
+    // 口径声明里写清两者不同义（第三方不必读代码）。
+    assert!(
+        doc["criteria"]["watermarks"]
+            .as_str()
+            .unwrap()
+            .contains("不代表数据更新到那一刻"),
+        "口径要写清 generated_at 不代表数据更新到那一刻"
     );
 }

@@ -14,6 +14,15 @@
 //!    任务行 + 项目行 + 标签行随导出一起给出。**只做连接，不重算任何时长**——
 //!    标签那一段里没有任何毫秒字段，按标签归并时长由第三方自己做。
 //!
+//! # 两个时间不是一回事（Ruling P5-19）
+//!
+//! - `as_of`：**数字**截至哪一刻——同一次采样的归属终点 `A(M)`，全部数字都来自它；
+//! - `generated_at`：**这份文件**何时产出——生成本刻的墙钟。
+//!
+//! 两者可以不等（例如系统时间被小幅改动、或导出发生在采样之后）：这时导出**不代表**
+//! 数据更新到了 `generated_at`。这句话也写进了导出的 `criteria.watermarks`，第三方不必
+//! 读代码就能知道该怎么解释这两个字段。
+//!
 //! # 边界（不要越界）
 //!
 //! - **落盘归 P8**：本模块返回**字符串**，不引入文件系统 / 对话框依赖，不写文件。
@@ -21,8 +30,9 @@
 //! - **只读**：不写库、不加 `revision`、不写审计。
 //! - **不做任何按 `weight` 的分配**（属 V0.2）；不做标签层级去重汇总（V0.2）。
 //! - **不读时钟**：`generated_at` 由调用方传入（分层门禁机器禁止 `src/services` 读系统
-//!   时钟）。生产路径 [`crate::services::bootstrap::AppState::export_json`] 把同一次样本的
-//!   归属终点 `A(M)` 传进来，所以 `generated_at == as_of`：导出不会声称自己比它装的数据更新。
+//!   时钟）。生产路径 [`crate::services::bootstrap::AppState::export_json`] 从**平台时钟
+//!   接缝**取一次生成本刻的墙钟传进来（`Coordinator::wall_ms` → `platform::clock::Clock`），
+//!   与那一次样本同处一条串行边界；数字仍**全部**来自样本（`as_of` 不因它变化）。
 //!
 //! # `schema_version` 是**导出格式**的版本
 //!
@@ -87,6 +97,8 @@ struct Criteria {
     pending: &'static str,
     /// 标签连接的读法与「不可相加」的提醒。
     labels: &'static str,
+    /// 两个时间的口径（Ruling P5-19）：`as_of` 是数据水位，`generated_at` 是文件产出时刻。
+    watermarks: &'static str,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,7 +125,9 @@ struct TaskClassification {
 struct Document {
     /// **导出格式**的版本（≠ 07 入站协议的同名字段，见模块文档）。
     schema_version: u32,
-    /// 生成时刻（Unix 毫秒）。**由调用方传入**：服务层不读时钟。
+    /// 生成时刻（Unix 毫秒）：**这份文件**何时产出。**由调用方传入**（服务层不读时钟）。
+    /// 它与 [`crate::services::stats::StatsSnapshot::as_of`]（数字截至哪一刻）是两件事，
+    /// 可以不等（Ruling P5-19）。
     generated_at: i64,
     /// 单位口径。
     units: Units,
@@ -166,7 +180,8 @@ pub struct ExportJson {
 ///
 /// `generated_at` 是**显式参数**：服务层不读时钟（分层门禁机器强制），所以「同一输入两次
 /// 导出除生成时间外字节一致」是可测的。生产路径
-/// （[`crate::services::bootstrap::AppState::export_json`]）传同一次样本的归属终点。
+/// （[`crate::services::bootstrap::AppState::export_json`]）从平台时钟接缝取一次生成本刻的
+/// 墙钟传进来；**数字不受它影响**——`as_of` 仍是那一次样本的归属终点（Ruling P5-19）。
 ///
 /// 请求用的就是报表的 [`StatsRangeQuery`]：范围 / 时区 / epoch 守卫与报表同源，导出不会
 /// 出现「数字是一个范围、口径字段是另一个范围」。
@@ -202,8 +217,11 @@ pub fn json(
                        四类分列、谁也不并进谁（1h 前台 + 1h 后台 = 人工 1h），三类之间不预先相加。",
             pending: "待确认栏的 ms 只累加「已知端点」候选的跨度（裁剪到范围）；终点未知不推算\
                       ——该 measure 一条已知端点的候选都没有时 ms 为 null（不是 0）。条数看 intervals。",
-            labels: "标签与项目按每条明细的 task_id 在导出时刻连接（见 tasks 段），只做连接、\
-                     不重算任何时长；按标签归并时多个标签之和可大于人工总量，不可相加。",
+            labels: "标签与项目按每条明细的 task_id 取当前归属（导出这一刻的当前分类，见 tasks 段），\
+                     只做连接、不重算任何时长，也不做任何按 weight 的分配；按标签归并时\
+                     多个标签之和可大于人工总量，不可相加。",
+            watermarks: "数字截至 as_of（同一次采样的归属终点，全部数字都来自它）；generated_at\
+                         只说明本文件何时生成，不代表数据更新到那一刻——两者可以不等。",
         },
         data_epoch: report.data_epoch,
         revision: report.revision,

@@ -624,14 +624,17 @@ impl AppState {
     /// 不写审计；**落盘归 P8**，这一层只返回内容（[`ExportJson::text`]）。
     ///
     /// **生成时间由这一层给**（`generated_at` 是服务层的显式参数）：服务层不许读时钟
-    /// （分层门禁机器强制），所以取**同一次样本**的归属终点 `A(M)` —— 导出因此不会声称
-    /// 自己比它装的数据更新（`generated_at == as_of`）。
+    /// （分层门禁机器强制），所以这里从**平台时钟接缝**取一次**生成本刻的墙钟**
+    /// （[`AppState::now_ms`] → `Coordinator::wall_ms` → `platform::clock::Clock`），
+    /// 与样本同处一条串行边界。它与数据水位是两件事：数字仍**全部**来自那一次样本
+    /// （`as_of` 是它的归属终点 `A(M)`），`generated_at` 只说明这份文件何时产出
+    /// （Ruling P5-19）——两者不相等时，导出不代表数据更新到了那一刻。
     pub fn export_json(&mut self, query: &StatsRangeQuery) -> Result<ExportJson, AppError> {
         let AppState {
             db, coordinator, ..
         } = self;
         let sample = coordinator.stats_sample(db)?;
-        let generated_at = sample.attributed_end;
+        let generated_at = coordinator.wall_ms()?;
         crate::services::export::json(db, sample, query, generated_at)
     }
 
