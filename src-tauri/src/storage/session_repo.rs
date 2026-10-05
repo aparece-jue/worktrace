@@ -43,6 +43,13 @@ pub struct IntervalRow {
     pub needs_review: bool,
 }
 
+/// `work_interval` 的一行加上它所属会话的模式（P5 统计的 measure 归类要用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntervalWithMode {
+    pub interval: IntervalRow,
+    pub mode: SessionMode,
+}
+
 const SESSION_SELECT: &str =
     "SELECT id, task_id, run_id, mode, state, timer_kind, target_duration_ms, \
      started_at, ended_at, needs_review, row_version FROM work_session";
@@ -53,6 +60,12 @@ const INTERVAL_SELECT: &str =
 const INTERVAL_SELECT_ALIASED: &str =
     "SELECT i.id, i.session_id, i.started_at, i.ended_at, i.voided_at, i.duration_ms, \
      i.sampled_end_wall_at, i.needs_review FROM work_interval i";
+/// 与 [`INTERVAL_SELECT_ALIASED`] 同序，末尾多一列 `s.mode`：P5 的范围统计要按会话
+/// 模式分 measure（人工 / 机器 / 等待），JOIN 一次就取回来，不再逐会话回查（避免 N+1）。
+const INTERVAL_WITH_MODE_SELECT: &str =
+    "SELECT i.id, i.session_id, i.started_at, i.ended_at, i.voided_at, i.duration_ms, \
+     i.sampled_end_wall_at, i.needs_review, s.mode FROM work_interval i \
+     JOIN work_session s ON s.id = i.session_id";
 
 fn read_session(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRow> {
     let mode: String = r.get(3)?;
@@ -89,6 +102,16 @@ fn read_interval(r: &rusqlite::Row<'_>) -> rusqlite::Result<IntervalRow> {
     })
 }
 
+/// 与 [`INTERVAL_WITH_MODE_SELECT`] 同序：前 8 列是 [`IntervalRow`]，第 9 列是会话模式。
+fn read_interval_with_mode(r: &rusqlite::Row<'_>) -> rusqlite::Result<IntervalWithMode> {
+    let mode: String = r.get(8)?;
+    Ok(IntervalWithMode {
+        interval: read_interval(r)?,
+        mode: SessionMode::parse(&mode)
+            .ok_or_else(|| super::task_repo::enum_error(8, "work_session.mode", &mode))?,
+    })
+}
+
 pub fn get_session(conn: &Connection, id: &str) -> Result<Option<SessionRow>, AppError> {
     let sql = format!("{SESSION_SELECT} WHERE id = ?1");
     conn.query_row(&sql, [id], read_session)
@@ -111,6 +134,43 @@ pub fn intervals_of_session(
     let mut stmt = conn.prepare(&sql).map_err(map_sqlite)?;
     let rows = stmt
         .query_map([session_id], read_interval)
+        .map_err(map_sqlite)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+}
+
+/// 与半开范围 `[from, to)` **相交**的区间（连同会话模式），按 `(started_at, id)` 升序。
+///
+/// 这是 P5 统计（范围报表 / Today / 导出）**唯一**的区间取数入口：**不按会话遍历各查
+/// 一次**——那正是计划明写要避免的 N+1。半开相交的谓词与
+/// [`require_no_human_overlap`] 同形，没有第二处再写一遍。
+///
+/// **排除口径只在这里做一次**（服务层不再重判）：
+/// - `i.voided_at IS NULL`：已作废的区间不进任何统计（02 §6），只能在历史/审计里看；
+/// - `s.state <> 'discarded'`：已丢弃会话的区间同样不进统计；
+/// - `(i.ended_at IS NULL OR i.started_at < i.ended_at)`：P3 收紧的「**空区间不占时间**」
+///   ——零长度段与任何半开范围都不相交，本来就不该出现在结果里。
+///
+/// **`needs_review = 1` 不在这里排除**：待确认区间要单列一栏（02 §6），由服务层按
+/// `attention_overview` 的待确认集合分出来，丢掉它反而会让用户看不到要处理的那条。
+///
+/// 调用方保证 `from <= to`（服务层用 `IntervalRange::new` 校验）；本函数不自行
+/// begin/commit，也不加版本。
+pub fn intervals_overlapping(
+    conn: &Connection,
+    from: i64,
+    to: i64,
+) -> Result<Vec<IntervalWithMode>, AppError> {
+    let sql = format!(
+        "{INTERVAL_WITH_MODE_SELECT} \
+         WHERE s.state <> 'discarded' AND i.voided_at IS NULL \
+           AND (i.ended_at IS NULL OR i.started_at < i.ended_at) \
+           AND i.started_at < ?2 \
+           AND (i.ended_at IS NULL OR ?1 < i.ended_at) \
+         ORDER BY i.started_at, i.id"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(map_sqlite)?;
+    let rows = stmt
+        .query_map(rusqlite::params![from, to], read_interval_with_mode)
         .map_err(map_sqlite)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
 }

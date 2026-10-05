@@ -26,6 +26,10 @@ pub mod history;
 // 到这里 `services` 子树的注册就齐了（前两个由 Task 1/3 各自注册，见 Ruling 2）。
 pub mod tasks;
 
+// P5 Task 1：统计口径（半开裁剪、排除、人工/机器分离、日界分桶）与范围报表入口。
+// Today / JSON 明细导出 / Markdown 周回顾三者共用这一层，不各写一套取数逻辑。
+pub mod stats;
+
 // P3 终审 I2c：`time_edit` 审计载荷的公共骨架（`recovery` 与 `history` 共用一份
 // 事实契约）。同样只有本层用。
 mod audit;

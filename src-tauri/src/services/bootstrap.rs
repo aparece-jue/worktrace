@@ -52,6 +52,7 @@ use crate::platform::single_instance::{self, InstanceLock};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
 use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditReport};
 use crate::services::recovery::{DiscardSessionRequest, ReconcileReport, ReconcileRequest};
+use crate::services::stats::{StatsRangeQuery, StatsSnapshot};
 use crate::services::tasks::{TaskTransitionReport, TransitionTaskRequest};
 use crate::services::timer::coordinator::{
     AcceptClockCorrectionRequest, ClockCorrectionAccepted, CommandOutcome, Coordinator,
@@ -578,6 +579,26 @@ impl AppState {
             db, coordinator, ..
         } = self;
         coordinator.tick(db)
+    }
+
+    /// **统计快照**（P5 Task 1）：在**同一条串行边界**内取一次协调器样本，再用一次
+    /// 一致读把事实冻成快照；聚合与序列化在边界**外**基于它进行
+    /// （[`StatsSnapshot::report`]）。
+    ///
+    /// 为什么必须是这一个方法，而不是让服务层自己够协调器：`AppState.coordinator` 是
+    /// 私有字段（把 `&mut Coordinator` 递出去，「不得忽略历史」就只剩纪律），而运行区间
+    /// 的终点只能来自 [`Coordinator::stats_sample`]。所以这里与 `start`/`pause` 同一姿势：
+    /// 解构 `AppState`、取一次样本、交给服务——IPC 命令归 P8，本层只开这一条接缝。
+    ///
+    /// **不过恢复门禁**：门禁只挡「开始新计时」（`start`/`resume`），统计是只读查询；
+    /// 真正不可信的那些事实由 `stats_sample` 自己按恢复语义拒绝（`RECOVERY_REQUIRED`），
+    /// 不在这里重复判一遍。
+    pub fn stats_snapshot(&mut self, query: &StatsRangeQuery) -> Result<StatsSnapshot, AppError> {
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        let sample = coordinator.stats_sample(db)?;
+        crate::services::stats::snapshot(db, sample, query)
     }
 
     /// **周期采样的一拍**：先问心跳（约 30 秒一次检查点），再取一次计时快照。
