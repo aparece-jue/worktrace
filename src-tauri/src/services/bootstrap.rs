@@ -50,7 +50,7 @@ use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
-use crate::services::export::ExportJson;
+use crate::services::export::{ExportJson, ExportMarkdown, WeeklyQuery};
 use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditReport};
 use crate::services::recovery::{DiscardSessionRequest, ReconcileReport, ReconcileRequest};
 use crate::services::stats::{StatsRangeQuery, StatsSnapshot, TodayQuery, TodayView};
@@ -636,6 +636,32 @@ impl AppState {
         let sample = coordinator.stats_sample(db)?;
         let generated_at = coordinator.wall_ms()?;
         crate::services::export::json(db, sample, query, generated_at)
+    }
+
+    /// **Markdown 周回顾**（P5 Task 4，F-018）：与 [`AppState::export_json`] 同一姿势——
+    /// 同一条串行边界内取一次样本，交给 `services::export` 用**同一份** `services::stats`
+    /// 取数路径产出周回顾（人工投入 / 完成任务 / 待确认记录三节）。**不依赖 AI、也不需要
+    /// 网络**；**不写库**：不加 `revision`、不写审计；**落盘归 P8**，这一层只返回内容
+    /// （[`ExportMarkdown::text`]）。
+    ///
+    /// **生成时间由这一层给**（`generated_at` 是服务层的显式参数，服务层不许读时钟）：
+    /// 取自**平台时钟接缝**的**生成本刻的墙钟**（[`AppState::now_ms`] →
+    /// `Coordinator::wall_ms`），与样本同处一条串行边界；它只说明这份文件何时产出，
+    /// 数字仍**全部**来自那一次样本（`as_of` 是它的归属终点 `A(M)`，Ruling P5-19 对
+    /// Markdown 同一口径）。
+    ///
+    /// **周界由服务定**：请求里的 `anchor` 省略时用**同一次样本**的归属终点算「本周」，
+    /// 与 Today 的「今天」同一口径——调用方不必、也不该为此另采一次墙钟。
+    pub fn export_weekly_markdown(
+        &mut self,
+        query: &WeeklyQuery,
+    ) -> Result<ExportMarkdown, AppError> {
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        let sample = coordinator.stats_sample(db)?;
+        let generated_at = coordinator.wall_ms()?;
+        crate::services::export::weekly(db, sample, query, generated_at)
     }
 
     /// **周期采样的一拍**：先问心跳（约 30 秒一次检查点），再取一次计时快照。

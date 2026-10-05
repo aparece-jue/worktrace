@@ -369,6 +369,68 @@ pub(crate) fn record_change(
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 完成事件（P5 Task 4：周回顾的「完成任务」按**事件时刻**取）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一条「任务被置为 `Done`」的变更事件。
+///
+/// 只承载周回顾要的那两件事实：**哪个任务**、**什么时候完成**。事件时刻就是
+/// `task_change.created_at`——02 §10 明写「报告按该记录的时刻选完成项，不以
+/// `updated_at` 或 session 结束时间代替」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoneEvent {
+    pub task_id: String,
+    /// 完成事件时刻（Unix 毫秒）。
+    pub completed_at: i64,
+}
+
+/// 与半开范围 `[from, to)` 相交的**完成事件**，按 `(created_at, task_id, id)` 升序。
+///
+/// # 为什么必须按**形状**过滤
+///
+/// `task_change` 有**三种形状**（任务字段 / 标签集合 / 今日计划集合，见
+/// [`crate::storage`] 的模块文档），三种都进同一张表。所以「有没有 `task_change` 行」
+/// 回答不了任何业务问题：贴一个标签、加一次今日计划、建一个任务同样会写一行。
+/// 完成事件的判据只有一条——`json_extract(after_json, '$.status') = 'Done'`
+/// （`transition_task` 写的就是这个形状，见 [`transition_task`]）；路径不存在时
+/// `json_extract` 返回 `NULL`、比较为假，别的形状因此天然落选。
+///
+/// # 为什么返回**全部**事件，而不是「最后一条」
+///
+/// 一个任务「完成 → 重开 → 再完成」有**两个** Done 事件，而 `task_change` 同一毫秒
+/// 可以落多行、`ORDER BY created_at, id` 在它们之间没有时间先后的意义（P3 台账的
+/// 携带项）。所以这里既不 `LIMIT 1`、也不做「取最新」的归并：**每个 Done 事件各归其周**，
+/// 由调用方按事件时刻分组。排序只为了让输出稳定（同一份库给出同一个顺序）。
+///
+/// 范围是**半开**的：`created_at == from` 算在内、`created_at == to` 不算
+/// （周一 00:00 那一刻完成的属于新的一周）；`from == to` 返回空。调用方保证 `from <= to`
+/// ——服务层用 `IntervalRange::new` 校验，与
+/// [`crate::storage::session_repo::intervals_overlapping`] 同一约定。
+pub fn done_events_within(
+    conn: &Connection,
+    from: i64,
+    to: i64,
+) -> Result<Vec<DoneEvent>, AppError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT task_id, created_at FROM task_change
+             WHERE json_extract(after_json, '$.status') = 'Done'
+               AND created_at >= ?1 AND created_at < ?2
+             ORDER BY created_at, task_id, id",
+        )
+        .map_err(map_sqlite)?;
+    let rows = stmt
+        .query_map(rusqlite::params![from, to], |r| {
+            Ok(DoneEvent {
+                task_id: r.get(0)?,
+                completed_at: r.get(1)?,
+            })
+        })
+        .map_err(map_sqlite)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+}
+
 /// 把「列里的值不在取值域内」包成带列名的 SQLite 转换错误。
 ///
 /// 用 `FromSqlConversionFailure` 而不是 `InvalidQuery`：后者的文案是
