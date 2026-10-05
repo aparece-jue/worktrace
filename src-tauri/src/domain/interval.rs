@@ -64,6 +64,19 @@ mod range_boundary_tests {
     use super::IntervalRange;
 
     #[test]
+    fn a_set_rejects_total_duration_overflow_without_changing_its_items() {
+        let mut set = super::IntervalSet::new();
+        set.insert(IntervalRange::new(i64::MIN, -1).unwrap())
+            .unwrap();
+        assert!(matches!(
+            set.insert(IntervalRange::new(0, 1).unwrap()),
+            Err(super::DomainError::IntervalSpanOverflow)
+        ));
+        assert_eq!(set.len(), 1);
+        assert_eq!(set.total_ms(), i64::MAX);
+    }
+
+    #[test]
     fn distant_short_intervals_have_zero_overlap_without_overflow() {
         let left = IntervalRange::new(i64::MIN, i64::MIN + 1).unwrap();
         let right = IntervalRange::new(i64::MAX - 1, i64::MAX).unwrap();
@@ -147,6 +160,10 @@ impl IntervalSet {
                 });
             }
         }
+        IntervalRange::new(range.start, range.end)?;
+        self.total_ms()
+            .checked_add(range.duration_ms())
+            .ok_or(DomainError::IntervalSpanOverflow)?;
         self.items.push(range);
         Ok(())
     }

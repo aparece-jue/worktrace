@@ -286,7 +286,9 @@ impl Coordinator {
                 voided: iv.voided_at.is_some(),
             };
             if facts.counts_as_confirmed() {
-                closed_trusted_ms += iv.duration_ms.unwrap_or(0);
+                closed_trusted_ms = closed_trusted_ms
+                    .checked_add(iv.duration_ms.unwrap_or(0))
+                    .ok_or(DomainError::IntervalSpanOverflow)?;
             }
             // 开放区间只在 running 下才算「正在计时」。
             if iv.ended_at.is_none() && iv.voided_at.is_none() && row.state.allows_open_interval() {
@@ -466,7 +468,10 @@ impl Coordinator {
 
         // 待确认段与已确认工时**分列**：它还不是工时，混在一起会让人以为算上了。
         let pending = self.pending_ms_of(conn, &live.id)?;
-        let active_ms = live.closed_trusted_ms + live_ms;
+        let active_ms = live
+            .closed_trusted_ms
+            .checked_add(live_ms)
+            .ok_or(DomainError::IntervalSpanOverflow)?;
         Ok(TimerSnapshot {
             data_epoch: meta.data_epoch,
             revision: meta.revision,
@@ -1430,11 +1435,17 @@ impl Coordinator {
 
     /// 待确认时长：所有 `needs_review=1` 且未作废的区间跨度之和。
     fn pending_ms_of(&self, conn: &Connection, session_id: &str) -> Result<i64, AppError> {
-        let mut total = 0;
+        let mut total: i64 = 0;
         for iv in session_repo::intervals_of_session(conn, session_id)? {
             if iv.needs_review && iv.voided_at.is_none() {
                 if let Some(end) = iv.ended_at {
-                    total += (end - iv.started_at).max(0);
+                    let span = end
+                        .checked_sub(iv.started_at)
+                        .ok_or(DomainError::IntervalSpanOverflow)?
+                        .max(0);
+                    total = total
+                        .checked_add(span)
+                        .ok_or(DomainError::IntervalSpanOverflow)?;
                 }
             }
         }
@@ -1693,14 +1704,16 @@ impl Coordinator {
 
         // **一遍回放**分出两段：闭合可信的进 closed，当前开放的进 live。
         // 用 `if/else` 而不是两次 `filter`——那样一个区间就可能同时落进两边。
-        let mut closed_trusted_ms = 0;
+        let mut closed_trusted_ms: i64 = 0;
         let mut open_interval_id = None;
         let mut live_ms = 0;
         for iv in session_repo::intervals_of_session(db.connection(), &live.id)? {
             let voided = iv.voided_at.is_some();
             match iv.ended_at {
                 Some(_) if !voided && !iv.needs_review => {
-                    closed_trusted_ms += iv.duration_ms.unwrap_or(0);
+                    closed_trusted_ms = closed_trusted_ms
+                        .checked_add(iv.duration_ms.unwrap_or(0))
+                        .ok_or(DomainError::IntervalSpanOverflow)?;
                 }
                 None if !voided && live.state == SessionState::Running => {
                     open_interval_id = Some(iv.id.clone());
@@ -1710,6 +1723,9 @@ impl Coordinator {
             }
         }
 
+        closed_trusted_ms
+            .checked_add(live_ms)
+            .ok_or(DomainError::IntervalSpanOverflow)?;
         Ok(StatsSample {
             run_id: self.run_id.clone(),
             session_id: Some(live.id),

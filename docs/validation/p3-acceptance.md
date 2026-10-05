@@ -1,5 +1,25 @@
 # P3 验收记录：恢复确认、历史修正与补录
 
+## 2026-10-05 待确认时长补充复审
+
+进一步检查发现 pending_ms_of 仍普通相减并累加，上一轮已确认工时的保护未覆盖这个独立路径。现候选跨度使用 checked_sub，累计使用 checked_add，超界返回 DOMAIN_ERROR，不把待确认时长截断为虚假的可表示数字。新增 pending_duration_overflow_returns_an_error_without_changing_persisted_facts，验证两段合法候选累加超界时快照返回错误，区间数量与会话版本不变。
+
+本轮针对修改范围复跑：库单元测试 59 passed、timer_snapshot 17 passed（含新增回归），Clippy all-targets / fmt / diff 检查通过。前述完整门禁 598 与前端 142 是上一轮证据，不冒充新增回归后的全套数量。本轮未改前端、IPC 或 schema。pre-p3-closure 已标注为历史开工记录，避免“P3 尚未实现”与当前交付冲突。
+
+仍需后续关闭：P5 统计/导出、P6 平台事件与维护备份恢复/采样失活等故障闭环、P8 恢复界面及真实多窗口/托盘/打包验收。它们是未交付或未验证的范围，不能称为已完成阶段的新接口冲突。
+
+## 2026-10-05 再复审（基线 adcb11c）
+
+上轮修复已纳入 adcb11c，专用 IntervalSpanOverflow 变体仍映射 DOMAIN_ERROR，错误文案调整与 P7 前端契约兼容；P1 schema、P4 写信封和既有 IPC 未变。再次检查恢复重试、条件化镜像刷新、任务跃迁与待办承接，未发现新的阶段职责冲突。
+
+另补一类数值边界：逐段合法不保证累计时长可表示。IntervalSet 插入前检查累计跨度并拒绝失败插入；协调器镜像装载、快照 active_ms 与 stats_sample 的累计改为 checked_add，返回既有 DOMAIN_ERROR，提交后刷新失败仍走 RECOVERY_REQUIRED 隔离。回归覆盖集合累计溢出时内容不变，以及持久化的两段合法区间累加溢出时装载返回错误、提交后刷新保持隔离。未采用饱和累加，因为那会静默少报工时。
+
+平台实机、真实多窗口和 P8 恢复交互仍按原责任阶段承接，本轮不把自动化通过解释为 V0.1 发布验收。
+
+完整门禁：Rust **598 passed / 0 failed / 1 ignored**、前端 **142 passed**，八项检查全部退出 0，证据：`C:\Users\lenovo\AppData\Local\Temp\worktrace-pre-p3-20261005-141806`；此前新增代码/测试的编译失败已修正，该次结果来自修复后的完整重跑。
+
+**订正（2026-10-05 复审）**：上面那次 598 是在 `tests/timer_snapshot.rs` 只有 **16** 条用例时跑的；该文件现为 **17** 条（两条时长累加回归都已在），因此它不是当前状态的最终数字。控制器在**当前 5 文件状态**上复跑完整门禁：Rust **599 passed / 0 failed / 1 ignored**、前端 **142 passed**、八项检查全部退出 0，证据 `C:\Users\lenovo\AppData\Local\Temp\worktrace-pre-p3-20261005-142510`。以这一条为准。
+
 ## 2026-10-05 已完成阶段兼容性复审
 
 再次检查 P1/P2/P4/P7 与 P3 的接缝，发现并修复提交后镜像刷新失败的隔离缺口：P3 数据已提交后，重载失败原先只返回 RECOVERY_REQUIRED，旧 running 镜像仍可能继续输出。现在 refresh_committed_session 在读取失败时记录待重载会话，is_faulted / 计时命令 / 快照统一隔离；retry_recovery 只重新读取已提交事实，读取仍失败则保持隔离，不重复写入、不新增审计或版本递增。

@@ -116,6 +116,46 @@ impl Harness {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn pending_duration_overflow_returns_an_error_without_changing_persisted_facts() {
+    let mut h = harness(TimerKind::Stopwatch, None);
+    h.set_state(SessionState::Recovering, 0);
+    h.interval("large-pending", i64::MIN, Some(-1), true, false);
+    h.interval("small-pending", 0, Some(1), true, false);
+    h.start(0);
+    let error = h.coord.snapshot(&mut h.db).unwrap_err();
+    assert_eq!(error.code(), "DOMAIN_ERROR");
+    assert_eq!(
+        session_repo::intervals_of_session(h.db.connection(), "s1")
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        session_repo::get_session(h.db.connection(), "s1")
+            .unwrap()
+            .unwrap()
+            .row_version,
+        0
+    );
+}
+
+#[test]
+fn accumulated_duration_overflow_returns_an_error_and_isolates_the_mirror() {
+    let mut h = harness(TimerKind::Stopwatch, None);
+    h.set_state(SessionState::Paused, 0);
+    h.interval("large", i64::MIN, Some(-1), false, false);
+    h.interval("small", 0, Some(1), false, false);
+    let error = h.coord.load_session(h.db.connection(), "s1").unwrap_err();
+    assert_eq!(error.code(), "DOMAIN_ERROR");
+    assert!(h
+        .coord
+        .refresh_committed_session(h.db.connection(), "s1")
+        .is_err());
+    assert!(h.coord.is_faulted());
+    assert!(h.coord.snapshot(&mut h.db).is_err());
+}
+
+#[test]
 fn a_failed_postcommit_refresh_isolates_the_mirror_and_retry_only_reloads_facts() {
     let mut h = harness(TimerKind::Stopwatch, None);
     h.interval("open", 1000, None, false, false);
