@@ -160,3 +160,75 @@ Task 1 的跨日分桶与 Task 4 的周界都用它们，**不新写第二份日
 
 **已考虑但决定不做**：不抽 `tests/common/` 共享夹具——P3 的 8 个测试文件各自带夹具（900–2100 行/文件）可读性更好，
 P5 规模更小（5 个文件），统一抽象反而会把各任务的独立性绑在一起。若实施中出现明显重复，由该任务的评审提出。
+
+---
+
+## P5 实施记录（2026-10-06，控制器落盘）
+
+> 代码范围 `0503f65..1d6a3f6`（10 提交 / 11 文件 / **+8123 行、0 删除**——纯新增，未改动任何一行既存代码）。
+> `cargo test --offline` **654 passed / 0 failed / 1 ignored**（P5 前 599）；`cargo fmt --check` / `clippy -D warnings` / 分层六条全绿；
+> 项目级八项门禁 **8/8 exit 0、`automated_passed = true`**（⇒ P1–P4 无回归）；无新 IPC/错误码/依赖/schema 迁移，前端与 15 份快照 fixture 零 diff。
+> 逐条验收与未完成项见 `docs/validation/p5-acceptance.md`；实施期裁决见 `.superpowers/sdd/2026-10-03-p5-stats-and-export/progress.md`。
+
+### 实际交付签名（P8 按这些接线；「下游接口」那一节以本记录为准）
+
+```rust
+// services/stats.rs
+pub fn snapshot(db: &mut Db, sample: StatsSample, query: &StatsRangeQuery) -> Result<StatsSnapshot, AppError>;
+impl StatsSnapshot {
+    pub fn report(&self) -> RangeReport;           // 唯一聚合点；聚合发生在串行边界之外，纯函数
+    // + run_id / session_id / session_version / open_interval_id / attributed_end / state / data_epoch / revision
+}
+pub fn today(db: &Db, sample: StatsSample, query: &TodayQuery) -> Result<TodayView, AppError>;
+pub struct StatsRangeQuery { pub from: i64, pub to: i64, pub timezone: String, pub expected_data_epoch: String }
+pub struct TodayQuery { pub timezone: String, pub expected_data_epoch: String }   // 不带 date：「今天」由同一次样本的 A(M) 算
+pub enum Measure { Human, MachineBackground, MachinePassive, Waiting }
+pub enum StatsClass { Confirmed, Live, Pending }
+pub struct MeasureColumn { class, measure, timezone, range, as_of, data_epoch, revision, ms: Option<i64>, intervals: usize }
+pub struct DayTotal { pub date: String, pub confirmed: Vec<MeasureColumn> }        // 固定四项
+pub struct StatsInterval { id, session_id, task_id, class, measure, started_at, ended_at: Option<i64>,
+                           duration_ms: Option<i64>, clipped_ms: i64, needs_review: bool }
+pub struct RangeReport { confirmed/live/pending: Vec<MeasureColumn>, days: Vec<DayTotal>, intervals: Vec<StatsInterval>,
+                         fault_sessions_excluded: usize, timezone, range, as_of, data_epoch, revision }
+impl RangeReport { pub fn column(&self, class: StatsClass, measure: Measure) -> &MeasureColumn }
+pub struct TodayView { tasks: Vec<TaskRow>, current: Option<CurrentTask>,
+                       confirmed/live/pending: Vec<MeasureColumn>,   // 三类各四项，**无合计字段**
+                       date, timezone, range, as_of, data_epoch, revision }
+impl TodayView { pub fn column(&self, class: StatsClass, measure: Measure) -> &MeasureColumn }
+
+// services/export.rs
+pub fn json(db: &Db, sample: StatsSample, query: &StatsRangeQuery, generated_at: i64) -> Result<ExportJson, AppError>;
+pub fn weekly(db: &Db, sample: StatsSample, query: &WeeklyQuery, generated_at: i64) -> Result<ExportMarkdown, AppError>;
+pub struct WeeklyQuery { pub timezone: String, pub anchor: Option<i64>, pub expected_data_epoch: String }  // None = 本周
+pub struct ExportJson { pub text: String, pub data_epoch: String, pub revision: i64 }
+pub struct ExportMarkdown { pub text: String, pub data_epoch: String, pub revision: i64,
+                            pub week_start: String, pub week_end: String, pub range: StatsRange, pub timezone: String }
+
+// storage（服务层不写 SQL）
+pub fn session_repo::intervals_overlapping(conn: &Connection, from: i64, to: i64) -> Result<Vec<IntervalWithSession>, AppError>;
+pub fn task_repo::done_events_within(conn: &Connection, from: i64, to: i64) -> Result<Vec<DoneEvent>, AppError>;
+
+// AppState（services/bootstrap.rs；G5 瘦包装，**不新增 `#[tauri::command]`**）
+pub fn stats_snapshot(&mut self, &StatsRangeQuery) -> Result<StatsSnapshot, AppError>;
+pub fn stats_today(&mut self, &TodayQuery) -> Result<TodayView, AppError>;
+pub fn export_json(&mut self, &StatsRangeQuery) -> Result<ExportJson, AppError>;
+pub fn export_weekly_markdown(&mut self, &WeeklyQuery) -> Result<ExportMarkdown, AppError>;
+```
+
+### 实施期改动的口径（都在代码注释里可追 Ruling 编号）
+
+1. **`pending` 列 = 条数 + 已知候选端点的跨度之和**（Ruling P5-12）：`intervals` **含零长度候选**（`[t,t)` 按"点落在 `[from,to)` 内、含起点"判；`ended_at IS NULL` 按"会话已开始"判）；
+   `ms` 是"已知端点候选的 clipped 跨度之和"，**全未知才 `None`**（只有 `[t,t)` 时是 `Some(0)`）。与 `attention_overview.pending_intervals` 的差**只剩范围裁剪**这一处。
+   ⇒ **判断"有没有待确认"用 `intervals`，不要用 `ms.is_some()`**（P2 的 `pending_ms` 把 0 折成 `None`）。
+2. **Today 给全四类 measure 的列组**（Ruling P5-15）：F-010 的五项 = `tasks` / `current` / 三组里的 `Human` 三列；**没有任何"总计"字段**，界面不得相加。
+3. **`generated_at` 是"生成本刻的墙钟"**（Ruling P5-19），由包装层取一次平台时钟；`as_of` 是数据水位。两者**可以不等**，文档写清了这层区别。`services/` 一律不读时钟（机器强制）。
+4. **R-03 分类依据可复现**（Ruling P5-20）：JSON 顶层 `criteria` 冻结范围/时区/分类依据，并附"任务 → 项目/标签"的数据级连接（**零时长字段**，只做连接不重算）。
+5. **周回顾三节只收人工**（Ruling P5-24）：机器/等待的时长与待确认记录都指向 JSON 导出；完成项按 `task_change` 的 `done` 事件时刻入周，**每个 Done 事件各归其周**（同任务可出现在两周）；多一列「当前状态」（完成→重开后显示"已重新打开"）。
+6. **`WeeklyQuery.anchor`**（Ruling P5-21）：`None` = 同一次样本的 `A(M)`（本周）；查历史周要传时间戳。
+
+### 下游必须知道的（终审分诊后落在这里，P8/P6 请照此规划）
+
+- **两类导出都没有 `Serialize`**：P8 要把信封经 IPC 返回时自己加 derive，**并顺带决定信封字段**（建议带 `as_of`，否则只能解析 `text` 或二次查询）。
+- **`task_change` 与 `work_interval(started_at)` 都没有索引**：**现在不要加**——加索引＝改已发布 schema + 迁移，会打红 `schema_v1.rs` 的"恰好八个 spec 索引"断言，也与"P5 未改 schema"冲突；先测量，再在拥有 schema 演进的阶段决定。
+- **导出与聚合都在 `AppState` 串行边界内完成**（"完成事件/任务必须与数字同版本"逼出来的取舍）：P8 做大数据量导出时注意它仍持锁（心跳 30s 级，风险低），必要时再谈快照外聚合。
+- **`task.title` 扫描器误报仍挂着**（Ruling P5-18）：`tests/error_contract.rs` 的退役英文子串门禁对字段访问误报，正确修法是把它收紧到构造点/字面量并重验它能抓真回潮。
