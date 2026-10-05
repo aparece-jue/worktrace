@@ -52,7 +52,7 @@ use crate::platform::single_instance::{self, InstanceLock};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
 use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditReport};
 use crate::services::recovery::{DiscardSessionRequest, ReconcileReport, ReconcileRequest};
-use crate::services::stats::{StatsRangeQuery, StatsSnapshot};
+use crate::services::stats::{StatsRangeQuery, StatsSnapshot, TodayQuery, TodayView};
 use crate::services::tasks::{TaskTransitionReport, TransitionTaskRequest};
 use crate::services::timer::coordinator::{
     AcceptClockCorrectionRequest, ClockCorrectionAccepted, CommandOutcome, Coordinator,
@@ -599,6 +599,22 @@ impl AppState {
         } = self;
         let sample = coordinator.stats_sample(db)?;
         crate::services::stats::snapshot(db, sample, query)
+    }
+
+    /// **Today 聚合**（P5 Task 2，F-010）：与 [`AppState::stats_snapshot`] 同一姿势——
+    /// 同一条串行边界内取一次样本，再由服务在**一个读事务**里取事实、今日选择列表与
+    /// 当前会话，一次返回五项（分别显示、不预先相加）。
+    ///
+    /// 为什么今天也走这条接缝：五项必须出自**同一次**样本与同一个版本（同一
+    /// `as_of`/`revision`），而 `AppState.coordinator` 是私有字段——样本只能从这里取。
+    /// 同样**不过恢复门禁**（统计是只读查询，判据在 `stats_sample` 自己那里）；
+    /// **不写库**：不加 `revision`、不写审计。IPC 命令归 P8。
+    pub fn stats_today(&mut self, query: &TodayQuery) -> Result<TodayView, AppError> {
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        let sample = coordinator.stats_sample(db)?;
+        crate::services::stats::today(db, sample, query)
     }
 
     /// **周期采样的一拍**：先问心跳（约 30 秒一次检查点），再取一次计时快照。

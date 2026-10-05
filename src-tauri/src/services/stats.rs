@@ -14,6 +14,13 @@
 //! 此快照进行」。所以本模块**不读时钟**（区间终点只能来自那一次样本的 `attributed_end`）、
 //! **不写库**（不产生事实、不加 `revision`、不写审计）、**不新开裁剪实现**。
 //!
+//! 三个消费者：
+//!
+//! - [`snapshot`] + [`StatsSnapshot::report`]：范围报表（T3/T4 的导出来自它）；
+//! - [`today`]：F-010 的 Today **一次返回**——今日选择列表、当前任务与运行状态、
+//!   确认人工工时、运行暂计、待确认时间**五项分别给出、不预先相加**。它用同一次样本
+//!   与同一个读事务（事实 + 日计划 + 当前会话），日界取查询时区的**真实**日界。
+//!
 //! # 口径（照抄 02 §6，不重新解释）
 //!
 //! - 范围一律**半开** `[from, to)`；每段有效区间与范围的交集走
@@ -38,15 +45,21 @@
 
 use std::collections::HashSet;
 
+use rusqlite::{Connection, Transaction};
+
 use crate::domain::interval::IntervalRange;
 use crate::domain::session::{SessionMode, SessionState};
 use crate::error::AppError;
-use crate::services::daily_plan::{local_days_covering, normalize_timezone};
+use crate::services::daily_plan::{
+    local_date_at, local_day_bounds, local_days_covering, normalize_timezone,
+};
 use crate::services::recovery::attention_overview;
 use crate::services::timer::coordinator::StatsSample;
+use crate::storage::daily_plan_repo;
 use crate::storage::db::{map_sqlite, Db};
 use crate::storage::meta::require_meta;
 use crate::storage::session_repo;
+use crate::storage::task_repo::{self, TaskRow};
 
 /// measure 的项数（= [`Measure::ALL`] 的长度）。数组下标一律用它，不写字面 4。
 const MEASURE_COUNT: usize = Measure::ALL.len();
@@ -579,7 +592,35 @@ pub fn snapshot(
     // 时区只在这一条入口上归一（与日界、存储键同一套），坏输入在这里就退回。
     let timezone = normalize_timezone(&query.timezone)?;
 
-    let overview = attention_overview(db, &query.expected_data_epoch, &sample.run_id)?;
+    read_consistent(
+        db,
+        sample,
+        range,
+        &timezone,
+        &query.expected_data_epoch,
+        |_, _| Ok(()),
+    )
+    .map(|(snapshot, ())| snapshot)
+}
+
+/// 一次一致读的共同骨架：**同一次 epoch 守卫 + 同一个读事务**。
+///
+/// 顺序照 Task 1 的原样：先经 [`attention_overview`]（它自己守卫 epoch，并给出
+/// 「未作废待确认」与「第 1 类损坏」两个集合），再开**一个**读事务读事实。两批事实
+/// 必须来自**同一个版本**：串行边界内不可能被人插进一次写，所以这里把「`meta` 与
+/// overview 的 epoch/revision 相等」钉成显式检查，而不是靠纪律。
+///
+/// `extra` 是**同一个事务里**追加的读：Today 用它取今日选择列表与当前会话
+/// （Ruling P5-1）——于是「Today 一次返回」里的每一批数据都只可能来自这一个版本。
+fn read_consistent<T>(
+    db: &Db,
+    sample: StatsSample,
+    range: IntervalRange,
+    timezone: &str,
+    expected_data_epoch: &str,
+    extra: impl FnOnce(&Transaction<'_>, &StatsSample) -> Result<T, AppError>,
+) -> Result<(StatsSnapshot, T), AppError> {
+    let overview = attention_overview(db, expected_data_epoch, &sample.run_id)?;
 
     let tx = db
         .connection()
@@ -592,6 +633,7 @@ pub fn snapshot(
         });
     }
     let rows = session_repo::intervals_overlapping(&tx, range.start, range.end)?;
+    let extras = extra(&tx, &sample)?;
     // 只读事务：什么都没写，直接结束它（与 `attention_overview` 同一写法）。
     drop(tx);
 
@@ -620,19 +662,176 @@ pub fn snapshot(
         })
         .collect();
 
-    Ok(StatsSnapshot {
-        run_id: sample.run_id,
-        session_id: sample.session_id,
-        session_version: sample.session_version,
-        open_interval_id: sample.open_interval_id,
-        attributed_end: sample.attributed_end,
-        state: sample.state,
-        data_epoch: meta.data_epoch,
-        revision: meta.revision,
+    Ok((
+        StatsSnapshot {
+            run_id: sample.run_id,
+            session_id: sample.session_id,
+            session_version: sample.session_version,
+            open_interval_id: sample.open_interval_id,
+            attributed_end: sample.attributed_end,
+            state: sample.state,
+            data_epoch: meta.data_epoch,
+            revision: meta.revision,
+            range,
+            timezone: timezone.to_string(),
+            facts,
+            pending_ids,
+            fault_session_ids,
+        },
+        extras,
+    ))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Today 聚合（F-010）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Today 的取数请求。
+///
+/// **不带日期**：「今天」由服务从**同一次样本的归属终点** `A(M)` 算
+/// （[`local_date_at`]），所以 `date` / `range` / `as_of` 三者天然同源——让调用方
+/// 另传一个日期，只会得到一份「数字是这一天的、口径字段是那一天」的视图。要看别的
+/// 日子用 [`StatsRangeQuery`]（范围报表）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct TodayQuery {
+    /// 用户时区（原始输入，在这一层过 [`normalize_timezone`]）。
+    pub timezone: String,
+    /// 请求方手上的库身份；由读事务里的 epoch 守卫校验。
+    pub expected_data_epoch: String,
+}
+
+/// 当前任务与运行状态（F-010 的第二项）。
+///
+/// `state` 取自**同一次** [`StatsSample`]：本层不推断 session 状态——从
+/// `open_interval_id.is_some()` 猜会把 `paused` 与 `recovering` 混为一谈。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CurrentTask {
+    /// 当前会话。暂停中的会话**也是**当前会话，只是没有开放区间。
+    pub session_id: String,
+    pub task_id: String,
+    /// 任务标题。只有 id 的话界面渲染不出「当前任务」：24 条命令里没有「按 id 取任务」
+    /// 的读路径，而当前任务未必在今天的列表里。
+    pub task_title: String,
+    pub state: SessionState,
+}
+
+/// Today 一次返回（F-010 的五项，**分别显示、不预先相加**）。
+///
+/// 五项 = [`Self::tasks`]（今日选择列表）、[`Self::current`]（当前任务与运行状态）、
+/// [`Self::confirmed_human`]（确认人工工时）、[`Self::live_human`]（运行暂计）、
+/// [`Self::pending_human`]（待确认时间）。**没有**合计字段：三段时间分属三类事实
+/// （02 §6「不得合并」），加起来既不是工时，也不是待办。
+///
+/// 三项工时都是**人工**口径（`measure = Human`，即只算 `FOREGROUND`）：Today 是用户
+/// 自己的工作视图，F-103 禁止把并行的机器时长加进人工。机器（`BACKGROUND` /
+/// `PASSIVE`）与 `WAITING` 的今日分列在范围报表里（[`StatsSnapshot::report`]）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TodayView {
+    /// ① 今日选择列表：P4 的顺序（`task.created_at, task.id`）。**完成的任务保留在
+    /// 列表里**并带自己的状态，不因完成而消失。
+    pub tasks: Vec<TaskRow>,
+    /// ② 当前任务与运行状态；没有活动会话时为 `None`。
+    pub current: Option<CurrentTask>,
+    /// ③ 确认人工工时：今日真实日界内已确认闭合（含 `recovering` 会话里已可信的前缀）。
+    pub confirmed_human: MeasureColumn,
+    /// ④ 运行暂计：当前开放区间裁剪到今日，终点取**同一次样本**的 `A(M)`。
+    pub live_human: MeasureColumn,
+    /// ⑤ 待确认时间：`intervals` **含零长度候选**，`ms` 只累加已知端点候选的跨度
+    /// （全未知才是 `None`）⇒ 判「有没有待确认」要看 `intervals`，**不要**看
+    /// `ms.is_some()`（Ruling P5-12）。
+    pub pending_human: MeasureColumn,
+    /// 这个视图算的是哪一天：**查询时区**的本地日期（`YYYY-MM-DD`，与 `LocalDate`
+    /// 的落库形状逐字一致）。
+    pub date: String,
+    /// 已归一的查询时区。
+    pub timezone: String,
+    /// 今日的**真实**半开日界：`end` 是次日零点的换算结果，夏令时切换日是 23 / 25 小时。
+    pub range: StatsRange,
+    /// 三个数字截至哪一刻（同一次样本的归属终点 `A(M)`）。
+    pub as_of: i64,
+    /// 这些事实来自哪个库身份。
+    pub data_epoch: String,
+    /// 这些事实来自哪个业务版本（与五项出自**同一个读事务**）。
+    pub revision: i64,
+}
+
+/// Today 聚合：一次返回 F-010 的五项（避免 N+1，00 §4）。
+///
+/// **调用方必须已经在同一条串行边界内拿到样本**——生产路径是
+/// `AppState::stats_today`。本函数自己不取样本、不读时钟：「今天」与 `as_of` 都从
+/// 那一次样本的归属终点来，日界只走 P3 的 [`local_day_bounds`]（G4）。
+///
+/// 事实、今日选择列表、当前会话与 epoch/revision 全部出自**一个读事务**
+/// （Ruling P5-1）：日计划用 **repo 级** [`daily_plan_repo::plan_for`]，不用
+/// `services::daily_plan::plan_for`——后者会自己开事务并自己守卫 epoch，嵌进来就是
+/// 两次守卫 + 两个快照。聚合仍在串行边界之外做（[`StatsSnapshot::report`]）。
+pub fn today(db: &Db, sample: StatsSample, query: &TodayQuery) -> Result<TodayView, AppError> {
+    // 时区只在这一条入口上归一（与日界、存储键同一套），坏输入在这里就退回。
+    let timezone = normalize_timezone(&query.timezone)?;
+    // 「今天」与 as_of 同源：日期取这一次样本的归属终点，本层不另读时钟。
+    let date = local_date_at(&timezone, sample.attributed_end)?;
+    // 日界是「次日零点」的换算结果，不是 `start + 24h`。
+    let range = local_day_bounds(&timezone, date)?;
+
+    let (snapshot, (tasks, current)) = read_consistent(
+        db,
+        sample,
         range,
-        timezone,
-        facts,
-        pending_ids,
-        fault_session_ids,
+        &timezone,
+        &query.expected_data_epoch,
+        |tx, sample| {
+            // ① 今日选择列表与 ② 当前任务：**同一个读事务**（Ruling P5-1）。
+            let tasks = daily_plan_repo::plan_for(tx, &date, &timezone)?;
+            let current = current_task(tx, sample)?;
+            Ok((tasks, current))
+        },
+    )?;
+
+    // 聚合在串行边界之外（Task 1 的分工）；这里只取人工那三列。
+    let report = snapshot.report()?;
+    Ok(TodayView {
+        tasks,
+        current,
+        confirmed_human: report.column(StatsClass::Confirmed, Measure::Human).clone(),
+        live_human: report.column(StatsClass::Live, Measure::Human).clone(),
+        pending_human: report.column(StatsClass::Pending, Measure::Human).clone(),
+        date: date.to_string(),
+        timezone: report.timezone.clone(),
+        range: report.range,
+        as_of: report.as_of,
+        data_epoch: report.data_epoch.clone(),
+        revision: report.revision,
     })
+}
+
+/// 当前任务与运行状态。
+///
+/// 会话身份与状态取自**同一次样本**；`task_id` / `task_title` 取自**同一个读事务**
+/// 里的会话行与任务行——[`StatsSample`] 本身不带任务身份（P2 的接缝只给会话），而
+/// 当前任务**不能**从「有没有开放区间」推：暂停中的会话没有开放区间，却仍然有当前任务。
+fn current_task(conn: &Connection, sample: &StatsSample) -> Result<Option<CurrentTask>, AppError> {
+    let Some(session_id) = sample.session_id.as_deref() else {
+        return Ok(None);
+    };
+    // 样本说「有会话」就必须给出状态：两半对不上说明接缝被改坏了。宁可响亮地失败，
+    // 也不要编一个默认状态——`state` 正是本层唯一不许推断的东西。
+    let state = sample.state.ok_or_else(|| AppError::Storage {
+        detail: "the stats sample carries a session id without a state".into(),
+    })?;
+    let session_row =
+        session_repo::get_session(conn, session_id)?.ok_or_else(|| AppError::Storage {
+            detail: "the stats sample points at a session that is not in the database".into(),
+        })?;
+    // 变量名不叫 `task`：`task.title` 是 `tests/error_contract.rs` 里已收口的**英文错误
+    // 文案**片段（作为原始子串扫描），这里只是字段访问，别让它撞上那条门禁。
+    let task_row =
+        task_repo::get_task(conn, &session_row.task_id)?.ok_or_else(|| AppError::Storage {
+            detail: "the current session points at a task that is not in the database".into(),
+        })?;
+    Ok(Some(CurrentTask {
+        session_id: session_row.id,
+        task_id: task_row.id,
+        task_title: task_row.title,
+        state,
+    }))
 }
