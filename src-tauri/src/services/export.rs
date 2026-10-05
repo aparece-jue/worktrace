@@ -229,6 +229,8 @@ pub fn json(
                           切分（夏令时切换日是 23 / 25 小时），逐日之和等于不分组的总和。",
             exclusions: "needs_review=1、voided_at 非空、discarded 会话的区间都不进任何「已确认」数字；\
                          其中 voided_at 非空与 discarded 会话的区间也不进明细；\
+                         第 1 类（不变量损坏）会话的区间同样不进明细——被排除的会话计入 fault_sessions_excluded；\
+                         非待确认的零长度行也不进明细（取数时就被「空区间不占时间」挡掉）；\
                          未作废的待确认候选会出现在明细里（needs_review=true、class=pending），\
                          它的 clipped_ms 计入 pending 列（含零长度候选：计数但不贡献跨度）；\
                          该列 ms 为 null 时按 0 求和，明细之和因此等于列合计。",

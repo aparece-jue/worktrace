@@ -140,6 +140,23 @@ fn blank_watermarks(text: &str, marks: &[i64]) -> String {
     out
 }
 
+/// 两个水位行（`as_of` / `generated_at`）**末尾那个括号里的裸毫秒**。
+///
+/// 这两行与时长行不同：它们的括号里是 Unix 毫秒本身（`…（1773115200000）`），
+/// 没有「 毫秒」后缀，所以 [`ms_in_line`] 用不上。
+fn trailing_watermark_ms(line: &str) -> i64 {
+    let close = line
+        .rfind('）')
+        .unwrap_or_else(|| panic!("水位行没有结尾括号：{line}"));
+    let open = line[..close]
+        .rfind('（')
+        .unwrap_or_else(|| panic!("水位行没有毫秒括号：{line}"));
+    line[open + '（'.len_utf8()..close]
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("水位行的毫秒数解析不了：{line}"))
+}
+
 /// 忽略全部事件的出口：周回顾用例不关心广播，但 `startup` 需要一个。
 struct NoSink;
 
@@ -1216,6 +1233,58 @@ fn the_app_state_entry_point_renders_the_same_week_as_the_service() {
         "除 time 水位（generated_at / as_of）外两份周回顾逐字节一致"
     );
     assert_eq!(later.revision, before_revision, "纯读不前进 revision");
+}
+
+#[test]
+fn the_generated_time_is_the_wall_clock_and_not_the_data_watermark() {
+    // 与 JSON 导出同一条判据（Ruling P5-19 对 Markdown 是同一口径）：`generated_at` 是
+    // **生成本刻的墙钟**，`as_of` 是数据的归属终点。上面那条用例里两个水位**一起**走
+    // （挂钟与单调钟都推 2 分钟 ⇒ 两个断言都等于 `wall + 2*MINUTE`），所以它区分不开
+    // 「生成时间取对了」与「生成时间被写成了数据水位」；这一条把两者拆开。
+    let fixture = app_fixture();
+    let wall = SH_NOON;
+    let clock = Arc::new(Mutex::new(FakeClock::new(wall, 0)));
+    let running = app_started(&fixture, Arc::clone(&clock));
+    let epoch = running.data_epoch().to_string();
+    let app = Arc::clone(running.app());
+
+    // 只拨**挂钟**、不动单调钟：数据的归属终点 `A(M)` 一动不动，而「生成本刻」的墙钟
+    // 前进 2 秒——两个水位从此不相等。
+    //
+    // 为什么是 2000ms 而不是「5 秒」：08 §1 的判据是「两差任一绝对值 **严格大于** 2000ms」
+    // 才算挂钟跳变（`platform::clock::THRESHOLD_MS`）。拨 5 秒会被判成跳变，`stats_sample`
+    // 会**先落恢复事务再拒绝**（`RECOVERY_REQUIRED`）——那是异常路径、而且会写库，
+    // 不是周回顾该走的正常路径。2000ms 恰好落在「不算越界」的那条边界上。
+    clock.lock().unwrap().advance_wall(2_000);
+
+    let exported = {
+        let mut guard = lock_app(&app);
+        guard
+            .export_weekly_markdown(&weekly_query(&epoch, None))
+            .expect("小幅改钟不该让周回顾失败")
+    };
+
+    // 文档里两个水位都印**裸毫秒**，可以直接比。
+    assert_eq!(
+        trailing_watermark_ms(line_with(&exported.text, "生成时间（generated_at）：")),
+        wall + 2_000,
+        "generated_at 是生成本刻的墙钟"
+    );
+    assert_eq!(
+        trailing_watermark_ms(line_with(&exported.text, "数据截至（as_of）：")),
+        wall,
+        "数字的归属终点不动：数字仍全部来自那一次样本"
+    );
+    assert_ne!(
+        trailing_watermark_ms(line_with(&exported.text, "生成时间（generated_at）：")),
+        trailing_watermark_ms(line_with(&exported.text, "数据截至（as_of）：")),
+        "两个字段必须能表达不同的时刻，否则「生成时间」没有信息"
+    );
+    // 事实与版本没被这次读时钟带动：空周、零完成记录、revision 不动。
+    assert_eq!(ms_in_line(line_with(&exported.text, "本周合计：")), 0);
+    assert_eq!(exported.revision, 0);
+    assert_eq!(exported.data_epoch, epoch);
+    assert_eq!(exported.week_start, "2026-03-09");
 }
 
 #[test]

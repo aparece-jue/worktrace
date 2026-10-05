@@ -1473,7 +1473,8 @@ fn the_exclusion_sentence_matches_the_pending_rows_that_are_in_the_detail() {
     );
     assert!(
         exclusions.contains("voided_at 非空与 discarded 会话的区间也不进明细"),
-        "只有已作废 / 已丢弃才不进明细——这句必须挂在 voided/discarded 上，别挂到 needs_review 上：{exclusions}"
+        "这句必须挂在 voided/discarded 上，别挂到 needs_review 上——它只说已作废 / 已丢弃，\
+         不声称穷尽「不进明细」的行（损坏会话与零长度行也不进明细）：{exclusions}"
     );
     assert!(
         exclusions.contains("未作废的待确认候选会出现在明细里"),
@@ -1482,5 +1483,93 @@ fn the_exclusion_sentence_matches_the_pending_rows_that_are_in_the_detail() {
     assert!(
         exclusions.contains("clipped_ms 计入 pending 列"),
         "要靠它才能把明细加回 `pending` 列的合计：{exclusions}"
+    );
+}
+
+#[test]
+fn a_broken_session_is_counted_in_the_criteria_and_keeps_out_of_the_detail() {
+    let mut h = setup(SH_NOON);
+    h.task("t-a", "写文档", 1_000);
+    // 健康会话：一段 1 小时的已确认闭合区间。
+    h.session(
+        "s-ok",
+        "t-a",
+        "FOREGROUND",
+        "finished",
+        0,
+        SH_NOON - 3 * HOUR,
+    );
+    h.interval(
+        "i-ok",
+        "s-ok",
+        SH_NOON - 3 * HOUR,
+        Some(SH_NOON - 2 * HOUR),
+        Some(HOUR),
+        0,
+        None,
+    );
+    // 第 1 类（不变量损坏）：非 running 会话残留开放区间（P3 的判定，形状照
+    // `tests/stats_window.rs` 的 `intervals_of_a_broken_session_are_not_counted_as_confirmed`）。
+    // 它那段看似可信的 1 小时闭合区间也一律不计、不进明细——正是这一条会让导出里
+    // `fault_sessions_excluded` 大于 0，而 T5 的端到端夹具恒为 0、照不到这里。
+    h.session(
+        "s-fault",
+        "t-a",
+        "FOREGROUND",
+        "paused",
+        0,
+        SH_NOON - 2 * HOUR,
+    );
+    h.interval(
+        "i-fault-closed",
+        "s-fault",
+        SH_NOON - 2 * HOUR,
+        Some(SH_NOON - HOUR),
+        Some(HOUR),
+        0,
+        None,
+    );
+    h.interval(
+        "i-fault-open",
+        "s-fault",
+        SH_NOON - HOUR,
+        None,
+        None,
+        0,
+        None,
+    );
+
+    let (_, doc) = h.export_doc(SH_MID, SH_MID + DAY, "Asia/Shanghai", SH_NOON);
+    let details = doc["intervals"].as_array().unwrap();
+
+    // ① 计数那一半：被排除的会话数在导出里给得出来（第三方能解释「为什么少了行」）。
+    assert_eq!(doc["fault_sessions_excluded"], 1);
+    // 数字只算健康会话那 1 小时：损坏会话的两行一条都没进。
+    assert_eq!(ms_of(&doc, "confirmed", "human"), Some(HOUR));
+    assert_eq!(column(&doc, "confirmed", "human")["intervals"], 1);
+
+    // ② 明细那一半：损坏会话的两行都不在明细里（闭合的那段也不在——不是只挡开放区间）。
+    assert_eq!(details.len(), 1, "明细里只剩健康会话那一条");
+    assert_eq!(details[0]["id"], "i-ok");
+    let summed: i64 = details
+        .iter()
+        .map(|detail| detail["clipped_ms"].as_i64().unwrap())
+        .sum();
+    assert_eq!(
+        summed, HOUR,
+        "被排除的行在列与明细里同时缺席 ⇒ `Σ clipped_ms == 列 ms` 仍然成立"
+    );
+
+    // ③ 文案那一半：少掉的行必须在口径里可解释，而且指向那个计数字段。
+    let exclusions = doc["criteria"]["exclusions"]
+        .as_str()
+        .expect("排除口径必须是字符串");
+    assert!(
+        exclusions.contains("第 1 类"),
+        "口径要写明是第 1 类（不变量损坏）会话的区间不进明细：{exclusions}"
+    );
+    assert!(
+        exclusions.contains("fault_sessions_excluded"),
+        "口径要指向 `fault_sessions_excluded`，否则第三方只能猜为什么少了行：{exclusions}"
     );
 }

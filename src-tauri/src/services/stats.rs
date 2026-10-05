@@ -735,6 +735,11 @@ pub struct TodayView {
     pub current: Option<CurrentTask>,
     /// ③ 已确认：今日真实日界内已确认闭合（含 `recovering` 会话里已可信的前缀），
     /// 按 [`Measure::ALL`] 固定四项。`Human` 那一列就是 F-010 的「确认人工工时」。
+    ///
+    /// **第 1 类（不变量损坏）会话的区间不进这个数**（也不进 `live` / `pending`）⇒ 当天有
+    /// 这类会话时，这里的数字是**静默变小**的，看到数字时要想到这一层。要看被排除了几个
+    /// 会话，用 [`RangeReport::fault_sessions_excluded`]——Today **有意**不带计数字段；
+    /// V0.1 的损坏提示只在恢复页（[`crate::services::recovery::attention_overview`]）。
     pub confirmed: Vec<MeasureColumn>,
     /// ④ 运行暂计：当前开放区间裁剪到今日（终点取**同一次样本**的 `A(M)`），固定四项。
     pub live: Vec<MeasureColumn>,
@@ -784,6 +789,11 @@ impl TodayView {
 /// （Ruling P5-1）：日计划用 **repo 级** [`daily_plan_repo::plan_for`]，不用
 /// `services::daily_plan::plan_for`——后者会自己开事务并自己守卫 epoch，嵌进来就是
 /// 两次守卫 + 两个快照。聚合仍在串行边界之外做（[`StatsSnapshot::report`]）。
+///
+/// **有意的丢弃**：报表算出来的 [`RangeReport::fault_sessions_excluded`] 在这里被**直接
+/// 丢掉**——下面只搬三组列，计数字段不搬（口径裁决 P5-13 / Task2-deferred-③，与
+/// [`TodayView::confirmed`] 那一句同一口径）：Today 不带损坏计数，要计数请用报表，
+/// 或者看恢复页的 `attention_overview`。
 pub fn today(db: &Db, sample: StatsSample, query: &TodayQuery) -> Result<TodayView, AppError> {
     // 时区只在这一条入口上归一（与日界、存储键同一套），坏输入在这里就退回。
     let timezone = normalize_timezone(&query.timezone)?;
@@ -808,6 +818,7 @@ pub fn today(db: &Db, sample: StatsSample, query: &TodayQuery) -> Result<TodayVi
 
     // 聚合在串行边界之外（Task 1 的分工）：三组列**原样**取自同一份报表，
     // 不筛选、不合并、不相加（F-010 的五项就是三组里的 `Human` 那三列）。
+    // `report.fault_sessions_excluded` **有意不搬**（见上面的文档）：Today 不带计数字段。
     let report = snapshot.report()?;
     Ok(TodayView {
         tasks,
