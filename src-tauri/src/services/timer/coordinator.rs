@@ -1540,9 +1540,12 @@ impl Coordinator {
         // （`retry_recovery` 也解不开，见 `Coordinator::retry_recovery`）。
         // 它必须排在接受路径**与下一条异常处理**之前：`flag == true` 时不许把硬故障
         // 当成可接受的校正，`flag == false` 时也不许先替它提交一笔恢复事务——
-        // 「硬故障 ⇒ 零写入」是每个采样入口的共同性质（`snapshot`/`tick`/`heartbeat`/
-        // `start` 在 `MonotonicBackwards` 下都不分割、不写审计、不加版本），
-        // 本入口不能是例外。
+        // **本入口**在硬故障下零写入（这是 `63eab6c` 之前的行为，Ruling 34 的修复把它
+        // 恢复回来）。**别把这条推广成"所有采样入口都零写入"**：`snapshot`/`tick`/
+        // `heartbeat`/`start` 会把 `needs_recovery()` 为真的判决（`MonotonicBackwards`
+        // 也算）交给 `handle_anomaly`，硬故障那一拍**确实会**先落一笔系统事务
+        // （`tests/exception_closure.rs` 的「硬故障那一拍仍然会先落一笔系统事务」用例
+        // 正钉着这一点）。照这两行去"对齐" `snapshot` 会破坏 P2 已钉的语义。
         if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
             self.faulted = true;
             return Err(AppError::RecoveryRequired);

@@ -1173,9 +1173,11 @@ fn a_backwards_monotonic_clock_is_not_accepted_as_a_correction() {
 /// Ruling 34 那个分支都进不去。这一条走 `flag == false`——本来会返回 `Unchanged` 的
 /// 那一路，也是 Ruling 34 真正要补的那条路。
 ///
-/// 硬故障在这条路上必须和别的采样入口一样**零写入**：单调读数倒退不是「异常要隔离」，
-/// 而是这一拍读数对本 run 已无意义（`snapshot`/`tick`/`heartbeat`/`start` 在
-/// `MonotonicBackwards` 下都不分割、不写审计、不加版本）。所以异常处理后置块必须排在
+/// 硬故障在这条路上必须**零写入**：单调读数倒退不是「异常要隔离」，而是这一拍读数对本 run
+/// 已无意义。零写入是**本入口**的既有行为（`63eab6c` 之前就是这样，Ruling 34 的修复把它
+/// 恢复回来），**不要推广到别的采样入口**——`snapshot`/`tick`/`heartbeat`/`start` 会把
+/// `needs_recovery()` 的判决交给 `handle_anomaly`，硬故障那一拍确实会先落一笔系统事务
+/// （见本文件「硬故障那一拍仍然会先落一笔系统事务」的用例）。所以异常处理后置块必须排在
 /// `MonotonicBackwards` 守卫**之后**：先认硬故障，再谈「有没有别的判决要被处理」。
 #[test]
 fn a_backwards_monotonic_clock_writes_nothing_without_an_unaccepted_correction() {
