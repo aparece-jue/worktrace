@@ -271,11 +271,11 @@ retry_recovery 的 IPC 请求 expected_data_epoch 映射到 AppState::retry_reco
 > 完整签名与全部差异见 P3 计划文末「P3 实施记录（2026-10-05，控制器落盘）」。本节只列**接线必须知道**的部分。
 
 - **请求参数**：`reconcile` 与 `attention_overview` 的服务入口**各多一个 `current_run_id`**（服务层够不着协调器）⇒ IPC 包装从 `state.coordinator().run_id()` 取后传入；其余命令的请求形状仍按本计划「P8 新增的 IPC 命令」表。
-- **`attention_overview` 的列表口径**：`items` = 不变量损坏 ∪ 未作废待确认区间 ∪ **别的 run 未结束会话**（不限状态；终态会话也进列表；**正在计时的当前 run 会话不进**）⇒「门禁关着 ⇔ 列表非空」成立。界面**不要**用 `TimerSnapshot.pending_ms` / `needs_attention()` 顶替；`duration_ms IS NULL` 表示"终点未知"，`ended_at` 只是候选端点。
+- **`attention_overview` 的列表口径**：`items` = 不变量损坏 ∪ 未作废待确认区间 ∪ **别的 run 未结束会话**（不限状态；终态会话也进列表；**正在计时的当前 run 会话不进**）。列表与计时门禁不等价：当前 run 的待确认记录可以进入列表而不阻挡其他任务；重扫失败或协调器故障也可以关闭门禁而没有对应列表项。界面应分别呈现待处理事实与服务返回的计时门禁，不能通过列表是否为空推导门禁。界面**不要**用 `TimerSnapshot.pending_ms` / `needs_attention()` 顶替；`duration_ms IS NULL` 表示"终点未知"，`ended_at` 只是候选端点。
 - **恢复页的动作边界**：零区间会话（`recovering` 且无区间）**不能**用 `discard_session`（`DOMAIN_ERROR`），要用 `reconcile` + 空 `ranges` 的 `Confirm`；`paused` + 待确认区间这类**只能**用 `discard_session`（它无状态前置）——两者不要共用一个"丢弃"按钮。
 - **`correct` 的入口条件**：只接 `finished`；`recovering` 提示走 `reconcile`；`running`/`paused` 要求先结束会话。
 - **接受时钟校正**：`flag == false` 的无操作路径在恰好同时检测到异常时返回 **`RECOVERY_REQUIRED`**（不是 `Unchanged`）⇒ 界面收到后刷新并显示恢复提示，**不要**当成失败重试。
-- **`retry_recovery` 的两种 `RECOVERY_REQUIRED`**（协调器仍 `faulted` ⇔ 重扫门禁失败）只靠错误码分不开；需要区分时读 `coordinator().is_faulted()`——**不新增错误码**。
+- **`retry_recovery` 的 `RECOVERY_REQUIRED`**可能来自协调器恢复事务、提交后镜像重载或门禁重扫失败，错误码不能区分原因；需要区分协调器是否仍被隔离时读 `coordinator().is_faulted()`（包含待重载镜像）。已提交的 P3 写操作不得自动重发；镜像重载失败的重试只读取已提交事实。**不新增错误码**。
 - **读数陷阱**：`task_change` 与 `time_edit` **同一毫秒可落多行** ⇒ 界面/统计**禁止"取最后一条"**（托盘"完成"的时间、历史页的"最近一次修改"尤其危险），按 `reason` 或内容定位。
 - **作废后的界面表现**：`discard_session` 之后协调器镜像**停在 `discarded`**（与 `finish` 停在 `finished` 同一口径）⇒ 计时区显示"无活动会话/已作废"，**不得**按 running 计暂计。
 - **登记**：`backfill` 的 `before_json` 是创建型 ⇒ 历史页重建"改动前事实"时跳过创建型行。

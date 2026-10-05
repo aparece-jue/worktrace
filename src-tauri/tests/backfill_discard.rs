@@ -51,6 +51,54 @@ const BF_END: i64 = WALL - 18_000;
 const S1_START: i64 = WALL - 60_000;
 const S1_END: i64 = WALL - 58_000;
 
+#[test]
+fn empty_backfills_do_not_overlap_closed_intervals() {
+    let fx = fixture();
+    let db = seeded(&fx);
+    finished_fixture(&db);
+    drop(db);
+    let running = started(&fx);
+    let mut state = lock_app(running.app());
+    let epoch = running.data_epoch().to_string();
+    let point = S1_START + 500;
+    state
+        .backfill(env_create(&epoch), backfill_request("t1", point, point))
+        .expect("an empty interval inside trusted history is not an overlap");
+}
+
+#[test]
+fn an_existing_empty_interval_does_not_block_a_nonempty_backfill() {
+    let fx = fixture();
+    drop(seeded(&fx));
+    let running = started(&fx);
+    let mut state = lock_app(running.app());
+    let epoch = running.data_epoch().to_string();
+    let point = BF_START + 500;
+    state
+        .backfill(env_create(&epoch), backfill_request("t1", point, point))
+        .unwrap();
+    state
+        .backfill(env_create(&epoch), backfill_request("t1", BF_START, BF_END))
+        .expect("existing empty history consumes no human time");
+}
+
+#[test]
+fn backfill_rejects_an_unrepresentable_duration_without_writes() {
+    let fx = fixture();
+    drop(seeded(&fx));
+    let running = started(&fx);
+    let mut state = lock_app(running.app());
+    let before = world(state.db());
+    let error = state
+        .backfill(
+            env_create(running.data_epoch()),
+            backfill_request("t1", i64::MIN, WALL),
+        )
+        .expect_err("extreme endpoints must be rejected rather than panic or wrap");
+    assert_code(&error, "DOMAIN_ERROR");
+    assert_eq!(world(state.db()), before);
+}
+
 /// 恢复会话的几何：可信前缀 + 已知终点的候选 + 终点未知的开放候选。
 const T0: i64 = WALL - 40_000;
 const PREFIX_END: i64 = WALL - 38_000;

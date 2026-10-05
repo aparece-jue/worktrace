@@ -170,6 +170,9 @@ pub struct Coordinator {
     /// 失败的恢复会让坏事实在下一拍被当成好事实接受。置真后在成功重建之前所有入口一律
     /// 拒绝（计划原文：「明确进入故障处理」）。
     faulted: bool,
+    /// A committed P3 write could not be reflected in the mirror. Retry this read,
+    /// not the already committed business write or an anomaly split.
+    pending_committed_reload: Option<String>,
     /// 已检测但未接受的墙钟校正；不能因长期容差增长而自动消失。
     unaccepted_clock_correction: bool,
     live: Option<LiveSession>,
@@ -186,6 +189,7 @@ impl Coordinator {
             last_checkpoint: None,
             last_checkpoint_monotonic: None,
             faulted: false,
+            pending_committed_reload: None,
             unaccepted_clock_correction: false,
             live: None,
         }
@@ -313,16 +317,38 @@ impl Coordinator {
         Ok(())
     }
 
+    /// P3 提交后的镜像刷新（不重新执行已提交的业务命令）。
+    pub fn refresh_committed_session(
+        &mut self,
+        conn: &Connection,
+        session_id: &str,
+    ) -> Result<(), AppError> {
+        let result = (|| {
+            let read_tx = conn.unchecked_transaction().map_err(map_sqlite)?;
+            self.load_session(&read_tx, session_id)
+        })();
+        match result {
+            Ok(()) => {
+                self.pending_committed_reload = None;
+                Ok(())
+            }
+            Err(_) => {
+                self.pending_committed_reload = Some(session_id.to_string());
+                Err(AppError::RecoveryRequired)
+            }
+        }
+    }
+
     /// 故障态下拒绝一切入口。成功重建（[`Coordinator::rebuild_from_committed`]）才解锁。
     pub fn refuse_if_faulted(&self) -> Result<(), AppError> {
-        if self.faulted {
+        if self.is_faulted() {
             return Err(AppError::RecoveryRequired);
         }
         Ok(())
     }
 
     pub fn is_faulted(&self) -> bool {
-        self.faulted
+        self.faulted || self.pending_committed_reload.is_some()
     }
 
     /// 观察一次采样并记录判定。**每个入口只调一次**——同一个采样看两次，
@@ -1300,12 +1326,15 @@ impl Coordinator {
 
     /// 故障后重试原系统恢复事务，不能只装载 running 行就解除隔离。
     pub fn retry_recovery(&mut self, db: &mut Db) -> Result<TimerSnapshot, AppError> {
-        if !self.faulted {
-            return self.snapshot(db);
-        }
-        // 单调钟读数已失去同一 run 的意义，只能通过新 run 的安全启动恢复。
+        // Hard clock faults still require a new run, even if a mirror read failed too.
         if matches!(self.last_verdict, SampleVerdict::MonotonicBackwards { .. }) {
             return Err(AppError::RecoveryRequired);
+        }
+        if let Some(session_id) = self.pending_committed_reload.clone() {
+            self.refresh_committed_session(db.connection(), &session_id)?;
+        }
+        if !self.faulted {
+            return self.snapshot(db);
         }
         if self.live.is_none() && session_repo::running_foreground(db.connection())?.is_some() {
             return Err(AppError::RecoveryRequired);

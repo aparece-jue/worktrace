@@ -18,6 +18,9 @@ impl IntervalRange {
                 ended_at: end,
             });
         }
+        if end.checked_sub(start).is_none() {
+            return Err(DomainError::IntervalSpanOverflow);
+        }
         Ok(Self { start, end })
     }
 
@@ -35,7 +38,12 @@ impl IntervalRange {
     pub fn overlap_ms(self, other: IntervalRange) -> i64 {
         let lo = self.start.max(other.start);
         let hi = self.end.min(other.end);
-        (hi - lo).max(0)
+        // 先比较再相减：相距很远的两个合法短区间也可能让 hi - lo 下溢。
+        if hi <= lo {
+            0
+        } else {
+            hi.saturating_sub(lo)
+        }
     }
 
     pub fn overlaps(self, other: IntervalRange) -> bool {
@@ -48,6 +56,20 @@ impl IntervalRange {
             start: from,
             end: to,
         })
+    }
+}
+
+#[cfg(test)]
+mod range_boundary_tests {
+    use super::IntervalRange;
+
+    #[test]
+    fn distant_short_intervals_have_zero_overlap_without_overflow() {
+        let left = IntervalRange::new(i64::MIN, i64::MIN + 1).unwrap();
+        let right = IntervalRange::new(i64::MAX - 1, i64::MAX).unwrap();
+        assert_eq!(left.overlap_ms(right), 0);
+        assert_eq!(right.overlap_ms(left), 0);
+        assert!(IntervalRange::new(i64::MIN, 0).is_err());
     }
 }
 

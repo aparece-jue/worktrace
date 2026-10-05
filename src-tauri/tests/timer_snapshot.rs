@@ -115,6 +115,82 @@ impl Harness {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[test]
+fn a_failed_postcommit_refresh_isolates_the_mirror_and_retry_only_reloads_facts() {
+    let mut h = harness(TimerKind::Stopwatch, None);
+    h.interval("open", 1000, None, false, false);
+    h.start(0);
+    let epoch = worktrace_lib::storage::meta::require_meta(h.db.connection())
+        .unwrap()
+        .data_epoch;
+    worktrace_lib::services::recovery::discard_session(
+        &mut h.db,
+        worktrace_lib::envelope::WriteEnvelope::for_update(&epoch, 0),
+        worktrace_lib::services::recovery::DiscardSessionRequest {
+            session_id: "s1".into(),
+        },
+        2000,
+    )
+    .unwrap();
+    let before = worktrace_lib::storage::meta::require_meta(h.db.connection())
+        .unwrap()
+        .revision;
+    let edits: i64 =
+        h.db.connection()
+            .query_row("SELECT COUNT(*) FROM time_edit", [], |r| r.get(0))
+            .unwrap();
+    // Inject a read failure strictly after the real business transaction committed.
+    h.db.connection()
+        .execute_batch(
+            "ALTER TABLE work_interval RENAME COLUMN sampled_end_wall_at TO unavailable_sample",
+        )
+        .unwrap();
+    assert!(h
+        .coord
+        .refresh_committed_session(h.db.connection(), "s1")
+        .is_err());
+    assert_eq!(
+        h.coord.snapshot(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    assert_eq!(
+        h.coord.retry_recovery(&mut h.db).unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    assert!(
+        h.coord.is_faulted(),
+        "failed read retry must preserve isolation"
+    );
+    h.db.connection()
+        .execute_batch(
+            "ALTER TABLE work_interval RENAME COLUMN unavailable_sample TO sampled_end_wall_at",
+        )
+        .unwrap();
+    assert!(
+        h.coord.is_faulted(),
+        "old running mirror must stay isolated after storage recovers"
+    );
+    assert!(h.coord.snapshot(&mut h.db).is_err());
+    let snapshot = h.coord.retry_recovery(&mut h.db).unwrap();
+    assert_eq!(snapshot.state, Some(SessionState::Discarded));
+    assert_eq!(snapshot.active_ms, 0);
+    assert!(!h.coord.is_faulted());
+    assert_eq!(
+        worktrace_lib::storage::meta::require_meta(h.db.connection())
+            .unwrap()
+            .revision,
+        before
+    );
+    let after: i64 =
+        h.db.connection()
+            .query_row("SELECT COUNT(*) FROM time_edit", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(
+        after, edits,
+        "retry cannot repeat the committed discard or write a recovery split"
+    );
+}
+
 /// 计划原文：「暂停冻结」——暂停后不再累计 live，`active_ms` 停在已确认工时上。
 #[test]
 fn pausing_freezes_active_ms() {

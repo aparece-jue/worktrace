@@ -671,7 +671,7 @@ impl AppState {
     /// 服务在自己的事务里做完校验、写入、审计与恰好一次 `revision`；**提交之后**由这里
     /// 做两件内存收尾：
     /// 1. [`AppState::rescan_recovery`]（S1）重算门禁——事实刚变，快照必须跟着变；
-    /// 2. **当且仅当被改动的会话正是协调器此刻镜像的那条**时 `Coordinator::load_session`
+    /// 2. **当且仅当被改动的会话正是协调器此刻镜像的那条**时 `Coordinator::refresh_committed_session`
     ///    刷新它，**不留一个继续按旧状态出快照的 `live`**（采样线程每一拍都出快照）。
     ///
     /// 第 2 步为什么带条件（计划「新增-2」的原文是「**改到协调器正镜像的会话时**」）：
@@ -743,7 +743,7 @@ impl AppState {
             db, coordinator, ..
         } = self;
         coordinator
-            .load_session(db.connection(), session_id)
+            .refresh_committed_session(db.connection(), session_id)
             .map_err(|_| AppError::RecoveryRequired)
     }
 
@@ -752,7 +752,7 @@ impl AppState {
     /// 与 [`AppState::reconcile`] 的两点不同（Task 3 的计划原文）：
     /// 1. **不重扫门禁**——`correct` 不改恢复性，门禁快照照旧；
     /// 2. 提交后仍然**当且仅当被改动的会话正是协调器此刻镜像的那条**时
-    ///    `Coordinator::load_session` 刷新它（Ruling 13）：`finish` 之后 `live` 还停在
+    ///    `Coordinator::refresh_committed_session` 刷新它（Ruling 13）：`finish` 之后 `live` 还停在
     ///    那条 `finished` 会话上，所以这条真的会命中——不刷新的话，快照的
     ///    `closed_trusted_ms` 会继续按修正前的时长算。刷新失败同样映射
     ///    [`AppError::RecoveryRequired`]（提交后约定：已提交事实保留，缺的是内存与事实
@@ -802,7 +802,7 @@ impl AppState {
     /// 提交之后两步（与 [`AppState::reconcile`] 同一条收尾口径）：
     /// 1. [`AppState::rescan_recovery`]（S1）**无条件**重扫门禁——事实刚变，
     ///    被判成终态/已作废的记录不再挡计时，快照必须跟着走；
-    /// 2. **当且仅当被作废的会话正是协调器此刻镜像的那条**时 `Coordinator::load_session`
+    /// 2. **当且仅当被作废的会话正是协调器此刻镜像的那条**时 `Coordinator::refresh_committed_session`
     ///    刷新它（Ruling 13）。这里通常**就是**镜像那条（用户正在计时时作废它），
     ///    刷新后 `live.state` 停在 `discarded`——与 `finish` 之后停在 `finished`
     ///    **完全同一口径**：`live` 只表示「本 run 最后装载过哪条会话」，

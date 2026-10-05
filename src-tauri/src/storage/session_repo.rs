@@ -670,12 +670,17 @@ pub fn require_no_human_overlap(
     exclude_interval: Option<&str>,
 ) -> Result<(), AppError> {
     // 半开相交：`existing.started_at < end AND start < existing.ended_at`。
+    // 上式仅适用于非空区间；[t,t) 不占任何时间，两个方向都要排除空集。
+    if start == end {
+        return Ok(());
+    }
     // 没有终点的行按「延伸到未来」处理，所以只要 `existing.started_at < end` 就算相交。
     let hit = conn
         .query_row(
             "SELECT i.started_at, i.ended_at FROM work_interval i \
                JOIN work_session s ON s.id = i.session_id \
               WHERE s.mode = 'FOREGROUND' AND i.voided_at IS NULL AND i.needs_review = 0 \
+                AND (i.ended_at IS NULL OR i.started_at < i.ended_at) \
                 AND (?3 IS NULL OR i.id <> ?3) \
                 AND i.started_at < ?2 \
                 AND (i.ended_at IS NULL OR ?1 < i.ended_at) \

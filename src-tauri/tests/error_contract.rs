@@ -186,6 +186,8 @@ domain_error_variants! {
     NoOpenInterval,
     IntervalOpenInWrongState,
     NegativeInterval,
+    // 2026-10-05 外部复审（区间跨度溢出）：新增的第十六个变体。
+    IntervalSpanOverflow,
     OverlappingInterval,
     TrustedIntervalWithoutDuration,
     PendingAndVoided,
@@ -233,6 +235,7 @@ fn representative_cases() -> Vec<DomainError> {
             started_at: 10,
             ended_at: 5,
         },
+        DomainError::IntervalSpanOverflow,
         DomainError::OverlappingInterval {
             existing_start: 1,
             existing_end: 9,

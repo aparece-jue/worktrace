@@ -594,7 +594,7 @@ pub fn reconcile(db: &mut Db, env: WriteEnvelope, req: ReconcileRequest, now: i6
 - [ ] **收尾后的形态不变量**：该会话**不得**再有 `voided_at IS NULL AND ended_at IS NULL` 的区间——`Confirm` 要求 `ranges` 覆盖全部待确认集合、`DiscardUncertain` 把它们全部作废，两条路都会消掉"终点未知"的遗留形态（与 Task 1 第 2 类的形态约束同一条）。测试里要按**全表**断言这一条，不只断言被处理的那几条。
 - [ ] 写 `time_edit`（`before_json`/`after_json` 记清每个被处理区间的**前**值（`started_at`/`ended_at`/`duration_ms`/`needs_review`/`voided_at`）与**后**值，以及 `run_id` 的前后值）；`reason` 写明是 `reconcile:confirm` 还是 `reconcile:discard_uncertain`。
 - [ ] 版本：`settle` 保证"这一条用户命令恰好一次 `revision`"；会话 `row_version` 由 `update_session_state` +1（**不新增 interval 版本列**，P4 计划的「本轮开工审查补全」里那条「interval 没有独立 `row_version`」；原记 `:159-160`）。**不写 `task_change`**（不移动任何完成时刻）。
-- [ ] 提交后（`AppState::reconcile`，S2+S1）：`rescan_recovery()`（**先**重算门禁，仍不可恢复就继续拒绝）+ `coordinator.load_session(db.connection(), &session_id)` 刷新镜像（新增-2）；镜像刷新失败映射 `RECOVERY_REQUIRED`（P2 的提交后约定，`coordinator.rs:606-614`）。
+- [ ] 提交后（`AppState::reconcile`，S2+S1）：`rescan_recovery()`（**先**重算门禁，仍不可恢复就继续拒绝）+ `coordinator.refresh_committed_session(db.connection(), &session_id)` 刷新镜像（新增-2）；镜像刷新失败映射 `RECOVERY_REQUIRED`（P2 的提交后约定，`coordinator.rs:606-614`）。
 - [ ] **测试（`tests/reconcile.rs`）**：全部待确认区间一次处理完；缺一条/多一条被拒；确认的起止重叠被拒（含与"后来已记录的人工时间"重叠、跨会话重叠）；`ended_at > now` 被拒；丢弃该会话全部待确认区间**不**动作废整次（其他会话与既有闭合区间原样）；非 `recovering` 被拒（逐字段比对：状态、版本、起止、时长、`needs_review`、`voided_at`）；第 1 类被拒；`time_edit` 前后值完整；**确认后 `session.needs_review = false` 且该会话能被 `resume`**（闭环证据）；失败整体回滚；**提交后 `AppState::recovery().requires_recovery()` 随事实变化**（还有别的待处理就仍为真）。
 
 ## Task 3：`correct`——仅 `finished` 的可信历史修正
@@ -619,7 +619,7 @@ pub fn correct(db: &mut Db, env: WriteEnvelope, req: CorrectRequest, now: i64)
 - [ ] 并发保护用**所属 `session.row_version`**（`env.expected_row_version`），不新增 `interval.row_version`；所有改变该 session 区间事实的命令在同事务增加 `session.row_version`（`update_session_state` 传原状态即可，`SessionStateUpdate::default()`）；修改不同区间的旧版本请求也拒绝，刷新后重新确认。
 - [ ] 删除误记 = `void_interval(now)`（**软删除**，保留审计），不是 `DELETE`。
 - [ ] **不改 `session.ended_at`**：它记录的是"会话结束那一刻"的事实，02 §3 只要求修正区间与 `duration_ms`；"最后一个区间的结束"要从区间算（P5 的口径）。**不新增或改写 `task_change`**：已完成任务的"完成时刻"**不因修正区间而移动**（报告按 `task_change` 里完成事件的时刻选完成项，不用 `updated_at`、也不用 session 结束时间——02 §10）。
-- [ ] 提交后：`load_session` 刷新该会话镜像（新增-2）；`correct` 不改恢复性，**不重扫门禁**。
+- [ ] 提交后：`refresh_committed_session` 刷新该会话镜像（新增-2）；`correct` 不改恢复性，**不重扫门禁**。
 - [ ] **测试（`tests/correct.rs`）**：负区间被拒；与同会话及其他会话的有效人工区间重叠被拒（含端点相接**不算**重叠的边界、`exclude_interval` 不排除自己时的反例）；`ended_at > now` 被拒；删除是软删除且审计留存（`time_edit` 有行、区间行仍在）；`recovering` 被指向 `reconcile`；修正后 `duration_ms` 与起止一致；幂等重复零变化；被拒时逐字段比对（状态、版本、起止、时长、`needs_review`、`voided_at`、`revision`、`time_edit`/`task_change` 行数）。
 
 ## Task 4：`backfill` 与 `discard_session`
@@ -644,7 +644,7 @@ pub fn discard_session(db: &mut Db, env: WriteEnvelope, req: DiscardSessionReque
 - [ ] `discard_session`：**全部区间**（含运行中的开放区间）`void_interval(now)`：`voided_at = now`、`needs_review = 0`、**已知时长区间的 `ended_at` 原样；无时长候选的 `ended_at` 清为 `NULL`**（开放区间仍保持 `NULL`——S8 的理由：`ck_interval_duration` 不允许"作废且已闭合却没有 `duration_ms`"，而给终点未知的段补时长就是造数；`open_interval_outside_running` 那条判据只查 `voided_at IS NULL`（`session_repo.rs:572`），作废段不会被判成残留开放区间）；会话设 `discarded`、`ended_at = max(now, session.started_at)`（`ck_session_range:93` 兜底）、`needs_review → false`（新增-1）、**`run_id` 不动**（终态会话不再参与门禁与联动）；写 `time_edit`。**不删除审计、不隐式改变任务状态**（02 §3 原文）。作废后协调器镜像停在 `discarded` 那条——**与 `finish` 之后停在 `finished` 完全同一口径**（`tests/timer_commands.rs:778` 的用例就是钉这个：`out.snapshot.state == Some(SessionState::Finished)`）；`live` 只表示"本 run 最后装载过哪条会话"，不是"正在计时"。**P8 登记界面表现**：作废后计时区显示"无活动会话/已作废"，不得按 running 计暂计（fix round 2：因 R8）。
 - [ ] **`discard_session` 不走 `end_session_in_tx`**：那条原语按 `run_id` 拒跨 run（`primitives.rs:75`），而"作废整次"必须能作用于**旧 run 留下的会话**（那正是恢复材料）。它只做 S8 的区间作废 + 会话状态更新，因而不受 `StaleRunContext` 限制；反过来，这也意味着它**不**参与"以可信方式闭合"，不会把停机时间算成工时。
 - [ ] 两者的区别要在错误与审计上可分辨：`discard_session` 不能只作废一个区间；`reconcile(discard_uncertain)` 不能作废整次。任何"含糊共用一个丢弃按钮"的实现都要在评审里被打回（02 §3/§4 原文）。
-- [ ] 提交后：`discard_session` 调 `rescan_recovery()`（S1）+ `load_session` 刷新镜像（新增-2）；`backfill` **不做**任何镜像刷新——它新建的是一条 `finished` 行，不改变当前镜像（`live` 仍指向 `running_foreground` 那条，或本来就是 `None`）。
+- [ ] 提交后：`discard_session` 调 `rescan_recovery()`（S1）+ `refresh_committed_session` 刷新镜像（新增-2）；`backfill` **不做**任何镜像刷新——它新建的是一条 `finished` 行，不改变当前镜像（`live` 仍指向 `running_foreground` 那条，或本来就是 `None`）。
 - [ ] **测试（`tests/backfill_discard.rs`）**：补录不产生 `task_change` 行、不占前台（补录期间另一次 `start` 仍能成功）、`work_session.state = 'finished'` 且 `sampled_end_wall_at IS NULL`；补录区间重叠被拒、`ended_at > now` 被拒；作废整次后该会话**全部**区间 `voided_at` 非空且 `needs_review` 清零、会话 `discarded` 且 `needs_review = false`；作废不改任务状态（逐字段比任务行）；两者都写审计；失败整体回滚不留半个会话；作废后 `AppState::recovery().requires_recovery()` 变化（若它是最后一条待处理事实）；**作废运行中的会话后镜像停在 `discarded`**（`coordinator.live().unwrap().state == Some(SessionState::Discarded)`，与 `tests/timer_commands.rs:778` 的 `finish` 口径同形，R8）。
 
 ## Task 5：区间规则与重叠校验，端到端集成
@@ -731,7 +731,7 @@ pub fn transition_task(db: &mut Db, coordinator: &mut Coordinator, env: WriteEnv
 - [ ] 提供全局待确认会话列表/数量（含终点未知的片段），与当前计时会话分离；开始别的任务后旧记录仍可发现——落点是「下游接口」第 2 条的 `attention_overview`（**新补**，原计划只有这句要求、没有落点）。
 - [ ] 显式接受时钟校正（S4）：先原子写审计并增加 revision，提交后调 `Coordinator::accept_clock_correction`（`:245`）更新映射/清除 run 内未接受标记；**不自动确认旧可疑工时**；失败保留标记（不提交、不清标记）；重启按安全启动恢复规则处理（新 run 里该标记本就不存在，08 §1）。
 - [ ] 结束原语 `end_session_in_tx` 要求 `EndSessionFacts.run_id`（`primitives.rs:33/75`），跨 run 直接 `StaleRunContext`：本计划的会话联动必须传**当前 run**；跨 run 会话先由启动扫描归一（Task 1 第 4 类把 `paused` 的 `run_id` 更新到当前 run；第 2 类转 `recovering`，走 `reconcile` 而不是联动）再走联动，不能靠放宽该判据绕过。
-- [ ] **提交后镜像刷新（新增-2）**：`reconcile`/`discard_session`/`transition_task` 改到协调器正镜像的会话时，提交后必须 `Coordinator::load_session`（`:266`）或 `rebuild_from_committed`（`:615`）刷新，失败映射 `RECOVERY_REQUIRED`；**不得**留一个继续按旧状态出快照的 `live`（采样线程每拍都出快照，`bootstrap.rs:749`）。
+- [ ] **提交后镜像刷新（新增-2）**：`reconcile`/`discard_session`/`transition_task` 改到协调器正镜像的会话时，提交后必须 `Coordinator::refresh_committed_session`（失败时隔离旧镜像，显式重试只重载已提交事实）或 `rebuild_from_committed`（`:615`）刷新，失败映射 `RECOVERY_REQUIRED`；**不得**留一个继续按旧状态出快照的 `live`（采样线程每拍都出快照，`bootstrap.rs:749`）。
 
 ## 当前兼容状态
 
@@ -805,7 +805,7 @@ pub fn retry_recovery(&mut self, expected_data_epoch: &str) -> Result<TimerSnaps
 4. **零区间会话的 `discard_session` 返回 `DOMAIN_ERROR`**（`HistoryEditReport.interval` 必填，不编造区间）；该形态由 **`reconcile` + 空 `ranges` 的 `Confirm`** 只做状态跃迁解决（**不是死锁**）。
 5. **`backfill` 的 `before_json` 是创建型** `{"change":"backfill"}`（同 `create_task` 的 `"{}"`）⇒ P5/P8 按 `before_json.intervals` 重建"改动前事实"时**必须跳过创建型行**。
 6. **审计形状**：`candidate_end_source` **只在真有候选端点推导**时写（目前只有启动扫描的 `normalize_crashed_interval`），且写在 `after_json`；`correct` 的用户理由落 `after_json.user_reason`；`voided_at` 键在两种形状里都在。
-7. **提交后收尾统一为"仅在镜像那条上刷新"**（`reconcile`/`correct`/`discard_session`：只有被改动的会话正是 `live` 镜像的那条才 `load_session`）；`transition_task` 用 `rebuild_from_committed` 且**仅当确有会话被结束/暂停**。
+7. **提交后收尾统一为"仅在镜像那条上刷新"**（`reconcile`/`correct`/`discard_session`：只有被改动的会话正是 `live` 镜像的那条才 `refresh_committed_session`）；`transition_task` 用 `rebuild_from_committed` 且**仅当确有会话被结束/暂停**。
 8. **S4 的"本来会返回 `Unchanged`"那条路不再丢弃已观察到的判决**：非 `Trusted` 判决交给既有异常处理（系统事务）后返回 `RECOVERY_REQUIRED`——否则睡眠/休眠（`Suspended` 无法被再次检测）会被**静默计成工时**。`flag == true` 的正常接受路径不变。
 9. **`paused` + 仍有待确认区间**这一类四类判定盖不住的形态：**原样保持**、归 `NeedsReview`、**零写入零版本**；出口是 `discard_session`（它无状态前置）。
 10. **`correct` 只放行 `Finished`**（`discarded` 单独中文拒绝）；它**不做第 1 类判定、不重扫门禁**，因而存在受控的"门禁快照滞后"窗口（方向是**过度拦截**，安全侧）。
@@ -813,7 +813,7 @@ pub fn retry_recovery(&mut self, expected_data_epoch: &str) -> Result<TimerSnaps
 ### 下游读数陷阱（两条，务必遵守）
 
 - **`task_change` 与 `time_edit` 同一毫秒可落多行** ⇒ `ORDER BY created_at, id` 在它们之间**不确定**，**禁止"取最后一条"**（P5 的报表、P8 的托盘/历史页尤其危险）；按 `reason` 或内容定位。
-- **`retry_recovery` 的两种 `RECOVERY_REQUIRED`（协调器仍 `faulted` ⇔ 重扫失败）只靠错误码分不开**；需要区分时读 `coordinator().is_faulted()`，**不新增错误码**。
+- **`retry_recovery` 的 `RECOVERY_REQUIRED`可能来自协调器恢复事务、提交后镜像重载或门禁重扫失败，错误码不能区分原因**；需要区分协调器是否仍被隔离时读 `coordinator().is_faulted()`（包含待重载镜像）。镜像重载重试只读取已提交事实，不重发 P3 写操作；**不新增错误码**。
 
 ### 验证落点
 

@@ -34,6 +34,14 @@ pub enum DomainError {
     IntervalOpenInWrongState { state: &'static str },
     /// 区间为负：`ended_at < started_at`。
     NegativeInterval { started_at: i64, ended_at: i64 },
+    /// 区间跨度无法用 `i64` 毫秒表示（`ended_at - started_at` 会溢出）。
+    ///
+    /// 两端各自都是合法时刻，但相距太远（超过约 2.9 亿年），任何按毫秒计的时长与交集
+    /// 都算不出来。用法是**写入前的拒绝**：`IntervalRange::new` 在构造时就挡住它，
+    /// 免得到下游的减法里 panic（2026-10-05 外部复审：`backfill` 传
+    /// `started_at = i64::MIN` 会在 `duration_ms()` 里 `attempt to subtract with overflow`）。
+    /// 文案故意**不带**参数：这里没有能讲给用户听的具体值，只有"太长了"这一个事实。
+    IntervalSpanOverflow,
     /// 区间与另一段有效人工区间（**可跨会话**）重叠（半开区间，端点相接不算重叠）。
     OverlappingInterval {
         existing_start: i64,
@@ -220,6 +228,9 @@ impl std::fmt::Display for DomainError {
                 ended_at,
             } => {
                 write!(f, "计时区间时长是负的（{started_at} → {ended_at}）。")
+            }
+            Self::IntervalSpanOverflow => {
+                write!(f, "这段时间跨得太长，无法用毫秒表示。")
             }
             Self::OverlappingInterval {
                 existing_start,
