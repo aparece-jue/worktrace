@@ -135,6 +135,8 @@ where
     T: Send + 'static,
     F: FnOnce(&mut AppState) -> Result<T, AppError> + Send + 'static,
 {
+    #[cfg(debug_assertions)]
+    let probe = dev::CommandProbe::start(command, window);
     let app = Arc::clone(state.app());
     let result = match tauri::async_runtime::spawn_blocking(move || {
         let mut guard = lock_app(&app);
@@ -150,7 +152,11 @@ where
     // 这里只把响应推迟返回（`manual-sync.md` §2.2 要的「先取数据再 sleep」）。
     // 发布构建里 `commands::dev` 整份不存在，这两行也随之不编译。
     #[cfg(debug_assertions)]
-    dev::delay_response_if_armed(window, command).await;
+    {
+        probe.record("body_complete", Some(result.is_ok()));
+        dev::delay_response_if_armed(window, command).await;
+        probe.record("return", Some(result.is_ok()));
+    }
     #[cfg(not(debug_assertions))]
     let _ = (command, window);
 

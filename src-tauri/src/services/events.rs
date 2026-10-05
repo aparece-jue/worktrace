@@ -215,6 +215,13 @@ impl Broadcaster {
         // 不是「没产生」，客户端的跳号判据看到的正是这个缺口。
         #[cfg(debug_assertions)]
         if self.take_drop(&envelope.event) {
+            println!(
+                "[worktrace] dev: {}",
+                serde_json::json!({
+                    "phase": "event_dropped", "event": envelope.event,
+                    "revision": envelope.revision,
+                })
+            );
             lock(&self.state).diagnostics.dropped += 1;
             return EmitOutcome::Dropped;
         }

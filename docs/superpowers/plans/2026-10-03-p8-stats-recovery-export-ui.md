@@ -279,3 +279,9 @@ retry_recovery 的 IPC 请求 expected_data_epoch 映射到 AppState::retry_reco
 - **读数陷阱**：`task_change` 与 `time_edit` **同一毫秒可落多行** ⇒ 界面/统计**禁止"取最后一条"**（托盘"完成"的时间、历史页的"最近一次修改"尤其危险），按 `reason` 或内容定位。
 - **作废后的界面表现**：`discard_session` 之后协调器镜像**停在 `discarded`**（与 `finish` 停在 `finished` 同一口径）⇒ 计时区显示"无活动会话/已作废"，**不得**按 running 计暂计。
 - **登记**：`backfill` 的 `before_json` 是创建型 ⇒ 历史页重建"改动前事实"时跳过创建型行。
+
+
+### 2026-10-05 实机验收补充
+
+- debug CommandProbe已交付：按窗口记录真实命令start/body_complete/return；广播注入实际丢弃时记录event_dropped。使用日志计数，无新增IPC，不写业务库。release lib check通过。上述「观测出口交付」已具备，完整实机门槛仍按逐项结果裁定，见[当前实机记录](../../validation/manual-acceptance-2026-10-05.md)。
+- **原生最小化与网页可见性收口**：Windows/WebView2实测isMinimized=true而visibilityState=visible，DevTools关闭后仍周期get_revision。Task 5复验前先确定并实现原生窗口可见性适配（监听、恢复校验、异步结果跨生命周期失效），覆盖最小化期间停止业务轮询及恢复首屏。不可只修改visibilityState测试替身后宣称实机通过。当前manual-sync §2.5前提未满足，manual_platform_verified仍为false。

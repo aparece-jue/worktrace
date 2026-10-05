@@ -231,3 +231,40 @@ pub async fn __p7_open_sync_lab(app: AppHandle) -> Result<String, String> {
         .map(|window| window.label().to_string())
         .map_err(|error| error.to_string())
 }
+
+/// Debug-only observation of the real command wrapper. No request payloads or SQL.
+pub struct CommandProbe {
+    id: u64,
+    command: &'static str,
+    window: String,
+    started: std::time::Instant,
+}
+
+impl CommandProbe {
+    pub fn start(command: &'static str, window: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let probe = Self {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            command,
+            window: window.to_string(),
+            started: std::time::Instant::now(),
+        };
+        probe.record("start", None);
+        probe
+    }
+
+    pub fn record(&self, phase: &str, success: Option<bool>) {
+        let wall_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        println!(
+            "[worktrace] probe: {}",
+            serde_json::json!({
+                "id": self.id, "window": self.window, "command": self.command,
+                "phase": phase, "wall_ms": wall_ms,
+                "elapsed_ms": self.started.elapsed().as_millis(), "success": success,
+            })
+        );
+    }
+}
