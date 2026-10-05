@@ -30,6 +30,10 @@ pub mod tasks;
 // Today / JSON 明细导出 / Markdown 周回顾三者共用这一层，不各写一套取数逻辑。
 pub mod stats;
 
+// P5 Task 3：JSON 明细导出（F-018）——数字只来自 `stats` 的范围报表，另加 R-03 的标签连接。
+// 只产出内容，不落盘（落盘归 P8）。
+pub mod export;
+
 // P3 终审 I2c：`time_edit` 审计载荷的公共骨架（`recovery` 与 `history` 共用一份
 // 事实契约）。同样只有本层用。
 mod audit;

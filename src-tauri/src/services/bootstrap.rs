@@ -50,6 +50,7 @@ use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
+use crate::services::export::ExportJson;
 use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditReport};
 use crate::services::recovery::{DiscardSessionRequest, ReconcileReport, ReconcileRequest};
 use crate::services::stats::{StatsRangeQuery, StatsSnapshot, TodayQuery, TodayView};
@@ -615,6 +616,23 @@ impl AppState {
         } = self;
         let sample = coordinator.stats_sample(db)?;
         crate::services::stats::today(db, sample, query)
+    }
+
+    /// **JSON 明细导出**（P5 Task 3，F-018）：与 [`AppState::stats_snapshot`] 同一姿势——
+    /// 同一条串行边界内取一次样本，交给 `services::export` 用**同一份** `services::stats`
+    /// 取数路径产出明细导出。导出**不依赖 AI、也不需要网络**；**不写库**：不加 `revision`、
+    /// 不写审计；**落盘归 P8**，这一层只返回内容（[`ExportJson::text`]）。
+    ///
+    /// **生成时间由这一层给**（`generated_at` 是服务层的显式参数）：服务层不许读时钟
+    /// （分层门禁机器强制），所以取**同一次样本**的归属终点 `A(M)` —— 导出因此不会声称
+    /// 自己比它装的数据更新（`generated_at == as_of`）。
+    pub fn export_json(&mut self, query: &StatsRangeQuery) -> Result<ExportJson, AppError> {
+        let AppState {
+            db, coordinator, ..
+        } = self;
+        let sample = coordinator.stats_sample(db)?;
+        let generated_at = sample.attributed_end;
+        crate::services::export::json(db, sample, query, generated_at)
     }
 
     /// **周期采样的一拍**：先问心跳（约 30 秒一次检查点），再取一次计时快照。
