@@ -492,6 +492,12 @@ fn date_out_of_range() -> AppError {
 // 第二节与第三节的事实（完成事件、待确认候选）
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// 周回顾**只收人工**（Ruling P5-24）：机器（BACKGROUND / PASSIVE）与等待（WAITING）
+/// 的时长与待确认记录都去 **JSON 明细导出**里看。
+///
+/// 三节共用这一个判断——「列哪几类」只写一遍，免得计数表与候选表各判一次而分叉。
+const REVIEW_MEASURES: [Measure; 1] = [Measure::Human];
+
 /// 一条完成记录：完成事件时刻在查询时区里的本地日期 + 任务的标题与**当前**状态。
 struct CompletedRecord {
     date: String,
@@ -540,7 +546,9 @@ fn records(
     let candidates: Vec<&StatsInterval> = report
         .intervals
         .iter()
-        .filter(|interval| interval.class == StatsClass::Pending)
+        .filter(|interval| {
+            interval.class == StatsClass::Pending && REVIEW_MEASURES.contains(&interval.measure)
+        })
         .collect();
 
     // 两节提到过的任务各读一行（同一个任务不重复读）；缺行时宁可响亮地失败，
@@ -641,7 +649,7 @@ fn render(
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "口径：人工只统计 FOREGROUND 会话的已确认闭合区间；机器并行时长（BACKGROUND / PASSIVE）与等待（WAITING）不计入人工，本节也不列。"
+        "口径：人工只统计 FOREGROUND 会话的已确认闭合区间；机器并行时长（BACKGROUND / PASSIVE）与等待（WAITING）不计入人工，本节也不列，它们的时长见 JSON 明细导出。"
     );
     let _ = writeln!(out);
     // 已确认列恒为 `Some`（`report()` 对已确认那一类一律给数）；`unwrap_or(0)` 只是不 panic 的出口。
@@ -696,12 +704,12 @@ fn render(
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "口径：未作废的待确认候选（needs_review）单列在此，不计入上面的人工合计；终点未知的候选不推算，只给条数，跨度一栏记「未知」。"
+        "口径：未作废的待确认候选（needs_review）单列在此，不计入上面的人工合计；终点未知的候选不推算，只给条数，跨度一栏记「未知」。本节只列人工的候选，机器与等待的待确认记录见 JSON 明细导出。"
     );
     let _ = writeln!(out);
     let _ = writeln!(out, "| 类型 | 候选条数 | 已知端点跨度 |");
     let _ = writeln!(out, "| --- | --- | --- |");
-    for measure in Measure::ALL {
+    for measure in REVIEW_MEASURES {
         let column = report.column(StatsClass::Pending, measure);
         // 一条候选都没有时不给「0」也不给「未知」：那是「无候选」，不是「算出来是 0」。
         let span = if column.intervals == 0 {

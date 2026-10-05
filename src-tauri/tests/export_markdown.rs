@@ -5,7 +5,9 @@
 //! - 完成任务按 `task_change` 里 `status → Done` 的**事件时刻**入周（改过 `updated_at` 不影响）；
 //! - 同一任务「完成 → 重开 → 再完成」⇒ 两周的回顾里各出现一次（G3 的钉法）；
 //! - `task_change` 的三种形状按**形状**过滤：贴标签 / 加今日计划 / 建任务都不算完成；
-//! - 待确认单独成节，且**不进**人工合计；
+//! - 待确认单独成节，且**不进**人工合计；终点未知的候选只给条数（不推算）；
+//! - 周回顾**只收人工**（Ruling P5-24）：机器 / 等待的待确认记录不在三节里，
+//!   同一周的 JSON 明细导出里仍然拿得到（信息没丢，只是换了个地方）；
 //! - 同一个周重复生成内容稳定（除生成时间）；
 //! - 空周也能生成合法文档；
 //! - 全文只陈述事实：不含「效率」「节省」这类推断性措辞（04 的 F-206）；
@@ -76,6 +78,19 @@ fn line_starting_with<'a>(block: &'a str, prefix: &str) -> &'a str {
         .unwrap_or_else(|| panic!("找不到以「{prefix}」开头的行：\n{block}"));
     assert!(hits.next().is_none(), "以「{prefix}」开头的行应当只有一行");
     first
+}
+
+/// 第三节的**表格行**里只许出现人工（Ruling P5-24）。
+///
+/// 只看表格行：口径散文里必须写明「机器与等待的待确认记录见 JSON 明细导出」，
+/// 那句话本身当然含「机器」「等待」。
+fn assert_pending_tables_are_human_only(pending: &str) {
+    for line in pending.lines().filter(|line| line.starts_with('|')) {
+        assert!(
+            !line.contains("机器") && !line.contains("等待"),
+            "第三节的表格里只列人工的待确认记录：{line}"
+        );
+    }
 }
 
 /// 取一个 `## ` 小节（到下一个 `## ` 之前）。
@@ -700,15 +715,97 @@ fn pending_candidates_are_listed_separately_and_never_join_the_human_total() {
         .filter(|line| line.starts_with("| 2026-"))
         .collect();
     assert_eq!(records, vec!["| 2026-03-10 | 2026-03-10 | 人工 | 写文档 |"]);
-    // 没有被作废的候选：机器三类都没有候选。
-    assert_eq!(
-        line_starting_with(pending, "| 机器（后台） |"),
-        "| 机器（后台） | 0 | 无候选 |"
+    // 第三节**只列人工**（Ruling P5-24）：机器与等待的候选行不在这个文档里。
+    assert_pending_tables_are_human_only(pending);
+
+    // 终点未知的候选（生产可达：崩溃恢复会产出 `ended_at IS NULL` 的候选）——
+    // 放在**周 B**，所以上面周 A 的断言不受影响，两条渲染分支各由一行钉住。
+    h.session(
+        "s-u",
+        "t-a",
+        "FOREGROUND",
+        "recovering",
+        1,
+        WEEK_B + DAY + 9 * HOUR,
     );
+    h.interval("i-u", "s-u", WEEK_B + DAY + 9 * HOUR, None, None, 1, None);
+
+    let week_b = h.weekly_text(Some(WEEK_B + DAY), "Asia/Shanghai", SH_NOON);
+    let pending_b = section(&week_b, "## 三、待确认记录");
+    // 终点未知 ⇒ 只给条数、不给毫秒（不是 0）。
+    assert_eq!(
+        line_starting_with(pending_b, "| 人工 |"),
+        "| 人工 | 1 | 未知（终点未知，不推算） |"
+    );
+    assert_eq!(
+        pending_b
+            .lines()
+            .filter(|line| line.starts_with("| 2026-"))
+            .collect::<Vec<_>>(),
+        vec!["| 2026-03-17 | 未知 | 人工 | 写文档 |"]
+    );
+    // 待确认不进人工合计：周 B 一条已确认区间都没有 ⇒ 合计是 0。
+    assert_eq!(ms_in_line(line_with(&week_b, "本周合计：")), 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ⑦ 同一个周重复生成：除生成时间外逐字节一致
+// ⑦ 机器 / 等待的待确认候选：不在周回顾里，但在 JSON 导出里
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn machine_pending_candidates_stay_out_of_the_review_and_remain_in_the_json_export() {
+    let mut h = setup(SH_NOON);
+    h.task("t-a", "写文档", 1_000);
+    // 一条机器（后台）的待确认候选：已知端点 20 分钟。
+    h.session(
+        "s-bg",
+        "t-a",
+        "BACKGROUND",
+        "recovering",
+        1,
+        WEEK_A + DAY + 13 * HOUR,
+    );
+    h.interval(
+        "i-bg",
+        "s-bg",
+        WEEK_A + DAY + 13 * HOUR,
+        Some(WEEK_A + DAY + 13 * HOUR + 20 * MINUTE),
+        None,
+        1,
+        None,
+    );
+
+    let text = h.weekly_text(Some(SH_NOON), "Asia/Shanghai", SH_NOON);
+    let pending = section(&text, "## 三、待确认记录");
+    // 周回顾三节只收人工（Ruling P5-24）：机器候选连计数行都不占。
+    assert_eq!(
+        line_starting_with(pending, "| 人工 |"),
+        "| 人工 | 0 | 无候选 |"
+    );
+    assert_pending_tables_are_human_only(pending);
+    assert!(
+        !text.contains("20 分钟"),
+        "机器候选的跨度不该出现在周回顾里：\n{text}"
+    );
+    assert_eq!(ms_in_line(line_with(&text, "本周合计：")), 0);
+
+    // 信息没丢，只是换了个地方：同一周的 JSON 明细导出里它还在（20 分钟、1 条）。
+    let query = h.range_query(WEEK_A, WEEK_B, "Asia/Shanghai");
+    let sample = h.coord.stats_sample(&mut h.db).unwrap();
+    let exported = export::json(&h.db, sample, &query, SH_NOON).expect("JSON 导出应当成功");
+    let doc: serde_json::Value = serde_json::from_str(&exported.text).unwrap();
+    let background = doc["pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|column| column["measure"] == "machine_background")
+        .expect("JSON 导出里必须有 machine_background 那一列");
+    assert_eq!(background["ms"], 20 * MINUTE);
+    assert_eq!(background["intervals"], 1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑧ 同一个周重复生成：除生成时间外逐字节一致
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -784,7 +881,7 @@ fn two_generations_of_the_same_week_are_byte_identical_except_for_the_generated_
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ⑧ 空周：仍然是一份合法文档
+// ⑨ 空周：仍然是一份合法文档
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -820,22 +917,16 @@ fn an_empty_week_is_still_a_valid_document() {
 
     let pending = section(&text, "## 三、待确认记录");
     assert!(pending.contains("本周没有待确认记录。"));
-    // 待确认四类固定出现；一条候选都没有时跨度一栏写「无候选」，不是 0（不推算）。
-    for label in [
-        "| 人工 |",
-        "| 机器（后台） |",
-        "| 机器（被动） |",
-        "| 等待 |",
-    ] {
-        assert_eq!(
-            line_starting_with(pending, label),
-            format!("{label} 0 | 无候选 |")
-        );
-    }
+    // 一条候选都没有时跨度一栏写「无候选」，不是 0（不推算）；且第三节只列人工（P5-24）。
+    assert_eq!(
+        line_starting_with(pending, "| 人工 |"),
+        "| 人工 | 0 | 无候选 |"
+    );
+    assert_pending_tables_are_human_only(pending);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ⑨ 只陈述事实：不含推断性措辞（04 的 F-206）
+// ⑩ 只陈述事实：不含推断性措辞（04 的 F-206）
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -908,10 +999,19 @@ fn the_review_states_facts_only_and_never_claims_ai_conclusions() {
     assert!(text.contains("口径："));
     assert!(line_with(&text, "本周合计：").contains("已确认"));
     assert!(section(&text, "## 二、完成任务").contains("task_change"));
+    // 被排除的机器 / 等待时长要有去处：两节的口径行都指向 JSON 明细导出（Ruling P5-23/P5-24）。
+    assert!(
+        section(&text, "## 一、人工投入").contains("JSON 明细导出"),
+        "第一节口径行必须说清机器与等待的时长去哪里看"
+    );
+    assert!(
+        section(&text, "## 三、待确认记录").contains("JSON 明细导出"),
+        "第三节口径行必须说清机器与等待的待确认记录去哪里看"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ⑩ 夏令时周按真实日界（167 小时），不是 7 × 24 小时
+// ⑪ 夏令时周按真实日界（167 小时），不是 7 × 24 小时
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -952,7 +1052,7 @@ fn a_dst_week_is_bounded_by_real_midnights_not_by_168_hours() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ⑪ 生产入口：真启动 + `AppState::export_weekly_markdown`
+// ⑫ 生产入口：真启动 + `AppState::export_weekly_markdown`
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct AppFixture {
