@@ -104,3 +104,59 @@
 
 - [ ] 消费 [pre-p3-closure](../../validation/pre-p3-closure.md) 的 #4–5 和异常表：复用 P3 四类判定，损坏/待确认/作废分别排除，不能只看当前 timer。
 - [ ] 跨午夜含暂停的报表用例、修正后重算、不同 task_change 形状的完成项过滤必须提供结果；P2 已有计时证据不能替代报表验证。
+
+---
+
+## P5 开工前补正（2026-10-05，控制器落盘；开工基线 `a9ba04a`）
+
+> 开工前把本计划的**消费面**逐条对照真实代码核对过（P3 已交付：`origin/dev` = `a9ba04a`，Rust 599 passed、八项门禁全 0）。
+> 下面是必须补的 7 处；每条都给依据与代价。裁决全文见 SDD 台账 `.superpowers/sdd/2026-10-03-p5-stats-and-export/progress.md`。
+
+**G1（Ruling P5-1）｜Today 必须在自己的读事务里用 repo 级入口取日计划**
+`services::daily_plan::plan_for` **自己开事务并自己 `guard_epoch`**；在 Today 的读事务里嵌套调用它会变成两次 epoch 守卫 + 两个快照，
+与"每个 DTO 的 `revision` 与数据来自同一读事务"（00 §5）冲突。⇒ 用 `storage::daily_plan_repo::plan_for(&tx, &date, &timezone)`
+在自己的事务里取；T2 必须有"与 `services::daily_plan::plan_for` 结果一致"的用例钉住排序与筛选。
+**代价**：与 P4 的读入口有一处轻微重复，靠该用例兜住。
+
+**G2（Ruling P5-6）｜"待确认 / 损坏"的排除口径读 P3 的 `attention_overview`，不要写第二份判定**
+P3 计划「下游接口」第 2 条明写：P5 排除可疑区间时读 `attention_overview` 的 `fault_sessions`/`attention`，**不要自己写第二份损坏判定**。
+真实签名：`services::recovery::attention_overview(db: &Db, expected_data_epoch: &str, current_run_id: &str) -> Result<AttentionOverview, AppError>`，
+`AttentionOverview{items, pending_intervals, pending_sessions, fault_sessions, data_epoch, revision}`。
+**注意**：它的列表口径是"不变量损坏 ∪ 未作废待确认区间 ∪ **别的 run 未结束会话**"，与"计时门禁是否关闭"**不等价**（P8 计划已订正这条），
+所以别拿"列表空不空"当门禁判据。**代价**：Today 多一次只读查询。
+
+**G3（Ruling P5-7）｜`task_change` 的生产读取入口不存在，Task 4 必须新增**
+全仓只有**写入**（`task_repo::record_change` 等）与**测试里的裸 SQL**——`src/` 里没有一条 `SELECT … FROM task_change`。
+Task 4 的「完成任务按 `task_change` 的完成事件时刻选」因此需要新增**仓储层**读取入口（服务层不写 SQL）。
+必须按**形状**过滤：三种形状见 `src/storage/mod.rs:6-27`（任务字段 / 标签集合 / 今日计划集合），
+完成事件是 `json_extract(after_json,'$.status') = 'Done'`；**"有没有 `task_change` 行"回答不了任何业务问题**
+（贴标签、加今日计划同样会写一行）。排序口径：**禁止"取最后一条"**——P3 台账的携带项写着 `task_change` 同毫秒可落多行、
+`ORDER BY created_at, id` 在它们之间不确定，要按形状 + 事件时刻取值。**代价**：Task 4 多一个仓储函数 + 它自己的测试。
+
+**G4（Ruling P5-8）｜日界只走 S10 的两个函数**
+`services::daily_plan::{local_day_bounds(timezone, date) -> IntervalRange, local_days_covering(timezone, from, to) -> Vec<(LocalDate, IntervalRange)>}`
+（P3 交付：`end` 由"次日零点"换算、跨日不整段丢、`from == to` 返空、`from > to` 报 `NegativeInterval`）。
+Task 1 的跨日分桶与 Task 4 的周界都用它们，**不新写第二份日界**；相交一律用 `domain::interval` 的 `overlap_ms`/`clipped_ms`/`IntervalSet`。
+
+**G5（Ruling P5-9）｜需要 `AppState` 瘦包装才够得着协调器**
+`AppState.coordinator` 是私有字段，而运行区间的终点只能来自 `Coordinator::stats_sample(&mut self, db)`。
+⇒ 按 P3 的 S2 模式加**瘦包装**（解构 `AppState { db, coordinator, .. }`、取样本、调服务）。
+**IPC 命令仍归 P8**（P5 不新增 `#[tauri::command]`、不改 `commands/mod.rs`）。
+`stats_sample` 不是无主接缝：`tests/timer_regressions.rs` 有 5 处调用（含成功路径），P5 是它的**第一个生产消费者**。
+
+**G6（Ruling P5-5）｜完成门槛里的 cargo 命令一律加 `--offline`**
+本机无网络；`cargo test` / `cargo clippy --all-targets` 都按 `--offline` 跑；分层脚本必须在 `src-tauri` 目录里执行。
+
+**G7（Ruling P5-10）｜"按范围读区间"的仓储入口也不存在，Task 1 必须新增**
+`session_repo` 只有 `intervals_of_session(conn, session_id)`（**按会话**），没有"与 `[from, to)` 相交的区间"查询。
+⇒ Task 1 新增一个仓储级入口，谓词沿用既有半开相交形状（`i.started_at < ?to AND (i.ended_at IS NULL OR ?from < i.ended_at)`），
+并保留 P3 收紧的"**空区间不占时间**"（`(i.ended_at IS NULL OR i.started_at < i.ended_at)`），排除 `voided_at IS NOT NULL`。
+不要用"遍历会话各查一次"绕过（计划明写 Today 避免 N+1）。**代价**：Task 1 多一个查询；索引与大数据量下的表现留给后续阶段观察。
+
+**门禁（Ruling P5-11）｜不新建 P5 门禁脚本**
+`src-tauri/scripts/check-pre-p3.ps1` 跑的就是通用八项（脚本回归 / Rust 测试 / Clippy / 格式 / 分层 / 前端测试 / 构建 / diff），
+名字是历史的；两份清单必然漂移，所以 P5 沿用同一入口。开工基线证据：
+`C:\Users\lenovo\AppData\Local\Temp\worktrace-pre-p3-20261005-185046`（八项全 0、599 passed / 0 failed / 1 ignored）。
+
+**已考虑但决定不做**：不抽 `tests/common/` 共享夹具——P3 的 8 个测试文件各自带夹具（900–2100 行/文件）可读性更好，
+P5 规模更小（5 个文件），统一抽象反而会把各任务的独立性绑在一起。若实施中出现明显重复，由该任务的评审提出。
