@@ -19,7 +19,10 @@
 //! - 范围一律**半开** `[from, to)`；每段有效区间与范围的交集走
 //!   [`IntervalRange::clipped_ms`]（全项目唯一一处裁剪实现）。
 //! - **三类分列，不得合并**：已确认闭合（含 `recovering` 会话里已可信的前缀）、
-//!   实时暂计（当前开放区间）、待确认部分。
+//!   实时暂计（当前开放区间）、待确认部分。待确认栏**含零长度候选**（P3 的 S5 归一与 P2 的
+//!   异常分割都会产出 `[t,t)`），它的条数与 `attention_overview.pending_intervals` 的差
+//!   只剩「范围裁剪」这一处；`ms` 只累加**已知端点**候选的跨度，终点未知的不推算
+//!   （Ruling P5-12）。
 //! - **排除**：`needs_review = 1`、`voided_at` 非空、`discarded` 会话的区间一律不进
 //!   「已确认」，也不进实时暂计；其中 `voided_at` 与 `discarded` 在仓储那一条查询里
 //!   排除（[`crate::storage::session_repo::intervals_overlapping`]，**只做一次**）。
@@ -36,7 +39,7 @@
 use std::collections::HashSet;
 
 use crate::domain::interval::IntervalRange;
-use crate::domain::session::SessionMode;
+use crate::domain::session::{SessionMode, SessionState};
 use crate::error::AppError;
 use crate::services::daily_plan::{local_days_covering, normalize_timezone};
 use crate::services::recovery::attention_overview;
@@ -98,7 +101,8 @@ pub enum StatsClass {
     Confirmed,
     /// 实时暂计：当前开放区间，终点取同一次协调器快照的归属终点 `A(M)`。
     Live,
-    /// 待确认部分：候选端点**不是**事实，所以这一栏没有时长。
+    /// 待确认部分：**含零长度候选**（`[t,t)`），候选端点不是既成事实——只有**已知端点**
+    /// 的候选按跨度求和（裁剪到范围），终点未知的只计数、不给毫秒（02 §4 不推算）。
     Pending,
 }
 
@@ -156,9 +160,18 @@ pub struct MeasureColumn {
     pub data_epoch: String,
     /// 事实来自哪个业务版本（与列里的数字同一次读事务）。
     pub revision: i64,
-    /// 该列的毫秒数。**待确认列恒为 `None`**：候选端点不是事实，不换算成时长。
+    /// 该列的毫秒数。
+    ///
+    /// **待确认列**：该 measure 里**已知端点**候选的跨度之和（裁剪到范围，与其它列同一
+    /// 口径）；这一 measure 一条已知端点的候选都没有时才是 `None`——「终点未知**不推算**」
+    /// （02 §4），不是「整栏不给数」。零长度候选有已知端点但跨度 0，所以它计数、
+    /// 贡献 0 毫秒。
     pub ms: Option<i64>,
-    /// 该列覆盖的区间条数（待确认列用它说「有几条要处理」）。
+    /// 该列覆盖的区间条数。
+    ///
+    /// **待确认列**：与范围相交（**含零长度候选**与终点未知但已开始的候选）的未作废待确认
+    /// 条数。它与 [`crate::services::recovery::attention_overview`] 的 `pending_intervals`
+    /// 的差**只剩「范围裁剪」这一处**（后者是全局的、不分范围）。
     pub intervals: usize,
 }
 
@@ -192,6 +205,9 @@ impl DayTotal {
 pub struct StatsInterval {
     pub id: String,
     pub session_id: String,
+    /// 它属于哪个任务——导出按**当前标签 / 项目**重算时的分类依据（R-03）：消费方只要按
+    /// 任务连一次标签，不必自己再查一次会话。
+    pub task_id: String,
     /// 它被归到哪一类。
     pub class: StatsClass,
     /// 它按会话模式归到哪个 measure。
@@ -199,9 +215,13 @@ pub struct StatsInterval {
     pub started_at: i64,
     /// 开放区间为 `None`。
     pub ended_at: Option<i64>,
-    /// 待确认与开放区间没有可信时长（`None`）。
+    /// 区间自身记下的可信时长（**未**按范围裁剪）；待确认与开放区间为 `None`。
     pub duration_ms: Option<i64>,
     pub needs_review: bool,
+    /// 本区间在这次报表范围内的贡献，与它所在列的 `ms` 逐项相加相等
+    /// （同类同 measure 的 `sum(clipped_ms) == column.ms`）——明细加得起来才等于合计。
+    /// 终点未知的待确认候选不推算，这里是 0。
+    pub clipped_ms: i64,
 }
 
 /// 一次范围报表。
@@ -211,7 +231,8 @@ pub struct RangeReport {
     pub confirmed: Vec<MeasureColumn>,
     /// 实时暂计，固定四项。
     pub live: Vec<MeasureColumn>,
-    /// 待确认，固定四项（`ms` 恒为 `None`）。
+    /// 待确认，固定四项：含零长度候选；`ms` 见 [`MeasureColumn::ms`]（只有已知端点候选
+    /// 的跨度，终点未知时该 measure 为 `None`）。
     pub pending: Vec<MeasureColumn>,
     /// 按查询时区真实日界分桶的**已确认**时长；逐日之和 == `confirmed` 的对应项之和。
     pub days: Vec<DayTotal>,
@@ -251,6 +272,7 @@ impl RangeReport {
 struct Fact {
     id: String,
     session_id: String,
+    task_id: String,
     mode: SessionMode,
     started_at: i64,
     ended_at: Option<i64>,
@@ -284,6 +306,9 @@ pub struct StatsSnapshot {
     pub open_interval_id: Option<String>,
     /// 归属终点 `A(M)`：实时暂计算到这里为止（**不另取墙钟**）。
     pub attributed_end: i64,
+    /// 同一次样本里的会话状态（`None` = 没有活动会话）。T2 的「当前任务与运行状态」要用它
+    /// ——从 `open_interval_id.is_some()` 猜会把 `paused` 与 `recovering` 混为一谈。
+    pub state: Option<SessionState>,
     pub data_epoch: String,
     pub revision: i64,
     /// 这次快照覆盖的半开范围。
@@ -313,7 +338,10 @@ impl StatsSnapshot {
         let mut confirmed_intervals = [0usize; MEASURE_COUNT];
         let mut live = [0i64; MEASURE_COUNT];
         let mut live_intervals = [0usize; MEASURE_COUNT];
+        let mut pending = [0i64; MEASURE_COUNT];
         let mut pending_intervals = [0usize; MEASURE_COUNT];
+        // 该 measure 有没有「已知端点」的候选：只有一条都没有时 `ms` 才是 `None`。
+        let mut pending_known = [false; MEASURE_COUNT];
         let mut details: Vec<StatsInterval> = Vec::with_capacity(self.facts.len());
         // 计入「已确认」的事实：日桶要在它们上面再裁一遍，不重新分类。
         let mut counted: Vec<&Fact> = Vec::new();
@@ -335,14 +363,28 @@ impl StatsSnapshot {
                 };
                 live[index] += live_ms;
                 live_intervals[index] += 1;
-                details.push(detail(fact, StatsClass::Live, measure));
+                details.push(detail(fact, StatsClass::Live, measure, live_ms));
                 continue;
             }
 
             // ② 待确认：只认 P3 的待确认集合（Ruling P5-6），本模块不重写谓词。
+            //
+            //    条数**含零长度候选**（P3 的 S5 归一在有可信前缀时写 `[t,t)`）：它落在范围内
+            //    就得算一条，否则普通崩溃路径之后报表说「0 条」而恢复面说「1 条」（P5-12）。
+            //    毫秒只累加**已知端点**候选的跨度并裁剪到范围；终点未知的不推算（02 §4）。
             if self.pending_ids.contains(fact.id.as_str()) {
                 pending_intervals[index] += 1;
-                details.push(detail(fact, StatsClass::Pending, measure));
+                let mut clipped = 0;
+                if let Some(ended_at) = fact.ended_at {
+                    // 有已知端点（哪怕只是 `[t,t)` 那个点）⇒ 这一 measure 的 `ms` 有数。
+                    pending_known[index] = true;
+                    if ended_at > fact.started_at {
+                        clipped =
+                            IntervalRange::new(fact.started_at, ended_at)?.clipped_ms(from, to);
+                        pending[index] += clipped;
+                    }
+                }
+                details.push(detail(fact, StatsClass::Pending, measure, clipped));
                 continue;
             }
             if fact.needs_review {
@@ -364,10 +406,11 @@ impl StatsSnapshot {
             // ④ 已确认闭合。候选端点不算事实，所以只有闭合过的才进来。
             if let Some(ended_at) = fact.ended_at {
                 let span = IntervalRange::new(fact.started_at, ended_at)?;
-                confirmed[index] += span.clipped_ms(from, to);
+                let clipped = span.clipped_ms(from, to);
+                confirmed[index] += clipped;
                 confirmed_intervals[index] += 1;
                 counted.push(fact);
-                details.push(detail(fact, StatsClass::Confirmed, measure));
+                details.push(detail(fact, StatsClass::Confirmed, measure, clipped));
             }
             // 其余（未闭合、未标待确认、又不是本次快照的开放区间）不计入任何一类：
             // 它们是启动扫描的归一对象（P3 Task 1），不是统计口径里的三类之一。
@@ -397,7 +440,7 @@ impl StatsSnapshot {
                     StatsClass::Confirmed,
                     &values,
                     &counts,
-                    true,
+                    [true; MEASURE_COUNT],
                     StatsRange::from(day_range),
                 ),
             });
@@ -408,16 +451,22 @@ impl StatsSnapshot {
                 StatsClass::Confirmed,
                 &confirmed,
                 &confirmed_intervals,
-                true,
+                [true; MEASURE_COUNT],
                 report_range,
             ),
-            live: self.columns(StatsClass::Live, &live, &live_intervals, true, report_range),
-            // 待确认栏只有条数与 measure：候选端点不是事实，`ms` 恒为 `None`。
+            live: self.columns(
+                StatsClass::Live,
+                &live,
+                &live_intervals,
+                [true; MEASURE_COUNT],
+                report_range,
+            ),
+            // 待确认栏：条数含零长度候选，`ms` 只算已知端点候选的跨度（逐 measure 判）。
             pending: self.columns(
                 StatsClass::Pending,
-                &[0; MEASURE_COUNT],
+                &pending,
                 &pending_intervals,
-                false,
+                pending_known,
                 report_range,
             ),
             days,
@@ -441,13 +490,14 @@ impl StatsSnapshot {
             && !fact.needs_review
     }
 
-    /// 拼一列组：`values` 是毫秒（`ms_known = false` 时整列 `None`），`counts` 是条数。
+    /// 拼一列组：`values` 是毫秒，`counts` 是条数；`ms_known[measure] = false` 的那一项
+    /// 整列 `None`（只有待确认栏会用到：该 measure 一条已知端点的候选都没有）。
     fn columns(
         &self,
         class: StatsClass,
         values: &[i64; MEASURE_COUNT],
         counts: &[usize; MEASURE_COUNT],
-        ms_known: bool,
+        ms_known: [bool; MEASURE_COUNT],
         range: StatsRange,
     ) -> Vec<MeasureColumn> {
         Measure::ALL
@@ -461,7 +511,11 @@ impl StatsSnapshot {
                 as_of: self.attributed_end,
                 data_epoch: self.data_epoch.clone(),
                 revision: self.revision,
-                ms: if ms_known { Some(values[index]) } else { None },
+                ms: if ms_known[index] {
+                    Some(values[index])
+                } else {
+                    None
+                },
                 intervals: counts[index],
             })
             .collect()
@@ -485,16 +539,18 @@ fn fact_span(fact: &Fact) -> Result<IntervalRange, AppError> {
     )?)
 }
 
-fn detail(fact: &Fact, class: StatsClass, measure: Measure) -> StatsInterval {
+fn detail(fact: &Fact, class: StatsClass, measure: Measure, clipped_ms: i64) -> StatsInterval {
     StatsInterval {
         id: fact.id.clone(),
         session_id: fact.session_id.clone(),
+        task_id: fact.task_id.clone(),
         class,
         measure,
         started_at: fact.started_at,
         ended_at: fact.ended_at,
         duration_ms: fact.duration_ms,
         needs_review: fact.needs_review,
+        clipped_ms,
     }
 }
 
@@ -555,6 +611,7 @@ pub fn snapshot(
         .map(|row| Fact {
             id: row.interval.id,
             session_id: row.interval.session_id,
+            task_id: row.task_id,
             mode: row.mode,
             started_at: row.interval.started_at,
             ended_at: row.interval.ended_at,
@@ -569,6 +626,7 @@ pub fn snapshot(
         session_version: sample.session_version,
         open_interval_id: sample.open_interval_id,
         attributed_end: sample.attributed_end,
+        state: sample.state,
         data_epoch: meta.data_epoch,
         revision: meta.revision,
         range,

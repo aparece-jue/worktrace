@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use worktrace_lib::domain::session::{SessionMode, TimerKind};
+use worktrace_lib::domain::session::{SessionMode, SessionState, TimerKind};
 use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::services::bootstrap::{
     lock_app, startup, NoProbe, RunningApp, Startup, StartupConfig,
@@ -85,14 +85,29 @@ fn setup() -> H {
 }
 
 impl H {
+    fn task(&self, id: &str) {
+        self.db
+            .connection()
+            .execute(
+                "INSERT INTO task(id,title,status,row_version,created_at,updated_at)
+                 VALUES(?1,'另一个任务','Doing',0,1000,1000)",
+                [id],
+            )
+            .unwrap();
+    }
+
     fn session(&self, id: &str, mode: &str, state: &str, needs_review: i64) {
+        self.session_of_task(id, "t1", mode, state, needs_review);
+    }
+
+    fn session_of_task(&self, id: &str, task_id: &str, mode: &str, state: &str, needs_review: i64) {
         self.db
             .connection()
             .execute(
                 "INSERT INTO work_session(id,task_id,run_id,mode,state,timer_kind,started_at,
                                           needs_review,row_version)
-                 VALUES(?1,'t1',?2,?3,?4,'stopwatch',?5,?6,0)",
-                rusqlite::params![id, RUN, mode, state, WALL, needs_review],
+                 VALUES(?1,?2,?3,?4,?5,'stopwatch',?6,?7,0)",
+                rusqlite::params![id, task_id, RUN, mode, state, WALL, needs_review],
             )
             .unwrap();
     }
@@ -694,6 +709,134 @@ fn waiting_time_gets_its_own_column_instead_of_being_merged_into_another_measure
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 待确认栏的口径（Ruling P5-12）
+//
+// P3 的 S5 归一会写 `[t,t)` 的候选（有可信前缀时 `VALUES(?1,?2,?3,?3,NULL,NULL,1)`，
+// 没有前缀时 `ended_at = started_at`），P2 也可能产出同形。它们没有宽度，但**是**用户
+// 要在恢复面处理的那一条——报表的待确认栏必须看得见它们，且与恢复面口径一致。
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_zero_length_pending_candidate_is_counted_without_contributing_span() {
+    let mut h = setup();
+    h.session("s-rec", "FOREGROUND", "recovering", 1);
+    // 站在可信前缀终点上的零长度候选：已知的只有一个点。
+    h.interval("i-point", "s-rec", SH_MID, Some(SH_MID), None, 1, None);
+
+    let report = h.report(SH_MID - 1_000, SH_MID + 1_000, "UTC");
+    let pending = report.column(StatsClass::Pending, Measure::Human);
+    assert_eq!(
+        pending.intervals, 1,
+        "零长度候选落在范围内就得算一条待确认（否则普通崩溃路径之后报表说 0 条、恢复面说 1 条）"
+    );
+    assert_eq!(
+        pending.ms,
+        Some(0),
+        "它只有一个已知的点：计入条数、不贡献毫秒"
+    );
+    assert_eq!(
+        ms(&report, StatsClass::Confirmed, Measure::Human),
+        Some(0),
+        "候选不是已确认工时"
+    );
+    assert_eq!(report.intervals.len(), 1);
+    assert_eq!(report.intervals[0].id, "i-point");
+
+    // 半开范围**含起点**：点正好落在 `from` 上算在范围内，落在 `from` 之前不算。
+    let at_from = h.report(SH_MID, SH_MID + 1_000, "UTC");
+    assert_eq!(
+        at_from
+            .column(StatsClass::Pending, Measure::Human)
+            .intervals,
+        1,
+        "`[from, to)` 含起点：候选的点正好在 from 上"
+    );
+    let before_from = h.report(SH_MID + 1, SH_MID + 2_000, "UTC");
+    assert_eq!(
+        before_from
+            .column(StatsClass::Pending, Measure::Human)
+            .intervals,
+        0,
+        "点落在 from 之前：范围不含它"
+    );
+
+    // 与一条**已知跨度**的候选同处一个范围：`ms` 只加有宽度的那条。
+    let mut h = setup();
+    h.session("s-rec", "FOREGROUND", "recovering", 1);
+    h.interval("i-point", "s-rec", SH_MID, Some(SH_MID), None, 1, None);
+    h.interval(
+        "i-tail",
+        "s-rec",
+        SH_MID + 100_000,
+        Some(SH_MID + 700_000),
+        None,
+        1,
+        None,
+    );
+    let report = h.report(SH_MID - 1_000, SH_MID + 1_000_000, "UTC");
+    let pending = report.column(StatsClass::Pending, Measure::Human);
+    assert_eq!(pending.intervals, 2, "两条都算：一个点 + 一段");
+    assert_eq!(
+        pending.ms,
+        Some(600_000),
+        "零长度那条不贡献毫秒：只有 700000-100000"
+    );
+}
+
+#[test]
+fn a_pending_candidate_with_a_known_endpoint_contributes_its_clipped_span() {
+    let mut h = setup();
+    h.session("s-rec", "FOREGROUND", "recovering", 1);
+    // P2 的异常分割余段：从最后可信检查点到候选终点。终点是**候选事实**（不是推算），
+    // 与 P2 `pending_ms_of` 求和已知 `ended_at` 的口径一致。
+    h.interval(
+        "i-tail",
+        "s-rec",
+        SH_MID,
+        Some(SH_MID + 900_000),
+        None,
+        1,
+        None,
+    );
+
+    // 报表范围只盖住候选中间的一段：贡献按范围裁剪。
+    let report = h.report(SH_MID + 120_000, SH_MID + 420_000, "UTC");
+    let pending = report.column(StatsClass::Pending, Measure::Human);
+    assert_eq!(pending.intervals, 1);
+    assert_eq!(
+        pending.ms,
+        Some(300_000),
+        "候选 [0,900000) 与范围 [120000,420000) 的交集是 5 分钟"
+    );
+    assert_eq!(
+        ms(&report, StatsClass::Confirmed, Measure::Human),
+        Some(0),
+        "待确认不并入已确认"
+    );
+}
+
+#[test]
+fn candidates_without_any_known_endpoint_report_no_span() {
+    let mut h = setup();
+    h.session("s-rec-fg", "FOREGROUND", "recovering", 1);
+    h.session("s-rec-bg", "BACKGROUND", "recovering", 1);
+    // 终点未知的候选（S5 归一里「没有可信前缀则整段待确认」的那种）。
+    h.interval("i-unknown-fg", "s-rec-fg", SH_MID, None, None, 1, None);
+    h.interval("i-unknown-bg", "s-rec-bg", SH_MID, None, None, 1, None);
+
+    let report = h.report(SH_MID, SH_MID + 3_600_000, "UTC");
+    let human = report.column(StatsClass::Pending, Measure::Human);
+    assert_eq!(
+        human.intervals, 1,
+        "终点未知按「延伸到未来」判：会话已开始就算在范围内"
+    );
+    assert_eq!(human.ms, None, "终点未知不推算：这一 measure 没有毫秒数");
+    let machine = report.column(StatsClass::Pending, Measure::MachineBackground);
+    assert_eq!(machine.intervals, 1);
+    assert_eq!(machine.ms, None);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DTO 口径字段
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -716,6 +859,7 @@ fn every_column_carries_the_five_contract_fields_from_one_read() {
     let report = snapshot.report().unwrap();
 
     assert_eq!(report.as_of, WALL, "as_of 是本次采样的归属挂钟");
+    assert_eq!(snapshot.state, None, "没有活动会话 ⇒ 快照不带状态");
     assert_eq!(report.as_of, snapshot.as_of());
     assert_eq!(report.as_of, snapshot.attributed_end);
     assert_eq!(report.data_epoch, h.epoch);
@@ -779,6 +923,89 @@ fn a_stale_data_epoch_is_rejected_before_any_fact_is_read() {
     // 样本本身不检查 epoch（它不是业务读）；epoch 守卫在一致读那一步。
     let err = worktrace_lib::services::stats::snapshot(&h.db, sample, &query).unwrap_err();
     assert_eq!(err.code(), "DATA_EPOCH_MISMATCH");
+}
+
+#[test]
+fn an_inverted_range_is_rejected_before_any_fact_is_read() {
+    let mut h = setup();
+    h.session("s-fg", "FOREGROUND", "finished", 0);
+    h.interval(
+        "i-fg",
+        "s-fg",
+        SH_MID,
+        Some(SH_MID + 3_600_000),
+        Some(3_600_000),
+        0,
+        None,
+    );
+
+    // 范围形状先判：`from > to` 走 `IntervalRange::new`，报领域错误而不是去读事实。
+    // 顺带钉住次序——epoch 守卫在范围校验**之后**，所以这里给一个坏 epoch 也仍是范围错误
+    // （早退路径：坏输入不该先碰库）。
+    let mut query = h.query(SH_MID + 1, SH_MID, "UTC");
+    query.expected_data_epoch = "epoch-from-another-database".to_string();
+    let sample = h.coord.stats_sample(&mut h.db).unwrap();
+    let err = worktrace_lib::services::stats::snapshot(&h.db, sample, &query).unwrap_err();
+    assert_eq!(err.code(), "DOMAIN_ERROR");
+    assert!(
+        err.detail().unwrap().contains("负的"),
+        "面向用户的负数区间说明：{}",
+        err.detail().unwrap()
+    );
+}
+
+#[test]
+fn the_detail_carries_the_task_and_the_clipped_span_of_each_interval() {
+    let mut h = setup();
+    h.task("t2");
+    h.session_of_task("s-bg", "t2", "BACKGROUND", "finished", 0);
+    // 行自身 1 小时，报表范围只盖住其中 10 分钟。
+    h.interval(
+        "i-bg",
+        "s-bg",
+        SH_MID,
+        Some(SH_MID + 3_600_000),
+        Some(3_600_000),
+        0,
+        None,
+    );
+
+    let report = h.report(SH_MID + 600_000, SH_MID + 1_200_000, "UTC");
+    let column = report.column(StatsClass::Confirmed, Measure::MachineBackground);
+    assert_eq!(column.ms, Some(600_000), "范围内的贡献是 10 分钟");
+    assert_eq!(column.intervals, 1);
+
+    assert_eq!(report.intervals.len(), 1);
+    let detail = &report.intervals[0];
+    assert_eq!(detail.id, "i-bg");
+    assert_eq!(
+        detail.task_id, "t2",
+        "明细带任务归属：导出按当前标签/项目重算的分类依据"
+    );
+    assert_eq!(detail.duration_ms, Some(3_600_000), "行自身的时长原义不变");
+    assert_eq!(detail.clipped_ms, 600_000, "裁剪后的贡献另给一列");
+    assert_eq!(
+        detail.clipped_ms,
+        column.ms.unwrap(),
+        "明细加得起来 == 列的合计"
+    );
+    let total: i64 = Measure::ALL
+        .iter()
+        .map(|measure| {
+            report.column(StatsClass::Confirmed, *measure).ms.unwrap()
+                + report.column(StatsClass::Live, *measure).ms.unwrap()
+                + report.column(StatsClass::Pending, *measure).ms.unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(
+        report
+            .intervals
+            .iter()
+            .map(|interval| interval.clipped_ms)
+            .sum::<i64>(),
+        total,
+        "全部明细的 clipped_ms 之和 == 三类全部 measure 的合计"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -977,6 +1204,11 @@ fn a_report_never_mixes_the_two_sides_of_a_pause_resume_finish_sequence() {
         })
         .unwrap();
     drop(guard);
+    assert_eq!(
+        snapshot.state,
+        Some(SessionState::Finished),
+        "状态与区间事实出自同一次样本（T2 的「当前任务与运行状态」靠它）"
+    );
     let report = snapshot.report().unwrap();
     assert_eq!(
         ms(&report, StatsClass::Confirmed, Measure::Human),
@@ -1028,6 +1260,7 @@ fn an_anomaly_split_keeps_the_trusted_prefix_confirmed_and_the_remainder_pending
         let mut guard = lock_app(&app);
         guard.stats_snapshot(&query).unwrap()
     };
+    assert_eq!(snapshot.state, Some(SessionState::Recovering));
     let report = snapshot.report().unwrap();
     assert_eq!(
         ms(&report, StatsClass::Confirmed, Measure::Human),
