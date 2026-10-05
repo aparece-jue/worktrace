@@ -211,8 +211,11 @@ pub fn json(
             range_basis: "半开范围 [from, to)：每段区间与范围的交集是它的 clipped_ms\
                           （max(0, min(end,to) - max(start,from))）；日桶按 timezone 的真实日界\
                           切分（夏令时切换日是 23 / 25 小时），逐日之和等于不分组的总和。",
-            exclusions: "needs_review=1、voided_at 非空、discarded 会话的区间不进任何「已确认」\
-                         数字，也不进明细；待确认栏只收未作废的候选（含零长度候选）。",
+            exclusions: "needs_review=1、voided_at 非空、discarded 会话的区间都不进任何「已确认」数字；\
+                         其中 voided_at 非空与 discarded 会话的区间也不进明细；\
+                         未作废的待确认候选会出现在明细里（needs_review=true、class=pending），\
+                         它的 clipped_ms 计入 pending 列（含零长度候选：计数但不贡献跨度）；\
+                         该列 ms 为 null 时按 0 求和，明细之和因此等于列合计。",
             measures: "人工只有 FOREGROUND；机器分 BACKGROUND 与 PASSIVE 两项；WAITING 单列。\
                        四类分列、谁也不并进谁（1h 前台 + 1h 后台 = 人工 1h），三类之间不预先相加。",
             pending: "待确认栏的 ms 只累加「已知端点」候选的跨度（裁剪到范围）；终点未知不推算\

@@ -85,6 +85,25 @@ fn ms_of(doc: &Value, class: &str, measure: &str) -> Option<i64> {
     column(doc, class, measure)["ms"].as_i64()
 }
 
+/// 明细里 `class` 与 `needs_review` 必须一致：**待确认候选带标记、已确认与暂计不带**。
+///
+/// `criteria.exclusions` 的文案说的就是这件事（「未作废的待确认候选会出现在明细里
+/// （needs_review=true、class=pending）」），所以文案与数据必须能互相对上——照字面把
+/// `needs_review` 的行滤掉的第三方会丢掉候选行，让 `Σ clipped_ms` 与 `pending` 列的
+/// `ms` 对不上。
+fn assert_detail_review_flags(details: &[Value]) {
+    for detail in details {
+        let class = detail["class"].as_str().unwrap();
+        let needs_review = detail["needs_review"].as_bool().unwrap();
+        assert_eq!(
+            needs_review,
+            class == "pending",
+            "明细 {} 的 needs_review 与 class={class} 不符",
+            detail["id"]
+        );
+    }
+}
+
 /// 把所有**时间水位**字段压成同一个值：`generated_at` 与 `as_of`（含每一列、每个日桶
 /// 里的 `as_of`）。两次导出之间会动的只有它们——数字与口径必须逐字段相同。
 fn normalize_watermarks(value: &mut Value) {
@@ -623,6 +642,8 @@ fn every_number_in_the_export_equals_the_stats_report_field_by_field() {
     let details = doc["intervals"].as_array().unwrap();
     assert_eq!(details.len(), report.intervals.len());
     assert_eq!(details.len(), 3);
+    // 待确认候选**在**明细里，并带着自己的标记（与 `criteria.exclusions` 的文案一致）。
+    assert_detail_review_flags(details);
     for (json, expected) in details.iter().zip(&report.intervals) {
         assert_eq!(json["id"], expected.id);
         assert_eq!(json["session_id"], expected.session_id);
@@ -1374,5 +1395,92 @@ fn the_generated_time_is_the_wall_clock_and_not_the_data_watermark() {
             .unwrap()
             .contains("不代表数据更新到那一刻"),
         "口径要写清 generated_at 不代表数据更新到那一刻"
+    );
+}
+
+#[test]
+fn the_exclusion_sentence_matches_the_pending_rows_that_are_in_the_detail() {
+    let mut h = setup(SH_NOON);
+    h.task("t-a", "写文档", 1_000);
+    // 一条已确认（needs_review=0）+ 一条未作废的待确认候选（needs_review=1，已知端点）。
+    h.session(
+        "s-done",
+        "t-a",
+        "FOREGROUND",
+        "finished",
+        0,
+        SH_NOON - 3 * HOUR,
+    );
+    h.interval(
+        "i-done",
+        "s-done",
+        SH_NOON - 3 * HOUR,
+        Some(SH_NOON - 2 * HOUR),
+        Some(HOUR),
+        0,
+        None,
+    );
+    h.session(
+        "s-pend",
+        "t-a",
+        "FOREGROUND",
+        "recovering",
+        1,
+        SH_NOON - HOUR,
+    );
+    h.interval(
+        "i-pend",
+        "s-pend",
+        SH_NOON - HOUR,
+        Some(SH_NOON - 50 * MINUTE),
+        // 候选端点不是既成事实 ⇒ 待确认区间不带行自身的时长。
+        None,
+        1,
+        None,
+    );
+
+    let (_, doc) = h.export_doc(SH_MID, SH_MID + DAY, "Asia/Shanghai", SH_NOON);
+    let details = doc["intervals"].as_array().unwrap();
+
+    // ① 数据那一半：待确认候选**在**明细里，带着 `needs_review=true` 与 `class=pending`
+    //    （照字面把 `needs_review` 的行滤掉的第三方会丢掉它）。
+    assert_eq!(details.len(), 2, "已确认与待确认各一条，都在明细里");
+    assert_detail_review_flags(details);
+    let pending_row = details
+        .iter()
+        .find(|detail| detail["class"] == "pending")
+        .expect("未作废的待确认候选必须出现在明细里");
+    assert_eq!(pending_row["id"], "i-pend");
+    assert_eq!(pending_row["needs_review"], true);
+    assert_eq!(pending_row["clipped_ms"], 10 * MINUTE);
+    let confirmed_row = details
+        .iter()
+        .find(|detail| detail["class"] == "confirmed")
+        .expect("已确认区间也在明细里");
+    assert_eq!(confirmed_row["id"], "i-done");
+    assert_eq!(confirmed_row["needs_review"], false);
+    // 那一行的贡献确实计入 `pending` 列（文案里说的「clipped_ms 计入 pending 列」）。
+    assert_eq!(ms_of(&doc, "pending", "human"), Some(10 * MINUTE));
+    assert_eq!(ms_of(&doc, "confirmed", "human"), Some(HOUR));
+
+    // ② 文案那一半：`criteria.exclusions` 必须与上面的数据说同一件事。
+    let exclusions = doc["criteria"]["exclusions"]
+        .as_str()
+        .expect("排除口径必须是字符串");
+    assert!(
+        exclusions.contains("不进任何「已确认」数字"),
+        "三者的共同口径必须写清（needs_review=1 只要不进已确认，不是不进明细）：{exclusions}"
+    );
+    assert!(
+        exclusions.contains("voided_at 非空与 discarded 会话的区间也不进明细"),
+        "只有已作废 / 已丢弃才不进明细——这句必须挂在 voided/discarded 上，别挂到 needs_review 上：{exclusions}"
+    );
+    assert!(
+        exclusions.contains("未作废的待确认候选会出现在明细里"),
+        "待确认候选在明细里这件事必须写进口径，否则第三方会照字面滤掉它们：{exclusions}"
+    );
+    assert!(
+        exclusions.contains("clipped_ms 计入 pending 列"),
+        "要靠它才能把明细加回 `pending` 列的合计：{exclusions}"
     );
 }
