@@ -326,15 +326,22 @@ fn rule2_applied_revision_never_exceeds_seen_revision() {
                 snapshots += 1;
             }
             Step::Notify(epoch, revision) => {
+                // 判据必须取**调用之前**的水位：`Apply` 会把 `seen_revision` 抬到本条通知的
+                // 版本（`events.rs` 的接纳分支），用事后值判「②命中 ⇒ ③必然也命中」会自证
+                // ——一个错误地**接纳**了 `revision <= applied_revision` 的实现，事后 `seen`
+                // 已经被抬到 ≥ revision，那条子断言照样通过（评审 Important 2 的修正）。
+                let same_epoch = gate.epoch() == Some(*epoch);
+                let (applied_before, seen_before) = (gate.applied_revision(), gate.seen_revision());
+
                 let verdict = gate.on_notification(&notification(epoch, *revision));
                 notifications += 1;
-                if gate.epoch() == Some(*epoch) && *revision <= gate.applied_revision() {
+
+                if same_epoch && *revision <= applied_before {
                     // 这一步正是②会命中的地方：证明③也一定命中（两者处置都是丢弃）。
                     assert!(
-                        *revision <= gate.seen_revision(),
-                        "②命中（{revision} <= applied）时③必然也命中（seen={}）：\
-                         这就是②不可被黑盒杀掉的原因",
-                        gate.seen_revision()
+                        *revision <= seen_before,
+                        "②命中（{revision} <= applied={applied_before}）时③必然也命中\
+                         （seen={seen_before}）：这就是②不可被黑盒杀掉的原因"
                     );
                     assert_eq!(
                         verdict,
@@ -343,6 +350,12 @@ fn rule2_applied_revision_never_exceeds_seen_revision() {
                     );
                     rule2_hits += 1;
                 }
+                // 通知只作缓存失效信号：它推 `seen`，但**不得**动已应用水位。
+                assert_eq!(
+                    gate.applied_revision(),
+                    applied_before,
+                    "通知路径改动了已应用水位（{step:?}）"
+                );
             }
         }
         assert!(
@@ -771,8 +784,17 @@ fn a_lost_notification_converges_through_get_revision_without_rolling_back_the_w
 /// 包一层只会给出虚假的保证。⇒ 本用例钉的不是「panic 怎么传播」，而是 00 §4 的两条
 /// **后果**：
 /// ① 已提交的业务不回滚（panic 发生在提交之后）；
-/// ② 串行边界不被毒死——`AppBoundary` 那把锁对中毒是容忍的（`lock_app` 取
-///    `into_inner`），后续命令照常可用，而不是「一次订阅者崩溃 = 应用废掉」。
+/// ② 串行边界**被真的毒过之后**仍然可用——`AppBoundary` 那把锁对中毒是容忍的
+///    （`lock_app` 取 `into_inner`），而不是「一次订阅者崩溃 = 应用废掉」。
+///
+/// ⚠️ ②要成立，**锁必须在 `catch_unwind` 的闭包内部取**（本用例就是这么写的）：
+/// 那正是生产路径的形状——`run_command` 也是在 `spawn_blocking` 的闭包里面才
+/// `lock_app`（`commands/mod.rs`），订阅者 panic 会真的毒掉那把锁。评审 Important 1
+/// 指出过上一版的写法把 guard 留在**测试帧**里：panic 在闭包边界就被接住、guard 从未
+/// 在展开路径上 drop ⇒ 锁根本没被毒，「中毒的锁不该让应用废掉」是一句**恒真断言**
+/// （把 `lock_app` 的容忍改回 `unwrap()` 它也照样绿）。现在 guard 在闭包内，
+/// 展开时 drop ⇒ 中毒是**结构性成立**的，而下面重新取锁走的正是那条容忍分支
+/// （变异 D3 实测：把容忍改回 `unwrap()`，本用例红）。
 ///
 /// ⚠️ **残留边界（登记，本任务不改）**：dev/test 档里这次 panic 经命令包装的
 /// `spawn_blocking` 会变成一次内部错误（`STORAGE_ERROR` + `requires_handshake`），
@@ -783,13 +805,15 @@ fn a_panicking_subscriber_never_rolls_back_the_committed_business() {
     let sink = Arc::new(PanicOnceSink::default());
     let rig = launch(Arc::clone(&sink) as Arc<dyn EventSink>);
     let broadcaster = rig.running.broadcaster();
-    let mut state = lock_app(rig.running.app());
 
     sink.panic_next();
     // 注射的 panic 不必刷进测试日志；钩子是进程级的，所以窗口开得尽可能小。
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // 取锁在闭包**内部**：guard 会在展开路径上 drop ⇒ 这把锁真的被中毒
+        // （与 `run_command` 的 `spawn_blocking` 闭包同一个形状）。
+        let mut state = lock_app(rig.running.app());
         commands::create_task_impl(
             &mut state,
             broadcaster,
@@ -807,6 +831,10 @@ fn a_panicking_subscriber_never_rolls_back_the_committed_business() {
         "panic 越过广播层（这一层只把 Err 记成诊断）"
     );
     assert_eq!(sink.panics.load(Ordering::SeqCst), 1);
+
+    // ②被毒过的那把锁还能取：这一行就是容忍分支（`unwrap_or_else(into_inner)`），
+    // 改回 `unwrap()` 会在这里 panic ⇒ 本用例红。
+    let mut state = lock_app(rig.running.app());
     assert_eq!(
         task_rows(&state, "订阅者 panic 之前的那笔写"),
         1,
@@ -815,9 +843,6 @@ fn a_panicking_subscriber_never_rolls_back_the_committed_business() {
     let committed = commands::get_revision_impl(&mut state).unwrap().revision;
     assert_eq!(committed, 1, "那次写已经提交（revision 恰好 +1）");
 
-    // ②串行边界没被毒死：放锁、重新取锁，命令与广播都照常。
-    drop(state);
-    let mut state = lock_app(rig.running.app());
     let next = commands::create_task_impl(
         &mut state,
         broadcaster,
