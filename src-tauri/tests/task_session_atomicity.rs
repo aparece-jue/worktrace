@@ -139,6 +139,8 @@ fn started(paths: Paths) -> App {
             sampling_interval_ms: 3_600_000,
             // 备份目录注入临时目录：测试绝不写进真实的数据目录。
             backup_dir: Some(paths._dir.path().join("backups")),
+            // 诊断日志：这些夹具不读它 ⇒ 保持关闭（绝不写进真实数据目录）。
+            diagnostic_log: None,
         },
         Box::new(CountingClock {
             clock: Arc::clone(&clock),

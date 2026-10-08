@@ -22,7 +22,7 @@ use worktrace_lib::domain::session::{SessionMode, TimerKind};
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::services::bootstrap::{
-    lock_app, startup, NoProbe, RunningApp, SharedApp, Startup, StartupConfig,
+    lock_app, startup, MaintenancePhase, NoProbe, RunningApp, SharedApp, Startup, StartupConfig,
 };
 use worktrace_lib::services::events::{EventEnvelope, EventSink};
 use worktrace_lib::services::timer::coordinator::StartRequest;
@@ -668,6 +668,127 @@ fn a_failed_tick_broadcast_never_rolls_back_the_committed_heartbeat() {
         rig.running.sampling_errors(),
         0,
         "广播失败不是采样失败：两者必须分开计数"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 维护态：整拍跳过（P6 Task 2a）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **维护态期间采样整拍跳过**：零写入、零广播，而 `ticks` 照涨、`sampling_errors` 不涨。
+///
+/// 夹具是 armed 的：有活动会话，且在维护窗口里推进 30 秒——没有维护态时这一拍会写一个
+/// 带进度的 `interval_checkpoint` 并广播 `timer.tick`（同文件的两条既有用例钉住了那条行为）。
+/// 用例末尾的**正控**（维护结束之后同一个夹具立刻写出东西）证明"零写入"不是因为心跳没到期。
+///
+/// 维护态**不调** `Scheduler::stop()`：线程与 `ticks` 都照旧（`stop()` 不可逆，调了就再也
+/// 回不来，而维护只是"这几拍不采样"）。
+#[test]
+fn a_maintenance_window_writes_nothing_broadcasts_nothing_and_keeps_ticking() {
+    let (rig, sink) = rig_recording(&["t1"]);
+    rig.start("t1").unwrap();
+
+    // 进入维护态（进入时刻由调用方从时钟接缝取）。
+    let entered_at = rig.clock.lock().unwrap().wall_ms();
+    lock_app(rig.running.app())
+        .begin_maintenance(MaintenancePhase::Restore, entered_at)
+        .expect("进入维护态");
+
+    // 基线全部在**置位之后**取：期间任何涨落都只能来自采样拍本身。
+    let ticks_before = rig.running.sampling_ticks();
+    let errors_before = rig.running.sampling_errors();
+    let events_before = sink.events().len();
+    let changes_before = rig.app_total_changes();
+    let rows_before = table_rows(&rig);
+    let revision_before = rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1");
+    let checkpoints_before =
+        rig.scalar("SELECT COALESCE(MAX(elapsed_ms), 0) FROM interval_checkpoint");
+
+    // 推进 30 秒：心跳到期。维护态下这一拍必须整个消失。
+    rig.clock.lock().unwrap().advance_both(30_000);
+    rig.wait_for_ticks(ticks_before + 5);
+
+    assert!(
+        rig.running.sampling_ticks() > ticks_before,
+        "维护态不停止调度器：ticks 照涨（{} -> {}）",
+        ticks_before,
+        rig.running.sampling_ticks()
+    );
+    assert_eq!(
+        rig.scalar("SELECT COALESCE(MAX(elapsed_ms), 0) FROM interval_checkpoint"),
+        checkpoints_before,
+        "维护态不写检查点：整整 30 秒的进度都不许落库"
+    );
+    assert_eq!(table_rows(&rig), rows_before, "任何表的行数都不该变");
+    assert_eq!(
+        rig.app_total_changes(),
+        changes_before,
+        "App 连接上的 total_changes 也必须一动不动（UPDATE 也算）"
+    );
+    assert_eq!(
+        rig.app_scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
+        revision_before,
+        "维护态不得制造 revision"
+    );
+    assert_eq!(
+        sink.events().len(),
+        events_before,
+        "维护态不广播：停止受理写入的同时广播一份旧世界的 tick 自相矛盾"
+    );
+    assert_eq!(
+        rig.running.sampling_errors(),
+        errors_before,
+        "维护态不是错误：sampling_errors 不涨"
+    );
+
+    // 正控：维护结束之后，同一个夹具立刻恢复写入（否则上面那些"零"没有判别力）。
+    lock_app(rig.running.app())
+        .end_maintenance()
+        .expect("退出维护态");
+    let resumed = rig.wait_until(|| rig.app_total_changes() > changes_before);
+    assert!(
+        resumed,
+        "维护结束之后采样必须恢复写入：到期的心跳（以及跨窗口长间隔的 P2 处置）都该落库"
+    );
+}
+
+/// 维护态的拍是**整拍跳过（含读）**，不是"读了不写"。
+///
+/// 判据是行为性的：让时钟永久失败 ⇒ 只要那一拍真的去读样本，就必然拿到 `Err` 并涨
+/// `sampling_errors`。维护态期间它**不涨**，而 `ticks` 照涨；维护一结束，同一个状态
+/// 立刻把它涨上去（正控：夹具本来就是必然失败的）。
+#[test]
+fn a_maintenance_tick_is_skipped_before_any_read() {
+    let (rig, _sink) = rig_recording(&["t1"]);
+    rig.start("t1").unwrap();
+    // 有活动会话 ⇒ 每一拍都要读时钟与库（`heartbeat` → `sample_and_detect`）。
+    rig.clock.lock().unwrap().fail_forever();
+
+    let entered_at = WALL;
+    lock_app(rig.running.app())
+        .begin_maintenance(MaintenancePhase::Restore, entered_at)
+        .expect("进入维护态");
+    let ticks_before = rig.running.sampling_ticks();
+    let errors_before = rig.running.sampling_errors();
+
+    rig.wait_for_ticks(ticks_before + 5);
+    assert!(
+        rig.running.sampling_ticks() > ticks_before,
+        "维护态期间采样线程仍在被驱动"
+    );
+    assert_eq!(
+        rig.running.sampling_errors(),
+        errors_before,
+        "整拍跳过：连读都没发生，所以这一刻的时钟故障一次都不该被记成采样失败"
+    );
+
+    lock_app(rig.running.app())
+        .end_maintenance()
+        .expect("退出维护态");
+    let raised = rig.wait_until(|| rig.running.sampling_errors() > errors_before);
+    assert!(
+        raised,
+        "维护结束之后的同一拍必须把时钟故障记进 sampling_errors（正控：夹具本来就是必然失败的）"
     );
 }
 

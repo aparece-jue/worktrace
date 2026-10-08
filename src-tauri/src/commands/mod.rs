@@ -70,8 +70,15 @@
 //! 组合根 `lib.rs` 把动作接到这两个入口上。
 //!
 //! 与 IPC 的一点差别：托盘**没有响应通道**，所以 `spawn_tray_*` 在阻塞线程里执行完
-//! 只把结果写进诊断（正式诊断日志归 P6）。串行边界与 IPC 完全相同——同一把
+//! 只把结果写进诊断。串行边界与 IPC 完全相同——同一把
 //! `Mutex<AppState>`、同样不在 UI 回调里开事务。
+//!
+//! **托盘绕过 [`run_command`]**（P6 Task 2a，计划 fix round 4 的 C-2）：所以
+//! `guard_writable` 挡不住它们，两条路径各自判维护态——暂停在
+//! [`tray_pause_impl`] 取锁之后先过门禁（拒绝即返回，不写任何东西）；退出走
+//! `RunningApp::shutdown` 里的 `AppState::begin_exit`（维护态下拒绝，
+//! **采样线程仍在跑**、进程也不退出）。两条拒绝都落到正式诊断日志
+//! （release 的 Windows 子系统没有控制台，`eprintln!` 没人看得见）。
 //!
 //! # dev 注入开关（P7 Task 6a，**只在 debug 构建存在**）
 //!
@@ -87,7 +94,9 @@
 //!
 //! # 本阶段不做
 //!
-//! 恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；维护态分流（P6）。
+//! 恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；维护态的新错误码
+//! `DATA_RESTORE_IN_PROGRESS` 与四处联动（P6 Task 4——本任务只把门禁装上，
+//! 被拒响应暂时用临时的内部错误，见 [`maintenance_response`]）。
 
 use std::sync::Arc;
 
@@ -95,7 +104,9 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::envelope::WriteEnvelope;
 use crate::error::{AppError, AuthorityKind, AuthorityTarget, ErrorResponse};
-use crate::services::bootstrap::{lock_app, AppState, ExitReport, RunningApp};
+use crate::services::bootstrap::{
+    is_maintenance_refusal, lock_app, AppState, ExitReport, RunningApp,
+};
 use crate::services::error_response::capture_error_response;
 use crate::services::events::{Broadcaster, EventEnvelope};
 use crate::services::timer::coordinator::{
@@ -140,6 +151,15 @@ where
     let app = Arc::clone(state.app());
     let result = match tauri::async_runtime::spawn_blocking(move || {
         let mut guard = lock_app(&app);
+        // **维护态门禁**（P6 Task 2a）——`guard_writable` 的唯一调用点：取锁之后、
+        // 命令体之前。维护态期间**全部命令一律拒绝**（含只读）：此刻运行态正要被换掉，
+        // 放行只读命令只会让它们报出与"正在恢复"无关的错误，或者读到占位状态。
+        //
+        // 恢复流程自己的 ②③ 两段**不重新进这里**（它在同一次后台调用里连续调服务原语），
+        // 所以白名单里**没有任何 IPC 命令名**。
+        if let Err(error) = guard.guard_writable() {
+            return Err(maintenance_response(&error));
+        }
         body(&mut guard).map_err(|error| capture_error_response(guard.db(), &error, &targets))
     })
     .await
@@ -175,6 +195,26 @@ fn internal_failure(detail: String) -> ErrorResponse {
         message: error.message(),
         authority: None,
         requires_handshake: true,
+    }
+}
+
+/// 维护态拒绝的响应形状（计划 fix round 2 的 I1）：**不读库** ⇒ 没有 `authority`，
+/// 也不要求重新握手（库身份没变，重新握手由维护结束后的新 `data_epoch` 触发）。
+///
+/// 为什么不能走 [`capture_error_response`]：它要读 `guard.db()` 才知道权威版本，
+/// 而维护态期间**运行态正要被换掉**（Task 4 的 `take_runtime`），那一刻既读不到、
+/// 也不该在错误路径上开事务。
+///
+/// **TODO（P6 Task 4）**：`code`/`message` 换成第六个码 `DATA_RESTORE_IN_PROGRESS`
+/// 与它的中文文案（四处联动：`error.rs` 的变体 + `code()` + `message()` + 两处码表用例，
+/// 以及前端 `ERROR_CODES`）。本任务刻意不提前拆那四处——现在这里是临时的内部错误
+/// （`STORAGE_ERROR` + `maintenance:` detail），测试断言的就是这个临时形状。
+fn maintenance_response(error: &AppError) -> ErrorResponse {
+    ErrorResponse {
+        code: error.code().to_owned(),
+        message: error.message(),
+        authority: None,
+        requires_handshake: false,
     }
 }
 
@@ -1241,6 +1281,11 @@ pub fn tray_pause_impl(
     app: &mut AppState,
     broadcaster: &Broadcaster,
 ) -> Result<TrayPause, AppError> {
+    // 托盘**绕过 `run_command`**（P6 Task 2a，计划 fix round 4 的 C-2）：所以维护态
+    // 得自己判，而且必须在**取锁之后**判（"取不到锁"只说明有别的操作在临界区里）。
+    // 拒绝对应"库零写入"：这一句之后才轮到快照与命令体。
+    app.guard_writable()?;
+
     let snapshot = app.snapshot()?;
     if !snapshot.is_running() {
         return Ok(TrayPause::NothingToPause);
@@ -1284,6 +1329,16 @@ fn diagnostic(error: &AppError) -> String {
     }
 }
 
+/// 落盘诊断那一行的 `detail` 段：`code=<码> detail=<内部原因>`。
+///
+/// 与 [`diagnostic`] 分开：那个是给人读的合并句，这个是给日志/脚本按 `k=v` 解析的。
+fn tray_diagnostic(error: &AppError) -> String {
+    match error.detail() {
+        Some(detail) => format!("code={} detail={detail}", error.code()),
+        None => format!("code={}", error.code()),
+    }
+}
+
 /// 托盘「暂停」：在**阻塞线程**上、**串行边界内**执行（与 [`run_command`] 同一条骨架）。
 pub fn spawn_tray_pause(app: &AppHandle) {
     let handle = app.clone();
@@ -1300,11 +1355,18 @@ pub fn spawn_tray_pause(app: &AppHandle) {
             Ok(TrayPause::NothingToPause) => {
                 println!("[worktrace] tray: 没有运行中的计时，暂停未执行")
             }
-            Err(error) => eprintln!(
-                "[worktrace] tray: 暂停失败：{}（{}）",
-                diagnostic(&error),
-                error.code()
-            ),
+            Err(error) => {
+                // 落盘诊断：release 的 Windows 子系统没有控制台，`eprintln!` 没人看得见
+                // （维护态拒绝必须留下痕迹）。
+                state
+                    .diagnostics()
+                    .record("tray.pause.refused", &tray_diagnostic(&error));
+                eprintln!(
+                    "[worktrace] tray: 暂停失败：{}（{}）",
+                    diagnostic(&error),
+                    error.code()
+                )
+            }
         }
     });
 }
@@ -1314,6 +1376,11 @@ pub fn spawn_tray_pause(app: &AppHandle) {
 /// 退出事务失败时（例如库里有一条结束不了的会话）**仍然退出，用非零码标出来**：
 /// 此刻事务已经回滚、库是一致的，这一次 run 会以「没有 `clean_exit_at`」结束——
 /// 那正是恢复扫描的输入（F-015）。把用户困在一个没有窗口的托盘里比一次不干净退出更糟。
+///
+/// **唯一的例外是维护态**（P6 Task 2a，计划 fix round 4 的 C-2）：恢复正把库换到一半，
+/// 此刻退出会让库停在中间态。所以那时 `shutdown()` 的 `begin_exit` 先拒绝，
+/// 这里**不调 `handle.exit`**——采样线程仍在跑、进程继续活着，拒绝原因落盘。
+/// （恢复很短；这是"不阻止用户用操作系统的强杀"，不是"没有出口"。）
 pub fn spawn_tray_quit(app: &AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1332,11 +1399,22 @@ pub fn spawn_tray_quit(app: &AppHandle) {
                 handle.exit(0);
             }
             Err(error) => {
+                // 落盘诊断：release 的 Windows 子系统没有控制台（见 `spawn_tray_pause`）。
+                // 退出被拒时这一行是**唯一**能说明"为什么点了没反应"的东西。
+                let shared = Arc::clone(handle.state::<RunningApp>().app());
+                lock_app(&shared)
+                    .diagnostics()
+                    .record("tray.quit.refused", &tray_diagnostic(&error));
                 eprintln!(
                     "[worktrace] tray: 退出失败：{}（{}）",
                     diagnostic(&error),
                     error.code()
                 );
+                if is_maintenance_refusal(&error) {
+                    // 维护态：拒绝退出（见上面的文档）。
+                    // **TODO（P6 Task 4）**：`is_maintenance_refusal` 换成按码判定。
+                    return;
+                }
                 handle.exit(1);
             }
         }

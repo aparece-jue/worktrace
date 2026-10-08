@@ -35,12 +35,35 @@
 //! 周期采样驱动与用户命令走**同一把锁**：这就是「同一条串行边界」的具体含义，
 //! 也是「广播按提交顺序」的依据（提交与广播在同一临界区内完成）。
 //!
+//! ## 维护态与退出意图（P6 Task 2a）
+//!
+//! **维护态标志就在 [`AppState`] 里**（与 `db`/`coordinator` 同一临界区，**不新增第二把锁**）：
+//! 恢复流程要做的「停止受理写入」因此不需要给 [`Scheduler`] 加 `pause`/`resume`
+//! （它没有，而且 `stop()` 不可逆），也不需要等"当前那一拍结束"（那会与正持锁的
+//! 调用方互锁——采样每一拍要取的正是这把锁）。
+//!
+//! 两条判据各只有一个落点，别加第二处：
+//!
+//! - **采样**：[`AppState::sampling_allowed`] 在 `sampling_action` 取锁之后的**第一句**
+//!   被问一次，维护态**整拍跳过**（含读：不 heartbeat、不 tick、不广播、不涨
+//!   `sampling_errors`；`Scheduler::ticks` 照涨，它只是"触发了几次"）。
+//! - **写入**：[`AppState::guard_writable`] 是唯一门禁，调用点是 `run_command`
+//!   （取锁之后、命令体之前）与**绕过它**的两条托盘路径（`tray_pause_impl` 自己判；
+//!   `RunningApp::shutdown` 走 [`AppState::begin_exit`] 的互斥）。四个统计/导出
+//!   `&mut self` 入口与 `retry_recovery` 也在**取样本之前**先过这道门禁——它们**不是**
+//!   只读查询（采样发现异常时可能提交 P2 的恢复事务）。
+//!
+//! **维护态不是错误**：[`AppState::sampling_allowed`] 的假不代表失败，采样一拍都不记；
+//! 被拒的写入走 [`AppState::guard_writable`] 的错误（本阶段是临时的内部错误，
+//! **Task 4 换成第六个码 `DATA_RESTORE_IN_PROGRESS`**，见 [`MAINTENANCE_DETAIL_PREFIX`]）。
+//!
 //! ## 本阶段不做
 //!
-//! 恢复确认与历史修正的用户命令、门禁重扫（P3 Task 2 起）；维护态隔离（P6 Task 2/4）；
-//! 恢复流程与 `services/backup.rs` 这层归属（P6 Task 4——本任务只做**迁移前的按需一致
-//! 备份编排**，原语先落在本文件，见 `backup_before_migration` 的说明）；平台事件的实机
-//! 验收（P8 复核）。
+//! 恢复确认与历史修正的用户命令、门禁重扫（P3 Task 2 起）；**装卸运行态**
+//! （`take_runtime`/`install_runtime`/`runtime_present`）与恢复流程、`services/backup.rs`
+//! 这层归属（P6 Task 4——本任务只做**迁移前的按需一致备份编排**，原语先落在本文件，
+//! 见 `backup_before_migration` 的说明）；采样失活看门狗与故障态检测半边（P6 Task 2b）；
+//! 正式 OS 事件源与 `AppState::system_boundary`（P6 Task 2c）；平台事件的实机验收（P8 复核）。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,6 +76,7 @@ use crate::domain::session::SessionState;
 use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
 use crate::platform::clock::Clock;
+use crate::platform::diagnostics::Diagnostics;
 use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
@@ -202,35 +226,62 @@ pub struct StartupConfig {
     /// 测试（以及打包路径实验）注入临时目录，免得把产物写进开发机**真实**的数据目录、
     /// 让「需迁移 ⇒ 有产物 / 无需迁移 ⇒ 零产物」这对断言互相污染。
     pub backup_dir: Option<PathBuf>,
+    /// 正式诊断日志的落盘路径（P6 Task 2a）。
+    ///
+    /// `None` = **关闭**（[`StartupConfig::new`] 的缺省）：显式路径构造多用于测试与打包
+    /// 路径实验，缺省落盘只会在临时目录里多留文件——更糟的是，夹具一旦忘了注入就会写进
+    /// 开发机**真实**的数据目录（Task 1 的变异实测过这种污染）。生产走
+    /// [`StartupConfig::from_app_paths`]：`app_data_dir()/worktrace.log`。
+    /// 测试要读回内容时用 [`StartupConfig::with_diagnostic_log`] 显式注入。
+    pub diagnostic_log: Option<PathBuf>,
 }
+
+/// 生产缺省下诊断日志的文件名（与库、锁同在应用数据目录）。
+///
+/// 公开是有意的：2b 的故障态跃迁、P8 的排查都要知道去哪读。
+pub const DIAGNOSTIC_LOG_FILE: &str = "worktrace.log";
 
 impl StartupConfig {
     /// 用平台路径构造。库与锁同目录（`platform::paths` 已保证）。
     ///
     /// 备份目录**不在这里解析**：它是按需的，解析推迟到 [`startup`] 里
     /// 「确实需要迁移」那条分支（见 [`StartupConfig::backup_dir`]）。
+    /// 诊断日志的路径**在这里就定下来**（它每一条记录都要用，且只是拼个路径、不建文件）。
     pub fn from_app_paths() -> Result<Self, AppError> {
         Ok(Self {
             db_path: paths::database_file().map_err(|e| io_err("db path", e))?,
             lock_path: paths::instance_lock_file().map_err(|e| io_err("lock path", e))?,
             sampling_interval_ms: DEFAULT_SAMPLING_INTERVAL_MS,
             backup_dir: None,
+            diagnostic_log: Some(
+                paths::app_data_dir()
+                    .map_err(|e| io_err("diagnostic log path", e))?
+                    .join(DIAGNOSTIC_LOG_FILE),
+            ),
         })
     }
 
-    /// 显式路径（测试与打包路径实验用）。
+    /// 显式路径（测试与打包路径实验用）。**诊断落盘关闭**（见
+    /// [`StartupConfig::diagnostic_log`]）。
     pub fn new(db_path: impl Into<PathBuf>, lock_path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: db_path.into(),
             lock_path: lock_path.into(),
             sampling_interval_ms: DEFAULT_SAMPLING_INTERVAL_MS,
             backup_dir: None,
+            diagnostic_log: None,
         }
     }
 
     /// 指定迁移前备份的目录（不调则由生产缺省按需解析）。
     pub fn with_backup_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.backup_dir = Some(dir.into());
+        self
+    }
+
+    /// 指定诊断日志的落盘路径（测试读回内容用；不调则由 [`StartupConfig::new`] 关闭）。
+    pub fn with_diagnostic_log(mut self, path: impl Into<PathBuf>) -> Self {
+        self.diagnostic_log = Some(path.into());
         self
     }
 }
@@ -297,7 +348,8 @@ impl RunningApp {
 
     /// **显式退出**（Task 4 的托盘「退出」与 P8 复用这一条入口）。
     ///
-    /// 顺序：**先停定时器**（此后不会再有新的一拍进事务），再在**一个事务**里
+    /// 顺序：`holds_app_lock` 检查 → **`begin_exit`（退出意图）** → **停定时器**
+    /// （此后不会再有新的一拍进事务）→ 在**一个事务**里
     /// 结束 `running`/`paused` 会话、写 `clean_exit_at`、按需推进 revision。
     /// `recovering` 记录原样保留（02 §4）。
     ///
@@ -313,6 +365,10 @@ impl RunningApp {
     /// 而那条路必然与采样线程互锁。防线是 [`holds_app_lock`]，失败是
     /// `STORAGE_ERROR`（接线缺陷，不是用户操作错误）：**拒绝时不碰任何东西**——
     /// 采样没停、没有事务、没有半退出状态。
+    ///
+    /// **维护态同样拒绝**（P6 Task 2a）：置位的是 [`AppState::begin_exit`]，位置在
+    /// `sampling.stop()` **之前**（见函数体的顺序说明）。拒绝返回维护态错误，
+    /// **采样线程仍在跑**——用户不能在恢复中途退出进程（恢复很短，强杀会把库停在中间态）。
     pub fn shutdown(&self) -> Result<ExitReport, AppError> {
         // **自死锁防线**（P7 Task 4 fix round 1，评审 I1）：退出要先 `join` 采样线程，
         // 而采样线程每一拍都要取这把锁。调用者自己正持着锁时，那次 join 永远等不到
@@ -326,10 +382,16 @@ impl RunningApp {
             });
         }
 
-        self.sampling.stop();
-
+        // **退出意图先置位**（P6 Task 2a，fix round 4 的 C-2）：`sampling.stop()` 不可逆，
+        // 维护态下先停采样再发现"访问器返 Err"⇒ 采样永久停、退出事务没跑、进程只能强杀。
+        // 所以顺序固定为 holds_app_lock 检查 → `begin_exit`（锁内、短）→ `sampling.stop()`
+        // → `explicit_exit`；维护态在 `begin_exit` 就被拒，**这一条路径上 `stop()` 不会被调到**。
+        //
+        // `begin_exit` 与退出时刻的采样共用**同一次**取锁（都是锁内短操作）：置位与读时刻
+        // 之间没有窗口，别的路径不可能插进来把维护态置上。
         let at = {
             let mut state = lock_app(&self.app);
+            state.begin_exit()?;
             // 退出时刻必须来自协调器的时钟（生产是 SystemClock，测试是 FakeClock）：
             // 这不仅是为了可测，也是为了让「退出」与「归属」用同一个时间来源。
             let AppState {
@@ -337,6 +399,8 @@ impl RunningApp {
             } = &mut *state;
             coordinator.snapshot(db)?.as_of
         };
+
+        self.sampling.stop();
 
         lock_app(&self.app).explicit_exit(at)
     }
@@ -391,6 +455,69 @@ pub fn scan_recovery(conn: &Connection, current_run_id: &str) -> Result<Recovery
 // 串行边界：AppState
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// 维护态阶段（V0.1 只有恢复需要维护态；备份走在线备份，不停写入）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenancePhase {
+    /// 恢复/替换库：换库窗口里没有可用的运行态。
+    Restore,
+}
+
+impl MaintenancePhase {
+    /// 稳定名字：诊断日志与测试按它读，不依赖 `Debug` 的拼法。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MaintenancePhase::Restore => "Restore",
+        }
+    }
+}
+
+/// 进程内唯一的维护态记录。**字段私有**，读走 [`AppState::maintenance`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceState {
+    phase: MaintenancePhase,
+    entered_at_ms: i64,
+}
+
+impl MaintenanceState {
+    /// 阶段（只读：置位/清位只能走 [`AppState`] 的方法）。
+    pub fn phase(&self) -> MaintenancePhase {
+        self.phase
+    }
+
+    /// 进入维护态的**挂钟毫秒**（由调用方从时钟接缝取，不由本类型自取）。
+    pub fn entered_at_ms(&self) -> i64 {
+        self.entered_at_ms
+    }
+}
+
+/// 维护态拒绝的 detail 前缀。
+///
+/// **TODO（P6 Task 4）**：`AppError::DataRestoreInProgress`（第六个码
+/// `DATA_RESTORE_IN_PROGRESS`）落地后，[`maintenance_refused`] 改用它，
+/// [`is_maintenance_refusal`] 改成按码判定，本前缀只留作诊断文案的一部分。
+/// 本任务刻意**不动** `src/error.rs`、命令层的错误码清单与前端——那是 Task 4 的四处联动，
+/// 拆开做只会多一处漂移。
+pub const MAINTENANCE_DETAIL_PREFIX: &str = "maintenance:";
+
+/// 一次维护态拒绝（临时形状，见 [`MAINTENANCE_DETAIL_PREFIX`]）。
+fn maintenance_refused(what: &str) -> AppError {
+    AppError::Storage {
+        detail: format!("{MAINTENANCE_DETAIL_PREFIX} {what}"),
+    }
+}
+
+/// 这条错误是不是「维护态拒绝」。
+///
+/// 用途只有一个：托盘的「退出」在维护态下要**拒绝退出**（不调 `handle.exit`），
+/// 而它与别的失败（持有串行边界、退出事务失败）必须分开处理。
+///
+/// **TODO（P6 Task 4）**：换成 `matches!(error, AppError::DataRestoreInProgress)`。
+pub fn is_maintenance_refusal(error: &AppError) -> bool {
+    error
+        .detail()
+        .is_some_and(|detail| detail.starts_with(MAINTENANCE_DETAIL_PREFIX))
+}
+
 /// 进程内**唯一**的数据库句柄与计时协调器。
 ///
 /// 一次只允许一条路径进入（外部那层 `Mutex`），所以「用户命令」与「周期采样」
@@ -411,6 +538,20 @@ pub struct AppState {
     /// 未处理的恢复事实」当成「没有」。所以失败时置真、**原样保留**旧快照，
     /// 由 [`AppState::guard_business_timing`] 先看这一位再走原有门禁。
     recovery_scan_failed: bool,
+    /// 维护态：`Some` 期间**不采样、不受理写入**（P6 Task 2a）。
+    ///
+    /// 为什么放在这里而不是 `Scheduler` 上：判定必须与 `db` 在**同一临界区**里
+    /// （D6 的"同一串行边界"），而且只有"取锁之后"这个位置才能覆盖**已经在途**的那一拍。
+    /// `Scheduler` 保持只有 `stop()`（不可逆）这一条停机语义，**不加 pause/resume**。
+    maintenance: Option<MaintenanceState>,
+    /// **退出意图**（P6 Task 2a，fix round 4 的 C-2）：`shutdown` 已经决定退出。
+    ///
+    /// 为什么不能只看一眼再 `stop()`：`Scheduler::stop()` 不可逆，而「看一眼前」到
+    /// `stop()` 之间有一个窗口——维护态若恰好在那时置位，采样线程照样被永久停掉、
+    /// 退出事务照样跑不成，进程只能强杀。置位与维护态**互斥**，窗口因此关闭。
+    shutting_down: bool,
+    /// 正式诊断日志的落点（release 的 Windows 子系统没有控制台，见模块头）。
+    diagnostics: Diagnostics,
 }
 
 /// 命令、托盘与采样共用的句柄。
@@ -528,6 +669,120 @@ impl AppState {
         &self.recovery
     }
 
+    /// 诊断落点（只读借用）。服务与命令层在**同一次状态跃迁**里顺手记一条。
+    ///
+    /// 本任务用它记维护态的进入/退出；Task 2b 的故障态进入/清除用**同一个**落点。
+    pub fn diagnostics(&self) -> &Diagnostics {
+        &self.diagnostics
+    }
+
+    /// 只读投影：当前维护态（诊断与 P8 的状态展示）。
+    pub fn maintenance(&self) -> Option<&MaintenanceState> {
+        self.maintenance.as_ref()
+    }
+
+    /// 进入维护态。**已在维护态 ⇒ 拒绝**（不覆盖进入时刻、不重入）。
+    ///
+    /// 退出意图已置位时同样拒绝（两者互斥，见 [`AppState::begin_exit`]）。
+    /// 进入/退出各记一条诊断（含 `phase`、`entered_at_ms`、时长）。
+    pub fn begin_maintenance(
+        &mut self,
+        phase: MaintenancePhase,
+        entered_at_ms: i64,
+    ) -> Result<(), AppError> {
+        if self.shutting_down {
+            return Err(maintenance_refused("exit in progress"));
+        }
+        if let Some(existing) = &self.maintenance {
+            return Err(maintenance_refused(&format!(
+                "already in maintenance (phase={} entered_at_ms={})",
+                existing.phase.as_str(),
+                existing.entered_at_ms
+            )));
+        }
+        self.maintenance = Some(MaintenanceState {
+            phase,
+            entered_at_ms,
+        });
+        self.diagnostics.record(
+            "maintenance.begin",
+            &format!("phase={} entered_at_ms={entered_at_ms}", phase.as_str()),
+        );
+        Ok(())
+    }
+
+    /// 退出维护态，交回被清掉的那份记录（**幂等**：已清则 `None`，也不再记一条）。
+    ///
+    /// 时长取**同一条时钟接缝**（[`AppState::now_ms`]）的当前墙钟减去 `entered_at_ms`；
+    /// 时钟取不到时照实记 `unknown`，不因为诊断失败而拒绝退出。
+    ///
+    /// **调用时机（写给 Task 4）**：恢复流程的 ③-a/③-b 在 `install_runtime` **之后**才调它，
+    /// 所以这条时钟接缝那时又在手了；顺序若反过来（先清维护态、后装运行态），时长会退化成
+    /// `unknown`——不是错误，但会丢掉维护窗口的长度。
+    pub fn end_maintenance(&mut self) -> Option<MaintenanceState> {
+        let state = self.maintenance.take()?;
+        let left_at_ms = self.now_ms().ok();
+        let left = match left_at_ms {
+            Some(left_at_ms) => format!(
+                "left_at_ms={left_at_ms} duration_ms={}",
+                left_at_ms - state.entered_at_ms
+            ),
+            None => "left_at_ms=unknown duration_ms=unknown".to_string(),
+        };
+        self.diagnostics.record(
+            "maintenance.end",
+            &format!(
+                "phase={} entered_at_ms={} {left}",
+                state.phase.as_str(),
+                state.entered_at_ms
+            ),
+        );
+        Some(state)
+    }
+
+    /// 采样判据：无维护态才允许采样。**采样拍在 `lock_app` 之后第一句就问它。**
+    ///
+    /// 维护态**不调** `Scheduler::stop()`（不可逆，调了就再也回不来）：
+    /// 这里返回 `false` 只是让那一拍**整拍跳过**（含读），线程与 `ticks` 都照旧。
+    pub fn sampling_allowed(&self) -> bool {
+        self.maintenance.is_none()
+    }
+
+    /// 写入门禁：维护态 ⇒ Err（本阶段是临时的内部错误，Task 4 换成第六个码）。
+    ///
+    /// 调用点**唯一**是 `commands` 那层的 `run_command`（取锁之后、命令体之前）；
+    /// 绕过它的两条托盘路径与四个统计/导出入口各自显式调用它（见模块头）。
+    ///
+    /// **2c 的 `AppState::system_boundary`（平台可信边界）落地时也必须先过这一道**：
+    /// 否则维护态期间一次锁屏/唤醒通知会绕开隔离直接写库。
+    pub fn guard_writable(&self) -> Result<(), AppError> {
+        match &self.maintenance {
+            Some(state) => Err(maintenance_refused(&format!(
+                "write refused (phase={})",
+                state.phase.as_str()
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// 置位**退出意图**（P6 Task 2a，fix round 4 的 C-2）。判据：
+    ///
+    /// - **维护态 ⇒ 拒绝**（不碰采样线程）：此刻运行态正要被换掉，退出事务既跑不成，
+    ///   强杀还会把库停在中间态；
+    /// - 否则置位并返回成功。重复调用**幂等**（退出是终态，第二次调不改语义）。
+    ///
+    /// 与 [`AppState::begin_maintenance`] **互斥**：置位之后维护态进不来。
+    pub fn begin_exit(&mut self) -> Result<(), AppError> {
+        if let Some(state) = &self.maintenance {
+            return Err(maintenance_refused(&format!(
+                "exit refused while in maintenance (phase={})",
+                state.phase.as_str()
+            )));
+        }
+        self.shutting_down = true;
+        Ok(())
+    }
+
     /// 业务计时（`start`/`resume`）的门禁。
     ///
     /// **只挡「开始新计时」**：查询（`snapshot`/`tick`）照常可用——用户要能看到
@@ -563,6 +818,9 @@ impl AppState {
             coordinator,
             recovery,
             recovery_scan_failed,
+            // 维护态/退出意图/诊断落点与这次重扫无关（Task 2a 新增；`..` 同时让以后
+            // 新增字段不再需要改这一处）。
+            ..
         } = self;
         let run_id = coordinator.run_id().to_string();
         match scan_recovery(db.connection(), &run_id) {
@@ -645,7 +903,13 @@ impl AppState {
     /// **不过恢复门禁**：门禁只挡「开始新计时」（`start`/`resume`），统计是只读查询；
     /// 真正不可信的那些事实由 `stats_sample` 自己按恢复语义拒绝（`RECOVERY_REQUIRED`），
     /// 不在这里重复判一遍。
+    ///
+    /// **过维护态门禁，且在取样本之前**（2026-10-08 收口）。它与上面那条恢复门禁的**口径不同**：
+    /// 恢复门禁挡的是「开始新计时」，维护态挡的是「此刻没有可用的运行态」（Task 4 的
+    /// `take_runtime` 之后连库都不在手）。而且这条入口**不是**纯粹的只读查询——采样发现
+    /// 异常时它会提交 P2 的恢复事务（见上段），所以不能按"只读"绕过维护隔离。
     pub fn stats_snapshot(&mut self, query: &StatsRangeQuery) -> Result<StatsSnapshot, AppError> {
+        self.guard_writable()?;
         let AppState {
             db, coordinator, ..
         } = self;
@@ -660,9 +924,12 @@ impl AppState {
     /// 为什么今天也走这条接缝：五项必须出自**同一次**样本与同一个版本（同一
     /// `as_of`/`revision`），而 `AppState.coordinator` 是私有字段——样本只能从这里取。
     /// 同样**不过恢复门禁**（统计是只读查询，判据在 `stats_sample` 自己那里）；
+    /// **过维护态门禁，且在取样本之前**（与 [`AppState::stats_snapshot`] 同一条理由：
+    /// 采样发现异常时它会提交 P2 的恢复事务）；
     /// **正常采样下只读**；采样发现异常时按 P2 的异常路径处理——**可能**提交恢复事务及其审计
     /// （幂等分支与硬故障回滚分支**零写入**），随后返回恢复错误。IPC 命令归 P8。
     pub fn stats_today(&mut self, query: &TodayQuery) -> Result<TodayView, AppError> {
+        self.guard_writable()?;
         let AppState {
             db, coordinator, ..
         } = self;
@@ -674,7 +941,8 @@ impl AppState {
     /// 同一条串行边界内取一次样本，交给 `services::export` 用**同一份** `services::stats`
     /// 取数路径产出明细导出。导出**不依赖 AI、也不需要网络**；**正常采样下只读**；采样异常时按 P2 的
     /// 异常路径处理——**可能**提交恢复事务及其审计（幂等分支与硬故障回滚分支**零写入**），随后返回恢复错误；
-    /// **落盘归 P8**，这一层只返回内容（[`ExportJson::text`]）。
+    /// **落盘归 P8**，这一层只返回内容（[`ExportJson::text`]）。**维护态在取样本之前就挡住**
+    /// （与 [`AppState::stats_snapshot`] 同一条理由）。
     ///
     /// **生成时间由这一层给**（`generated_at` 是服务层的显式参数）：服务层不许读时钟
     /// （分层门禁机器强制），所以这里从**平台时钟接缝**取一次**生成本刻的墙钟**
@@ -683,6 +951,7 @@ impl AppState {
     /// （`as_of` 是它的归属终点 `A(M)`），`generated_at` 只说明这份文件何时产出
     /// （Ruling P5-19）——两者不相等时，导出不代表数据更新到了那一刻。
     pub fn export_json(&mut self, query: &StatsRangeQuery) -> Result<ExportJson, AppError> {
+        self.guard_writable()?;
         let AppState {
             db, coordinator, ..
         } = self;
@@ -696,7 +965,8 @@ impl AppState {
     /// 取数路径产出周回顾（人工投入 / 完成任务 / 待确认记录三节）。**不依赖 AI、也不需要
     /// 网络**；**正常采样下只读**；采样异常时按 P2 的异常路径处理——**可能**提交恢复事务及其审计
     /// （幂等分支与硬故障回滚分支**零写入**），随后返回恢复错误；**落盘归 P8**，这一层只返回内容
-    /// （[`ExportMarkdown::text`]）。
+    /// （[`ExportMarkdown::text`]）。**维护态在取样本之前就挡住**（与
+    /// [`AppState::stats_snapshot`] 同一条理由）。
     ///
     /// **生成时间由这一层给**（`generated_at` 是服务层的显式参数，服务层不许读时钟）：
     /// 取自**平台时钟接缝**的**生成本刻的墙钟**（[`AppState::now_ms`] →
@@ -710,6 +980,7 @@ impl AppState {
         &mut self,
         query: &WeeklyQuery,
     ) -> Result<ExportMarkdown, AppError> {
+        self.guard_writable()?;
         let AppState {
             db, coordinator, ..
         } = self;
@@ -1047,6 +1318,10 @@ impl AppState {
     /// **不做定时自动重试**：08 §1 的立场是「故障不能自己把证据擦掉」，
     /// 这条入口只由用户显式触发（P8 的 IPC 命令）。
     pub fn retry_recovery(&mut self, expected_data_epoch: &str) -> Result<TimerSnapshot, AppError> {
+        // 维护态在**任何读取与事务之前**就挡住（2026-10-08 收口）：它是要重试一笔恢复事务的
+        // 写入口，不能因为"用户显式触发"就绕过维护隔离。
+        self.guard_writable()?;
+
         // 1. 只读预检：epoch 是**请求带来的**期望值，不与「读出来的当前值」自比。
         {
             let tx = self
@@ -1356,6 +1631,15 @@ pub fn startup(
             recovery: recovery.clone(),
             // 启动能走到这里就说明第 ④ 步的扫描成功了：没有「扫描失败」的遗留。
             recovery_scan_failed: false,
+            // 维护态与退出意图都是**进程内**状态，启动时一定是「没有」。
+            maintenance: None,
+            shutting_down: false,
+            // 诊断落点：`None` = 关闭（显式路径构造的缺省），生产解析到应用数据目录。
+            // 路径只在第一次真的记录时才创建文件（见 `platform::diagnostics`）。
+            diagnostics: match config.diagnostic_log.clone() {
+                Some(path) => Diagnostics::to_file(path),
+                None => Diagnostics::disabled(),
+            },
         }),
         holder: Mutex::new(None),
     });
@@ -1394,6 +1678,17 @@ pub fn startup(
 /// 广播留在临界区内完成，所以「广播顺序 = 提交顺序」。
 fn sampling_action(app: &SharedApp, broadcaster: &Broadcaster, errors: &AtomicU64) {
     let mut state = lock_app(app);
+    // **维护态的唯一落点**（P6 Task 2a）：取锁之后第一句就问，维护态**整拍跳过**——
+    // 含读。理由：① 换库窗口里 `db` 这个句柄正被关闭/替换，读它要么报错（平白污染
+    // `sampling_errors`）要么读到已经作废的那个世界；② 采样的快照会广播给所有窗口，
+    // 在"停止受理写入"的同时广播一份旧世界的 tick 自相矛盾；③ 只有真的停止取样，
+    // 维护结束后的第一拍才会是"跨了维护窗口的长间隔"，由 P2 既有的长间隔规则处理。
+    //
+    // 维护态**不是错误**：这里直接返回，不涨 `errors`；`Scheduler::ticks` 照涨
+    // （它只是"触发了几次"的诊断计数）。
+    if !state.sampling_allowed() {
+        return;
+    }
     match state.sample_tick() {
         Ok(snapshot) => {
             if snapshot.session_id.is_some() {

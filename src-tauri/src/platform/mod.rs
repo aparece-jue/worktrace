@@ -7,8 +7,12 @@
 //! 引用上层，理由写在 `tray` 的模块头）。
 //! P7 Task 6a 加上实验窗口 `sync-lab`（`sync_lab`）：同样只碰窗口对象，
 //! 「什么时候开」由 debug 构建才存在的 dev 命令决定（理由写在 `sync_lab` 的模块头）。
+//! P6 Task 2a 加上正式诊断日志的落点（`diagnostics`）：release 的 Windows 子系统
+//! 没有控制台，维护态/故障态这类「内存态」的跃迁必须有落盘出口（理由写在模块头）。
 
 pub mod clock;
+// P6 Task 2a：一条一行地记诊断（append）。2b 的故障态进入/清除复用同一落点。
+pub mod diagnostics;
 pub mod paths;
 pub mod scheduler;
 pub mod single_instance;
