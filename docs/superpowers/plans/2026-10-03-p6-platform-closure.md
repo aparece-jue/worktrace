@@ -471,3 +471,92 @@ P1/P2/P3/P4/P5/P7 核心已交付；P5 异常采样入口回归已补齐，各�
 - 历史行号、2026-10-04 的调用数量与未实施描述不作为当前状态。当前证据及交接见[跨阶段复审](../../validation/cross-stage-review-2026-10-08.md)，P8 接线按当前 13 条新增命令契约执行。
 
 P6 承接维护态/恢复切换、WAL 一致备份、迁移前按需备份、正式 OS 事件源、采样线程故障与诊断、退出失败提示、跨进程单实例与并发证据；这些是阶段交付内容，不是开工前必须已经实现的前置。manual_platform_verified 继续为 false。
+
+---
+
+## P6 开工前补正（2026-10-08，控制器落盘；开工基线 `9242915`）
+
+> 开工前把本计划的**每一条接缝假设**对照真实代码逐条核过（只读勘察，未改代码）。P1/P7 时代的文件
+> （`migrations.rs`/`meta.rs`/`db.rs`/`error.rs`/`paths.rs`/`scheduler.rs`/`anchor.rs`/`tray.rs`/`lib.rs`/`check-layers.ps1`/前端 TS）
+> **行号与签名全部仍准确**；但 `bootstrap.rs`/`coordinator.rs`/`commands/mod.rs`/`events.rs` 在 2026-10-04 之后又长了，
+> **行号整体漂移**（`bootstrap.rs` 从 ~800 行长到 1198 行，`Db::open`/`migrate` 的 `:664/:667` 现在是 `:1080/:1083`）。
+> ⇒ **实施与评审一律「按符号定位」，不要按本正文里的行号定位**；漂移对照表见
+> [pre-p6-closure](../../validation/pre-p6-closure.md)。以下 11 条是必须先补的（G1–G11）。
+
+**G1（Ruling P6-1）｜Task 1 首条「把 P7 的开发验证门禁升级为正式恢复扫描接入」已经做完了。**
+`startup` 第 ④ 步今天就是 P3 的正式扫描：`crate::services::recovery::scan_at_startup(&mut db, &run_id, sample.wall_ms)?`
+（`services/bootstrap.rs:1123-1124`，注释 `:1114-1122`；签名见 `services/recovery.rs:196`），其后才是 `scan_recovery`（`:1125`）。
+⇒ Task 1 的剩余范围只有：**按需迁移前备份的编排**、**单实例/启动失败/二次启动的故障路径**，以及恢复路径 ③-a/③-b 复用同一函数。
+**不要重做扫描接线**；把它当成已交付的既有件引用。**代价**：Task 1 比计划读起来小一截。
+
+**G2（Ruling P6-2）｜M6 只能取方案②：release 是 `panic = "abort"`。**
+`Cargo.toml:50-54` 的 `[profile.release]` 写着 `panic = "abort"` ⇒ panic 直接**终止进程**，`catch_unwind` 捕不到（std 口径），
+**方案①「给 `on_tick` 包 `catch_unwind` 并继续下一拍」在发布构建里不可能生效**。M6 原文那句现象描述
+（"线程展开退出、`ticks` 停涨、进程还在、没有任何一处会红"）**只在 dev/test profile 成立**；release 里是整个进程消失（用户看得见）。
+⇒ 裁决：**实现方案②**——「`ticks` 不再增长」的看门狗 + 一条可失败的注入用例（注入必 panic 的 `on_tick`，断言可观察出口变化）。
+**不改 `[profile.release]`**（那是发布形态变更，不属本阶段）。同时把计划里 M6 的**现象描述按 profile 分开写**，
+别让后人以为 release 下是"静默线程死亡"。**代价**：release 下没有"继续下一拍"这种能力（进程已 abort），只能靠崩溃可见性 + 看门狗覆盖 dev/test。
+
+**G3（Ruling P6-3）｜`is_faulted()` 比 `faulted` 字段宽，`timer_faulted` 的语义要照实写。**
+`Coordinator::is_faulted`（`coordinator.rs:352-353`）实际是 `self.faulted || self.pending_committed_reload.is_some()`；
+`retry_recovery` 的早退分支（`:1341-1343`）说明"提交后重建待刷新"这一支**不需要** `faulted` 也为真，而它的清除走 `refresh_committed_session`（`:1337-1342`）而不是 `faulted = false`。
+⇒ 裁决：`AppState::timer_faulted()` 就投影这个**既有复合语义**（不新增 P2 访问器，不在服务层拆字段）；
+"按跃迁记一次"的诊断**以 `is_faulted()` 为判据**，但文案要写成"计时不可用（故障态或提交后待刷新）"，
+**不得**把 pending-reload 误记成"进入故障态"。**代价**：诊断里两种成因合并为一个"不可用"信号，细分要看 `run_id` + 后续 P8 的展示。
+
+**G4（Ruling P6-4）｜`faulted` 置真点是 13 处 5 组，不是 12 处 4 组。**
+清单实测：`rebuild_from_committed:649`（`:658/670/675/679/687/697`）、`read_sample:1009`（`:1021`）、`handle_anomaly:1123`（`:1135`）、
+`try_handle_anomaly:1149`（`:1158/1172/1222/1311`）、**`accept_detected_clock_correction:1520`（`:1550`）——第 5 组，计划原先没有**；
+清除 2 处：`:701`、`:1359`。⇒ Task 2 的"置真点分组名"用**上面这 5 组**，别照原表的 4 组。
+
+**G5（Ruling P6-5）｜`startup` 的真实调用点是 25 处（`lib.rs:214` + `tests/` 24 处 / 19 个文件），不是 12 处。**
+⇒ ① 绝不给 `startup` 加参数（会把 24 个测试调用点全部拖下水）；② 新配置一律进 `StartupConfig`。
+
+**G6（Ruling P6-5 续）｜备份目录必须可注入，否则本计划自己的"成对断言"必然互相污染。**
+`StartupConfig`（`bootstrap.rs:162-167`）今天只有 `db_path`/`lock_path`/`sampling_interval_ms`；`platform::paths::app_data_dir()`
+**全仓零生产调用者**；而 19 个测试文件都用 `StartupConfig::new(临时目录)`。
+若备份直接写 `app_data_dir()/backups/`，测试会写进开发机**真实**数据目录（`%APPDATA%`），
+"需迁移 ⇒ 有产物 / 无需迁移 ⇒ 零产物"这对断言会互相污染、也跟着进程环境漂。
+⇒ 裁决：**给 `StartupConfig` 加可注入的备份目录**（如 `backup_dir: Option<PathBuf>` + 一个 `with_backup_dir(...)` 构造帮手，
+生产路径缺省解析 `app_data_dir()/backups`），且**这个解析只在"确实需要迁移"时才发生**——
+首启与"版本相等"两条路径**不得**因为拿不到应用数据目录而失败（那两条本来就不该有产物）。
+**代价**：`StartupConfig` 多一个字段（构造点不破，因为给默认值）。
+
+**G7（Ruling P6-6）｜访问器改造的真实代价约 646 处，不是 52 处。**
+实测 `grep -rno '\.db()\|\.db_mut()\|\.coordinator()' src/ tests/` = **653** 命中：`commands/mod.rs` **19**（`db()` 8 + `db_mut()` 11，与计划一致）、
+`commands/dev.rs` **1**（一致）、`bootstrap.rs` 的 `let AppState { … }` 解构 **23**（计划写 9）、**`tests/` 632 处 / 18 个文件**（计划只列了 6 个文件的 23 处）。
+其中约 7 处**不是** `AppState` 访问器，而是测试自建夹具的同名方法（`tests/exit.rs:78`、`tests/shell_lifecycle.rs:415` 各有一处 `fn db(&self) -> Db`）
+——**不要动它们**。`coordinator()` 在 `src/` 生产代码里 **0** 处、`tests/` 81 处（计划表里根本没列它）。
+⇒ 裁决：**设计不改**（维护态下运行态不在手，访问器必须可失败），但 Task 4 的体量按 **~646 处**排，
+机械改造 + 全量门禁；**逐个文件核对，不要用一把梭的全局替换**（测试夹具的同名方法会被误伤）。**代价**：Task 4 的 diff 会很大（大部分是 `.unwrap()`）。
+
+**G8（Ruling P6-7）｜`services/mod.rs` 要补 `pub mod backup;`；`SystemClock` 还差 `Clone`。**
+计划给了 `services/backup.rs` 的路径却没写注册（`services/mod.rs` 今天 0 处 `backup`，`:6-42` 共 13 个 `pub mod`/`mod`）；
+`platform/clock.rs:37` 的 `SystemClock` **没有** `#[derive(Clone)]`（C-C 要求时钟同源）。两条都要在对应任务里落地。
+
+**G9（Ruling P6-8）｜行号漂移对照（照符号定位，别照计划正文）**：`StartupStep :83→:93`、`ALL :105→:115`、
+`StartupConfig :152→:162`、`RunningApp.sampling :197→:207`、`sampling_ticks/errors :230/:235→:240/:245`、`shutdown :257→:267`、
+`AppState :341→:354`、`AppBoundary/AppGuard/lock_app/holds_app_lock :361/:370/:399/:412→:381/:390/:419/:432`、
+`explicit_exit :546→:695`、`ExitReport :612→:1028`、`Db::open/migrate :664/:667→:1080/:1083`（**备份插在这两者之间**，今天那里没有 `user_version` 读取）、
+`sampling_action :749/:750→:1177/:1178`、`DEFAULT_SAMPLING_INTERVAL_MS :70→:80`；
+`coordinator.rs`：`faulted :170→:172`、`refuse_if_faulted :315→:345`、`is_faulted :322→:352`、`retry_recovery :1265→:1333`、`system_pause :1293→:1364`、`handle_anomaly :1055→:1123`；
+`commands/mod.rs`：`run_command` 取锁 `:140→:142`、`spawn_tray_pause :1282→:1288`（锁 `:1289→:1295`）、`tray_pause_impl :1234→:1240`、`spawn_tray_quit :1311→:1317`、`tray_quit_impl :1265→:1271`、"五个码"第三处 `:162→:168`；
+`events.rs`：`on_notification :390→:397`（②`:396→:403`、③`:399→:406`、规则①`:393→:400`）、`apply_snapshot :350-370→:357-377`、`applied_revision :341→:348`、`seen_revision :345→:352`。
+**仍然准确**（已复核）：`Scheduler` 全public面、`StartupStep` 9 个变体名与顺序、`migrations` 四函数、`meta` 四函数、`error.rs` 五码、
+`anchor.rs:236` 阈值、`check-layers.ps1` 六条规则、`events.rs` 的两个事件名、`uq_running_foreground:183`、`lib.rs/window.rs/tray.rs/sync_lab.rs` 接线、
+前端五个联动点、`run_repo::start_run(storage/run_repo.rs:42)`。
+
+**G10（Ruling P6-9）｜别"顺手修正" `tests/startup_order.rs` 的断言写法。**
+真实写法是：**顺序断言 = 一串 8 个字面量**（`:123-136`，经 `StartupProbe` 的实现 `RecordingProbe:35/:39`，不含 `ExistingInstanceNotified`），
+第 9 条由**另一个用例的四重不变量**钉住（`ALL.len()==9`、无重复、`as_str()` 互不相同、两条路径实测并集 == ALL 双向，`:225-328`），第二实例路径另断言 2 步（`:185-192`）。
+⇒ 这**不是**覆盖缺口，是本计划原文"按 `ALL` 写 9 条"的措辞不准。**不要去把它改成 9 条字面量**。
+
+**G11（Ruling P6-10）｜`Scheduler::Drop` 会无条件 `stop()`，且不查 `holds_app_lock`——装卸运行态时的自死锁陷阱。**
+`scheduler.rs:147-158`（注释自陈"当前生产路径不可达"）。P6 的恢复流程要新建/丢弃运行态（`Runtime` 里含 `Db`+`Coordinator`；
+`Scheduler` 全程不 stop/不重启），**若任何新代码在持锁临界区里丢弃持有 Scheduler 的运行态，就会复现 `shutdown` 那道防线想拦的自死锁**。
+⇒ 落地时把这条写进注释并**用一条用例钉住**（装卸发生在锁外/或在锁内但不 drop Scheduler）。
+
+> 另有三条勘察发现，写在这里给实施者省一轮：① `revision-gate.json:3` 的 `normative` 字段里的 `RevisionGate(:247-:363)` 是**更早的行号**
+> （现在是 `:325-419`），别照它定位；② `AppState`/`bootstrap.rs` **没有内联 `#[cfg(test)] mod tests`**，维护态与恢复编排只能用 `tests/` 集成测试钉；
+> ③ `commands/dev.rs` 的 4 条 debug 命令里只有 `__p7_replay_event:185` 走 `run_command`，另三条不触 `AppState`
+> ⇒ 「`guard_writable` 唯一调用点 + 白名单为空」对触达 `AppState` 的路径仍成立，**托盘那两条是唯一真实例外**（各自判维护态）。
