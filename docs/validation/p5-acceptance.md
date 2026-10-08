@@ -76,18 +76,15 @@
 
 `manual_platform_verified` 保持 **false**。
 
-## 5. 已知待修正文案（下次改动第一笔，**零行为改动**）
+## 5. 2026-10-08 复审修复收口
 
-定稿修复波（`e6d9a41`）新写的两处**文档与代码相反**，复审判定为 Important 级；按"终审后只开一次修复波"的纪律**未在本轮再修**，
-但**点名在此**，以免下游照错句子实现：
+此前两处排除文案已修正：损坏会话的已确认区间排除，待确认候选仍保留；本次采样认可的开放区间按 live 分支处理。JSON 回归使用 running 且带待确认候选的损坏会话核对实际明细。
 
-| 位置 | 错在哪 | 应改成 |
-| --- | --- | --- |
-| `src-tauri/src/services/stats.rs:739` | 新括注「（也不进 `live` / `pending`）」**说反了**。故障码 1 `running_with_pending_interval` 按定义就是"running 会话带未作废待确认区间"；`attention_overview` 的条目同时带 `fault_reason` 与 `intervals`，于是该会话**同时**进 `pending_ids` 与 `fault_session_ids`；而 `report()` 里 **pending 分支排在故障分支之前**并 `continue` ⇒ 这条区间**会计入 `pending` 列、也进明细**（`stats.rs:412-413` 的既有注释本就写着"**不**从待确认栏里抹掉它——用户要处理的就是那些"）。`live` 同理（`:370-381` 不查 `fault_session_ids`） | 「不进 `confirmed`；其待确认候选仍留在 `pending`（见 P5-12）」 |
-| `src-tauri/src/services/export.rs:232` | 在**冻结口径**里把"不进明细"说成了**全称**，与紧随其后的 `:234`「未作废的待确认候选会出现在明细里」**自相矛盾**——第三方照这句读会把上面那行判为不该存在 | 「第 1 类会话的**非待确认**区间不进明细」 |
+空范围现在在统一范围读取入口返回零条；实时区间还必须与查询范围有真实交集，未来范围不再产生零时长 live 明细。新增回归同时覆盖 confirmed、pending、live 与 JSON。
 
-另两条 Minor（同批，可一起收）：`stats.rs:794` 的 ruling 引用错（写成 P5-13，实际出处是 Task 2 的 deferred ③）；
-`tests/export_markdown.rs:147-158` 的 `trailing_watermark_ms` 取"行内最后一对括号"、没有锚点（水位行哪天多一个尾括号就会静默解析成另一个数、用例变假绿）——照 `ms_in_line` 加 `" 毫秒）"` 锚点即可。
+统计/导出服务在**正常采样下**只读；AppState 入口的采样若发现异常，走 P2 的异常路径——**可能**提交恢复事务及其审计（**幂等分支与硬故障回滚分支零写入**，只置故障态），随后返回恢复错误。既有回归是**协调器级**的 `tests/timer_regressions.rs::old_running_session_is_isolated_before_sampling_with_or_without_new_anchor`（含 `stats_sample` 在内 7 个入口，断言 `RECOVERY_REQUIRED`、`revision` 不变、无新审计）；**AppState 入口级（`stats_today`/`export_json`/`export_weekly_markdown`）的时钟异常联动用例本轮未新增**——入口级要额外证明"包装层不吞异常、也不在异常后拿旧样本产出数字"。Today 与导出目前在同一串行边界完成，以维持数字与任务、标签、完成事件的版本一致。
+
+错误 ruling 引用和 Markdown 水位解析锚点已修正；水位仍是裸 Unix 毫秒，没有“毫秒”后缀。历史验收数字保留，当前复验结果见[跨阶段复审](cross-stage-review-2026-10-08.md)。
 
 ## 6. 携带给下游（终审建议：这些不在 workspace 台账里，P8/P6 看不到）
 

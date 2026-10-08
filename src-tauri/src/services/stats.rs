@@ -8,11 +8,13 @@
 //! 1. [`snapshot`]：在**同一条串行边界**内，用一次协调器样本（
 //!    [`crate::services::timer::coordinator::Coordinator::stats_sample`]）加一次一致读，
 //!    把事实冻成 [`StatsSnapshot`]；
-//! 2. [`StatsSnapshot::report`]：**纯函数**，在边界**外**基于快照聚合出 [`RangeReport`]。
+//! 2. [`StatsSnapshot::report`]：**纯函数**，可在边界**外**基于快照聚合出 [`RangeReport`]。
 //!
-//! 分开的理由是计划原文：「构造内部 StatsSnapshot 后释放边界；聚合 / 序列化在外部基于
-//! 此快照进行」。所以本模块**不读时钟**（区间终点只能来自那一次样本的 `attributed_end`）、
-//! **不写库**（不产生事实、不加 `revision`、不写审计）、**不新开裁剪实现**。
+//! Today与导出包装目前在串行边界内完成，确保任务/分类材料与数字同版本。
+//! 分层保留冻结快照后在锁外聚合的能力；消费者须先冻结全部附加材料才能移出边界。
+//! 本模块**不读时钟**（区间终点只能来自那一次样本的 `attributed_end`）、
+//! **正常采样下不写库**（不产生事实、不加 `revision`、不写审计；采样发现异常时由 P2 的
+//! 异常路径决定是否提交恢复事务——幂等分支与硬故障回滚分支**零写入**）、**不新开裁剪实现**。
 //!
 //! 三个消费者：
 //!
@@ -341,7 +343,7 @@ impl StatsSnapshot {
         self.attributed_end
     }
 
-    /// 把冻结的快照聚合成范围报表（纯函数，**在串行边界外**调用）。
+    /// 把冻结的快照聚合成范围报表（纯函数，可在串行边界外调用；当前Today/导出包装仍持边界）。
     pub fn report(&self) -> Result<RangeReport, AppError> {
         let from = self.range.start;
         let to = self.range.end;
@@ -369,9 +371,17 @@ impl StatsSnapshot {
             //    live 与 confirmed 互斥，同一段时间不会被算两遍。
             if self.is_live_open_interval(fact) {
                 let live_ms = if self.attributed_end > fact.started_at {
-                    IntervalRange::new(fact.started_at, self.attributed_end)?.clipped_ms(from, to)
+                    let span = IntervalRange::new(fact.started_at, self.attributed_end)?;
+                    // 开放终点未知；实时范围只能使用本次采样认可的终点。
+                    if !span.overlaps(self.range) {
+                        continue;
+                    }
+                    span.clipped_ms(from, to)
                 } else {
-                    // 归属终点没有越过起点（改时后退等）：暂计 0，不编造负数。
+                    // 刚启动的零时长实时记录保留，但只出现在包含起点的范围内。
+                    if !(from <= fact.started_at && fact.started_at < to) {
+                        continue;
+                    }
                     0
                 };
                 live[index] += live_ms;
@@ -736,7 +746,7 @@ pub struct TodayView {
     /// ③ 已确认：今日真实日界内已确认闭合（含 `recovering` 会话里已可信的前缀），
     /// 按 [`Measure::ALL`] 固定四项。`Human` 那一列就是 F-010 的「确认人工工时」。
     ///
-    /// **第 1 类（不变量损坏）会话的区间不进这个数**（也不进 `live` / `pending`）⇒ 当天有
+    /// **第 1 类（不变量损坏）会话的区间不进这个数**（待确认候选仍保留在 `pending`；本次开放区间先由采样判定，`live` 分支不由故障集合排除）⇒ 当天有
     /// 这类会话时，这里的数字是**静默变小**的，看到数字时要想到这一层。要看被排除了几个
     /// 会话，用 [`RangeReport::fault_sessions_excluded`]——Today **有意**不带计数字段；
     /// V0.1 的损坏提示只在恢复页（[`crate::services::recovery::attention_overview`]）。
@@ -788,10 +798,10 @@ impl TodayView {
 /// 事实、今日选择列表、当前会话与 epoch/revision 全部出自**一个读事务**
 /// （Ruling P5-1）：日计划用 **repo 级** [`daily_plan_repo::plan_for`]，不用
 /// `services::daily_plan::plan_for`——后者会自己开事务并自己守卫 epoch，嵌进来就是
-/// 两次守卫 + 两个快照。聚合仍在串行边界之外做（[`StatsSnapshot::report`]）。
+/// 两次守卫 + 两个快照。聚合是纯函数；当前Today包装在同一串行边界内调用（[`StatsSnapshot::report`]）。
 ///
 /// **有意的丢弃**：报表算出来的 [`RangeReport::fault_sessions_excluded`] 在这里被**直接
-/// 丢掉**——下面只搬三组列，计数字段不搬（口径裁决 P5-13 / Task2-deferred-③，与
+/// 丢掉**——下面只搬三组列，计数字段不搬（口径裁决 Task2-deferred-③，与
 /// [`TodayView::confirmed`] 那一句同一口径）：Today 不带损坏计数，要计数请用报表，
 /// 或者看恢复页的 `attention_overview`。
 pub fn today(db: &Db, sample: StatsSample, query: &TodayQuery) -> Result<TodayView, AppError> {
@@ -816,7 +826,7 @@ pub fn today(db: &Db, sample: StatsSample, query: &TodayQuery) -> Result<TodayVi
         },
     )?;
 
-    // 聚合在串行边界之外（Task 1 的分工）：三组列**原样**取自同一份报表，
+    // 聚合为纯函数（当前 Today 包装仍在串行边界内）：三组列**原样**取自同一份报表，
     // 不筛选、不合并、不相加（F-010 的五项就是三组里的 `Human` 那三列）。
     // `report.fault_sessions_excluded` **有意不搬**（见上面的文档）：Today 不带计数字段。
     let report = snapshot.report()?;

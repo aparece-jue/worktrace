@@ -1402,7 +1402,7 @@ fn the_generated_time_is_the_wall_clock_and_not_the_data_watermark() {
 fn the_exclusion_sentence_matches_the_pending_rows_that_are_in_the_detail() {
     let mut h = setup(SH_NOON);
     h.task("t-a", "写文档", 1_000);
-    // 一条已确认（needs_review=0）+ 一条未作废的待确认候选（needs_review=1，已知端点）。
+    // 一条已确认 + 损坏running会话的待确认候选；故障不能抹掉恢复材料。
     h.session(
         "s-done",
         "t-a",
@@ -1420,14 +1420,7 @@ fn the_exclusion_sentence_matches_the_pending_rows_that_are_in_the_detail() {
         0,
         None,
     );
-    h.session(
-        "s-pend",
-        "t-a",
-        "FOREGROUND",
-        "recovering",
-        1,
-        SH_NOON - HOUR,
-    );
+    h.session("s-pend", "t-a", "FOREGROUND", "running", 1, SH_NOON - HOUR);
     h.interval(
         "i-pend",
         "s-pend",

@@ -333,6 +333,14 @@ fn clipping_covers_inside_outside_partial_and_empty_ranges() {
         empty.column(StatsClass::Pending, Measure::Human).intervals,
         0
     );
+    assert_eq!(
+        empty
+            .column(StatsClass::Confirmed, Measure::Human)
+            .intervals,
+        0
+    );
+    assert_eq!(empty.column(StatsClass::Live, Measure::Human).intervals, 0);
+    assert!(empty.intervals.is_empty());
     assert!(empty.days.is_empty());
     assert_eq!(empty.range.from, a + 10);
     assert_eq!(empty.range.to, a + 10);
@@ -1278,4 +1286,64 @@ fn an_anomaly_split_keeps_the_trusted_prefix_confirmed_and_the_remainder_pending
             .intervals,
         1
     );
+}
+
+#[test]
+fn empty_range_inside_confirmed_pending_and_live_facts_has_no_detail() {
+    let mut h = setup();
+    h.session("empty-confirmed", "FOREGROUND", "finished", 0);
+    h.interval(
+        "empty-closed",
+        "empty-confirmed",
+        WALL,
+        Some(WALL + 3_600_000),
+        Some(3_600_000),
+        0,
+        None,
+    );
+    h.session("empty-pending", "FOREGROUND", "recovering", 1);
+    h.interval(
+        "empty-candidate",
+        "empty-pending",
+        WALL,
+        Some(WALL + 3_600_000),
+        None,
+        1,
+        None,
+    );
+    h.session("empty-running", "FOREGROUND", "running", 0);
+    h.interval("empty-open", "empty-running", WALL, None, None, 0, None);
+    let mut sample = h.coord.stats_sample(&mut h.db).unwrap();
+    sample.session_id = Some("empty-running".into());
+    sample.session_version = Some(0);
+    sample.open_interval_id = Some("empty-open".into());
+    sample.state = Some(SessionState::Running);
+    sample.attributed_end = WALL + 2000;
+    sample.live_ms = 2000;
+    let query = h.query(WALL + 1000, WALL + 1000, "UTC");
+    let report = worktrace_lib::services::stats::snapshot(&h.db, sample.clone(), &query)
+        .unwrap()
+        .report()
+        .unwrap();
+    for class in [StatsClass::Confirmed, StatsClass::Live, StatsClass::Pending] {
+        for measure in Measure::ALL {
+            assert_eq!(report.column(class, measure).intervals, 0);
+        }
+    }
+    assert!(report.intervals.is_empty());
+    assert!(report.days.is_empty());
+    let exported =
+        worktrace_lib::services::export::json(&h.db, sample.clone(), &query, WALL).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&exported.text).unwrap();
+    assert_eq!(json["intervals"].as_array().unwrap().len(), 0);
+    let future = h.query(WALL + 3000, WALL + 4000, "UTC");
+    let report = worktrace_lib::services::stats::snapshot(&h.db, sample, &future)
+        .unwrap()
+        .report()
+        .unwrap();
+    assert_eq!(report.column(StatsClass::Live, Measure::Human).intervals, 0);
+    assert!(!report
+        .intervals
+        .iter()
+        .any(|row| row.class == StatsClass::Live));
 }

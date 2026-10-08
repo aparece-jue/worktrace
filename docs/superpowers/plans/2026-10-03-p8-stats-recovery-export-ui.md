@@ -14,7 +14,7 @@
 - `.../03-adr.zh.md` ADR-012 的 R-04（`DockviewDemo` 不进发布产物）
 - `.../00-architecture.zh.md` §5（快照、去重、维护态）
 
-**依赖的前置计划：** **P3、P5、P6、P7**（恢复确认与修正、统计与导出、平台硬化、外壳与核心交互）。**（2026-10-04 修订：因 M13）今天的实施状态**：P7 已交付并验收（实机项结论为空，归本计划 Task 5）；**P3/P5/P6 都还没实施**（`worktrace-src/src/services/` 下没有 `stats.rs`/`export.rs`，`reconcile`/`backfill`/`discard_session` 无生产实现，`DATA_RESTORE_IN_PROGRESS` 0 命中）。⇒ Task 1（要 P5 的 Today 聚合）、Task 2（要 P3 的 `correct`/`reconcile`/`backfill`）、Task 3（要 P5 的生成函数 + P6 的维护态与恢复入口）各自写了**硬前置**，前置未落地时不得声称对应 F-ID 完成。
+**依赖的前置计划：** P3、P5、P6、P7。2026-10-08：P3/P5 服务与 P7 核心已交付，P6 尚未实施，完整平台验收仍未完成。Today/恢复/导出 IPC 包装与页面由 P8 实施；备份恢复仍以 P6 服务交付为硬前置。
 
 **边界（不要越界）：**
 - **HUD 与全局捕获热键属 V0.1b**（F-012/F-013），不做。
@@ -42,7 +42,7 @@
 | **M12** | Minor | P7 验收记录里归 P8 的 10+ 项在 P8 计划里没有 | 逐条登记「做 / 不做 + 理由 + 落在哪个 Task」，见文末「P7 验收记录里归 P8 的条目：逐条登记」 | 来源 `docs/validation/p7-acceptance.md` §6.3 第 9 条、§6.4 第 11–17 条、§6.5 第 19/24 条、§6.6 第 29–36 条 | 不登记 ⇒ P7 交出来的东西在 P8 手里再次落空（这正是上一轮审计的成因） |
 | **M13** | Minor | 依赖的前置计划只写「P3、P5、P6、P7」 | 补一句今天的实施状态：**P3/P5/P6 均未实施**（全仓 0 命中），P7 已交付；Task 1/2/3 各自写了硬前置 | `worktrace-src/src/services/` 无 `stats.rs`/`export.rs`；`grep -rn "reconcile\|backfill\|discard_session" src/` 无生产实现（`docs/validation/p1-p4-review-backlog.md:22` FOLLOW-03 已核） | 三个前置计划今天都不在树里，计划必须按"顺序执行"读，而不是"都有了" |
 
-**控制器裁决回填（2026-10-04；本计划审前留白的一处 + `mode` 的归属）**（**fix round 2（同日终审）见文末「P8 新增的 IPC 命令（9 条）」一节**：P8 要新增哪些命令、请求/响应与信封口径在那里逐条写死）：
+**控制器裁决回填（2026-10-04；本计划审前留白的一处 + `mode` 的归属）**（**fix round 2（同日终审）见文末「P8 新增的 IPC 命令（13 条）」一节**：P8 要新增哪些命令、请求/响应与信封口径在那里逐条写死）：
 
 - **②`mode`（§6.4 第 14 条）→ V0.1 判"不做"**：`start` 明确拒绝非前台（`coordinator.rs:492`-`:496`），三个非前台变体没有任何生产构造点 ⇒ 会话模式恒为前台，`useRunningTaskId` 不需要 `mode`。落地位置：本节的 **M9 行**、「边界」一节那条、文末登记表的 **§6.4-14 行**（三处口径一致：**V0.1 不做**；要做得先扩 `TimerSnapshot.mode`，**届时另开变更**）。
 - **③导出落盘的能力选型 → 先按"离线约束"确认，不得默认插件可用**：本机缓存实测**没有** `tauri-plugin-dialog`/`tauri-plugin-fs`/`rfd`（Windows 侧 `~/.cargo/registry/cache` 只有 `tauri-plugin`/`tauri-plugin-log`/`tauri-plugin-opener` 三个 `.crate`；`src-tauri/Cargo.lock` 全文 grep 0 命中）⇒ **离线环境下它们装不上**，必须走零依赖方案。落地位置：Task 3 的「能力的选型与登记」条（含"可打开的位置"这半边**零新增能力**的实测依据）。
@@ -54,8 +54,8 @@
 文件：`src/pages/Today.tsx`（**新建**）、`src/App.tsx`（导航加第 5 项）、`src/pages/__tests__/Today.test.tsx`（新建）。
 
 - [ ] **前提订正（2026-10-04 修订：因 C3）**：原措辞「在 P7 的基础上扩展」「P7 已做前两项（今日选择列表、当前任务）」**为假**——`src/pages/` 今天只有 `Inbox`/`Timer`/`Projects`/`Tasks`（`src/App.tsx:40` 的 `PageKey` 与 `:42` 的 `PAGES` 都是四项，没有 Today）；`src/ipc.ts:249` 的 `planFor` 虽然有转发，但 `grep -rn "planFor" src/pages/` = **0 命中**；"当前任务"今天只有 `src/pages/Timer.tsx:113`（计时页标题）与 `src/App.tsx:89`（状态栏）读 `snapshot.task_title`，**没有任何"今日页"**。⇒ 本任务是**从零建一个 Today 页**，不是扩展现成页面。
-- [ ] **数据源（2026-10-04 fix round 2：因 I3）**：本页要用的命令今天**大半不存在**——`plan_for`/`timer_snapshot` 已有转发（`src/ipc.ts:249`/`:264`），而**今日聚合**那条命令属 **P5 新增**、**待确认/恢复**那几条属 **P8 新增**（见文末「P8 新增的 IPC 命令（9 条）」）。⇒ 本任务五项里，今天只有「今日选择列表 + 当前任务」两项有数据源。
-- [ ] **硬前置（2026-10-04 修订：因 C4/M13）**：F-010 的后三项（确认人工工时 / 运行暂计 / 待确认时间）必须来自 **P5 的同一次查询**（同一 `as_of`/`revision`），而 `services/stats.rs`/`services/export.rs` 今天**不存在**（P5 未实施）。所以：**P5 的 Today 聚合入口（一条命令 + 一个 DTO，含 `as_of`/`revision`/`range`/`timezone`）落地之前，本任务只能做前两项**（今日选择列表 + 当前任务）**，不得**把 `TimerSnapshot.active_ms`（那是**当前会话**的暂计，`snapshot.rs:63`）冒充"今日确认人工工时"，也不得声称 F-010 完成。
+- [ ] **数据源（2026-10-08 订正）**：`plan_for`/`timer_snapshot` 已接线；P5 已交付 `AppState::stats_today` 与 Today DTO，但未新增 IPC。P8 新增第 12 条 `stats_today` 包装和前端转发，今日五项统一消费同一个 `TodayView`，不能拼接不同水位的多次查询。
+- [ ] **硬前置**：后三项必须来自 P5 的同一次查询（同一 `as_of`/`revision`）。服务前置已满足，IPC 接线与页面验收仍归 P8；不得用 `TimerSnapshot.active_ms` 冒充今日已确认工时。
 - [ ] **要复用的既有件（逐条实测；本任务不新造）**：
   - 本视图水位：`createViewWatermark()`（`src/components/viewWatermark.ts:47`，签名 `isStale(stamp: VersionStamp, requestEpoch: string): boolean`，`:42`；`applied(stamp)` 在 `:44`）。用法照 `Inbox.tsx:114`/`:140`（`useState(createViewWatermark)` 拿稳定实例 → 响应 `isStale` 判旧 → 上屏后 `applied`）。
   - 命令转发：`planFor`（`src/ipc.ts:249`）、`timerSnapshot`（`:264`）、`addToPlan`（`:254`）、`removeFromPlan`（`:259`）——**后两条今天全仓零调用**（`grep -rn "addToPlan\|removeFromPlan" src/` 除 `ipc.ts` 定义处外 0 命中），Today 是它们的第一处消费方（今日选择列表的增删）。
@@ -75,8 +75,8 @@
 
 文件：`src/pages/Recovery.tsx`（新建）、`src/pages/History.tsx`（新建）、`src/pages/__tests__/{Recovery,History}.test.tsx`（新建；vitest 就地，见 M11）。
 
-- [ ] **数据源（2026-10-04 fix round 2：因 I3；fix round 4：命令总数 9 → 11）**：本任务要用的 8 条命令（`reconcile`/`correct`/`backfill`/`discard_session`/`transition_task`/`accept_detected_clock_correction`/`retry_recovery`/`attention_overview`）**全部由 P8 新增**，逐条形状见文末「P8 新增的 IPC 命令（9 条）」；P3 只交付 `AppState` 入口与 DTO（P3 计划 §0.3 的 S1/S2/S4/S12 与 §0.5）。⇒ 恢复页与历史页的**第一跳读查询就是第 8 条 `attention_overview`**。
-- [ ] **硬前置（2026-10-04 修订：因 M13）**：本任务整条依赖 **P3** 的 `reconcile` / `correct` / `backfill` / `discard_session` 服务与命令，而 P3 **今天未实施**（`grep -rn "reconcile\|backfill\|discard_session" src/` 无生产实现，见 `docs/validation/p1-p4-review-backlog.md:22` FOLLOW-03）。⇒ 本任务只能在 P3 落地后开工；**不得**在前端伪造这四个动作的语义（那正是本计划「边界」里"不在前端补"的意思）。
+- [ ] **数据源（2026-10-04 fix round 2：因 I3；fix round 4：命令总数 9 → 11）**：本任务要用的 8 条命令（`reconcile`/`correct`/`backfill`/`discard_session`/`transition_task`/`accept_detected_clock_correction`/`retry_recovery`/`attention_overview`）**全部由 P8 新增**，逐条形状见文末「P8 新增的 IPC 命令（13 条）」；P3 只交付 `AppState` 入口与 DTO（P3 计划 §0.3 的 S1/S2/S4/S12 与 §0.5）。⇒ 恢复页读取第 8 条 `attention_overview`；历史页读取第 13 条 `history_view`，不能用恢复列表代替正常历史。
+- [ ] **硬前置（2026-10-04 修订：因 M13）**：本任务整条依赖 **P3** 的 `reconcile` / `correct` / `backfill` / `discard_session` 服务与命令，P3 服务现已交付，但这些动作的前端 IPC 接线仍归本阶段；2026-10-04 的未实施判断仅为历史记录。⇒ 本任务按当前 P3 服务契约接线；**不得**在前端伪造这四个动作的语义（那正是本计划「边界」里"不在前端补"的意思）。
 - [ ] **F-015 恢复确认**：recovering 记录要能看清"哪一段可信、哪一段待确认"；确认时要让用户给出**合法且不重叠**的起止，重叠时显示服务返回的具体冲突而不是笼统失败；已知单调时长**只作候选**，不作为默认值强迫接受。
 - [ ] **丢弃与作废必须是两个动作**（02 §3 原文）：`reconcile(discard_uncertain)` 只丢不确定区间、保留此前闭合工时；`discard_session` 作废整次并单独入口 + 二次确认。界面上**不许合并成一个"丢弃"按钮**，文案要说清各自的影响范围。
 - [ ] **F-017 修正与补录**：`correct` 只对 `finished` 开放，界面据状态禁用入口；`backfill` 独立入口，明确"不启动计时、不伪造完成事件"；删除误记是软删除，界面要说明"保留审计"。
@@ -93,7 +93,7 @@
   - **不在 ⇒ 走零依赖方案（推荐默认，且今天是唯一可行路径）**：① **写文件**那半边由**新增一条 Rust 命令**完成（`commands/` 里落，走 `run_command` 与既有错误契约）：目标目录用 `platform::paths::app_data_dir()`（`platform/paths.rs:15`）下的 `exports/`，文件名带时间戳，**返回真实存在的绝对路径**；② **"给出可打开的位置"**那半边**不需要任何新能力**——`capabilities/default.json:1` 现有的 `opener:default` 已经包含 `allow-reveal-item-in-dir`（实测 `tauri-plugin-opener-2.6.0/permissions/default.toml`：`permissions = ["allow-open-url", "allow-reveal-item-in-dir", "allow-default-urls"]`），前端用已装好的 `@tauri-apps/plugin-opener`（`package.json:18`；**今天 `src/` 里 0 调用**，本任务是它的第一处消费方）调 `revealItemInDir(path)` 即可；③ **不引原生保存对话框**：路径固定 + 展示可复制的路径（剪贴板）就是 V0.1 的"手填/复制路径"口径；**若将来要"用户自选路径"**，那是需要网络的一次依赖引入，**另开变更**。
   - 需要写进 `src-tauri/Cargo.toml`（依赖）与 `src-tauri/capabilities/default.json`（`permissions`；`windows` 今天只有 `["main","sync-lab"]`）的具体条目在这里定稿并登记——**按上面的零依赖方案，两处都不需要改动**（这正是选它的第二个理由）。**在能力登记完成前，不得把导出落盘写成已完成**，也不得把落盘代码塞回 P5（P5 计划 `:27`/`:96`/`:101` 已把落盘订正给 P8）。
 - [ ] **落盘的失败路径与"取消不算失败"口径**（与"能力登记"同等重要）：① **取消 ≠ 失败**——**按裁决③的零依赖方案，V0.1 没有"选择保存位置"这一步**（路径固定、对话框不引入），所以这一档今天只落在**其它用户主动放弃**的场景上（例如恢复的二次确认被取消）：不弹错误、不写文件、不重试，界面回到可再次触发的状态；**用例仍要能区分"取消"与"失败"**，并在注释里写明"将来若引入保存对话框，用户取消走的就是这一档"；② 目标目录不可写/磁盘满/路径过长 ⇒ 用 Rust 的错误契约返回（`AppError` 那套 `code`/`message`，`src/error.rs:11`-`:58`），界面走 `reportCommandError`（`commandError.ts:44`）——**不要**在 `invoke` 的 `catch` 里自己编文案；③ 能力**未登记/不可用**时必须**明确不可用**（按钮禁用 + 一句说明），不得静默失败。
-- [ ] **命令编号（2026-10-04 fix round 2：因 I3；fix round 4：因 I-3 补齐）**：导出是「P8 新增的 IPC 命令（**11 条**）」里的**第 9 条 `export_data`**；**备份与恢复是第 10、11 条**（`backup` / `restore`）——它们的请求/响应形状、二次确认硬校验、以及"`restore` 是唯一不用 `run_command` 形状的命令"都写在文末那张表里。P6 只给服务原语与维护态，`commands/` 侧的包装**全部**由 P8 新增。
+- [ ] **命令编号（2026-10-04 fix round 2：因 I3；fix round 4：因 I-3 补齐）**：导出是「P8 新增的 IPC 命令（**13 条**）」里的**第 9 条 `export_data`**；**备份与恢复是第 10、11 条**（`backup` / `restore`）——它们的请求/响应形状、二次确认硬校验、以及"`restore` 是唯一不用 `run_command` 形状的命令"都写在文末那张表里。P6 只给服务原语与维护态，`commands/` 侧的包装**全部**由 P8 新增。
 - [ ] **F-019 备份/恢复**：恢复是危险操作，需明确的二次确认与维护态提示；恢复期间用户命令被禁用，`DATA_RESTORE_IN_PROGRESS` 显示为"正在恢复"而不是通用错误；恢复完成后界面必须重新握手（`data_epoch` 已变），旧数据不得残留。**依赖 P6**（Task 4 的服务入口 + 维护态 + 新错误码；今天都还没有——`DATA_RESTORE_IN_PROGRESS` 全仓 0 命中，见 P6 计划「产出接口」）。
 - [ ] **F-014 的界面侧**：导出与备份均为**用户明确操作**（04 §9），不做后台自动上传或联网校验。
 - [ ] 恢复/备份的**跨窗口**口径（2026-10-04 修订：因 C4 同批）：维护态对 UI 的出口只有"被拒时的新码 + 维护结束后的 `data_epoch` 变化"两条（P6 不新造第三个事件名）。⇒ 另一个窗口**不会**立刻收到"开始恢复"的通知，它的入口只能靠"写命令被拒 ⇒ 按 `code` 禁用；下次握手成功 ⇒ 解禁"。**不要**假定存在维护态事件。
@@ -173,14 +173,14 @@
 
 | # | 级别 | 原措辞 | 新措辞 / 落地 | 依据（实测 file:line） | 为什么必须改 |
 | --- | --- | --- | --- | --- | --- |
-| **I3** | Important | P8 计划里**没有**"要新增哪几条 IPC 命令"的登记（恢复页与今日页因此没有数据源） | 新增下节「P8 新增的 IPC 命令（9 条）」，逐条给命令名 / 请求→响应 / 信封与广播口径 | P3 计划的「边界」一节明写 **P3 不新增 `#[tauri::command]`、不改 `commands/mod.rs`**（只交付服务层 + `AppState` 入口 + 测试）；其 §0.5 末尾与「完成门槛」的接口归属条目把 `attention_overview` 与 `retry_recovery` 的 **IPC 命令点名给 P8** | 不登记 ⇒ P3 的服务入口没人接，恢复页/今日页没有数据源 |
+| **I3** | Important | P8 计划里**没有**"要新增哪几条 IPC 命令"的登记（恢复页与今日页因此没有数据源） | 新增下节「P8 新增的 IPC 命令（13 条）」，逐条给命令名 / 请求→响应 / 信封与广播口径 | P3 计划的「边界」一节明写 **P3 不新增 `#[tauri::command]`、不改 `commands/mod.rs`**（只交付服务层 + `AppState` 入口 + 测试）；其 §0.5 末尾与「完成门槛」的接口归属条目把 `attention_overview` 与 `retry_recovery` 的 **IPC 命令点名给 P8** | 不登记 ⇒ P3 的服务入口没人接，恢复页/今日页没有数据源 |
 | **I5** | Important | 新增第六个错误码的"四处联动"不含前端 | 见 P6 计划「产出接口」第 1 条：`worktrace-web/src/types/ipc.ts:86` 注释"五个稳定码"、`src/__tests__/ipc.test.ts:117` 用例名"五个码"要改成六个 | `types/ipc.ts:87`-`:93`（`ERROR_CODES`）；`types/__tests__/snapshot-contract.test.ts:291` 把它当**取值域**用（加第六项**不破坏**该用例） | 改了码不改测试名与注释 = 又一处"文档说的与树不一样" |
 
 ### fix round 4（2026-10-04 定向复评）：备份/恢复的两条 IPC 命令（I-3）
 
 | # | 级别 | 原措辞 | 新措辞 | 依据 | 为什么 |
 | --- | --- | --- | --- | --- | --- |
-| **I-3** | Important | Task 3 写着备份/恢复"`commands/` 侧的包装由 P8 在 Task 3 一并新增（**同属该表**）"，但那张表只有 **9 条**（8 条 P3 + `export_data`）——**这两条命令没人登记**；P6 只给了服务原语（`begin_restore` / `prepare_and_swap` / `commit_restore` / `abort_restore`） | 表里**补第 10、11 条**：`backup` 与 `restore`；「**9 条**」一律改成「**11 条**」，连带更新注册表/`ipc_commands.rs`/`src/ipc.ts` 的计数口径（**24 → 35**） | P6 计划「产出接口」第 5 条只到服务原语；P8 Task 3 的"同属该表"在**表里没有对应行**——登记与内容自相矛盾 | 恢复页与导出/备份页**没有数据源**；且 `restore` 是全项目唯一的危险操作，它的二次确认与维护态语义必须在命令层写死 |
+| **I-3** | Important | Task 3 写着备份/恢复"`commands/` 侧的包装由 P8 在 Task 3 一并新增（**同属该表**）"，但那张表只有 **9 条**（8 条 P3 + `export_data`）——**这两条命令没人登记**；P6 只给了服务原语（`begin_restore` / `prepare_and_swap` / `commit_restore` / `abort_restore`） | 表里**补第 10、11 条**：`backup` 与 `restore`；「**9 条**」一律改成「**11 条**」，连带更新注册表/`ipc_commands.rs`/`src/ipc.ts` 的计数口径（**24 → 37**） | P6 计划「产出接口」第 5 条只到服务原语；P8 Task 3 的"同属该表"在**表里没有对应行**——登记与内容自相矛盾 | 恢复页与导出/备份页**没有数据源**；且 `restore` 是全项目唯一的危险操作，它的二次确认与维护态语义必须在命令层写死 |
 
 ### fix round 3（2026-10-04）：P3 引用改为符号/小节定位
 
@@ -188,13 +188,13 @@
 | --- | --- | --- | --- | --- | --- |
 | **②** | Minor（跨文件） | 命令表里引用 P3 一律带行号（`p3:501`/`532`/`556`/`557`/`601`/`95`/`96`/`199`/`233`-`240`/`641`/`645`/`632`/`204`/`271`） | 全部改成**符号/小节定位**（`ReconcileRequest`、P3 计划 **§0.3 的 S1/S2/S4/S12**、**§0.5 的 `AttentionOverview`/`PendingIntervalItem`**、其「下游接口」与「完成门槛」的接口归属条目）；行号**只在一张「P3 侧符号 ↔ 行号」对照表里给一次**，并标明"**仅供参考，以符号/小节名为准**" | P3 计划本轮 511 → **667 行**；按现场 `grep -n` 重定位：`AcceptClockCorrectionRequest:96`、`ClockCorrectionAccepted:97`、`rescan_recovery:77`、S12 `:194`-`:206`、`AttentionOverview:235`、`PendingIntervalItem:260`、`ReconcileRequest:503`、`CorrectRequest:534`、`BackfillRequest:558`、`DiscardSessionRequest:559`、`TransitionTaskRequest:603`、`P3 不新增命令:27`、`P8 的 8 条:634`、`attention_overview IPC 归 P8:273` | 行号会因并行改动漂移（本轮 P3 就漂了 +2/±1）；符号与小节名不会 |
 
-### P8 新增的 IPC 命令（11 条）
+### P8 新增的 IPC 命令（13 条）
 
 **共同口径（全部照 P7 既有姿势，别新造）**：
 
 - 每条 = `#[tauri::command] pub async fn x(…)`（包装，只有一行转发）+ `pub fn x_impl(app: &mut AppState, request: XRequest) -> Result<XResponse, AppError>`（命令体）——见 `commands/mod.rs:27`-`:34` 的「命令体与包装分开」；
 - 包装一律走 `run_command`（`commands/mod.rs:127`）⇒ 自动落在同一把 `Mutex<AppState>` 上、自动被维护态挡住（P6 的 I1）、失败时自动经 `capture_error_response` 带权威 `epoch`/`revision`；
-- **写命令**（1–6、7、9）一次成功业务写**恰好一次** `bump_revision`（服务层做，命令层不碰），并用 `WriteOutcome::into_parts()` 的第二位决定要不要 `announce` `domain.changed`；**只读命令**（8）不带信封、不加 revision；
+- **业务写命令（1–6）**按服务层实际变更决定版本推进与广播，命令层不得自行 bump。第 7 条恢复重试可只重载或重扫，不保证每次写入；复用 P3 的实际结果与异常闭环。第 8、13 条只读。第 9 条导出与第 12 条 Today 正常采样不写业务事实；异常采样可能先提交 P2 恢复事务，失败后刷新权威状态，不能按普通查询的“零写入”处理。落盘本身不推进业务 revision；第 10/11 条按各自备份/恢复约定处理。
 - 需要 epoch/版本校验的写命令一律用 `crate::envelope::WriteEnvelope`（新建 ⇒ `for_create`；改既有对象 ⇒ `for_update`）；**集合/关系类操作传 `expected_row_version: None`**（P7 的口径，`envelope.rs:45`-`:48`）；
 - 请求 DTO 一律**一个 `request` 参数**、枚举走**字符串**（`commands/mod.rs:38`-`:47`）；
 - 响应必须能给出 `data_epoch`/`revision`（要么自带这两个字段，要么是带它们的报告/`CommandOutcome`）——页面的**本视图水位**（`viewWatermark`）就靠它判旧。
@@ -219,26 +219,30 @@
 
 | # | 命令名（`lib.rs` 注册表 + `commands/mod.rs`） | 请求 → 响应 | 口径与备注 |
 | --- | --- | --- | --- |
-| 1 | `reconcile` | `ReconcileRequest`（P3 计划 §0.3 的 S2 命令入口）→ `ReconcileReport` | 写；服务入口 = P3 的 `AppState::reconcile`（S2）。**只做 `discard_uncertain`**——"作废整次"是第 4 条，两个动作在界面上也不许合并 |
+| 1 | `reconcile` | `ReconcileRequest`（P3 计划 §0.3 的 S2 命令入口）→ `ReconcileReport` | 写；服务入口 = P3 的 `AppState::reconcile`（S2）。支持 `Confirm` 与 `DiscardUncertain`——"作废整次"是第 4 条，两个动作在界面上也不许合并 |
 | 2 | `correct` | `CorrectRequest`（P3 §0.3 的 S2）→ `HistoryEditReport` | 写；**只对 `finished` 开放**，界面据会话 `state` 禁用入口 |
 | 3 | `backfill` | `BackfillRequest`（P3 §0.3 的 S2）→ `HistoryEditReport` | 写；独立入口，明确"不启动计时、不伪造完成事件" |
 | 4 | `discard_session` | `DiscardSessionRequest`（P3 §0.3 的 S2）→ `HistoryEditReport` | 写；单独入口 + 二次确认，文案说清影响范围 |
 | 5 | `transition_task` | `TransitionTaskRequest`（P3 §0.3 的 S2）→ `TaskTransitionReport` | 写；P3 完成后启用 P7 暂缓的完成/取消、Blocked/Waiting、reopen 与托盘「完成」占位项（`p7-acceptance` §6.1 第 1/2 条） |
 | 6 | `accept_detected_clock_correction` | `AcceptClockCorrectionRequest`（P3 §0.3 的 **S4**）→ `ClockCorrectionAccepted` | 写；"显式接受一次已检测的墙钟校正"（08 §1），不自动接受 |
-| 7 | `retry_recovery` | epoch 请求 → `TimerSnapshot` | **它会提交一笔恢复事务**（不是纯读）⇒ 按写命令处理，但**不带 `WriteEnvelope`**（没有用户可编辑对象，判据在协调器里）；服务入口 = P3 的 `AppState::retry_recovery`（P3 §0.3 的 **S12**），**触发是用户显式点"重试"**，不做定时自动重试（S12 末条） |
+| 7 | `retry_recovery` | epoch 请求 → `TimerSnapshot` | **必要时提交恢复事务，也可能仅重载/重扫或无变化** ⇒ 按恢复入口处理，不强制每次推进 revision，但**不带 `WriteEnvelope`**（没有用户可编辑对象，判据在协调器里）；服务入口 = P3 的 `AppState::retry_recovery`（P3 §0.3 的 **S12**），**触发是用户显式点"重试"**，不做定时自动重试（S12 末条） |
 | 8 | `attention_overview` | epoch 请求 → `AttentionOverview`（P3 计划 **§0.5**；服务入口 `services::recovery::attention_overview`） | **只读**：同一读事务取 `data_epoch`/`revision`；恢复页与"待确认"栏的**唯一数据源**（P3「下游接口」第 2 条） |
-| 9 | `export_data` | `ExportRequest { format: "json"｜"markdown", range, timezone, expected_data_epoch }` → `ExportResult { path: String, bytes: u64, data_epoch: String, revision: i64 }` | **P8 自己的**（Task 3）：调 P5 的生成函数（`services/export.rs`，返回字符串/字节）→ 写入 `<app_data_dir>/exports/` → 返回**真实绝对路径**（界面用 `revealItemInDir` 打开所在位置）。**依赖 P5**：P5 未实施前只能先做落盘骨架 |
+| 9 | `export_data` | `ExportRequest`（按 format 区分：json 带 from/to，markdown 带可选 anchor；两者均带 timezone/expected_data_epoch） → `ExportResult { path: String, bytes: u64, data_epoch: String, revision: i64 }` | **P8 自己的**（Task 3）：调 P5 的生成函数（`services/export.rs`，返回字符串/字节）→ 写入 `<app_data_dir>/exports/` → 返回**真实绝对路径**（界面用 `revealItemInDir` 打开所在位置）。P5 内容生成服务已交付，IPC 与落盘尚未实施；json 转发 `StatsRangeQuery`，markdown 转发 `WeeklyQuery`，不能用任意范围冒充服务算出的自然周 |
 | 10 | `backup` | `BackupRequest { expected_data_epoch: String }` → `BackupResult { path: String, bytes: u64, data_epoch: String, revision: i64 }` | **写**（它产生一份库副本，**不修改业务事实** ⇒ 不加 `revision`、不广播 `domain.changed`；`WriteEnvelope` 只用 `expected_data_epoch` 做身份校验，`expected_row_version: None`）。服务入口 = P6 的 `services/backup.rs`（`VACUUM INTO`，见 P6 Task 1 的裁决）；**维护态期间被 `guard_writable` 拒绝**（P6 的 I1）。**进程内串行**：备份走同一把锁的短临界区，不放长活到锁外 |
 | 11 | `restore` | `RestoreRequest { backup_path: String, expected_data_epoch: String, confirmed: bool }` → `RestoreResult { data_epoch: String, revision: i64, applied: bool }` | **写、且是全项目唯一的危险操作**：① `confirmed` 必须为 `true`（前端的**二次确认**是硬前置，命令层再校验一次，缺它就拒绝——不要只靠界面）；② 服务入口 = P6 的三段流程（`begin_restore` →（锁外）`prepare_and_swap` → `commit_restore`/`abort_restore`），**这是唯一不进 `run_command` 单临界区形状的命令**（见下「执行骨架」）；③ 成功后返回**新 `data_epoch`**，前端据此重新握手（旧展示必须丢）；④ 失败（回滚成功）返回 `applied: false` + **原 `data_epoch`**，**不是错误**——界面按"恢复未生效"提示，进程不死 |
+
+| 12 | `stats_today` | `TodayQuery { expected_data_epoch, timezone }` → `TodayView`（P5 当前服务 DTO） | 转发 `AppState::stats_today`；一次响应含五项及 `data_epoch`/`revision`/`as_of`/范围/时区。正常只读，异常采样可能先提交 P2 恢复事务再报错；不得由命令层补采时钟或重算数字 |
+
+| 13 | `history_view` | `HistoryQuery { expected_data_epoch, from, to, limit, offset, session_id?: String }` → `HistoryView { data_epoch, revision, sessions, selected }` | **P8 新增只读服务与 IPC，尚未实现**。同一读事务校验 epoch、读取分页会话及可选详情；常规历史覆盖 finished/discarded，不依赖 attention_overview。详情包含 session、全部区间及审计，返回真实 row_version 供 correct/discard 使用，不采样、不写库、不推进 revision |
 
 **两条归属订正（写给控制器）**：你给的清单是"7 条 P3 命令 + 导出 = 8"；但 P3 计划**自己**把 `retry_recovery` 的 IPC 也点名给 P8（P3 计划 §0.3 的 **S12 末条**与「完成门槛」里的接口归属条目），所以 P3 侧是 **8 条**（正是 P3 计划写的"P8 的 8 条"），加上导出共 **9 条**。
 
 **注册与门禁的连带改动（P8 的交付物，不能只写 Rust 半边）**：
 
-- `lib.rs:113`-`:159` 的 `invoke_handler` 注册表加 **11** 条；`tests/ipc_commands.rs` 逐条覆盖 **24 → 35**；
+- `lib.rs:113`-`:159` 的 `invoke_handler` 注册表加 **13** 条；`tests/ipc_commands.rs` 逐条覆盖 **24 → 37**；
 - `tests/ipc_snapshots.rs` 与 `src/types/__snapshots__/*.json`（现 15 份）为**新响应类型**补快照；`tests/ipc_requests.rs` 补新请求 DTO 的字段样本；
-- `src/ipc.ts` 加 **11** 个转发函数 + `src/types/ipc.ts` 加对应 DTO（P3 的抄其 §0.5 / 各 Task；`backup`/`restore` 的抄 P6「产出接口」第 5 条的返回形状——**形状不自己发明**）；
-- **`restore` 的执行骨架（写死；与其余 10 条不同）**：它要跨**两个**临界区（进维护态/装回）＋一段**不持锁**的长活，所以**不能**用 `run_command` 的"一次 `lock_app` 包住整个 body"形状 ⇒ 需要一条专用的包装（名字实施时定，如 `run_maintenance_command`），它把 `SharedApp` 交给命令体、由命令体自己按段 `lock_app`；**其余 10 条一律用 `run_command`**。这条差异要写进实现注释与用例（否则下一个人会把它改回 `run_command`，长活重新占住锁 ⇒ 维护态"快速失败"失效）；
+- `src/ipc.ts` 加 **13** 个转发函数 + `src/types/ipc.ts` 加对应 DTO（P3 的抄其 §0.5 / 各 Task；`backup`/`restore` 的抄 P6「产出接口」第 5 条的返回形状——**形状不自己发明**）；
+- **`restore` 的执行骨架（写死；与其余 12 条不同）**：它要跨**两个**临界区（进维护态/装回）＋一段**不持锁**的长活，所以**不能**用 `run_command` 的"一次 `lock_app` 包住整个 body"形状 ⇒ 需要一条专用的包装（名字实施时定，如 `run_maintenance_command`），它把 `SharedApp` 交给命令体、由命令体自己按段 `lock_app`；**其余 12 条一律用 `run_command`**。这条差异要写进实现注释与用例（否则下一个人会把它改回 `run_command`，长活重新占住锁 ⇒ 维护态"快速失败"失效）；
 - `src/__tests__/App.test.tsx:126` 的"挂载时**恰好四条命令**"这类断言要按新页面重新核对（Today/Data/Recovery 页各自的第一跳读查询会改变命令集合）。
 
 ---
@@ -271,7 +275,7 @@ retry_recovery 的 IPC 请求 expected_data_epoch 映射到 AppState::retry_reco
 > 完整签名与全部差异见 P3 计划文末「P3 实施记录（2026-10-05，控制器落盘）」。本节只列**接线必须知道**的部分。
 
 - **请求参数**：`reconcile` 与 `attention_overview` 的服务入口**各多一个 `current_run_id`**（服务层够不着协调器）⇒ IPC 包装从 `state.coordinator().run_id()` 取后传入；其余命令的请求形状仍按本计划「P8 新增的 IPC 命令」表。
-- **`attention_overview` 的列表口径**：`items` = 不变量损坏 ∪ 未作废待确认区间 ∪ **别的 run 未结束会话**（不限状态；终态会话也进列表；**正在计时的当前 run 会话不进**）。列表与计时门禁不等价：当前 run 的待确认记录可以进入列表而不阻挡其他任务；重扫失败或协调器故障也可以关闭门禁而没有对应列表项。界面应分别呈现待处理事实与服务返回的计时门禁，不能通过列表是否为空推导门禁。界面**不要**用 `TimerSnapshot.pending_ms` / `needs_attention()` 顶替；`duration_ms IS NULL` 表示"终点未知"，`ended_at` 只是候选端点。
+- **`attention_overview` 的列表口径**：`items` = 不变量损坏 ∪ 未作废待确认区间 ∪ **别的 run 未结束会话**；故障和待确认查询不限 run，终态也可能入列；仅正常且无待确认的当前 run 计时会话不入列，当前 run 的损坏或待确认会话仍入列。列表与计时门禁不等价：当前 run 的待确认记录可以进入列表而不阻挡其他任务；重扫失败或协调器故障也可以关闭门禁而没有对应列表项。界面应分别呈现待处理事实与服务返回的计时门禁，不能通过列表是否为空推导门禁。界面**不要**用 `TimerSnapshot.pending_ms` / `needs_attention()` 顶替；`duration_ms IS NULL` 表示没有已确认时长；候选 `ended_at` 可能已知，只有 `ended_at IS NULL` 才表示终点未知。已知候选端点也不等于可信历史。
 - **恢复页的动作边界**：零区间会话（`recovering` 且无区间）**不能**用 `discard_session`（`DOMAIN_ERROR`），要用 `reconcile` + 空 `ranges` 的 `Confirm`；`paused` + 待确认区间这类**只能**用 `discard_session`（它无状态前置）——两者不要共用一个"丢弃"按钮。
 - **`correct` 的入口条件**：只接 `finished`；`recovering` 提示走 `reconcile`；`running`/`paused` 要求先结束会话。
 - **接受时钟校正**：`flag == false` 的无操作路径在恰好同时检测到异常时返回 **`RECOVERY_REQUIRED`**（不是 `Unchanged`）⇒ 界面收到后刷新并显示恢复提示，**不要**当成失败重试。
@@ -285,3 +289,22 @@ retry_recovery 的 IPC 请求 expected_data_epoch 映射到 AppState::retry_reco
 
 - debug CommandProbe已交付：按窗口记录真实命令start/body_complete/return；广播注入实际丢弃时记录event_dropped。使用日志计数，无新增IPC，不写业务库。release lib check通过。上述「观测出口交付」已具备，完整实机门槛仍按逐项结果裁定，见[当前实机记录](../../validation/manual-acceptance-2026-10-05.md)。
 - **原生最小化与网页可见性收口**：Windows/WebView2实测isMinimized=true而visibilityState=visible，DevTools关闭后仍周期get_revision。Task 5复验前先确定并实现原生窗口可见性适配（监听、恢复校验、异步结果跨生命周期失效），覆盖最小化期间停止业务轮询及恢复首屏。不可只修改visibilityState测试替身后宣称实机通过。当前manual-sync §2.5前提未满足，manual_platform_verified仍为false。
+
+## 2026-10-08 上游兼容性补充
+
+P1/P2/P3/P4/P5/P7 核心已交付，P6/P8 未实施。P5 复审修复及当前证据见[跨阶段复审](../../validation/cross-stage-review-2026-10-08.md)。统计/导出服务在正常采样下只读；AppState 采样若发现异常则走 P2 的异常路径——**可能**提交恢复事务及其审计（幂等分支与硬故障回滚分支零写入，只置故障态），随后返回恢复错误；界面应刷新权威恢复状态，**既不能按普通查询的"零写入"处理，也不能据"查询失败"认定没有写入**。Today/导出目前在串行边界内读取附加材料并聚合，移到锁外前须冻结全部材料。
+
+空范围返回零条和空明细；未来范围不包含已采样实时跨度之外的开放记录。刚启动的零时长实时记录仅在包含起点的非空范围保留。故障会话的待确认候选仍在 pending 与明细中，不能按故障标记整体隐藏。
+
+## 2026-10-08 第二轮复查收口
+
+修正三个下游冲突：Today IPC 从错误的“P5 新增”归属移至 P8 第 12 条；导出不再作为固定 bump_revision 的业务写；reconcile 明确支持确认与丢弃不确定段，retry_recovery 不保证每次有写入。注册基线由 24 → 36，服务签名以当前源码为准。上方 2026-10-04 评审表的“未实施”与当时命令计数仅为历史记录，不作为当前实施状态。
+
+## 2026-10-08 第三轮契约收口
+
+- [ ] **历史数据源**：P8 Task 2 新增只读 `services/history_view.rs`（名称可随实现统一）、DTO、`history_view` IPC/前端转发及测试。历史列表按会话区间与 `[from,to)` 相交筛选，以稳定的 `started_at DESC, id DESC` 排序分页；limit 限制为 1..100，offset 非负，空范围返回空列表。正常完成、整次作废及区间软删除后的会话必须可查；范围内零长度历史按起点落入范围处理，不能因没有有效统计区间而消失。可选 session_id 详情读取不依赖列表页是否包含该会话，同一读事务返回当前版本与全部区间、审计；不存在明确报领域错误。不能从统计明细反推完整历史（统计会排除作废记录），不能把恢复注意列表当全部会话。
+- [ ] **历史查询验收**：无恢复事项但存在 finished 会话时可找到并修正；discarded/作废区间仅展示审计且不计工时；旧 epoch 拒绝；列表、详情和版本来自同一读事务；分页排序稳定；空范围零条；correct 返回冲突后重新读取详情，禁止复用旧 row_version 自动重发。
+- [ ] **导出 DTO**：新增带 format 判别的请求；json 复用 from/to，markdown 复用可选 anchor，不接受同时传不适用字段的含糊请求。Markdown 周界以 P5 返回 range/week_start/week_end 为准。导出结果的 epoch/revision 必须直接取自本次生成结果，不能在写文件后重新查询；两类 P5 返回结构当前不是 IPC 序列化 DTO，P8 包装只序列化自己的 ExportResult。
+- [ ] **恢复 DTO**：P3 服务报告与请求当前不全部具备 serde；P8 在命令 DTO 层显式解析字符串枚举并映射服务类型，响应使用可序列化 DTO，测试字段与权威版本。不能假设一行转发即可编译，也不能为方便接线绕过现有领域校验。
+
+新增历史查询是既定历史修正页面的数据源补齐，尚未实施，不计入 P3/P5 已完成成果。P8 注册和转发契约共 13 条（24 → 37）。本节取代旧评审表中的累计计数，历史记录不作为当前计数权威。

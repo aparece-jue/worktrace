@@ -176,6 +176,10 @@ pub fn intervals_overlapping(
     from: i64,
     to: i64,
 ) -> Result<Vec<IntervalWithSession>, AppError> {
+    // A half-open empty query contains neither spans nor pending point candidates.
+    if from == to {
+        return Ok(Vec::new());
+    }
     let sql = format!(
         "{INTERVAL_WITH_SESSION_SELECT} \
          WHERE s.state <> 'discarded' AND i.voided_at IS NULL \

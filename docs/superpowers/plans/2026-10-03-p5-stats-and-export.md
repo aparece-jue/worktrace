@@ -4,7 +4,7 @@
 
 **Goal:** 把已经确认的工时事实变成可核对的结果：按范围裁剪、把人工与机器分列、给出 Today 聚合，并导出 JSON 明细与 Markdown 周回顾——口径写在 DTO 里，用户能自己核对，且全程不依赖 AI。
 
-**Architecture:** 新增 `services/stats.rs`（口径与聚合）与 `services/export.rs`（两种导出）。**区间规则只从 P3 取**（半开相交、按真实日界裁剪），本计划不重写一份。统计一律经只读查询 + 服务层纯函数完成，不产生新的持久化事实；唯一写操作是导出文件的落盘（P7 决定路径）（2026-10-04 修订：落盘改归 **P8**；文末注为准）。
+**Architecture:** 新增 `services/stats.rs`（口径与聚合）与 `services/export.rs`（两种导出）。**区间规则只从 P3 取**（半开相交、按真实日界裁剪），本计划不重写一份。统计服务经只读查询与纯函数完成；AppState入口**正常采样只读**，采样若发现异常则走P2的异常路径（**可能**提交恢复事务及其审计；幂等分支与硬故障回滚分支零写入），随后返回恢复错误。正常采样不产生统计持久化事实。导出落盘与路径归 **P8**。当前Today/导出聚合在串行边界内完成，确保附加材料与数字同版本；report纯函数可供冻结材料后的锁外调用。
 
 **Tech Stack:** Rust 1.98 · rusqlite 0.40（沿用 P1）· `serde_json`（P1 已在）· 无新依赖（Markdown 手写拼接，不引模板引擎）
 
@@ -37,7 +37,7 @@
 - [ ] 统计范围统一为**半开区间** `[from, to)`。每段有效区间与范围的交集按 02 §6 的公式：`max(0, min(end, to) - max(start, from))`。这是全项目唯一一处裁剪实现，P3 与本计划共用，**不得复制第二份**。
 - [ ] **运行中区间的终点取同一协调器快照的单调归属终点**，不另采墙钟（02 §6、08 §1）。实现上即：由 P2 传入该次快照的终点值，本层不读时钟。
 - [ ] 排除口径：`needs_review = 1`、`voided_at` 非空、以及 `discarded` 会话的区间，一律不计入任何"已确认"数字；只有未作废的待确认区间进入“待确认”栏；voided_at 非空或 discarded 的记录不显示为待确认，仅可在历史/审计中查看。
-- [ ] 同一串行边界内先经 P2 取得已验证样本并完成必要异常事务，再开启一致读事务读取事实与 epoch/revision，构造内部 StatsSnapshot 后释放边界；聚合/序列化在外部基于此快照进行。采样至读快照完成之间不允许 pause/resume/finish 等写入穿插。
+- [ ] 同一串行边界内先经 P2 取得已验证样本并完成必要异常事务，再开启一致读事务读取事实与 epoch/revision，构造内部 StatsSnapshot；范围 report 可在边界外聚合，Today/导出目前在同一边界内读取附加材料并聚合/序列化，未来移出时须先冻结全部材料。采样至读快照完成之间不允许 pause/resume/finish 等写入穿插。
 - [ ] 内部 StatsSnapshot 带 epoch/revision、as_of、run_id、session_id/session_version、开放 interval_id 及 attribution_end；先确认该区间仍是快照中的有效开放区间，再计 live，闭合事实不得重复叠加。公共 TimerSnapshot 可保留展示字段，P2 提供内部统计接缝而非暴露 Instant。
 - [ ] 三类分列，**不得合并**：已确认闭合区间（含 `recovering` 会话里已可信的前缀）；实时暂计（当前开放区间）；待确认部分。
 - [ ] `measure` 分离：**人工仅 `FOREGROUND`**；机器分 `BACKGROUND` 与 `PASSIVE` 两项；`WAITING` 单列。**禁止把并行机器时长加成人工**——这是 F-103 的核心，1h 前台 + 1h 后台必须报 1h 人工而不是 2h。
@@ -176,7 +176,7 @@ P5 规模更小（5 个文件），统一抽象反而会把各任务的独立性
 // services/stats.rs
 pub fn snapshot(db: &mut Db, sample: StatsSample, query: &StatsRangeQuery) -> Result<StatsSnapshot, AppError>;
 impl StatsSnapshot {
-    pub fn report(&self) -> RangeReport;           // 唯一聚合点；聚合发生在串行边界之外，纯函数
+    pub fn report(&self) -> RangeReport;           // 唯一聚合点；纯函数，可基于冻结材料在边界外调用
     // + run_id / session_id / session_version / open_interval_id / attributed_end / state / data_epoch / revision
 }
 pub fn today(db: &Db, sample: StatsSample, query: &TodayQuery) -> Result<TodayView, AppError>;
@@ -232,3 +232,8 @@ pub fn export_weekly_markdown(&mut self, &WeeklyQuery) -> Result<ExportMarkdown,
 - **`task_change` 与 `work_interval(started_at)` 都没有索引**：**现在不要加**——加索引＝改已发布 schema + 迁移，会打红 `schema_v1.rs` 的"恰好八个 spec 索引"断言，也与"P5 未改 schema"冲突；先测量，再在拥有 schema 演进的阶段决定。
 - **导出与聚合都在 `AppState` 串行边界内完成**（"完成事件/任务必须与数字同版本"逼出来的取舍）：P8 做大数据量导出时注意它仍持锁（心跳 30s 级，风险低），必要时再谈快照外聚合。
 - **`task.title` 扫描器误报仍挂着**（Ruling P5-18）：`tests/error_contract.rs` 的退役英文子串门禁对字段访问误报，正确修法是把它收紧到构造点/字面量并重验它能抓真回潮。
+
+
+### 2026-10-08 兼容性修复
+
+空范围[from,from)统一返回零条区间、零条明细和零个日桶，包含查询点位于既有区间内部的情形；待确认候选的零长度规则不改变空查询范围。损坏会话的已确认部分排除，待确认候选保留，本次采样认可的live单列。当前实现状态与测试见[跨阶段复审](../../validation/cross-stage-review-2026-10-08.md)。

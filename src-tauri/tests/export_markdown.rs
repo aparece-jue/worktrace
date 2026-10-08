@@ -145,14 +145,17 @@ fn blank_watermarks(text: &str, marks: &[i64]) -> String {
 /// 这两行与时长行不同：它们的括号里是 Unix 毫秒本身（`…（1773115200000）`），
 /// 没有「 毫秒」后缀，所以 [`ms_in_line`] 用不上。
 fn trailing_watermark_ms(line: &str) -> i64 {
-    let close = line
-        .rfind('）')
-        .unwrap_or_else(|| panic!("水位行没有结尾括号：{line}"));
-    let open = line[..close]
-        .rfind('（')
-        .unwrap_or_else(|| panic!("水位行没有毫秒括号：{line}"));
-    line[open + '（'.len_utf8()..close]
+    let value = ["生成时间（generated_at）：", "数据截至（as_of）："]
+        .iter()
+        .find_map(|prefix| line.strip_prefix("- ").unwrap_or(line).strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("不是水位行：{line}"))
         .trim()
+        .strip_suffix('）')
+        .unwrap_or_else(|| panic!("水位行没有结尾括号：{line}"));
+    let (_, millis) = value
+        .rsplit_once('（')
+        .unwrap_or_else(|| panic!("水位行没有毫秒括号：{line}"));
+    millis
         .parse()
         .unwrap_or_else(|_| panic!("水位行的毫秒数解析不了：{line}"))
 }
