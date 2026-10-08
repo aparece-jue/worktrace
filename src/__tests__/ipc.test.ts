@@ -114,7 +114,7 @@ describe("命令转发", () => {
 });
 
 describe("错误规范化", () => {
-  it("命令体的 ErrorResponse 原样透传（五个码与 authority 都不动）", async () => {
+  it("命令体的 ErrorResponse 原样透传（六个码与 authority 都不动）", async () => {
     const response = {
       code: "VERSION_CONFLICT",
       message: "这条记录已被修改，请刷新后重试。",

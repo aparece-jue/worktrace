@@ -9,6 +9,10 @@ pub mod timer;
 pub mod bootstrap;
 pub mod events;
 
+// P6 Task 4a：备份原语（命名 / 保留策略 / `VACUUM INTO`）。启动编排调它，
+// 恢复/替换库（Task 4b）也用同一套——**不留第二套拷贝**。
+pub mod backup;
+
 pub mod error_response;
 pub mod handshake;
 

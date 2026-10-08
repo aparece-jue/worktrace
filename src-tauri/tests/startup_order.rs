@@ -17,9 +17,10 @@ use worktrace_lib::domain::session::{SessionMode, TimerKind};
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::platform::single_instance::{self, InstanceLock};
+use worktrace_lib::services::backup::BACKUP_FORMAT_VERSION;
 use worktrace_lib::services::bootstrap::{
     lock_app, scan_recovery, startup, PreMigrationBackup, Startup, StartupConfig, StartupProbe,
-    StartupStep, BACKUP_FORMAT_VERSION,
+    StartupStep,
 };
 use worktrace_lib::services::events::{EventEnvelope, EventSink};
 use worktrace_lib::services::timer::coordinator::StartRequest;
@@ -1186,4 +1187,53 @@ fn the_retention_keeps_the_newest_five_and_survives_an_undeletable_entry() {
     );
     assert!(old(1_000).is_dir(), "删不掉的那份仍在（清理失败只记诊断）");
     assert!(!old(2_000).exists(), "最老的**文件**被清掉了");
+}
+
+/// 保留策略**永不删掉刚写出的那一份**（Task 1 评审留下的那条）：
+/// 纯按文件名里的挂钟毫秒排序时，系统时间被回拨、且已有 ≥5 份 ⇒ 刚写出的那份时间戳
+/// 最小，会被当成「最老」删掉——现象是「启动成功、日志说已备份、产物却没了」。
+///
+/// 本条构造的正是那个形状：5 份既有产物的文件名时间戳**全都比本轮更晚**。
+#[test]
+fn the_retention_never_removes_the_artifact_it_just_wrote() {
+    let fx = fixture();
+    database_needing_migration(&fx.db_path);
+    let backup_dir = injected_backup_dir(&fx);
+    std::fs::create_dir_all(&backup_dir).unwrap();
+
+    let named = |at_ms: i64| backup_dir.join(format!("worktrace-f1-s1-v0.0.9-{at_ms}.db"));
+    let existing: Vec<i64> = (1..=5).map(|i| WALL + i * 1_000).collect();
+    for at_ms in &existing {
+        std::fs::write(named(*at_ms), b"previous artifact").unwrap();
+    }
+
+    let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
+    match startup(
+        StartupConfig::new(&fx.db_path, &fx.lock_path).with_backup_dir(&backup_dir),
+        Box::new(FakeClock::new(WALL, 0)),
+        sink,
+        &probe,
+        &|| -> Result<(), AppError> { Ok(()) },
+    )
+    .expect("保留策略不得把一次成功启动变成失败")
+    {
+        Startup::Running(_) => {}
+        Startup::AlreadyRunning { .. } => panic!("首个进程应当是唯一实例"),
+    }
+
+    let just_written = backup_dir.join(format!(
+        "worktrace-f{BACKUP_FORMAT_VERSION}-s0-v{}-{WALL}.db",
+        env!("CARGO_PKG_VERSION")
+    ));
+    assert!(
+        just_written.exists(),
+        "本次产物不得被保留策略删掉：{}",
+        just_written.display()
+    );
+    assert_eq!(backup_names(&backup_dir).len(), 5, "仍然只留 5 份");
+    assert!(
+        !named(existing[0]).exists(),
+        "该被清掉的是最老的既有产物，而不是刚写出的那份"
+    );
 }

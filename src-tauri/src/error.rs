@@ -32,6 +32,15 @@ pub enum AppError {
     /// Infrastructure failure (SQLite, IO, migration). Detail is redacted too.
     #[error("storage failure")]
     Storage { detail: String },
+
+    /// A restore/replace is in progress: writes are refused until it ends.
+    ///
+    /// 维护态（P6 Task 2a 的 `MaintenanceState`，Task 4a 换上这个码）。**刻意不带
+    /// `detail`**：`detail()` 只服务 `Domain`/`Storage` 两种"内部原因"，而这条拒绝对
+    /// 用户只有一个意思（"正在恢复，稍后再试"），`message()` 已经把话说完；
+    /// 内部原因（哪个入口、什么阶段）走 `AppState` 的正式诊断日志，不进错误文本。
+    #[error("a data restore is in progress")]
+    DataRestoreInProgress,
 }
 
 impl AppError {
@@ -43,6 +52,7 @@ impl AppError {
             AppError::RecoveryRequired => "RECOVERY_REQUIRED",
             AppError::Domain { .. } => "DOMAIN_ERROR",
             AppError::Storage { .. } => "STORAGE_ERROR",
+            AppError::DataRestoreInProgress => "DATA_RESTORE_IN_PROGRESS",
         }
     }
 
@@ -54,6 +64,7 @@ impl AppError {
             AppError::RecoveryRequired => "存在待确认的计时记录，请先处理恢复再继续。".to_string(),
             AppError::Domain { detail } => format!("操作不被允许：{detail}"),
             AppError::Storage { .. } => "存储暂时不可用，请稍后重试。".to_string(),
+            AppError::DataRestoreInProgress => "正在恢复数据，请稍候重试。".to_string(),
         }
     }
 
@@ -118,6 +129,7 @@ mod tests {
                 detail: "非法状态".into(),
             },
             AppError::Storage { detail: "x".into() },
+            AppError::DataRestoreInProgress,
         ];
         let codes: Vec<&str> = all.iter().map(|e| e.code()).collect();
         assert_eq!(
@@ -127,7 +139,8 @@ mod tests {
                 "VERSION_CONFLICT",
                 "RECOVERY_REQUIRED",
                 "DOMAIN_ERROR",
-                "STORAGE_ERROR"
+                "STORAGE_ERROR",
+                "DATA_RESTORE_IN_PROGRESS"
             ]
         );
         let mut sorted = codes.clone();
@@ -172,6 +185,7 @@ mod tests {
             AppError::Storage {
                 detail: "disk".into(),
             },
+            AppError::DataRestoreInProgress,
         ];
         for e in all {
             let m = e.message();

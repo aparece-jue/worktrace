@@ -10,7 +10,9 @@
 //! → `user_version < SCHEMA_VERSION` 时 `VACUUM INTO` 备份（否则跳过并记诊断）→ `migrate`**。
 //! 备份**失败即拒绝迁移**（不降级、不跳过、不先迁移后补），本次启动以可诊断的失败
 //! 结束：不建 `application_run`、不启动协调器与采样驱动、不开窗口。详见
-//! [`PreMigrationBackup`] 与 `backup_before_migration`。
+//! [`PreMigrationBackup`] 与 [`crate::services::backup::backup_before_migration`]——
+//! **本入口只负责编排与顺序**，命名/保留策略/`VACUUM INTO` 都在 `services::backup`
+//! （P6 Task 4a 从那时的本文件整体搬走，不留第二套拷贝）。
 //!
 //! 每一步都通过 [`StartupProbe`] 报出去，`tests/startup_order.rs` 断言的是**调用次序**
 //! 本身，不是「没崩」。`lib.rs` 不得自己重排这段顺序：它只调用本入口
@@ -54,8 +56,9 @@
 //!   只读查询（采样发现异常时可能提交 P2 的恢复事务）。
 //!
 //! **维护态不是错误**：[`AppState::sampling_allowed`] 的假不代表失败，采样一拍都不记；
-//! 被拒的写入走 [`AppState::guard_writable`] 的错误（本阶段是临时的内部错误，
-//! **Task 4 换成第六个码 `DATA_RESTORE_IN_PROGRESS`**，见 [`MAINTENANCE_DETAIL_PREFIX`]）。
+//! 被拒的写入走 [`AppState::guard_writable`] 的错误——**第六个码
+//! `DATA_RESTORE_IN_PROGRESS`**（[`AppError::DataRestoreInProgress`]，Task 4a 落地，
+//! 四处联动见 `src/error.rs` 与前端 `src/types/ipc.ts` 的 `ERROR_CODES`）。
 //!
 //! ## 故障路径的两半（P6 Task 2b）
 //!
@@ -90,12 +93,12 @@
 //! ## 本阶段不做
 //!
 //! 恢复确认与历史修正的用户命令、门禁重扫（P3 Task 2 起）；**装卸运行态**
-//! （`take_runtime`/`install_runtime`/`runtime_present`）与恢复流程、`services/backup.rs`
-//! 这层归属（P6 Task 4——本任务只做**迁移前的按需一致备份编排**，原语先落在本文件，
-//! 见 `backup_before_migration` 的说明）；正式 OS 事件源与 `AppState::system_boundary`
-//! （P6 Task 2c）；平台事件的实机验收（P8 复核）。
+//! （`take_runtime`/`install_runtime`/`runtime_present`、三个访问器改 `Result`）与恢复的
+//! 三段流程（P6 Task 4b）；正式 OS 事件源与 `AppState::system_boundary`
+//! （P6 Task 2c）；平台事件的实机验收（P8 复核）。**备份编排**在第②步里，原语已搬到
+//! [`crate::services::backup`]（Task 4a），本文件不再持有任何拷贝逻辑。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
@@ -111,6 +114,7 @@ use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
 use crate::platform::system_events::{self, SystemEvent, SystemEventKind, SystemEventSource};
+use crate::services::backup;
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
 use crate::services::export::{ExportJson, ExportMarkdown, WeeklyQuery};
 use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditReport};
@@ -631,32 +635,16 @@ impl MaintenanceState {
     }
 }
 
-/// 维护态拒绝的 detail 前缀。
-///
-/// **TODO（P6 Task 4）**：`AppError::DataRestoreInProgress`（第六个码
-/// `DATA_RESTORE_IN_PROGRESS`）落地后，[`maintenance_refused`] 改用它，
-/// [`is_maintenance_refusal`] 改成按码判定，本前缀只留作诊断文案的一部分。
-/// 本任务刻意**不动** `src/error.rs`、命令层的错误码清单与前端——那是 Task 4 的四处联动，
-/// 拆开做只会多一处漂移。
-pub const MAINTENANCE_DETAIL_PREFIX: &str = "maintenance:";
-
-/// 一次维护态拒绝（临时形状，见 [`MAINTENANCE_DETAIL_PREFIX`]）。
-fn maintenance_refused(what: &str) -> AppError {
-    AppError::Storage {
-        detail: format!("{MAINTENANCE_DETAIL_PREFIX} {what}"),
-    }
-}
-
 /// 这条错误是不是「维护态拒绝」。
 ///
 /// 用途只有一个：托盘的「退出」在维护态下要**拒绝退出**（不调 `handle.exit`），
 /// 而它与别的失败（持有串行边界、退出事务失败）必须分开处理。
 ///
-/// **TODO（P6 Task 4）**：换成 `matches!(error, AppError::DataRestoreInProgress)`。
+/// 按**码**判定（Task 4a 落地第六个码之前，这里靠 `STORAGE_ERROR` + 一个 detail 前缀
+/// 认出来——那只是临时的形状）。调用方仍可用 `error.code()` 直接比对，这个函数存在的
+/// 意义是让"维护态拒绝"这个判断只有一个落点。
 pub fn is_maintenance_refusal(error: &AppError) -> bool {
-    error
-        .detail()
-        .is_some_and(|detail| detail.starts_with(MAINTENANCE_DETAIL_PREFIX))
+    matches!(error, AppError::DataRestoreInProgress)
 }
 
 /// 按**本拍能拿到的证据**归因一次「刚观察到的不可用」（P6-4 的分组名词表 + `prior_fault`）。
@@ -972,14 +960,10 @@ impl AppState {
         entered_at_ms: i64,
     ) -> Result<(), AppError> {
         if self.shutting_down {
-            return Err(maintenance_refused("exit in progress"));
+            return Err(AppError::DataRestoreInProgress);
         }
-        if let Some(existing) = &self.maintenance {
-            return Err(maintenance_refused(&format!(
-                "already in maintenance (phase={} entered_at_ms={})",
-                existing.phase.as_str(),
-                existing.entered_at_ms
-            )));
+        if self.maintenance.is_some() {
+            return Err(AppError::DataRestoreInProgress);
         }
         self.maintenance = Some(MaintenanceState {
             phase,
@@ -1029,7 +1013,8 @@ impl AppState {
         self.maintenance.is_none()
     }
 
-    /// 写入门禁：维护态 ⇒ Err（本阶段是临时的内部错误，Task 4 换成第六个码）。
+    /// 写入门禁：维护态 ⇒ [`AppError::DataRestoreInProgress`]（第六个码
+    /// `DATA_RESTORE_IN_PROGRESS`，Task 4a；前端按 `code` 显示「正在恢复」）。
     ///
     /// 调用点**唯一**是 `commands` 那层的 `run_command`（取锁之后、命令体之前）；
     /// 绕过它的两条托盘路径与四个统计/导出入口各自显式调用它（见模块头）。
@@ -1038,10 +1023,7 @@ impl AppState {
     /// 否则维护态期间一次锁屏/唤醒通知会绕开隔离直接写库。
     pub fn guard_writable(&self) -> Result<(), AppError> {
         match &self.maintenance {
-            Some(state) => Err(maintenance_refused(&format!(
-                "write refused (phase={})",
-                state.phase.as_str()
-            ))),
+            Some(_) => Err(AppError::DataRestoreInProgress),
             None => Ok(()),
         }
     }
@@ -1054,11 +1036,8 @@ impl AppState {
     ///
     /// 与 [`AppState::begin_maintenance`] **互斥**：置位之后维护态进不来。
     pub fn begin_exit(&mut self) -> Result<(), AppError> {
-        if let Some(state) = &self.maintenance {
-            return Err(maintenance_refused(&format!(
-                "exit refused while in maintenance (phase={})",
-                state.phase.as_str()
-            )));
+        if self.maintenance.is_some() {
+            return Err(AppError::DataRestoreInProgress);
         }
         self.shutting_down = true;
         Ok(())
@@ -1304,7 +1283,7 @@ impl AppState {
         boundary: Option<ClockSample>,
     ) -> Result<TimerSnapshot, AppError> {
         if !self.sampling_allowed() {
-            return Err(maintenance_refused("system boundary"));
+            return Err(AppError::DataRestoreInProgress);
         }
 
         let outcome = {
@@ -1712,152 +1691,6 @@ pub struct ExitReport {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 迁移前的按需一致备份（P6 Task 1 的编排；原语归属见下）
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// 备份产物的**格式版号**：与库 schema 版号、应用版本并列的第三个版号。
-///
-/// 它描述「这份备份文件长什么样」——今天是「一个 `VACUUM INTO` 出来的 SQLite 单文件
-/// 快照」。形状变了才 +1（02 §9 要求三个版号分别记录，落地就是文件名）。
-pub const BACKUP_FORMAT_VERSION: u32 = 1;
-
-/// 备份目录名（生产缺省：`app_data_dir()/backups`）。与库、锁同在一个应用数据目录下。
-const BACKUP_DIR_NAME: &str = "backups";
-
-/// 保留的备份份数。按需执行下它只在**真迁移**时触发，所以这 5 份是「跨版本升级」的
-/// 历史，不是「最近 5 次启动」。
-const BACKUP_KEEP: usize = 5;
-
-/// 备份文件名的固定前后缀。保留策略只认自己写出来的名字。
-const BACKUP_PREFIX: &str = "worktrace-f";
-const BACKUP_SUFFIX: &str = ".db";
-
-/// 备份阶段的失败：`detail` 统一带阶段标记，便于把「备份失败」与「迁移失败」分开；
-/// 用户文案仍走 `AppError::message()`（`Storage` 的 detail 不进用户可见文案）。
-fn backup_stage(e: AppError) -> AppError {
-    AppError::Storage {
-        detail: format!("pre-migration backup: {}", e.detail().unwrap_or(e.code())),
-    }
-}
-
-/// 备份文件名：`worktrace-f<格式版号>-s<数据库版号>-v<应用版本>-<Unix 毫秒>.db`。
-///
-/// `db_version` 记的是**被备份的那份库**的 `PRAGMA user_version`（迁移前），不是本次
-/// 构建的 [`SCHEMA_VERSION`]：文件名描述的是「这份产物是什么」。写构建版本只会与
-/// 应用版本重复，写被备份的版本才有信息量（恢复前要判的正是它）。
-fn backup_file_name(db_version: i64, at_ms: i64) -> String {
-    format!(
-        "{BACKUP_PREFIX}{BACKUP_FORMAT_VERSION}-s{db_version}-v{}-{at_ms}{BACKUP_SUFFIX}",
-        env!("CARGO_PKG_VERSION")
-    )
-}
-
-/// 从文件名里取出 Unix 毫秒（保留策略据此从旧到新删）。
-///
-/// 名字不符合这个形状（或毫秒段不是数字）⇒ `None`：认不出的文件**不碰**，
-/// 删别人的东西不是保留策略的事。
-fn backup_timestamp(path: &Path) -> Option<i64> {
-    let name = path.file_name()?.to_str()?;
-    let stem = name
-        .strip_prefix(BACKUP_PREFIX)?
-        .strip_suffix(BACKUP_SUFFIX)?;
-    let (_, at_ms) = stem.rsplit_once('-')?;
-    at_ms.parse::<i64>().ok()
-}
-
-/// 只保留最新的 [`BACKUP_KEEP`] 份备份。**不返回错误**：清理发生在备份成功之后，
-/// 失败只记诊断，不能把一次成功启动变成失败。
-fn prune_old_backups(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut backups: Vec<(i64, PathBuf)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            backup_timestamp(&path).map(|at_ms| (at_ms, path))
-        })
-        .collect();
-    if backups.len() <= BACKUP_KEEP {
-        return;
-    }
-
-    backups.sort_by_key(|(at_ms, _)| *at_ms);
-    let excess = backups.len() - BACKUP_KEEP;
-    for (_, path) in backups.into_iter().take(excess) {
-        if let Err(error) = std::fs::remove_file(&path) {
-            // 只记诊断。（release 的 Windows 子系统没有控制台，正式诊断日志归 P6 Task 2。）
-            eprintln!(
-                "[worktrace] backup prune: cannot remove {}: {error} (ignored)",
-                path.display()
-            );
-        }
-    }
-}
-
-/// 迁移前的按需一致备份：**在同一个已打开的连接上** `VACUUM INTO`。
-///
-/// 三件事写死在这里：
-///
-/// 1. **同一连接**。`Db::open` 之后没有关连接的时机（第②步一结束就要读 `app_meta`
-///    取 `data_epoch`），所以原语必须是「库已经打开时可用」的那种；而磁盘库是 WAL
-///    （`storage/db.rs` 打开时强制校验），**只拷主库文件必然撕裂**。`VACUUM INTO`
-///    产出的是一份事务一致的单文件快照（WAL 里尚未 checkpoint 的内容也在内），
-///    且**零新增依赖**——不开 `rusqlite` 的 `"backup"` feature（那要动
-///    `Cargo.toml`/`Cargo.lock`，本机是离线环境）。
-/// 2. **只在需要迁移时调用**（调用点见 [`startup`] 的第②步）。
-/// 3. **失败即拒绝迁移**：返回 `AppError::Storage`，`detail` 带 `pre-migration backup:`
-///    阶段标记。调用方据此让本次启动失败——不降级、不跳过、不先迁移后补。
-///
-/// 备份目录**在这里才解析**：首启与「版本相等」两条路径不碰应用数据目录。
-/// 原语归属：P6 Task 4 的 `services/backup.rs`。本任务不得动 `services/mod.rs`，
-/// 所以它先落在本文件；Task 4 抽取时把这三段整体搬走，**不要另写第二套拷贝逻辑**。
-fn backup_before_migration(
-    config: &StartupConfig,
-    conn: &Connection,
-    from_version: i64,
-    clock: &(dyn Clock + Send),
-) -> Result<(), AppError> {
-    let dir = match &config.backup_dir {
-        Some(dir) => dir.clone(),
-        None => paths::app_data_dir()
-            .map_err(|e| io_err("pre-migration backup dir", e))?
-            .join(BACKUP_DIR_NAME),
-    };
-    std::fs::create_dir_all(&dir).map_err(|e| io_err("pre-migration backup dir", e))?;
-
-    // 时间戳走注入的时钟：`services` 不得自取系统时间（分层门禁那条规则的用意是
-    // 「服务层的时间必须来自 `Clock`」）。时钟取不到就没法给产物命名 ⇒ 同样拒绝迁移。
-    let sample = clock.sample().map_err(|_| AppError::Storage {
-        detail: "pre-migration backup: clock sample unavailable for the artifact name".to_string(),
-    })?;
-    let target = dir.join(backup_file_name(from_version, sample.wall_ms));
-
-    // 同名产物（同一毫秒）在这里就拒绝：**不覆盖**是刻意的，而且这条比让 `VACUUM INTO`
-    // 自己去撞可诊断得多（它撞出来的是一句 SQL 级报错："output file already exists"
-    // 或"表已存在"）。
-    if target.exists() {
-        return Err(AppError::Storage {
-            detail: format!(
-                "pre-migration backup: artifact already exists: {}",
-                target.display()
-            ),
-        });
-    }
-
-    let target_sql = target.to_str().ok_or_else(|| AppError::Storage {
-        detail: "pre-migration backup: artifact path is not valid UTF-8".to_string(),
-    })?;
-    conn.execute("VACUUM INTO ?1", [target_sql])
-        .map_err(map_sqlite)
-        .map_err(backup_stage)?;
-
-    // 备份已经落地，之后才是保留策略：它失败只记诊断。
-    prune_old_backups(&dir);
-    Ok(())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // 启动
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1911,7 +1744,15 @@ pub fn startup(
     let backup = if !db_existed {
         PreMigrationBackup::NothingToBackUp
     } else if from_version < SCHEMA_VERSION {
-        backup_before_migration(&config, db.connection(), from_version, &*clock)?;
+        // 原语在 `services::backup`（Task 4a 整体搬走）：本入口只负责**编排与顺序**。
+        // 备份目录在这里才解析——下面的参数是 `Option`，`None` 的缺省路径由原语自己算，
+        // 所以首启与「版本相等」两条路径都不碰应用数据目录。
+        backup::backup_before_migration(
+            config.backup_dir.as_deref(),
+            db.connection(),
+            from_version,
+            &*clock,
+        )?;
         PreMigrationBackup::Taken
     } else {
         PreMigrationBackup::NotNeeded

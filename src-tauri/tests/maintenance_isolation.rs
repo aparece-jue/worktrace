@@ -271,17 +271,19 @@ fn log_lines(path: &Path) -> Vec<String> {
     }
 }
 
-/// 断言这是一条**维护态拒绝**：本阶段用的是临时的内部错误
-/// （`STORAGE_ERROR` + `maintenance:` 前缀的 detail）。
+/// 断言这是一条**维护态拒绝**：P6 Task 4a 的第六个码 `DATA_RESTORE_IN_PROGRESS`。
 ///
-/// **TODO（P6 Task 4）**：换成 `DATA_RESTORE_IN_PROGRESS` 之后要改的就是这一个函数
+/// 它**不带内部 detail**（`detail()` 只服务 `Domain`/`Storage`；维护态拒绝的文案就是
+/// `message()` 那句面向用户的中文），所以这里钉的是两件事：码本身，以及"它没有被降级成
+/// 别的失败"。
+///
 /// 两条维护态采样用例不涉及错误码（只断言零写入与采样计数），无需改动。
 fn assert_maintenance_refusal(error: &AppError) {
-    assert_eq!(error.code(), "STORAGE_ERROR", "实际：{error:?}");
-    let detail = error.detail().unwrap_or_default();
-    assert!(
-        detail.starts_with("maintenance:"),
-        "维护态拒绝的 detail 必须以 maintenance: 开头，实际：{detail}"
+    assert_eq!(error.code(), "DATA_RESTORE_IN_PROGRESS", "实际：{error:?}");
+    assert_eq!(
+        error.detail(),
+        None,
+        "维护态拒绝不带内部 detail（新码是单元变体）：{error:?}"
     );
 }
 

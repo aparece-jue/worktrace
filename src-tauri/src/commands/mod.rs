@@ -17,7 +17,7 @@
 //! 每次命令都走同一把 `Mutex<AppState>`（[`lock_app`]），所以用户命令与周期采样
 //! 天然串行——这就是「广播按提交顺序」里那条串行边界的落点。
 //!
-//! # 错误：五个码原样透传
+//! # 错误：六个码原样透传
 //!
 //! 失败统一走 [`capture_error_response`]（**在原事务结束之后、同一串行边界内**捕获，
 //! 不另调 `timer.snapshot` 补版本），载荷是共享的
@@ -41,7 +41,7 @@
 //! [`parse_session_mode`] / [`parse_timer_kind`] / `TaskStatus::parse`
 //! （后者在 `services::catalog::TaskQueryRequest` 的 `TryFrom` 里），**不依赖 serde
 //! 的枚举反序列化**：后者的失败拿不到 `ErrorResponse.code`，会退化成 Tauri 的
-//! 反序列化错误（00 §4 只认那五个码）。
+//! 反序列化错误（00 §4 只认那六个码）。
 //!
 //! 每个命令只收**一个** `request` 参数（请求 DTO 见下）：这样 IPC 的参数名不受
 //! Tauri 的 `camelCase` 参数重命名影响，字段名就是本文件里写的那套 snake_case。
@@ -94,9 +94,9 @@
 //!
 //! # 本阶段不做
 //!
-//! 恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；维护态的新错误码
-//! `DATA_RESTORE_IN_PROGRESS` 与四处联动（P6 Task 4——本任务只把门禁装上，
-//! 被拒响应暂时用临时的内部错误，见 [`maintenance_response`]）。
+//! 恢复确认相关命令（P3）；统计与导出命令（P5，P8 接入）；恢复流程本身与装卸运行态
+//! （P6 Task 4b）。维护态的新错误码 `DATA_RESTORE_IN_PROGRESS` 与四处联动**已落地**
+//! （P6 Task 4a），被拒响应的形状见 [`maintenance_response`]。
 
 use std::sync::Arc;
 
@@ -185,7 +185,7 @@ where
 
 /// 阻塞任务 panic / 被取消：这是**缺陷**，不是用户错误，也不是业务失败。
 ///
-/// 五个码里没有「内部错误」，取最接近的 `STORAGE_ERROR`。**刻意不带 `authority`**：
+/// 六个码里没有「内部错误」，取最接近的 `STORAGE_ERROR`。**刻意不带 `authority`**：
 /// panic 发生在临界区里，此时再去读一次库既拿不到可信版本，也不该在错误路径上开事务；
 /// `requires_handshake` 因此为真，客户端据此重新握手而不是拿一个来源不明的版本继续。
 fn internal_failure(detail: String) -> ErrorResponse {
@@ -202,13 +202,12 @@ fn internal_failure(detail: String) -> ErrorResponse {
 /// 也不要求重新握手（库身份没变，重新握手由维护结束后的新 `data_epoch` 触发）。
 ///
 /// 为什么不能走 [`capture_error_response`]：它要读 `guard.db()` 才知道权威版本，
-/// 而维护态期间**运行态正要被换掉**（Task 4 的 `take_runtime`），那一刻既读不到、
+/// 而维护态期间**运行态正要被换掉**（Task 4b 的 `take_runtime`），那一刻既读不到、
 /// 也不该在错误路径上开事务。
 ///
-/// **TODO（P6 Task 4）**：`code`/`message` 换成第六个码 `DATA_RESTORE_IN_PROGRESS`
-/// 与它的中文文案（四处联动：`error.rs` 的变体 + `code()` + `message()` + 两处码表用例，
-/// 以及前端 `ERROR_CODES`）。本任务刻意不提前拆那四处——现在这里是临时的内部错误
-/// （`STORAGE_ERROR` + `maintenance:` detail），测试断言的就是这个临时形状。
+/// `code`/`message` 来自 [`AppError::DataRestoreInProgress`]（第六个码
+/// `DATA_RESTORE_IN_PROGRESS`，P6 Task 4a 落地）：码是前端的分支键，文案是面向用户的
+/// 中文，两者都由 `error.rs` 给出——这里**不重抄一份**，免得又多一处漂移源。
 fn maintenance_response(error: &AppError) -> ErrorResponse {
     ErrorResponse {
         code: error.code().to_owned(),
@@ -1411,8 +1410,8 @@ pub fn spawn_tray_quit(app: &AppHandle) {
                     error.code()
                 );
                 if is_maintenance_refusal(&error) {
-                    // 维护态：拒绝退出（见上面的文档）。
-                    // **TODO（P6 Task 4）**：`is_maintenance_refusal` 换成按码判定。
+                    // 维护态：拒绝退出（见上面的文档）。判定按第六个码
+                    // `DATA_RESTORE_IN_PROGRESS`（[`is_maintenance_refusal`]）。
                     return;
                 }
                 handle.exit(1);

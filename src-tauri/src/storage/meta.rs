@@ -57,6 +57,29 @@ pub fn init_meta(tx: &Transaction<'_>) -> Result<Meta, AppError> {
     })
 }
 
+/// 换一个全新的 `data_epoch`，返回新值。**恢复/替换库的提交路径专用**。
+///
+/// 分工写死（三个函数各管一段，别互相代劳）：
+/// - [`init_meta`] 只在**建库**时 INSERT 一次（重复 INSERT 会撞 `app_meta.singleton` 的 PK）；
+/// - [`bump_revision`] 只动 `revision`；
+/// - 本函数只动 `data_epoch`，**不动 `revision`**。
+///
+/// **不 bump revision**：新 epoch 内不存在「旧响应」，所以没有要作废的缓存；bump 只会给
+/// 「一次业务写恰好 +1」这条口径多造一条没有业务含义的例外（恢复后的 `revision` 可以低于
+/// 原库，它只在**新 epoch 内**比较，00 §5）。
+///
+/// **调用约定**：只由恢复/替换库的**提交路径**在与 `run_repo::start_run` **同一个事务**里
+/// 调一次；回滚路径不调（原库的 epoch 原样保留）。本函数不自行 begin/commit——事务归调用方。
+pub fn rotate_epoch(tx: &Transaction<'_>) -> Result<String, AppError> {
+    let epoch = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "UPDATE app_meta SET data_epoch = ?1 WHERE singleton = 1",
+        [&epoch],
+    )
+    .map_err(map_sqlite)?;
+    Ok(epoch)
+}
+
 /// 一次**业务**写成功后调用，`revision` 恰好 +1，返回新值。
 ///
 /// 调用点必须落在业务服务的事务里，且**一次业务操作只调一次**（总纲 §9）。

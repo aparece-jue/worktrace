@@ -83,13 +83,14 @@ export type SessionMode = (typeof SESSION_MODES)[number];
 export const AUTHORITY_KINDS = ["task", "session", "project", "tag"] as const;
 export type AuthorityKind = (typeof AUTHORITY_KINDS)[number];
 
-/** `AppError::code()` 的五个稳定码（00 §4）。前端只按它分支。 */
+/** `AppError::code()` 的六个稳定码（00 §4）。前端只按它分支。 */
 export const ERROR_CODES = [
   "DATA_EPOCH_MISMATCH",
   "VERSION_CONFLICT",
   "RECOVERY_REQUIRED",
   "DOMAIN_ERROR",
   "STORAGE_ERROR",
+  "DATA_RESTORE_IN_PROGRESS",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
