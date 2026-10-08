@@ -83,9 +83,10 @@ const WALL_JUMP: i64 = 5_000;
 /// 于是待确认候选真是一条**有端点**的区间（否则零长度余段会被省略）。
 const MONOTONIC_STEP: i64 = 1_000;
 // **刻意不钉恢复事务的语句条数**（2026-10-08 控制器裁决）：「一次 `running` + 墙钟异常的
-// 恢复事务由几行写入构成」属 **P2 的内部实现细节**（眼下是 5 行：闭合原区间 / 插入待确认
-// 余段 / 写异常审计 / 会话置 `recovering` / 恰好一次版本）。P5 的用例把它钉死，会让以后改
-// P2 的人在一个 P5 文件里红——那不是要的信号。本文件只钉两件**语义**事实：
+// 恢复事务由几行写入构成」属 **P2 的内部实现细节**。那笔事务眼下做五步——闭合原区间 /
+// 插入待确认余段 / 写异常审计 / 会话置 `recovering` / 恰好一次版本——但**步数与条数都不在
+// 本文件的判据里**：P5 的用例把它钉死，会让以后改 P2 的人在一个 P5 文件里红，那不是要的信号。
+// 本文件只钉两件**语义**事实：
 //   · 第一次入口**确实写了一笔**（增量 `> 0`：一笔都没写就说明恢复事务被吞了）；
 //   · 后两次**恰好 0**（幂等分支：不重复分割/写审计/加版本）；
 // 再加上 `revision` **恰好 +1**——那才是「恰好一次恢复事务」的真正判据。
@@ -370,6 +371,16 @@ fn a_hard_fault_isolates_every_statistics_entry_with_zero_writes() {
         let state = lock_app(&app);
         total_changes(state.db())
     };
+    // 进入 ③ **之前**协调器不在故障态（事实，不是推断）：第一次入口调用才是判出硬故障、
+    // 并把协调器锁进故障态的那一拍。没有这一条，后面的 `is_faulted()` 断言就分不清
+    // 「入口调用造成的」与「装置早就造成的」。
+    {
+        let state = lock_app(&app);
+        assert!(
+            !state.coordinator().is_faulted(),
+            "硬故障是 ③ 里那一次入口调用判出来的，不是装置提前造出来的"
+        );
+    }
 
     // ② 硬故障：单调钟倒退 100ms。下一个采样入口会判 `MonotonicBackwards`。
     fx.clock
@@ -531,6 +542,11 @@ fn a_hard_fault_isolates_every_statistics_entry_with_zero_writes() {
 ///
 /// 最后再各叫一次、**不拨钟**：异常已被检测但**未被接受**（`unaccepted_clock_correction`），
 /// 统计入口继续按恢复语义拒绝，仍然一行都不写、版本不动。
+///
+/// 收尾（⑤）用**新 run**（同一个库、另一个锁文件）经**真入口**读一次数字：已确认人工
+/// 必须是可信前缀的 60000ms（不是被拨过的墙钟 66000、也不是 61000），待确认另计 1 条 /
+/// 1000ms，版本等于那笔恢复事务之后的版本。只核对区间行与审计行会漏掉「聚合/裁剪口径」
+/// 这一层——B 的场景同时带着前缀与候选，正好两列一起验。
 #[test]
 fn a_wall_clock_jump_commits_exactly_one_recovery_transaction_for_every_entry() {
     let fx = fixture();
@@ -733,5 +749,65 @@ fn a_wall_clock_jump_commits_exactly_one_recovery_transaction_for_every_entry() 
         );
     }
 
+    // ⑤ **异常之后仍能用同一装置读出一致的数字**（经真入口，不是读区间行）。
+    //
+    // 为什么必须这一步：只核对 `work_interval` / `time_edit` 的行比「经入口读出的数字」弱一档
+    // ——行对了而聚合/裁剪口径错了（例如把待确认候选算进已确认、或把可信前缀算到被拨过的
+    // 墙钟 66 秒）在这里看不出来。B 的场景正好同时带着「可信前缀 60000」与「待确认候选
+    // 1000」，两列一起断言才自洽。
+    //
+    // 为什么是新 run：B 结束时校正**已检测未接受**，本 run 的统计入口按设计继续拒绝
+    // （④ 刚钉过）；而待确认是**全局事实**（`attention_overview` 的 pending 查询不限 run），
+    // 所以新 run 的 `stats_today` 看得见 run-1 留下的那条候选。这也是 A 的收尾用的同一姿势。
     drop(running);
+    drop(app);
+    let rebuilt = started(&fx, &fx.rebuilt_lock_path);
+    let rebuilt_epoch = rebuilt.data_epoch().to_string();
+    let rebuilt_app = Arc::clone(rebuilt.app());
+    let view = {
+        let mut state = lock_app(&rebuilt_app);
+        state
+            .stats_today(&today_query(&rebuilt_epoch))
+            .expect("新 run 必须能报出既成事实")
+    };
+    assert_eq!(view.date, "2026-03-10");
+    assert_eq!(
+        cell(&view, StatsClass::Confirmed, Measure::Human).ms,
+        Some(ONE_MINUTE),
+        "可信前缀 = 那 1 分钟：不是被拨过的墙钟 66 秒，也不是 61 秒"
+    );
+    assert_eq!(
+        cell(&view, StatsClass::Confirmed, Measure::Human).intervals,
+        1
+    );
+    assert_eq!(
+        cell(&view, StatsClass::Pending, Measure::Human).intervals,
+        1,
+        "待确认候选是一条（[WALL+60s, WALL+61s)）"
+    );
+    assert_eq!(
+        cell(&view, StatsClass::Pending, Measure::Human).ms,
+        Some(MONOTONIC_STEP),
+        "候选有**已知端点** ⇒ 按跨度给毫秒（1000ms），且不算进已确认"
+    );
+    assert_eq!(
+        cell(&view, StatsClass::Live, Measure::Human).ms,
+        Some(0),
+        "本 run 没有在计时的区间"
+    );
+    assert_eq!(
+        cell(&view, StatsClass::Confirmed, Measure::MachineBackground).ms,
+        Some(0),
+        "B 的场景只有前台：机器与等待都是 0"
+    );
+    assert_eq!(
+        cell(&view, StatsClass::Confirmed, Measure::Waiting).ms,
+        Some(0)
+    );
+    assert_eq!(
+        view.revision, after_revision,
+        "读出的版本 == 那一笔恢复事务之后的版本（before_revision + 1）"
+    );
+    assert_eq!(view.data_epoch, epoch, "同一个库身份");
+    drop(rebuilt);
 }
