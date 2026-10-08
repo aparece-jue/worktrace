@@ -82,13 +82,13 @@ const WALL_JUMP: i64 = 5_000;
 /// 每次撞异常时单调钟额外走的 1000ms：让「余段的候选终点」严格晚于可信前缀终点，
 /// 于是待确认候选真是一条**有端点**的区间（否则零长度余段会被省略）。
 const MONOTONIC_STEP: i64 = 1_000;
-/// 一次「running + 墙钟异常」的恢复事务写下的行数：
-/// ① 原区间在检查点处闭合（UPDATE `work_interval`）
-/// ② 余段待确认候选（INSERT `work_interval`）
-/// ③ 异常审计（INSERT `time_edit`）
-/// ④ 会话置 `recovering` + `needs_review`（UPDATE `work_session`）
-/// ⑤ 恰好一次版本（UPDATE `app_meta`）
-const RECOVERY_TX_ROWS: i64 = 5;
+// **刻意不钉恢复事务的语句条数**（2026-10-08 控制器裁决）：「一次 `running` + 墙钟异常的
+// 恢复事务由几行写入构成」属 **P2 的内部实现细节**（眼下是 5 行：闭合原区间 / 插入待确认
+// 余段 / 写异常审计 / 会话置 `recovering` / 恰好一次版本）。P5 的用例把它钉死，会让以后改
+// P2 的人在一个 P5 文件里红——那不是要的信号。本文件只钉两件**语义**事实：
+//   · 第一次入口**确实写了一笔**（增量 `> 0`：一笔都没写就说明恢复事务被吞了）；
+//   · 后两次**恰好 0**（幂等分支：不重复分割/写审计/加版本）；
+// 再加上 `revision` **恰好 +1**——那才是「恰好一次恢复事务」的真正判据。
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 装置
@@ -525,8 +525,9 @@ fn a_hard_fault_isolates_every_statistics_entry_with_zero_writes() {
 /// - 后两次是「`recovering` + 墙钟异常」：协调器的**幂等分支**，不重复分割、不重复写审计、
 ///   不加版本，仍然返回 `RECOVERY_REQUIRED`。
 ///
-/// 于是「恰好一次版本 + 5 行写入」与「后两次零写入」是同一次运行里的两个观察：
+/// 于是「恰好一次版本 + 第一次确实写了一笔」与「后两次零写入」是同一次运行里的两个观察：
 /// 入口既没有藏住那笔写，也没有交出一个用异常前样本拼的视图（它返回的是 `Err`）。
+/// **条数不钉**：写了几行属 P2 的实现细节，见文件上方那段说明。
 ///
 /// 最后再各叫一次、**不拨钟**：异常已被检测但**未被接受**（`unaccepted_clock_correction`），
 /// 统计入口继续按恢复语义拒绝，仍然一行都不写、版本不动。
@@ -592,10 +593,16 @@ fn a_wall_clock_jump_commits_exactly_one_recovery_transaction_for_every_entry() 
         };
         deltas.push(after_changes - call_changes);
     }
+    // 第一次：恢复事务**真的落库**（写了多少行属 P2 的实现细节，这里只要求「写了一笔」）。
+    assert!(
+        deltas[0] > 0,
+        "第一次入口必须真的提交了一笔恢复事务（增量 > 0），实际 {deltas:?}"
+    );
+    // 后两次：幂等分支**恰好零写入**——不重复分割、不重复写审计、不加版本。
     assert_eq!(
-        deltas,
-        vec![RECOVERY_TX_ROWS, 0, 0],
-        "恢复事务只落一次（第一次入口），后两次是幂等分支：零写入"
+        &deltas[1..],
+        &[0, 0],
+        "recovering + 墙钟异常是幂等分支，必须一行都不写，实际 {deltas:?}"
     );
 
     // ③ 那笔恢复事务是**可见的**：版本恰好 +1，会话 `recovering`，余段是待确认候选。
@@ -606,15 +613,15 @@ fn a_wall_clock_jump_commits_exactly_one_recovery_transaction_for_every_entry() 
     assert_eq!(
         after_revision,
         before_revision + 1,
-        "一次异常恰好一次版本（不是 0，也不是 3）"
+        "一次异常恰好一次版本（不是 0，也不是 3）——这才是「恰好一次恢复事务」的判据"
     );
     let written_total = {
         let state = lock_app(&app);
         total_changes(state.db()) - before_changes
     };
     assert_eq!(
-        written_total, RECOVERY_TX_ROWS,
-        "三次调用合计只写了那一笔恢复事务的 5 行"
+        written_total, deltas[0],
+        "三次调用合计 == 第一次那一笔：中间没有被别的东西偷偷写"
     );
 
     {
