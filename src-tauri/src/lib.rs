@@ -59,6 +59,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::platform::clock::SystemClock;
+use crate::platform::diagnostics::Diagnostics;
 use crate::platform::tray::{self, TrayAction};
 use crate::platform::window;
 use crate::services::bootstrap::{
@@ -91,22 +92,29 @@ impl EventSink for TauriEventSink {
     }
 }
 
-/// 启动次序的生产探针：每步打印一行。
+/// 启动次序的生产探针：每一步写进**正式诊断日志**（P6 Task 2b 收掉 2a 交接的那条 minor）。
 ///
-/// Task 0 只留了 `NoProbe` 占位，这里兑现「生产侧换诊断日志」：真机上也能看见六步
-/// 都在、顺序固定，而不是只有测试里那一条断言。P6 接入正式诊断日志时替换本类型
-/// （release 的 Windows 子系统没有控制台，输出直接丢弃，不会崩）。
-struct StartupTrace;
+/// 为什么不再是 `println!`：release 的 Windows 子系统**没有控制台**（`tauri.conf.json` 的
+/// `windows_subsystem`），输出直接丢弃——真机上「卡在哪一步」「迁移前备份走了哪条分支」
+/// 就再也查不到。落点与状态跃迁（维护态、故障态）写的是**同一个文件**：路径都来自同一份
+/// [`StartupConfig::diagnostic_log`]（经 `Diagnostics::from_optional_path`）。
+struct StartupTrace {
+    diagnostics: Diagnostics,
+}
 
 impl StartupProbe for StartupTrace {
     fn step(&self, step: StartupStep) {
-        println!("[worktrace] startup: {}", step.as_str());
+        self.diagnostics
+            .record("startup.step", &format!("step={}", step.as_str()));
     }
 
     /// 迁移前备份的按需判据结果。三条分支里有两条是「这次没备份」，原因不同 ⇒ 分开打，
     /// 免得事后只看到「没有产物」而分不清是首启、版本相等，还是判据坏了。
     fn pre_migration_backup(&self, outcome: PreMigrationBackup) {
-        println!("[worktrace] startup: pre_migration_backup={outcome:?}");
+        self.diagnostics.record(
+            "startup.pre_migration_backup",
+            &format!("outcome={outcome:?}"),
+        );
     }
 }
 
@@ -219,11 +227,15 @@ fn setup(app: &mut tauri::App, alive: &Arc<AtomicBool>) -> Result<(), Box<dyn st
     let sink = Arc::new(TauriEventSink {
         app: handle.clone(),
     });
+    // 启动探针与状态跃迁（维护态、故障态）写**同一个**诊断文件：路径都来自这份 config。
+    let trace = StartupTrace {
+        diagnostics: Diagnostics::from_optional_path(config.diagnostic_log.clone()),
+    };
     match bootstrap::startup(
         config,
         Box::new(SystemClock::new()),
         sink,
-        &StartupTrace,
+        &trace,
         &open_window,
     )? {
         Startup::Running(running) => {

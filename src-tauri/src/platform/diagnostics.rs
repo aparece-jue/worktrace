@@ -47,6 +47,18 @@ impl Diagnostics {
         }
     }
 
+    /// 按可选路径构造：`None` = 关闭（与 [`Diagnostics::disabled`] 同一语义）。
+    ///
+    /// 用途：`StartupConfig.diagnostic_log` 是 `Option<PathBuf>`，而**启动探针**（组合根那条
+    /// `StartupTrace`）与**状态跃迁**（维护态、故障态）必须写进**同一个文件**。把这段
+    /// `match` 收在这里，两处就不会各写一份、日后漂移。
+    pub fn from_optional_path(path: Option<PathBuf>) -> Self {
+        match path {
+            Some(path) => Self::to_file(path),
+            None => Self::disabled(),
+        }
+    }
+
     /// 是否配置了落点。
     pub fn is_enabled(&self) -> bool {
         self.path.is_some()
@@ -104,6 +116,23 @@ mod tests {
         assert!(!sink.is_enabled());
         assert!(sink.path().is_none());
         sink.record("maintenance.begin", "phase=Restore");
+    }
+
+    /// `Option<PathBuf>` 的两条分支：`Some` = 落盘、`None` = 关闭（**不是**写到某个缺省）。
+    #[test]
+    fn an_optional_path_maps_to_the_same_two_shapes() {
+        assert!(!Diagnostics::from_optional_path(None).is_enabled());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worktrace.log");
+        let sink = Diagnostics::from_optional_path(Some(path.clone()));
+        assert!(sink.is_enabled());
+        assert_eq!(sink.path(), Some(path.as_path()));
+        sink.record("startup.step", "step=single_instance_checked");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "event=startup.step step=single_instance_checked\n"
+        );
     }
 
     /// 多次 `record` 是**追加**（不是覆盖），父目录按需创建。

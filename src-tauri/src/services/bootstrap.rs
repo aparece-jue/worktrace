@@ -57,13 +57,39 @@
 //! 被拒的写入走 [`AppState::guard_writable`] 的错误（本阶段是临时的内部错误，
 //! **Task 4 换成第六个码 `DATA_RESTORE_IN_PROGRESS`**，见 [`MAINTENANCE_DETAIL_PREFIX`]）。
 //!
+//! ## 故障路径的两半（P6 Task 2b）
+//!
+//! **路 A：协调器故障态**（`Err`，线程还活着）。`Coordinator::faulted` 一旦置真，
+//! `refuse_if_faulted` 会拒绝十个入口 ⇒ 计时没有出口；P2 实现清除、P3 给生产出口
+//! （[`AppState::retry_recovery`]）、P8 提供触发，**P6 补的是「故障是怎么被发现的、
+//! 被谁看见了」**：
+//!
+//! - **采样路径按「跃迁」记一条**（[`AppState::observe_timer_availability`]）：故障持续
+//!   期间每一拍都拿 `Err(RecoveryRequired)`，逐拍记会把正式诊断刷爆。`sampling_errors`
+//!   **口径不变**——它是「采样失败」，故障期间照涨，与「故障次数」不是一回事。
+//! - **启动路径点名**：启动后**第一次**采样就已经不可用 ⇒ 记 `startup.timer_unavailable`
+//!   （否则用户看到「刚打开就不能计时」却不知道原因）。
+//! - **只读观察口** [`AppState::timer_faulted`] 照实投影 `Coordinator::is_faulted` 的
+//!   **既有复合语义**（`faulted || pending_committed_reload.is_some()`）：两者对调用方
+//!   是同一件事（十个入口一起被拒），诊断文案因此写成「计时不可用（故障态或提交后待
+//!   刷新）」——**不得**把「提交后待刷新」误记成「进入故障态」。
+//! - **不自动重试、不自动清故障**：清除只走用户显式触发的 [`AppState::retry_recovery`]。
+//!
+//! **路 B：采样线程 panic**（`ticks` 停涨）。它不经过协调器，也不涨 `sampling_errors`；
+//! 出口是 `platform::scheduler` 的看门狗——[`Scheduler::spawn_watched`] 的退出守卫把
+//! `event=sampler.died_unexpectedly` 写进**同一个**诊断落点，只读投影是
+//! [`RunningApp::sampling_died_unexpectedly`]。两条路的信号与处置都不同，别混成一条。
+//!
+//! **诊断落点是同一个文件**（[`StartupConfig::diagnostic_log`]）：启动探针、维护态跃迁、
+//! 故障态跃迁都写它——release 的 Windows 子系统没有控制台，`println!` 写出去没人看得见。
+//!
 //! ## 本阶段不做
 //!
 //! 恢复确认与历史修正的用户命令、门禁重扫（P3 Task 2 起）；**装卸运行态**
 //! （`take_runtime`/`install_runtime`/`runtime_present`）与恢复流程、`services/backup.rs`
 //! 这层归属（P6 Task 4——本任务只做**迁移前的按需一致备份编排**，原语先落在本文件，
-//! 见 `backup_before_migration` 的说明）；采样失活看门狗与故障态检测半边（P6 Task 2b）；
-//! 正式 OS 事件源与 `AppState::system_boundary`（P6 Task 2c）；平台事件的实机验收（P8 复核）。
+//! 见 `backup_before_migration` 的说明）；正式 OS 事件源与 `AppState::system_boundary`
+//! （P6 Task 2c）；平台事件的实机验收（P8 复核）。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -86,6 +112,7 @@ use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditRepor
 use crate::services::recovery::{DiscardSessionRequest, ReconcileReport, ReconcileRequest};
 use crate::services::stats::{StatsRangeQuery, StatsSnapshot, TodayQuery, TodayView};
 use crate::services::tasks::{TaskTransitionReport, TransitionTaskRequest};
+use crate::services::timer::anchor::SampleVerdict;
 use crate::services::timer::coordinator::{
     AcceptClockCorrectionRequest, ClockCorrectionAccepted, CommandOutcome, Coordinator,
     ResumeRequest, SessionRequest, StartRequest,
@@ -109,6 +136,67 @@ use crate::storage::WriteOutcome;
 /// （那条规则的用意是「服务层不得自取时间」），而节拍本来就不该由服务层
 /// 表达成一个时刻类型——`platform::scheduler` 收毫秒。
 pub const DEFAULT_SAMPLING_INTERVAL_MS: u64 = 1_000;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 故障路径的诊断词表（P6 Task 2b）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 采样线程**意外结束**（`on_tick` panic ⇒ `ticks` 停涨）的诊断事件。
+///
+/// 由 `Scheduler::spawn_watched` 的退出守卫写；它**不是**广播事件（`services/events.rs`
+/// 仍然只有 `domain.changed` 与 `timer.tick`——本任务不新增事件名那个口径说的是广播）。
+pub const EVENT_SAMPLER_DIED: &str = "sampler.died_unexpectedly";
+
+/// 「计时不可用」的**进入**诊断事件（故障态**或**提交后待刷新）。
+pub const EVENT_TIMER_UNAVAILABLE_BEGIN: &str = "timer.unavailable.begin";
+
+/// 启动后**第一次采样就已经**不可用的诊断事件（启动路径点名，见模块头）。
+///
+/// 它与上一条是**同一个跃迁的两种形态**：第一次观察就不可用时记这一条，之后才进故障态
+/// 的记上一条。所以一次跃迁**只会**留下其中一行。
+pub const EVENT_STARTUP_TIMER_UNAVAILABLE: &str = "startup.timer_unavailable";
+
+/// 「计时不可用」的**清除**诊断事件。
+pub const EVENT_TIMER_UNAVAILABLE_END: &str = "timer.unavailable.end";
+
+/// 诊断文案：照实投影 [`Coordinator::is_faulted`] 的**复合语义**（P6-3）。
+///
+/// **不得**写成「进入故障态」：`is_faulted()` 也可能只因「提交后待刷新」
+/// （`pending_committed_reload`）为真，那时并没有进入故障态。
+pub const TIMER_UNAVAILABLE_REASON: &str = "计时不可用（故障态或提交后待刷新）";
+
+/// 置真点**分组名**（P6-4：`services/timer/coordinator.rs` 里 13 处置真按成因分 5 组）。
+///
+/// 这五个名字是**词表**，与置真点一一对应：
+///
+/// | 分组名 | 置真点 | 触发场景 |
+/// | --- | --- | --- |
+/// | [`FAULT_COMMITTED_REBUILD_FAILED`] | `rebuild_from_committed` 的 6 处 | 业务命令已提交、重建内存/响应时失败 |
+/// | [`FAULT_NO_TRUSTED_BASELINE`] | `read_sample` 的无基线分支 | 采样失败且没有可信基线 |
+/// | [`FAULT_ANOMALY_TRANSACTION_FAILED`] | `handle_anomaly` 的兜底 | 异常事务失败 |
+/// | [`FAULT_MONOTONIC_BACKWARDS`] | 4 处单调钟硬故障分支 | 本 run 的单调读数已失去意义 |
+/// | [`FAULT_CLOCK_CORRECTION_REJECTED`] | `accept_detected_clock_correction` | 接受校正入口撞上硬故障 |
+///
+/// **归因的证据边界**：协调器不暴露「是哪一处置的真」（P6-3：不新增 P2 访问器），
+/// 所以采样路径按**它拿得到的最强证据**归因（见 [`fault_origin`]）：能精确落到 4 组，
+/// 第 5 组在采样路径上表现为 `monotonic_backwards`（它的触发条件本来就是单调钟倒退）。
+pub const FAULT_COMMITTED_REBUILD_FAILED: &str = "committed_rebuild_failed";
+/// 见 [`FAULT_COMMITTED_REBUILD_FAILED`] 的表。
+pub const FAULT_NO_TRUSTED_BASELINE: &str = "no_trusted_baseline";
+/// 见 [`FAULT_COMMITTED_REBUILD_FAILED`] 的表。
+pub const FAULT_ANOMALY_TRANSACTION_FAILED: &str = "anomaly_transaction_failed";
+/// 见 [`FAULT_COMMITTED_REBUILD_FAILED`] 的表。
+pub const FAULT_MONOTONIC_BACKWARDS: &str = "monotonic_backwards";
+/// 见 [`FAULT_COMMITTED_REBUILD_FAILED`] 的表。
+pub const FAULT_CLOCK_CORRECTION_REJECTED: &str = "clock_correction_rejected";
+
+/// 观察点名字：周期采样的一拍。
+const OBSERVER_ENTRY_SAMPLING: &str = "sample_tick";
+/// 观察点名字：P3 的显式重试入口（S12）。
+const OBSERVER_ENTRY_RETRY: &str = "retry_recovery";
+
+/// 诊断行里挂钟取不到时的占位（照实记「不知道」，不编一个时刻）。
+const WALL_MS_UNKNOWN: &str = "unknown";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 启动次序的探针
@@ -346,6 +434,16 @@ impl RunningApp {
         self.sampling_errors.load(Ordering::SeqCst)
     }
 
+    /// 采样线程是否**意外结束**（P6 Task 2b 的看门狗出口）。
+    ///
+    /// 真 ⇒ 线程已经不在了、`sampling_ticks` 停涨，而**故障态检测那一半也再没有采样拍
+    /// 可看**：所以这条信号与 [`AppState::timer_faulted`] 是**互补**的，不是同一件事的
+    /// 两个名字（见模块头「故障路径的两半」）。对应的诊断行是
+    /// `event=sampler.died_unexpectedly`，由 `Scheduler::spawn_watched` 的退出守卫写。
+    pub fn sampling_died_unexpectedly(&self) -> bool {
+        self.sampling.died_unexpectedly()
+    }
+
     /// **显式退出**（Task 4 的托盘「退出」与 P8 复用这一条入口）。
     ///
     /// 顺序：`holds_app_lock` 检查 → **`begin_exit`（退出意图）** → **停定时器**
@@ -518,6 +616,39 @@ pub fn is_maintenance_refusal(error: &AppError) -> bool {
         .is_some_and(|detail| detail.starts_with(MAINTENANCE_DETAIL_PREFIX))
 }
 
+/// 按**现有只读证据**把一次「计时不可用」归因到一个置真点分组（P6-4 的 5 个名字）。
+///
+/// 协调器不暴露「是哪一处置的真」（P6-3：不新增 P2 访问器），采样路径能拿到的最强证据只有
+/// 两个：**上一拍的判定**（[`Coordinator::last_verdict`]）与**调用之前是否已经在故障态**。
+/// 于是规则是（对采样路径**精确**，逐条给依据）：
+///
+/// - `MonotonicBackwards` ⇒ [`FAULT_MONOTONIC_BACKWARDS`]。`try_handle_anomaly` 的 4 处
+///   硬故障分支都以它为判据，而它是 `d_mono < 0` 的唯一来源。
+/// - 其余 `needs_recovery()` 的判定 ⇒ [`FAULT_ANOMALY_TRANSACTION_FAILED`]：
+///   采样拍上唯一能带着「异常判决」置真的地方是 `handle_anomaly` 的兜底（`Err(_)` 分支）。
+/// - 判定是 `Trusted` 而**调用前还没进故障态** ⇒ [`FAULT_NO_TRUSTED_BASELINE`]：
+///   采样拍自己置真且没有任何异常判决，只剩 `read_sample` 的「没有基线可采样」那条
+///   （启动第⑤步就建立了基线，所以它在生产上几乎只有时钟彻底坏掉时才可达）。
+/// - 判定是 `Trusted` 而**调用前已经在故障态** ⇒ [`FAULT_COMMITTED_REBUILD_FAILED`]：
+///   故障不是这一拍置的，最可能来自命令路径的「提交后重建失败」（13 处置真点里只有它
+///   不经过采样）。
+///
+/// 第 5 组 [`FAULT_CLOCK_CORRECTION_REJECTED`] 是**接受校正入口**的硬故障分支，在采样
+/// 路径上表现为 `MonotonicBackwards`（它的触发条件本来就是单调钟倒退）——所以词表是 5 个
+/// 名字，采样路径只会写出其中 4 个。
+fn fault_origin(verdict: SampleVerdict, faulted_before: bool) -> &'static str {
+    if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
+        return FAULT_MONOTONIC_BACKWARDS;
+    }
+    if verdict.needs_recovery() {
+        return FAULT_ANOMALY_TRANSACTION_FAILED;
+    }
+    if faulted_before {
+        return FAULT_COMMITTED_REBUILD_FAILED;
+    }
+    FAULT_NO_TRUSTED_BASELINE
+}
+
 /// 进程内**唯一**的数据库句柄与计时协调器。
 ///
 /// 一次只允许一条路径进入（外部那层 `Mutex`），所以「用户命令」与「周期采样」
@@ -550,6 +681,13 @@ pub struct AppState {
     /// `stop()` 之间有一个窗口——维护态若恰好在那时置位，采样线程照样被永久停掉、
     /// 退出事务照样跑不成，进程只能强杀。置位与维护态**互斥**，窗口因此关闭。
     shutting_down: bool,
+    /// 采样/启动路径**上一次观察到的**「计时是否可用」（P6 Task 2b）。
+    ///
+    /// `None` = **还没有观察过**（启动后第一次采样还没来）；`Some(false)` = 上次可用；
+    /// `Some(true)` = 上次不可用。诊断只在**跃迁**上记一条，所以这一位必须与 `db`/`coordinator`
+    /// 同处一个临界区（不新增第二把锁）：比较与记录必须是一次原子动作，否则两拍并发
+    /// （理论上只有一拍，但 `retry_recovery` 也会观察）会各记一条。
+    timer_unavailable: Option<bool>,
     /// 正式诊断日志的落点（release 的 Windows 子系统没有控制台，见模块头）。
     diagnostics: Diagnostics,
 }
@@ -674,6 +812,100 @@ impl AppState {
     /// 本任务用它记维护态的进入/退出；Task 2b 的故障态进入/清除用**同一个**落点。
     pub fn diagnostics(&self) -> &Diagnostics {
         &self.diagnostics
+    }
+
+    /// 只读投影：**计时现在可不可用**（P6 Task 2b 的观察口）。
+    ///
+    /// 照实投影 [`Coordinator::is_faulted`] 的**既有复合语义**
+    /// （`faulted || pending_committed_reload.is_some()`）：故障态与「提交后待刷新」都会让
+    /// 十个入口一起返回 `RECOVERY_REQUIRED`，对观察者是同一件事。**不新增 P2 访问器、
+    /// 不在服务层拆字段**（P6-3）——拆开只会诱导调用方按错误的粒度分支。
+    ///
+    /// **它只是观察口，不是出口**：清除仍然只能走 [`AppState::retry_recovery`]（P3 S12），
+    /// P6 不做自动重试、也不自动清故障。
+    ///
+    /// **Task 4 的口径（先写在这里，免得装卸运行态时漏掉）**：运行态不在手（维护态的换库
+    /// 窗口）时返回 `false`——观察口不制造「故障」这种结论。
+    pub fn timer_faulted(&self) -> bool {
+        self.coordinator.is_faulted()
+    }
+
+    /// 观察一次「计时是否可用」，在**跃迁**上记一条诊断，返回本次观察值（P6 Task 2b）。
+    ///
+    /// 为什么不每拍记一条：故障态下每一拍都会拿到 `Err(RecoveryRequired)`，
+    /// 1 秒一条会把正式诊断日志刷爆——诊断要的是**跃迁**（进入/清除各一条）。
+    ///
+    /// 口径（别与 `sampling_errors` 混）：这里「只记一条」**不改变** `sampling_errors`，
+    /// 后者是「采样失败」的既有计数，故障期间照涨（每一拍都算一次失败）。
+    ///
+    /// - `entry`：观察点（[`OBSERVER_ENTRY_SAMPLING`] / [`OBSERVER_ENTRY_RETRY`]）。
+    /// - `faulted_before`：**调用协调器之前**读到的值——归因要用它区分「这一拍自己置的真」
+    ///   与「已经在故障态（别处置的真）」。观察点必须自己先读一次，这里不替它猜。
+    /// - `snapshot_wall_ms`：**同一次调用**里已经取到的挂钟（快照的 `as_of`）；没有就给
+    ///   `None`，由 [`AppState::diagnostic_wall_ms`] 决定是补一次采样还是照实记 `unknown`。
+    fn observe_timer_availability(
+        &mut self,
+        entry: &str,
+        faulted_before: bool,
+        snapshot_wall_ms: Option<i64>,
+    ) -> bool {
+        let unavailable = self.timer_faulted();
+        let previous = self.timer_unavailable.replace(unavailable);
+        let transition = match previous {
+            // 第一次观察就是「可用」：没有跃迁可记（健康的启动不该在日志里留一行）。
+            None => unavailable,
+            Some(previous) => previous != unavailable,
+        };
+        if !transition {
+            return unavailable;
+        }
+
+        let run_id = self.coordinator.run_id().to_string();
+        let wall_ms = self.diagnostic_wall_ms(entry, snapshot_wall_ms);
+        if unavailable {
+            // 第一次观察就不可用 ⇒ **启动路径点名**（否则用户看到「刚打开就不能计时」
+            // 却不知道原因）；此后才是普通的「进入」。两者是同一次跃迁的两种形态。
+            let event = match previous {
+                None => EVENT_STARTUP_TIMER_UNAVAILABLE,
+                Some(_) => EVENT_TIMER_UNAVAILABLE_BEGIN,
+            };
+            let origin = fault_origin(self.coordinator.last_verdict(), faulted_before);
+            self.diagnostics.record(
+                event,
+                &format!(
+                    "run_id={run_id} wall_ms={wall_ms} origin={origin} entry={entry} \
+                     reason={TIMER_UNAVAILABLE_REASON}"
+                ),
+            );
+        } else {
+            self.diagnostics.record(
+                EVENT_TIMER_UNAVAILABLE_END,
+                &format!("run_id={run_id} wall_ms={wall_ms} entry={entry}"),
+            );
+        }
+        unavailable
+    }
+
+    /// 诊断行里的 `wall_ms`：优先用**同一次调用**已经取到的那个（快照的 `as_of`，零成本）。
+    ///
+    /// 没有快照时（失败拍不带 `as_of`）按观察点分两种：
+    ///
+    /// - **采样拍可以补一次** `Coordinator::wall_ms()`：它的既有口径就是「用完即弃、不喂给
+    ///   锚点或检测器」，所以不会影响任何判定，只多一次读钟。
+    /// - **显式重试入口不可以**：P3 的用例钉着「S12 全路径只取一次样本」
+    ///   （`tests/exception_closure.rs::retry_recovery_clears_the_fault_only_after_a_successful_commit`
+    ///   数的是 `clock.sample()` 的**调用次数**），多一次就红。而重试成功时 `Ok(snapshot)`
+    ///   一定带着 `as_of`，所以「清除」记录永远有真实挂钟，不会退化成 `unknown`。
+    fn diagnostic_wall_ms(&self, entry: &str, snapshot_wall_ms: Option<i64>) -> String {
+        if let Some(wall_ms) = snapshot_wall_ms {
+            return wall_ms.to_string();
+        }
+        if entry == OBSERVER_ENTRY_SAMPLING {
+            if let Ok(wall_ms) = self.coordinator.wall_ms() {
+                return wall_ms.to_string();
+            }
+        }
+        WALL_MS_UNKNOWN.to_string()
     }
 
     /// 只读投影：当前维护态（诊断与 P8 的状态展示）。
@@ -1334,12 +1566,23 @@ impl AppState {
         }
 
         // 2. 重试那笔恢复事务；成功提交后才清故障态。
-        let snapshot = {
+        let faulted_before = self.timer_faulted();
+        let retried = {
             let AppState {
                 db, coordinator, ..
             } = self;
-            coordinator.retry_recovery(db)?
+            coordinator.retry_recovery(db)
         };
+
+        // **无论成败**都观察一次跃迁：成功 ⇒ 记一条「清除」；失败 ⇒ 值没变，零记录。
+        // 为什么放在这里而不是只靠采样拍：S12 是文档写明的**清除入口**，用户点完「重试
+        // 对账」日志里应当立刻有结论，不该等下一拍（生产是 1 秒）才发现。
+        //
+        // 挂钟**只从这次调用的结果里取**（`snapshot.as_of`），不额外采样：P3 的用例钉着
+        // 「S12 全路径只取一次样本」，多一次 `clock.sample()` 就红；成功时一定有 `as_of`。
+        let snapshot_wall_ms = retried.as_ref().ok().map(|snapshot| snapshot.as_of);
+        self.observe_timer_availability(OBSERVER_ENTRY_RETRY, faulted_before, snapshot_wall_ms);
+        let snapshot = retried?;
 
         // 3. 无条件重扫门禁（S1），事实刚变，快照必须跟着变。
         self.rescan_recovery()?;
@@ -1624,6 +1867,11 @@ pub fn startup(
     coordinator.establish_anchor(sample);
     probe.step(StartupStep::CoordinatorStarted);
 
+    // 正式诊断日志的落点**只解析一次**（P6 Task 2b）：一份给状态跃迁（`AppState`），
+    // 一份给采样线程的失活看门狗。同一条 `config.diagnostic_log` ⇒ 同一个文件；
+    // 组合根那条启动探针也按同一个字段构造（`Diagnostics::from_optional_path`）。
+    let diagnostics = Diagnostics::from_optional_path(config.diagnostic_log.clone());
+
     let app: SharedApp = Arc::new(AppBoundary {
         state: Mutex::new(AppState {
             db,
@@ -1634,23 +1882,41 @@ pub fn startup(
             // 维护态与退出意图都是**进程内**状态，启动时一定是「没有」。
             maintenance: None,
             shutting_down: false,
-            // 诊断落点：`None` = 关闭（显式路径构造的缺省），生产解析到应用数据目录。
+            // 计时可用性还没被观察过：启动后第一次采样说了算（它要是立刻不可用，
+            // 就记 `startup.timer_unavailable` 点名）。
+            timer_unavailable: None,
+            // `None` = 关闭（显式路径构造的缺省），生产解析到应用数据目录。
             // 路径只在第一次真的记录时才创建文件（见 `platform::diagnostics`）。
-            diagnostics: match config.diagnostic_log.clone() {
-                Some(path) => Diagnostics::to_file(path),
-                None => Diagnostics::disabled(),
-            },
+            diagnostics: diagnostics.clone(),
         }),
         holder: Mutex::new(None),
     });
     let broadcaster = Arc::new(Broadcaster::new(sink));
     let sampling_errors = Arc::new(AtomicU64::new(0));
-    let sampling = Scheduler::spawn(config.sampling_interval_ms, {
-        let app = Arc::clone(&app);
-        let broadcaster = Arc::clone(&broadcaster);
-        let errors = Arc::clone(&sampling_errors);
-        move || sampling_action(&app, &broadcaster, &errors)
-    });
+    let sampling = Scheduler::spawn_watched(
+        config.sampling_interval_ms,
+        {
+            let app = Arc::clone(&app);
+            let broadcaster = Arc::clone(&broadcaster);
+            let errors = Arc::clone(&sampling_errors);
+            move || sampling_action(&app, &broadcaster, &errors)
+        },
+        {
+            // **路 B 的出口**（P6 Task 2b 的看门狗）：线程在没有停止信号的情况下退出
+            // ⇒ `on_tick` panic 展开（dev/test profile；release 是整进程 abort，见
+            // `platform::scheduler` 的模块头）。这里只写一条诊断，不重启、不假装恢复。
+            let diagnostics = diagnostics.clone();
+            move || {
+                diagnostics.record(
+                    EVENT_SAMPLER_DIED,
+                    &format!(
+                        "thread={} effect=ticks_stop_growing",
+                        crate::platform::scheduler::SAMPLER_THREAD_NAME
+                    ),
+                );
+            }
+        },
+    );
     probe.step(StartupStep::SamplingStarted);
 
     // ⑥ 开窗口——最后一步：后端就绪之前窗口不该开始拉数据。
@@ -1689,7 +1955,20 @@ fn sampling_action(app: &SharedApp, broadcaster: &Broadcaster, errors: &AtomicU6
     if !state.sampling_allowed() {
         return;
     }
-    match state.sample_tick() {
+
+    // **故障态的检测半边**（P6 Task 2b）：`faulted_before` 必须在调用**之前**读——
+    // 归因分组名要用它区分「这一拍自己置的真」与「已经在故障态（别处置的真）」。
+    let faulted_before = state.timer_faulted();
+    let outcome = state.sample_tick();
+    // 按**跃迁**记账：进入/清除各一条，持续期间零记录（故障态下每一拍都是 Err，
+    // 逐拍记会 1 秒一条刷爆诊断）。注意它**不改变** `sampling_errors` 的口径。
+    //
+    // 挂钟优先用这一拍的快照（零成本）；失败拍没有快照，由观察点补一次读钟
+    // （`Coordinator::wall_ms` 用完即弃、不喂检测器）。
+    let snapshot_wall_ms = outcome.as_ref().ok().map(|snapshot| snapshot.as_of);
+    state.observe_timer_availability(OBSERVER_ENTRY_SAMPLING, faulted_before, snapshot_wall_ms);
+
+    match outcome {
         Ok(snapshot) => {
             if snapshot.session_id.is_some() {
                 // 失败只记诊断（`Broadcaster` 内部计数），不回滚任何已提交业务。

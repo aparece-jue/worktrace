@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 use worktrace_lib::domain::session::{SessionMode, TimerKind};
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
+use worktrace_lib::platform::diagnostics::Diagnostics;
+use worktrace_lib::platform::scheduler::Scheduler;
 use worktrace_lib::services::bootstrap::{
     lock_app, startup, MaintenancePhase, NoProbe, RunningApp, SharedApp, Startup, StartupConfig,
 };
@@ -790,6 +792,88 @@ fn a_maintenance_tick_is_skipped_before_any_read() {
         raised,
         "维护结束之后的同一拍必须把时钟故障记进 sampling_errors（正控：夹具本来就是必然失败的）"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 采样失活看门狗（P6 Task 2b，方案②）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **注入一个必 panic 的 `on_tick`** ⇒ 线程意外结束这件事被观察到，而且留下正式诊断。
+///
+/// 方案②（P6-2 的裁决）：`Cargo.toml` 的 `[profile.release]` 是 `panic = "abort"`，
+/// `catch_unwind` 在发布构建里**捕不到** panic（进程直接终止），所以「包住 `on_tick` 并
+/// 继续下一拍」不可能成立。能成立的是**「`ticks` 不再增长」这条信号 + 一个真正去观察它
+/// 的出口**：`Scheduler::spawn_watched` 的退出守卫在「没有停止信号却退出了」时报告一次
+/// （回调写正式诊断日志），`died_unexpectedly()` 同步为真。
+///
+/// 现象按 profile 分开写（**别把两句话混起来**）：
+///
+/// - **dev/test（默认 profile，`panic = "unwind"`）**：panic 展开、线程退出而进程还在——
+///   本用例覆盖的正是这一种，`ticks` 停在死亡时的读数上，而**没有任何一处会红**这件事
+///   就此结束（诊断里有行、只读出口为真）。
+/// - **release（`panic = "abort"`）**：panic 直接终止**整个进程**，没有展开、没有守卫、
+///   也不可能有「继续下一拍」。那条路径的可见性是**进程消失**（下次启动走 P3 的恢复
+///   扫描），本模块不假装覆盖它；`[profile.release]` **本任务不改**。
+#[test]
+fn a_panicking_on_tick_is_observed_by_the_watchdog_and_freezes_the_ticks() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("diagnostics.log");
+    let sink = Diagnostics::to_file(&log_path);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let reported = Arc::new(AtomicUsize::new(0));
+
+    let scheduler = {
+        let calls = Arc::clone(&calls);
+        let reported = Arc::clone(&reported);
+        let sink = sink.clone();
+        Scheduler::spawn_watched(
+            5,
+            move || {
+                // 第一拍正常完成（`ticks` 先涨到 1，看门狗要看的正是"停在哪个读数上"），
+                // 第二拍 panic：线程直接展开退出。
+                if calls.fetch_add(1, Ordering::SeqCst) >= 1 {
+                    panic!("注入的必 panic on_tick");
+                }
+            },
+            move || {
+                reported.fetch_add(1, Ordering::SeqCst);
+                sink.record(
+                    "sampler.died_unexpectedly",
+                    "thread=worktrace-sampler effect=ticks_stop_growing",
+                );
+            },
+        )
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !scheduler.died_unexpectedly() {
+        assert!(
+            Instant::now() < deadline,
+            "`on_tick` panic 之后必须能观察到线程已经不在了（ticks={}）",
+            scheduler.ticks()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let frozen = scheduler.ticks();
+    assert!(frozen >= 1, "死之前至少完成过一拍，否则「停涨」没有判别力");
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        scheduler.ticks(),
+        frozen,
+        "panic 之后 ticks 不得再涨——这就是看门狗要看的信号"
+    );
+    assert_eq!(reported.load(Ordering::SeqCst), 1, "意外退出只报告一次");
+    assert_eq!(
+        std::fs::read_to_string(&log_path).unwrap(),
+        "event=sampler.died_unexpectedly thread=worktrace-sampler effect=ticks_stop_growing\n",
+        "看门狗必须留下正式诊断：release 的 Windows 子系统没有控制台，println! 没人看得见"
+    );
+
+    // 幂等停机：线程早就没了，`stop()` 照样立刻返回（`join` 的 Err 被既有实现忽略）。
+    scheduler.stop();
+    assert_eq!(scheduler.ticks(), frozen, "stop 之后同样不涨");
+    assert!(scheduler.died_unexpectedly());
 }
 
 /// 所有表的行数快照：空闲采样必须让它一动不动。

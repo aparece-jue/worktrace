@@ -26,6 +26,33 @@
 //! **并发调用 `stop` 也保证「返回 ⇒ 线程已退出」**（fix round 1，评审 M1）：句柄只能被
 //! 取走一次，第二个调用者拿不到句柄，于是它等的是**线程自己在退出前置的完成位**（panic
 //! 展开也置位）。停一次的标志仍由停止位保证：置位之后不会再有新的一拍。
+//!
+//! ## 失活看门狗：`ticks` 不再增长（P6 Task 2b，方案②）
+//!
+//! `on_tick` 一旦 panic，线程就没有下一拍了（循环体是 `on_tick(); ticks.fetch_add(…)`）：
+//! `ticks` **停涨**、`interval_checkpoint` 不再前进，而调用方那条失败计数的分支
+//! （`sampling_action` 的 `Err(_)`）**根本不会被执行**——panic 不走那条路。现象是
+//! 「界面秒数照走（它从 `started_at` 算，不靠采样）、检查点不动、进程不报错、托盘还在」，
+//! **没有任何一处会红**。
+//!
+//! 这里给的出口是**方案②**：不包 `catch_unwind`（见下），而是让线程在**没有停止信号**
+//! 的情况下退出时报告一次（[`Scheduler::spawn_watched`] 的 `on_unexpected_exit`），
+//! 并把「线程已意外结束」变成可读的 [`Scheduler::died_unexpectedly`]。
+//!
+//! **为什么不是方案①（包 `catch_unwind` 后继续下一拍）**：`Cargo.toml` 的
+//! `[profile.release]` 是 `panic = "abort"`，panic 直接终止**整个进程**，捕捉器在发布
+//! 构建里**捕不到**——那条路在 release 下不可能生效（P6-2 的裁决：**不改 profile**）。
+//!
+//! **现象按 profile 分开写，别把两句话混起来**：
+//!
+//! - **dev/test（默认 profile，`panic = "unwind"`）**：panic 展开、线程退出而进程还在。
+//!   这是本模块覆盖的那一种：退出守卫在展开时报告一次，`died_unexpectedly()` 同时为真。
+//! - **release（`panic = "abort"`）**：panic 直接终止**整个进程**——没有展开、没有守卫，
+//!   也**不可能**在这里「继续下一拍」。那条路径的可见性是**进程消失**：下次启动由 P3 的
+//!   恢复扫描接手。本模块不假装覆盖它，只保证 unwind 形态下不再「悄悄死掉」。
+//!
+//! 报告出口是**闭包**而不是 `Diagnostics` 句柄：这一层不认识业务，写去哪个文件由接线方
+//! （[`crate::services::bootstrap`]）决定——与 `on_tick` 同一手法。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +61,9 @@ use std::time::Duration;
 
 /// 一次 `sleep` 最多睡这么久，让 `stop` 能在半个周期内生效。
 const MAX_SLEEP_SLICE: Duration = Duration::from_millis(50);
+
+/// 采样线程名。看门狗与诊断都按它点名（`std::thread` 的默认名字在日志里没有信息量）。
+pub const SAMPLER_THREAD_NAME: &str = "worktrace-sampler";
 
 /// 后台周期驱动。**Drop 会停止并 join**。
 #[derive(Debug)]
@@ -45,6 +75,11 @@ pub struct Scheduler {
     /// 为什么需要它：`JoinHandle` 只能被取走一次，第二个 `stop()` 调用者拿不到句柄，
     /// 只凭「取不到句柄」就返回会让「返回 ⇒ 线程已退出」这句话不成立（M1）。
     done: Arc<AtomicBool>,
+    /// 线程**在没有停止信号的情况下**结束过（看门狗的闩锁位，P6 Task 2b）。
+    ///
+    /// 与 `done` 分开：`done` 是「线程不在了」（停止之后也为真），这一位是「不在了而且
+    /// 不是被叫停的」——**置位后不再清除**。
+    died: Arc<AtomicBool>,
     /// 已完成的触发次数。只用于诊断与测试，不参与任何业务判断。
     ticks: Arc<AtomicU64>,
 }
@@ -59,6 +94,38 @@ impl Drop for DoneOnDrop {
     }
 }
 
+/// 线程**意外退出**时的报告守卫（P6 Task 2b 的看门狗）。
+///
+/// 判据是**停止位**：置过位就是「被叫停」的正常退出，不报告；没有置位却退出了，说明是
+/// `on_tick` panic 展开（唯一的另一条出路）。
+///
+/// 它同时置**闩锁位**（`died`）：`died_unexpectedly()` 读的是那一位，所以「曾经意外结束」
+/// 是**历史事实**——`stop()` 之后再问仍然为真（否则观察者必须抢在停机之前读到，那是个陷阱：
+/// 本任务的用例第一次就踩了它）。要问「现在还在不在跑」请看 `ticks` 是否还在涨。
+///
+/// 为什么用 `Drop` 而不是 `catch_unwind`：`[profile.release]` 是 `panic = "abort"`，
+/// 捕捉器在发布构建里捕不到（见模块头）；而「线程退出」这件事在两种 profile 下都成立，
+/// 只是 release 下根本走不到这里（进程一起没了）。
+///
+/// 回调**不得 panic**：它在展开过程中执行，再 panic 一次就是 abort（双重 panic）。
+struct UnexpectedExitOnDrop<G: FnOnce()> {
+    stop: Arc<AtomicBool>,
+    died: Arc<AtomicBool>,
+    report: Option<G>,
+}
+
+impl<G: FnOnce()> Drop for UnexpectedExitOnDrop<G> {
+    fn drop(&mut self) {
+        if self.stop.load(Ordering::SeqCst) {
+            return;
+        }
+        self.died.store(true, Ordering::SeqCst);
+        if let Some(report) = self.report.take() {
+            report();
+        }
+    }
+}
+
 impl Scheduler {
     /// 起一个后台线程，每 `interval_ms` 毫秒调一次 `on_tick`。
     ///
@@ -68,24 +135,53 @@ impl Scheduler {
     /// 服务层就不必为了传一个节拍去 import `Duration`。
     ///
     /// `interval_ms` 会被夹到至少 1ms：0 会让线程空转。
-    pub fn spawn<F>(interval_ms: u64, mut on_tick: F) -> Self
+    pub fn spawn<F>(interval_ms: u64, on_tick: F) -> Self
     where
         F: FnMut() + Send + 'static,
+    {
+        // 不关心「意外退出」的调用方走这一条；看门狗由 [`Scheduler::spawn_watched`] 接。
+        Self::spawn_watched(interval_ms, on_tick, || {})
+    }
+
+    /// 与 [`Scheduler::spawn`] 相同，外加一个**意外退出**的报告出口（P6 Task 2b 的看门狗）。
+    ///
+    /// `on_unexpected_exit` 只在一种情况下被调用：线程退出时**没有**收到过停止信号
+    /// （即 `on_tick` panic 展开，dev/test profile；release 下进程直接没了，见模块头）。
+    /// `stop()`/`Drop` 都是被叫停，**不会**调用它——「被叫停的退出」与「意外退出」必须
+    /// 分得开，否则每次正常退出都会留一条假故障。
+    ///
+    /// 回调**不得 panic**：它在展开过程中执行，再 panic 一次就是 abort。
+    /// 诊断落点（`Diagnostics::record`）自身不返回错误、不 panic，符合这条。
+    ///
+    /// `spawn` 的对外行为一个字没变（它现在只是本函数的 `report = || {}` 特例）：
+    /// 停机语义仍只有 `stop()`/`Drop`，不加 `pause`/`resume`。
+    pub fn spawn_watched<F, G>(interval_ms: u64, mut on_tick: F, on_unexpected_exit: G) -> Self
+    where
+        F: FnMut() + Send + 'static,
+        G: FnOnce() + Send + 'static,
     {
         let interval = Duration::from_millis(interval_ms.max(1));
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
+        let died = Arc::new(AtomicBool::new(false));
         let ticks = Arc::new(AtomicU64::new(0));
 
         let handle = {
             let stop = Arc::clone(&stop);
             let ticks = Arc::clone(&ticks);
             let done = Arc::clone(&done);
+            let died = Arc::clone(&died);
             thread::Builder::new()
-                .name("worktrace-sampler".to_string())
+                .name(SAMPLER_THREAD_NAME.to_string())
                 .spawn(move || {
                     // 线程退出（含 panic 展开）时置完成位，供并发的第二个 `stop()` 等待。
                     let _done = DoneOnDrop(done);
+                    // 看门狗：声明在 `_done` 之后 ⇒ 先报告、再置完成位；两者都在展开时执行。
+                    let _report = UnexpectedExitOnDrop {
+                        stop: Arc::clone(&stop),
+                        died,
+                        report: Some(on_unexpected_exit),
+                    };
                     while !stop.load(Ordering::SeqCst) {
                         if !sleep_in_slices(interval, &stop) {
                             break;
@@ -104,6 +200,7 @@ impl Scheduler {
             stop,
             handle: Mutex::new(Some(handle)),
             done,
+            died,
             ticks,
         }
     }
@@ -111,6 +208,20 @@ impl Scheduler {
     /// 已完成的触发次数。
     pub fn ticks(&self) -> u64 {
         self.ticks.load(Ordering::SeqCst)
+    }
+
+    /// 线程是否**意外结束过**：没有收到停止信号，却已经不在了（`ticks` 停涨的判据）。
+    ///
+    /// 真的含义是「这个调度器再也不会来下一拍，而且不是任何一次 `stop()` 造成的」——
+    /// 唯一能造成它的路径是 `on_tick` panic 展开（dev/test profile）或线程体自身意外返回。
+    ///
+    /// **它是闩锁的历史事实**：置位后不会因为随后调用的 `stop()` 而变回假（`stop()` 是
+    /// 退出路径的收尾，不该把已经发生的失活报告擦掉）。要问「现在还在不在跑」请比较
+    /// 两次 `ticks()`。
+    ///
+    /// 它**不清理任何东西**：线程已经退出、句柄仍在（`stop()` 依旧幂等且立刻返回）。
+    pub fn died_unexpectedly(&self) -> bool {
+        self.died.load(Ordering::SeqCst)
     }
 
     /// 停止并等待线程退出。可重复调用，且**只要共享引用就能调**（见模块头「停」）。
@@ -223,6 +334,94 @@ mod tests {
             after_drop,
             "Drop 之后不得再触发"
         );
+    }
+
+    /// **注入必 panic 的 `on_tick`** ⇒ 意外退出被报告一次，且 `ticks` 停涨（方案②）。
+    ///
+    /// 覆盖的是 dev/test profile 的形态（`panic = "unwind"`：线程展开退出、进程还在）；
+    /// release 是 `panic = "abort"`，整进程终止、走不到这个守卫——现象按 profile 分开写在
+    /// 模块头。注入的 panic 会由默认 hook 打一行到 stderr，那是**注入本身**的声音，不是失败。
+    #[test]
+    fn a_panicking_on_tick_reports_the_unexpected_exit_and_freezes_the_ticks() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let reported = Arc::new(AtomicUsize::new(0));
+
+        let scheduler = {
+            let calls = Arc::clone(&calls);
+            let reported = Arc::clone(&reported);
+            Scheduler::spawn_watched(
+                5,
+                move || {
+                    // 第一拍正常完成（`ticks` 涨到 1 ⇒「停涨」才有判别力），第二拍 panic。
+                    if calls.fetch_add(1, Ordering::SeqCst) >= 1 {
+                        panic!("injected on_tick panic");
+                    }
+                },
+                move || {
+                    reported.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !scheduler.died_unexpectedly() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "panic 之后必须能观察到线程已经不在了（ticks={}）",
+                scheduler.ticks()
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        let frozen = scheduler.ticks();
+        assert!(frozen >= 1, "死之前至少完成过一拍");
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(scheduler.ticks(), frozen, "panic ⇒ ticks 停涨");
+        assert_eq!(reported.load(Ordering::SeqCst), 1, "意外退出只报告一次");
+
+        // 幂等停机：线程早就没了，`stop()` 照样立刻返回，且不改变"意外退出"这个结论。
+        scheduler.stop();
+        assert!(scheduler.died_unexpectedly());
+        assert_eq!(scheduler.ticks(), frozen);
+    }
+
+    /// 被叫停的退出**不是**意外退出：`stop()` 与 `Drop` 都不报告。
+    ///
+    /// 这条是上一条的**正控**：没有它，「每次退出都报告一次」也能让上一条全绿。
+    #[test]
+    fn a_requested_stop_is_not_an_unexpected_exit() {
+        let reported = Arc::new(AtomicUsize::new(0));
+        let scheduler = {
+            let reported = Arc::clone(&reported);
+            Scheduler::spawn_watched(
+                5,
+                || {},
+                move || {
+                    reported.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while scheduler.ticks() < 1 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(scheduler.ticks() >= 1, "线程必须真的跑过几拍");
+        scheduler.stop();
+        assert!(!scheduler.died_unexpectedly(), "被叫停的退出不是意外退出");
+        assert_eq!(reported.load(Ordering::SeqCst), 0, "stop 不该触发看门狗");
+
+        let reported = Arc::new(AtomicUsize::new(0));
+        {
+            let reported = Arc::clone(&reported);
+            let _scheduler = Scheduler::spawn_watched(
+                5,
+                || {},
+                move || {
+                    reported.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(reported.load(Ordering::SeqCst), 0, "Drop 不该触发看门狗");
     }
 
     /// 停止不需要等满一个周期（分片睡眠）。
