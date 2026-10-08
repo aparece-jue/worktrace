@@ -44,7 +44,8 @@ use worktrace_lib::services::bootstrap::{
     lock_app, startup, NoProbe, RunningApp, SharedApp, Startup, StartupConfig,
 };
 use worktrace_lib::services::events::{EventEnvelope, EventSink};
-use worktrace_lib::services::timer::coordinator::StartRequest;
+use worktrace_lib::services::timer::anchor::SampleVerdict;
+use worktrace_lib::services::timer::coordinator::{SessionRequest, StartRequest};
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
 use worktrace_lib::storage::migrations::migrate;
@@ -53,12 +54,17 @@ use worktrace_lib::storage::migrations::migrate;
 const WALL: i64 = 1_700_000_000_000;
 /// 采样节拍：故障检测要在**采样拍**上被看见，所以压到 10ms。
 const FAST_INTERVAL_MS: u64 = 10;
+/// 「采样拍还没来过」那条用例要的节拍：一小时，用例期间一拍都不落。
+const IDLE_INTERVAL_MS: u64 = 3_600_000;
 /// 「启动后第一次采样」那条用例要留出**在第一次采样之前**布好故障的时间。
 const SLOW_INTERVAL_MS: u64 = 250;
 /// 拨给墙钟的越界量（判据是严格大于 2000ms：见 `platform::clock::THRESHOLD_MS`）。
 const WALL_JUMP: i64 = 31_000;
 /// 把单调钟拨回去的量（硬故障：`d_mono < 0`）。
 const MONOTONIC_BACKWARDS: i64 = 5_000;
+/// 一次「长间隔」（两个时钟一起走）——远大于 `expected_interval_ms * 3` 的两条可能取值
+/// （采样节拍 1 秒 ⇒ 3 秒；启动基线的 `HEARTBEAT_INTERVAL_MS` ⇒ 90 秒）。
+const LONG_GAP: i64 = 120_000;
 
 /// 诊断日志的文件名（**注入的路径**，不是生产那个 `worktrace.log`）。
 const LOG_NAME: &str = "diagnostics.log";
@@ -364,8 +370,258 @@ fn retry_recovery_clears_the_fault_and_records_exactly_one_recovery_line() {
     assert_eq!(lines_of(&fx.log_path, "timer.unavailable.end").len(), 1);
 }
 
+/// 让**下一条命令**的「提交后重建」必然失败：插入一行 `state='running'`、
+/// `mode='FOREGROUND'`、但 `timer_kind` 是枚举解析不出来的值的会话。
+///
+/// 为什么是**插入一行**而不是改既有行：SQLite 在 UPDATE 时会**重算该行所有 CHECK 约束**，
+/// 把既有行的枚举列改坏会让命令自身的写入先撞 CHECK（变成 `STORAGE_ERROR`，而我们要的是
+/// 「提交成功、提交**之后**的重建失败」）。这一行只被**读**
+/// （`rebuild_from_committed` 里 `running_foreground` 的 `read_session` 解析失败），
+/// 所以 CHECK 只要在插入那一刻让开即可——写法照 `tests/exception_closure.rs::break_the_scan`。
+///
+/// 命中位置是 `rebuild_from_committed` 的 `running_foreground` 读取 ⇒ 置真点分组
+/// `committed_rebuild_failed`（13 处里 6 处、唯一的命令来源）。
+fn poison_the_committed_rebuild(app: &SharedApp, run_id: &str) {
+    lock_app(app)
+        .db()
+        .connection()
+        .execute_batch(&format!(
+            "PRAGMA ignore_check_constraints = ON;
+             INSERT INTO work_session(id,task_id,run_id,mode,state,timer_kind,started_at,
+                                      ended_at,needs_review,row_version)
+             VALUES('s-poison','t1','{run_id}','FOREGROUND','running','bogus',0,NULL,0,0);
+             PRAGMA ignore_check_constraints = OFF;"
+        ))
+        .unwrap();
+}
+
+/// 让**命令路径**（不是采样拍）把协调器锁进故障态，返回被结束的会话 id。
+///
+/// 手法：起一次计时 → 暂停（暂停本身会成功重建一次，前台槽位也就空出来）→ 注入一行读不出来的
+/// `running` 会话（见 [`poison_the_committed_rebuild`]）→ 在**同一个持锁段**里（可选地先拨
+/// 一个长间隔再）`finish`：命令提交成功，随后的 `rebuild_from_committed` 在
+/// `running_foreground` 上解析失败 ⇒ `faulted = true`，而 `last_verdict` 是这一拍判出来的值。
+///
+/// `long_gap = true` 构造的是评审指出的那条**可达路径**：这一拍判出 `Suspended`
+/// （非 `Trusted`）且异常事务**成功落地**（会话不是 `running`，不进分割），于是判定停在
+/// 非 `Trusted`；随后同一次调用里的重建失败置真 ⇒ 下一拍采样只能看到「已经在故障态」。
+/// `long_gap = false` 是对照组：判定停在 `Trusted`。
+fn fault_from_the_command_path(
+    fx: &Fixture,
+    app: &SharedApp,
+    epoch: &str,
+    run_id: &str,
+    long_gap: bool,
+) -> String {
+    start_session(app, epoch);
+
+    // ① 暂停：`finish` 在 `paused` 上合法（02 §3），而且这一步的重建是**成功**的。
+    let session_id = {
+        let mut state = lock_app(app);
+        let live = state.coordinator().live().expect("刚 start 过").clone();
+        state
+            .pause(SessionRequest {
+                expected_data_epoch: epoch.to_string(),
+                session_id: live.id.clone(),
+                session_expected_version: live.row_version,
+            })
+            .expect("暂停应当成功");
+        live.id
+    };
+
+    // ② 让下一条命令的重建必然失败（此刻前台槽位空着：会话刚被暂停）。
+    poison_the_committed_rebuild(app, run_id);
+
+    // ③ 一个持锁段里：拨长间隔（可选）+ `finish`。持锁保证**没有采样拍插进来**，
+    //    所以「这一拍判出什么」由用例决定，不是竞态。
+    let version = lock_app(app)
+        .coordinator()
+        .live()
+        .expect("刚 pause 过")
+        .row_version;
+    let error = {
+        let mut state = lock_app(app);
+        if long_gap {
+            // 时钟锁与串行边界的取锁顺序和采样拍一致（先边界后时钟），不会互锁。
+            fx.clock.lock().unwrap().advance_both(LONG_GAP);
+        }
+        state
+            .finish(SessionRequest {
+                expected_data_epoch: epoch.to_string(),
+                session_id: session_id.clone(),
+                session_expected_version: version,
+            })
+            .expect_err("提交之后的重建失败必须走恢复语义")
+    };
+    assert_eq!(error.code(), "RECOVERY_REQUIRED");
+    assert!(
+        lock_app(app).timer_faulted(),
+        "命令路径的置真点必须真的进故障态"
+    );
+    session_id
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// ③ 启动路径：启动后**第一次**采样就已经故障 ⇒ 点名
+// ③ 命令路径置真（提交后重建失败）：归因只能说 `prior_fault`
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **不是这一拍置的真 ⇒ `origin=prior_fault`**，判定停在**非 `Trusted`** 时也必须是它。
+///
+/// 这条钉的正是评审 Important 1：`last_verdict` 停在 `Suspended`（采样拍判出、异常事务
+/// 成功落地），随后的置真来自命令路径的「提交后重建失败」；下一拍被 `refuse_if_faulted`
+/// 拒绝、判定不再更新。拿判定去归因就会写成 `anomaly_transaction_failed`——分组名写错，
+/// 而「真实置真点」在采样路径上本来就不可分（P6-3 不许新增 P2 访问器）。
+#[test]
+fn a_fault_raised_by_the_command_path_is_reported_as_prior_fault() {
+    let fx = fixture();
+    let running = started(&fx, FAST_INTERVAL_MS);
+    let app = app_of(&running);
+    let epoch = running.data_epoch().to_string();
+
+    assert!(wait_for_ticks(&running, 2), "先让健康的采样拍落地");
+    assert!(lines_of(&fx.log_path, "timer.unavailable.begin").is_empty());
+
+    fault_from_the_command_path(&fx, &app, &epoch, running.run_id(), true);
+
+    assert_eq!(
+        lock_app(&app).coordinator().last_verdict(),
+        SampleVerdict::Suspended { gap_ms: LONG_GAP },
+        "构造的是「判定停在非 Trusted」那条可达路径"
+    );
+    assert!(
+        wait_until(|| !lines_of(&fx.log_path, "timer.unavailable.begin").is_empty()),
+        "采样拍必须把命令路径的置真记下来：{:?}",
+        log_lines(&fx.log_path)
+    );
+
+    let begins = lines_of(&fx.log_path, "timer.unavailable.begin");
+    assert_eq!(
+        begins.len(),
+        1,
+        "跃迁只记一条：{:?}",
+        log_lines(&fx.log_path)
+    );
+    let line = &begins[0];
+    assert!(
+        line.contains("origin=prior_fault"),
+        "不是这一拍置的真就只能说 prior_fault（判定可能停在故障之前）：{line}"
+    );
+    assert!(
+        !line.contains("origin=anomaly_transaction_failed"),
+        "不得拿停在故障之前的判定归因：{line}"
+    );
+    assert!(line.contains("entry=sample_tick"), "{line}");
+    assert!(
+        line.contains(&format!("run_id={}", running.run_id())),
+        "{line}"
+    );
+
+    // 路 A 的口径不变：命令照样 `RECOVERY_REQUIRED`、ticks 照涨、sampling_errors 照涨。
+    assert_eq!(
+        lock_app(&app).snapshot().unwrap_err().code(),
+        "RECOVERY_REQUIRED"
+    );
+    let ticks_before = running.sampling_ticks();
+    let errors_before = running.sampling_errors();
+    assert!(wait_for_ticks(&running, ticks_before + 5));
+    assert!(
+        running.sampling_errors() > errors_before,
+        "口径不变：故障期间每一拍仍然是一次采样失败"
+    );
+    assert_eq!(lines_of(&fx.log_path, "timer.unavailable.begin").len(), 1);
+}
+
+/// 对照：判定停在 `Trusted` 时**同样**写 `prior_fault`（不是 `committed_rebuild_failed`）。
+///
+/// 为什么不能写 `committed_rebuild_failed`：采样路径分不开「命令路径的 6 处重建失败」与
+/// 「接受校正入口那 1 处、命令路径上同样可达的异常/硬故障分支」。这一条与上一条一起把
+/// 归因的两个分支都钉住（一个非 `Trusted`、一个 `Trusted`，结果必须一样）。
+#[test]
+fn a_command_side_fault_is_prior_fault_even_when_the_verdict_is_trusted() {
+    let fx = fixture();
+    let running = started(&fx, FAST_INTERVAL_MS);
+    let app = app_of(&running);
+    let epoch = running.data_epoch().to_string();
+
+    assert!(wait_for_ticks(&running, 2), "先让健康的采样拍落地");
+
+    fault_from_the_command_path(&fx, &app, &epoch, running.run_id(), false);
+
+    assert_eq!(
+        lock_app(&app).coordinator().last_verdict(),
+        SampleVerdict::Trusted,
+        "对照组：判定停在 Trusted"
+    );
+    assert!(
+        wait_until(|| !lines_of(&fx.log_path, "timer.unavailable.begin").is_empty()),
+        "{:?}",
+        log_lines(&fx.log_path)
+    );
+    let begins = lines_of(&fx.log_path, "timer.unavailable.begin");
+    assert_eq!(begins.len(), 1, "{:?}", log_lines(&fx.log_path));
+    assert!(
+        begins[0].contains("origin=prior_fault"),
+        "同样只能说 prior_fault：{}",
+        begins[0]
+    );
+    assert!(
+        !begins[0].contains("origin=committed_rebuild_failed"),
+        "采样路径分不出是哪一处，不许点名：{}",
+        begins[0]
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ④ 事件名按**观察点**取：重试早于第一次采样时不许借用「启动」这个名字
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 采样拍还没来过（这个夹具的节拍是一小时），用户先点了「重试对账」——第一次观察发生在
+/// **重试入口**上，而此刻协调器仍在故障态（硬故障解不开，`retry_recovery` 早退）。
+///
+/// 事件名必须按观察点取：这里是 `timer.unavailable.begin … entry=retry_recovery`，
+/// **不能**是 `startup.timer_unavailable`（那是「启动后第一次**采样**」的名字）。
+#[test]
+fn a_retry_before_the_first_sample_does_not_borrow_the_startup_event_name() {
+    let fx = fixture();
+    let running = started(&fx, IDLE_INTERVAL_MS);
+    let app = app_of(&running);
+    let epoch = running.data_epoch().to_string();
+
+    // 采样拍还没来过；先把协调器锁进硬故障——置真的是**命令路径**（接受校正入口）。
+    fx.clock
+        .lock()
+        .unwrap()
+        .advance_monotonic(-MONOTONIC_BACKWARDS);
+    let error = lock_app(&app)
+        .accept_detected_clock_correction(&epoch)
+        .unwrap_err();
+    assert_eq!(error.code(), "RECOVERY_REQUIRED");
+    assert!(lock_app(&app).timer_faulted());
+    assert!(
+        log_lines(&fx.log_path).is_empty(),
+        "命令路径不观察，这一步还不该有「不可用」的行：{:?}",
+        log_lines(&fx.log_path)
+    );
+
+    // 用户的第一次重试早于第一次采样：硬故障解不开，故障态**保持**。
+    let error = lock_app(&app).retry_recovery(&epoch).unwrap_err();
+    assert_eq!(error.code(), "RECOVERY_REQUIRED");
+    assert!(lock_app(&app).timer_faulted(), "硬故障不得被重试解开");
+
+    let begins = lines_of(&fx.log_path, "timer.unavailable.begin");
+    assert_eq!(begins.len(), 1, "{:?}", log_lines(&fx.log_path));
+    assert!(begins[0].contains("entry=retry_recovery"), "{}", begins[0]);
+    assert!(begins[0].contains("origin=prior_fault"), "{}", begins[0]);
+    assert!(
+        lines_of(&fx.log_path, "startup.timer_unavailable").is_empty(),
+        "「启动点名」只属于采样拍的第一次观察：{:?}",
+        log_lines(&fx.log_path)
+    );
+    assert_eq!(running.sampling_ticks(), 0, "这个夹具里一拍采样都没来过");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⑤ 启动路径：启动后**第一次**采样就已经故障 ⇒ 点名
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// 采样节拍 250ms，留出「启动之后、第一次采样之前」布故障的窗口：把单调钟拨回去

@@ -73,6 +73,10 @@
 //!   **既有复合语义**（`faulted || pending_committed_reload.is_some()`）：两者对调用方
 //!   是同一件事（十个入口一起被拒），诊断文案因此写成「计时不可用（故障态或提交后待
 //!   刷新）」——**不得**把「提交后待刷新」误记成「进入故障态」。
+//! - **归因边界**：进入行里的 `origin` 是**本拍能拿到的证据**，不是置真点的原始记录——
+//!   这一拍自己置的真按判定精确归因（三组），**不是**这一拍置的真只写 `prior_fault`
+//!   （命令路径可达的那几组在采样路径上本来就不可分）。口径与依据见
+//!   [`FAULT_COMMITTED_REBUILD_FAILED`] 的「归因的证据边界」。
 //! - **不自动重试、不自动清故障**：清除只走用户显式触发的 [`AppState::retry_recovery`]。
 //!
 //! **路 B：采样线程 panic**（`ticks` 停涨）。它不经过协调器，也不涨 `sampling_errors`；
@@ -150,10 +154,12 @@ pub const EVENT_SAMPLER_DIED: &str = "sampler.died_unexpectedly";
 /// 「计时不可用」的**进入**诊断事件（故障态**或**提交后待刷新）。
 pub const EVENT_TIMER_UNAVAILABLE_BEGIN: &str = "timer.unavailable.begin";
 
-/// 启动后**第一次采样就已经**不可用的诊断事件（启动路径点名，见模块头）。
+/// 启动后**第一次采样**就已经不可用的诊断事件（启动路径点名，见模块头）。
 ///
-/// 它与上一条是**同一个跃迁的两种形态**：第一次观察就不可用时记这一条，之后才进故障态
-/// 的记上一条。所以一次跃迁**只会**留下其中一行。
+/// 它与上一条是**同一个跃迁的两种形态**：`sample_tick` 的第一次观察就不可用时记这一条
+/// （「刚打开就不能计时」要在启动诊断里点名），之后才进故障态的记上一条。所以一次跃迁
+/// **只会**留下其中一行；**事件名按观察点取**——别的入口（如显式重试）即便抢在第一次
+/// 采样之前观察，也不会借用「启动」这个名字（那会名实矛盾）。
 pub const EVENT_STARTUP_TIMER_UNAVAILABLE: &str = "startup.timer_unavailable";
 
 /// 「计时不可用」的**清除**诊断事件。
@@ -177,9 +183,24 @@ pub const TIMER_UNAVAILABLE_REASON: &str = "计时不可用（故障态或提交
 /// | [`FAULT_MONOTONIC_BACKWARDS`] | 4 处单调钟硬故障分支 | 本 run 的单调读数已失去意义 |
 /// | [`FAULT_CLOCK_CORRECTION_REJECTED`] | `accept_detected_clock_correction` | 接受校正入口撞上硬故障 |
 ///
-/// **归因的证据边界**：协调器不暴露「是哪一处置的真」（P6-3：不新增 P2 访问器），
-/// 所以采样路径按**它拿得到的最强证据**归因（见 [`fault_origin`]）：能精确落到 4 组，
-/// 第 5 组在采样路径上表现为 `monotonic_backwards`（它的触发条件本来就是单调钟倒退）。
+/// **归因的证据边界（先读这一段，别把 `origin` 当成置真点的原始记录）**：协调器不暴露
+/// 「是哪一处置的真」（P6-3：不新增 P2 访问器），采样路径能拿到的最强证据只有两个——
+/// **这一拍之前是否已经在故障态**与**上一拍的判定**。于是 `origin` 只有两种来源
+/// （规则与逐条依据见 [`fault_origin`]）：
+///
+/// - **这一拍自己置的真**（`faulted_before == false`）⇒ 按判定**精确**落到词表里的三组之一；
+/// - **不是这一拍置的真**（`faulted_before == true`）⇒ 只能写 [`FAULT_PRIOR_FAULT`]：
+///   命令路径的 6 处「提交后重建失败」、接受校正入口那 1 处、以及命令路径上同样可达的
+///   异常/硬故障分支，在采样路径上**本来就不可分**。
+///
+/// **不要**拿上一拍的判定去猜后一种：那个判定可能停在故障**之前**（评审 Important 1 的
+/// 可达路径：采样拍先判出 `Suspended`/`Jumped` 且异常事务成功 ⇒ 判定停在非 `Trusted`；
+/// 随后一条命令提交成功但 `rebuild_from_committed` 失败置真；下一拍被 `refuse_if_faulted`
+/// 拒绝、判定不再更新 ⇒ 猜会把「提交后重建失败」写成 `anomaly_transaction_failed`）。
+///
+/// 所以：词表 = 5 个分组名 + 1 个「非本拍」值（[`FAULT_PRIOR_FAULT`]），
+/// 采样路径实际只会写出其中 4 个字符串；[`FAULT_CLOCK_CORRECTION_REJECTED`] 被观察到时
+/// 协调器**已经**在故障态 ⇒ 落 `prior_fault`，不会再单独出现。
 pub const FAULT_COMMITTED_REBUILD_FAILED: &str = "committed_rebuild_failed";
 /// 见 [`FAULT_COMMITTED_REBUILD_FAILED`] 的表。
 pub const FAULT_NO_TRUSTED_BASELINE: &str = "no_trusted_baseline";
@@ -189,6 +210,8 @@ pub const FAULT_ANOMALY_TRANSACTION_FAILED: &str = "anomaly_transaction_failed";
 pub const FAULT_MONOTONIC_BACKWARDS: &str = "monotonic_backwards";
 /// 见 [`FAULT_COMMITTED_REBUILD_FAILED`] 的表。
 pub const FAULT_CLOCK_CORRECTION_REJECTED: &str = "clock_correction_rejected";
+/// **不是这一拍置的真**——采样路径能诚实说出的上限（见上一条的「归因的证据边界」）。
+pub const FAULT_PRIOR_FAULT: &str = "prior_fault";
 
 /// 观察点名字：周期采样的一拍。
 const OBSERVER_ENTRY_SAMPLING: &str = "sample_tick";
@@ -616,35 +639,33 @@ pub fn is_maintenance_refusal(error: &AppError) -> bool {
         .is_some_and(|detail| detail.starts_with(MAINTENANCE_DETAIL_PREFIX))
 }
 
-/// 按**现有只读证据**把一次「计时不可用」归因到一个置真点分组（P6-4 的 5 个名字）。
+/// 按**本拍能拿到的证据**归因一次「刚观察到的不可用」（P6-4 的分组名词表 + `prior_fault`）。
 ///
-/// 协调器不暴露「是哪一处置的真」（P6-3：不新增 P2 访问器），采样路径能拿到的最强证据只有
-/// 两个：**上一拍的判定**（[`Coordinator::last_verdict`]）与**调用之前是否已经在故障态**。
-/// 于是规则是（对采样路径**精确**，逐条给依据）：
+/// 规则只有两条（边界与依据见 [`FAULT_COMMITTED_REBUILD_FAILED`] 的说明）：
 ///
-/// - `MonotonicBackwards` ⇒ [`FAULT_MONOTONIC_BACKWARDS`]。`try_handle_anomaly` 的 4 处
-///   硬故障分支都以它为判据，而它是 `d_mono < 0` 的唯一来源。
-/// - 其余 `needs_recovery()` 的判定 ⇒ [`FAULT_ANOMALY_TRANSACTION_FAILED`]：
-///   采样拍上唯一能带着「异常判决」置真的地方是 `handle_anomaly` 的兜底（`Err(_)` 分支）。
-/// - 判定是 `Trusted` 而**调用前还没进故障态** ⇒ [`FAULT_NO_TRUSTED_BASELINE`]：
-///   采样拍自己置真且没有任何异常判决，只剩 `read_sample` 的「没有基线可采样」那条
-///   （启动第⑤步就建立了基线，所以它在生产上几乎只有时钟彻底坏掉时才可达）。
-/// - 判定是 `Trusted` 而**调用前已经在故障态** ⇒ [`FAULT_COMMITTED_REBUILD_FAILED`]：
-///   故障不是这一拍置的，最可能来自命令路径的「提交后重建失败」（13 处置真点里只有它
-///   不经过采样）。
+/// 1. **`faulted_before == true`（不是这一拍置的真）⇒ [`FAULT_PRIOR_FAULT`]。**
+///    这一支**不看判定**：判定可能停在故障**之前**，拿它归因会把命令路径的「提交后重建
+///    失败」写成 `anomaly_transaction_failed`（评审 Important 1 的可达路径）。
+/// 2. **`faulted_before == false`（这一拍自己置的真）⇒ 按判定精确归因**：
+///    - `MonotonicBackwards` ⇒ [`FAULT_MONOTONIC_BACKWARDS`]：它是 `d_mono < 0` 的唯一来源，
+///      `try_handle_anomaly` 的 4 处硬故障分支都以它为判据；
+///    - 其余 `needs_recovery()` ⇒ [`FAULT_ANOMALY_TRANSACTION_FAILED`]：采样拍上唯一能
+///      带着异常判决置真的地方是 `handle_anomaly` 的兜底（`Err(_)` 分支）；
+///    - `Trusted` ⇒ [`FAULT_NO_TRUSTED_BASELINE`]：采样拍自己置真且没有任何异常判决，
+///      只剩 `read_sample` 的「没有基线可采样」那条（启动第⑤步就建立了基线，所以它在
+///      生产上几乎只有时钟彻底坏掉时才可达）。
 ///
-/// 第 5 组 [`FAULT_CLOCK_CORRECTION_REJECTED`] 是**接受校正入口**的硬故障分支，在采样
-/// 路径上表现为 `MonotonicBackwards`（它的触发条件本来就是单调钟倒退）——所以词表是 5 个
-/// 名字，采样路径只会写出其中 4 个。
+/// 第 5 组 [`FAULT_CLOCK_CORRECTION_REJECTED`] 被采样路径观察到时协调器**已经**在故障态
+/// ⇒ 必然落第 1 条（`prior_fault`），不会再单独出现。
 fn fault_origin(verdict: SampleVerdict, faulted_before: bool) -> &'static str {
+    if faulted_before {
+        return FAULT_PRIOR_FAULT;
+    }
     if matches!(verdict, SampleVerdict::MonotonicBackwards { .. }) {
         return FAULT_MONOTONIC_BACKWARDS;
     }
     if verdict.needs_recovery() {
         return FAULT_ANOMALY_TRANSACTION_FAILED;
-    }
-    if faulted_before {
-        return FAULT_COMMITTED_REBUILD_FAILED;
     }
     FAULT_NO_TRUSTED_BASELINE
 }
@@ -863,11 +884,13 @@ impl AppState {
         let run_id = self.coordinator.run_id().to_string();
         let wall_ms = self.diagnostic_wall_ms(entry, snapshot_wall_ms);
         if unavailable {
-            // 第一次观察就不可用 ⇒ **启动路径点名**（否则用户看到「刚打开就不能计时」
-            // 却不知道原因）；此后才是普通的「进入」。两者是同一次跃迁的两种形态。
-            let event = match previous {
-                None => EVENT_STARTUP_TIMER_UNAVAILABLE,
-                Some(_) => EVENT_TIMER_UNAVAILABLE_BEGIN,
+            // **启动路径点名只属于采样拍**（"启动后第一次采样"）：事件名按**观察点**取，
+            // 不按"是不是第一次观察"取——否则「重试对账早于第一次采样且仍不可用」会写出
+            // `event=startup.timer_unavailable … entry=retry_recovery` 这种名实矛盾的行。
+            let event = if previous.is_none() && entry == OBSERVER_ENTRY_SAMPLING {
+                EVENT_STARTUP_TIMER_UNAVAILABLE
+            } else {
+                EVENT_TIMER_UNAVAILABLE_BEGIN
             };
             let origin = fault_origin(self.coordinator.last_verdict(), faulted_before);
             self.diagnostics.record(
