@@ -61,7 +61,9 @@ use std::sync::Arc;
 use crate::platform::clock::SystemClock;
 use crate::platform::tray::{self, TrayAction};
 use crate::platform::window;
-use crate::services::bootstrap::{self, Startup, StartupConfig, StartupProbe, StartupStep};
+use crate::services::bootstrap::{
+    self, PreMigrationBackup, Startup, StartupConfig, StartupProbe, StartupStep,
+};
 use crate::services::events::{EventEnvelope, EventSink};
 
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
@@ -99,6 +101,12 @@ struct StartupTrace;
 impl StartupProbe for StartupTrace {
     fn step(&self, step: StartupStep) {
         println!("[worktrace] startup: {}", step.as_str());
+    }
+
+    /// 迁移前备份的按需判据结果。三条分支里有两条是「这次没备份」，原因不同 ⇒ 分开打，
+    /// 免得事后只看到「没有产物」而分不清是首启、版本相等，还是判据坏了。
+    fn pre_migration_backup(&self, outcome: PreMigrationBackup) {
+        println!("[worktrace] startup: pre_migration_backup={outcome:?}");
     }
 }
 

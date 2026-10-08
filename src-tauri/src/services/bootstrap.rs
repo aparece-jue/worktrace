@@ -2,9 +2,15 @@
 //!
 //! ## 固定顺序（01 §2 + 02 §4，不得调整）
 //!
-//! ① 单实例检查 → ② 打开库并迁移（含新库的库身份）→ ③ 新建 `application_run`
-//! → ④ 恢复扫描（P3 的四类判定 + 落地事实，随后算门禁快照）→ ⑤ 启动协调器与周期采样驱动
-//! → ⑥ 开窗口。
+//! ① 单实例检查 → ② 打开库、（真的要迁移时）**迁移前一致备份**、迁移（含新库的库身份）
+//! → ③ 新建 `application_run` → ④ 恢复扫描（P3 的四类判定 + 落地事实，随后算门禁快照）
+//! → ⑤ 启动协调器与周期采样驱动 → ⑥ 开窗口。
+//!
+//! 第②步内部再固定成四拍：**拿到单实例锁 → `Db::open` → 读 `user_version`
+//! → `user_version < SCHEMA_VERSION` 时 `VACUUM INTO` 备份（否则跳过并记诊断）→ `migrate`**。
+//! 备份**失败即拒绝迁移**（不降级、不跳过、不先迁移后补），本次启动以可诊断的失败
+//! 结束：不建 `application_run`、不启动协调器与采样驱动、不开窗口。详见
+//! [`PreMigrationBackup`] 与 `backup_before_migration`。
 //!
 //! 每一步都通过 [`StartupProbe`] 报出去，`tests/startup_order.rs` 断言的是**调用次序**
 //! 本身，不是「没崩」。`lib.rs` 不得自己重排这段顺序：它只调用本入口
@@ -31,11 +37,12 @@
 //!
 //! ## 本阶段不做
 //!
-//! 恢复确认与历史修正的用户命令、门禁重扫（P3 Task 2 起）；启动故障路径硬化与锁异常
-//! 释放（P6 Task 1）；维护态隔离（P6 Task 2/4）；备份（P6 Task 4）；平台事件的实机
+//! 恢复确认与历史修正的用户命令、门禁重扫（P3 Task 2 起）；维护态隔离（P6 Task 2/4）；
+//! 恢复流程与 `services/backup.rs` 这层归属（P6 Task 4——本任务只做**迁移前的按需一致
+//! 备份编排**，原语先落在本文件，见 `backup_before_migration` 的说明）；平台事件的实机
 //! 验收（P8 复核）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
@@ -64,7 +71,7 @@ use crate::services::timer::snapshot::TimerSnapshot;
 use crate::storage::db::{map_sqlite, Db};
 use crate::storage::guards::guard_epoch;
 use crate::storage::meta;
-use crate::storage::migrations::migrate;
+use crate::storage::migrations::{current_version, migrate, SCHEMA_VERSION};
 use crate::storage::run_repo;
 use crate::storage::session_repo::{self, InvariantFault};
 use crate::storage::WriteOutcome;
@@ -140,9 +147,33 @@ impl StartupStep {
     }
 }
 
+/// 迁移前备份的**按需判据**走了哪条分支。
+///
+/// 三条分支都会表现为「这一次没有备份发生」（`NotNeeded` 与 `NothingToBackUp`），
+/// 但**原因不同**，所以它们分开报：断言与诊断都按原因看，不合并成「都没备份」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreMigrationBackup {
+    /// 库文件本来就不存在（首启）：**没有可备份的事实**。
+    ///
+    /// 注意新库的 `user_version == 0` 属于「需要迁移」——它在这里被挡下的原因是
+    /// 库文件不存在，不是版本相等。
+    NothingToBackUp,
+    /// 库已经在 [`SCHEMA_VERSION`]：`migrate` 是幂等空操作，没有要保护的迁移动作。
+    NotNeeded,
+    /// 需要迁移：**已经在 `migrate` 之前**写出一份一致备份。
+    Taken,
+}
+
 /// 启动次序的观察者。生产侧接诊断日志，测试侧记录次序。
 pub trait StartupProbe: Send + Sync {
     fn step(&self, step: StartupStep);
+
+    /// 迁移前备份的按需判据结果（**在 `migrate` 之前**报出）。
+    ///
+    /// 默认什么都不做：既有实现（含 [`NoProbe`]）不必为一个新信号改签名，
+    /// 生产探针把它接进启动诊断。它**不是** `StartupStep`——备份不改变六步顺序，
+    /// 而 `StartupStep::ALL` 的条数由另一条断言钉着。
+    fn pre_migration_backup(&self, _outcome: PreMigrationBackup) {}
 }
 
 /// 什么都不记的探针。生产接线在 Task 1 换成诊断日志。
@@ -164,15 +195,26 @@ pub struct StartupConfig {
     pub lock_path: PathBuf,
     /// 周期采样节拍，毫秒。
     pub sampling_interval_ms: u64,
+    /// 迁移前备份的落盘目录。
+    ///
+    /// `None` = 生产缺省：**只在确实需要迁移时**才解析 `app_data_dir()/backups`——
+    /// 首启与「版本相等」两条路径本来就不该有产物，不该因为拿不到应用数据目录而失败。
+    /// 测试（以及打包路径实验）注入临时目录，免得把产物写进开发机**真实**的数据目录、
+    /// 让「需迁移 ⇒ 有产物 / 无需迁移 ⇒ 零产物」这对断言互相污染。
+    pub backup_dir: Option<PathBuf>,
 }
 
 impl StartupConfig {
     /// 用平台路径构造。库与锁同目录（`platform::paths` 已保证）。
+    ///
+    /// 备份目录**不在这里解析**：它是按需的，解析推迟到 [`startup`] 里
+    /// 「确实需要迁移」那条分支（见 [`StartupConfig::backup_dir`]）。
     pub fn from_app_paths() -> Result<Self, AppError> {
         Ok(Self {
             db_path: paths::database_file().map_err(|e| io_err("db path", e))?,
             lock_path: paths::instance_lock_file().map_err(|e| io_err("lock path", e))?,
             sampling_interval_ms: DEFAULT_SAMPLING_INTERVAL_MS,
+            backup_dir: None,
         })
     }
 
@@ -182,7 +224,14 @@ impl StartupConfig {
             db_path: db_path.into(),
             lock_path: lock_path.into(),
             sampling_interval_ms: DEFAULT_SAMPLING_INTERVAL_MS,
+            backup_dir: None,
         }
+    }
+
+    /// 指定迁移前备份的目录（不调则由生产缺省按需解析）。
+    pub fn with_backup_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.backup_dir = Some(dir.into());
+        self
     }
 }
 
@@ -1043,6 +1092,152 @@ pub struct ExitReport {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 迁移前的按需一致备份（P6 Task 1 的编排；原语归属见下）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 备份产物的**格式版号**：与库 schema 版号、应用版本并列的第三个版号。
+///
+/// 它描述「这份备份文件长什么样」——今天是「一个 `VACUUM INTO` 出来的 SQLite 单文件
+/// 快照」。形状变了才 +1（02 §9 要求三个版号分别记录，落地就是文件名）。
+pub const BACKUP_FORMAT_VERSION: u32 = 1;
+
+/// 备份目录名（生产缺省：`app_data_dir()/backups`）。与库、锁同在一个应用数据目录下。
+const BACKUP_DIR_NAME: &str = "backups";
+
+/// 保留的备份份数。按需执行下它只在**真迁移**时触发，所以这 5 份是「跨版本升级」的
+/// 历史，不是「最近 5 次启动」。
+const BACKUP_KEEP: usize = 5;
+
+/// 备份文件名的固定前后缀。保留策略只认自己写出来的名字。
+const BACKUP_PREFIX: &str = "worktrace-f";
+const BACKUP_SUFFIX: &str = ".db";
+
+/// 备份阶段的失败：`detail` 统一带阶段标记，便于把「备份失败」与「迁移失败」分开；
+/// 用户文案仍走 `AppError::message()`（`Storage` 的 detail 不进用户可见文案）。
+fn backup_stage(e: AppError) -> AppError {
+    AppError::Storage {
+        detail: format!("pre-migration backup: {}", e.detail().unwrap_or(e.code())),
+    }
+}
+
+/// 备份文件名：`worktrace-f<格式版号>-s<数据库版号>-v<应用版本>-<Unix 毫秒>.db`。
+///
+/// `db_version` 记的是**被备份的那份库**的 `PRAGMA user_version`（迁移前），不是本次
+/// 构建的 [`SCHEMA_VERSION`]：文件名描述的是「这份产物是什么」。写构建版本只会与
+/// 应用版本重复，写被备份的版本才有信息量（恢复前要判的正是它）。
+fn backup_file_name(db_version: i64, at_ms: i64) -> String {
+    format!(
+        "{BACKUP_PREFIX}{BACKUP_FORMAT_VERSION}-s{db_version}-v{}-{at_ms}{BACKUP_SUFFIX}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// 从文件名里取出 Unix 毫秒（保留策略据此从旧到新删）。
+///
+/// 名字不符合这个形状（或毫秒段不是数字）⇒ `None`：认不出的文件**不碰**，
+/// 删别人的东西不是保留策略的事。
+fn backup_timestamp(path: &Path) -> Option<i64> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name
+        .strip_prefix(BACKUP_PREFIX)?
+        .strip_suffix(BACKUP_SUFFIX)?;
+    let (_, at_ms) = stem.rsplit_once('-')?;
+    at_ms.parse::<i64>().ok()
+}
+
+/// 只保留最新的 [`BACKUP_KEEP`] 份备份。**不返回错误**：清理发生在备份成功之后，
+/// 失败只记诊断，不能把一次成功启动变成失败。
+fn prune_old_backups(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut backups: Vec<(i64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            backup_timestamp(&path).map(|at_ms| (at_ms, path))
+        })
+        .collect();
+    if backups.len() <= BACKUP_KEEP {
+        return;
+    }
+
+    backups.sort_by_key(|(at_ms, _)| *at_ms);
+    let excess = backups.len() - BACKUP_KEEP;
+    for (_, path) in backups.into_iter().take(excess) {
+        if let Err(error) = std::fs::remove_file(&path) {
+            // 只记诊断。（release 的 Windows 子系统没有控制台，正式诊断日志归 P6 Task 2。）
+            eprintln!(
+                "[worktrace] backup prune: cannot remove {}: {error} (ignored)",
+                path.display()
+            );
+        }
+    }
+}
+
+/// 迁移前的按需一致备份：**在同一个已打开的连接上** `VACUUM INTO`。
+///
+/// 三件事写死在这里：
+///
+/// 1. **同一连接**。`Db::open` 之后没有关连接的时机（第②步一结束就要读 `app_meta`
+///    取 `data_epoch`），所以原语必须是「库已经打开时可用」的那种；而磁盘库是 WAL
+///    （`storage/db.rs` 打开时强制校验），**只拷主库文件必然撕裂**。`VACUUM INTO`
+///    产出的是一份事务一致的单文件快照（WAL 里尚未 checkpoint 的内容也在内），
+///    且**零新增依赖**——不开 `rusqlite` 的 `"backup"` feature（那要动
+///    `Cargo.toml`/`Cargo.lock`，本机是离线环境）。
+/// 2. **只在需要迁移时调用**（调用点见 [`startup`] 的第②步）。
+/// 3. **失败即拒绝迁移**：返回 `AppError::Storage`，`detail` 带 `pre-migration backup:`
+///    阶段标记。调用方据此让本次启动失败——不降级、不跳过、不先迁移后补。
+///
+/// 备份目录**在这里才解析**：首启与「版本相等」两条路径不碰应用数据目录。
+/// 原语归属：P6 Task 4 的 `services/backup.rs`。本任务不得动 `services/mod.rs`，
+/// 所以它先落在本文件；Task 4 抽取时把这三段整体搬走，**不要另写第二套拷贝逻辑**。
+fn backup_before_migration(
+    config: &StartupConfig,
+    conn: &Connection,
+    from_version: i64,
+    clock: &(dyn Clock + Send),
+) -> Result<(), AppError> {
+    let dir = match &config.backup_dir {
+        Some(dir) => dir.clone(),
+        None => paths::app_data_dir()
+            .map_err(|e| io_err("pre-migration backup dir", e))?
+            .join(BACKUP_DIR_NAME),
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| io_err("pre-migration backup dir", e))?;
+
+    // 时间戳走注入的时钟：`services` 不得自取系统时间（分层门禁那条规则的用意是
+    // 「服务层的时间必须来自 `Clock`」）。时钟取不到就没法给产物命名 ⇒ 同样拒绝迁移。
+    let sample = clock.sample().map_err(|_| AppError::Storage {
+        detail: "pre-migration backup: clock sample unavailable for the artifact name".to_string(),
+    })?;
+    let target = dir.join(backup_file_name(from_version, sample.wall_ms));
+
+    // 同名产物（同一毫秒）在这里就拒绝：**不覆盖**是刻意的，而且这条比让 `VACUUM INTO`
+    // 自己去撞可诊断得多（它撞出来的是一句 SQL 级报错："output file already exists"
+    // 或"表已存在"）。
+    if target.exists() {
+        return Err(AppError::Storage {
+            detail: format!(
+                "pre-migration backup: artifact already exists: {}",
+                target.display()
+            ),
+        });
+    }
+
+    let target_sql = target.to_str().ok_or_else(|| AppError::Storage {
+        detail: "pre-migration backup: artifact path is not valid UTF-8".to_string(),
+    })?;
+    conn.execute("VACUUM INTO ?1", [target_sql])
+        .map_err(map_sqlite)
+        .map_err(backup_stage)?;
+
+    // 备份已经落地，之后才是保留策略：它失败只记诊断。
+    prune_old_backups(&dir);
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 启动
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1076,9 +1271,32 @@ pub fn startup(
         }
     };
 
-    // ② 打开库并迁移。新库在这里取得库身份（`migrate` 不写 `app_meta`）。
+    // ② 打开库、（真的要迁移时）迁移前一致备份、迁移。新库在这里取得库身份
+    //    （`migrate` 不写 `app_meta`）。
+    //
+    //    「库文件本来在不在」必须在 `Db::open` **之前**问：`open` 会把文件建出来。
+    let db_existed = config.db_path.exists();
     let mut db = Db::open(&config.db_path)?;
     probe.step(StartupStep::DatabaseOpened);
+
+    // 判据读 `PRAGMA user_version`（与 `migrate` 自己那条检查同源），**不是**
+    // `meta::read_meta`：新库在 `migrate` 之前根本没有 `app_meta` 表，混用会把新库
+    // 误判成「无需迁移」而静默跳过迁移。
+    //
+    // 首启先判：`user_version == 0` 的新库属于「需要迁移」，但它被挡下的原因与
+    // 「版本相等」**不同**（没有可备份的事实），所以两条分支分开报。
+    // 未来版本（`from_version > SCHEMA_VERSION`）落到最后一条：`migrate` 会拒绝它
+    // （不尝试降级），而拿一份读不懂的库做备份没有意义。
+    let from_version = current_version(db.connection())?;
+    let backup = if !db_existed {
+        PreMigrationBackup::NothingToBackUp
+    } else if from_version < SCHEMA_VERSION {
+        backup_before_migration(&config, db.connection(), from_version, &*clock)?;
+        PreMigrationBackup::Taken
+    } else {
+        PreMigrationBackup::NotNeeded
+    };
+    probe.pre_migration_backup(backup);
 
     migrate(db.connection())?;
     let data_epoch = match meta::read_meta(db.connection())? {

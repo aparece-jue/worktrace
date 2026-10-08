@@ -7,7 +7,7 @@
 //! 能拿到锁；`run_id <> 当前 run` 的三件事决定恢复门禁。
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,33 +18,74 @@ use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::platform::single_instance::{self, InstanceLock};
 use worktrace_lib::services::bootstrap::{
-    lock_app, scan_recovery, startup, Startup, StartupConfig, StartupProbe, StartupStep,
+    lock_app, scan_recovery, startup, PreMigrationBackup, Startup, StartupConfig, StartupProbe,
+    StartupStep, BACKUP_FORMAT_VERSION,
 };
 use worktrace_lib::services::events::{EventEnvelope, EventSink};
 use worktrace_lib::services::timer::coordinator::StartRequest;
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
-use worktrace_lib::storage::migrations::migrate;
+use worktrace_lib::storage::migrations::{current_version, migrate, user_tables, SCHEMA_VERSION};
 use worktrace_lib::storage::run_repo;
 use worktrace_lib::storage::session_repo::InvariantFault;
 
 /// 假时钟的初始挂钟：`application_run.started_at` 必须等于它。
 const WALL: i64 = 1_700_000_000_000;
 
+/// 探针记到的**一条**事件：启动步骤，或迁移前备份的按需判据结果。
+///
+/// 两者记进**同一条流**：只记步骤的话，「备份完成 → `migrate` 开始」这个顺序
+/// 就断言不出来（步骤里没有备份这一条，`StartupStep` 也不该为它加变体——
+/// `ALL` 的条数由另一个用例的四重不变量钉着）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeEvent {
+    Step(StartupStep),
+    Backup(PreMigrationBackup),
+}
+
 #[derive(Default)]
 struct RecordingProbe {
-    steps: Mutex<Vec<StartupStep>>,
+    events: Mutex<Vec<ProbeEvent>>,
 }
 
 impl StartupProbe for RecordingProbe {
     fn step(&self, step: StartupStep) {
-        self.steps.lock().unwrap().push(step);
+        self.events.lock().unwrap().push(ProbeEvent::Step(step));
+    }
+
+    fn pre_migration_backup(&self, outcome: PreMigrationBackup) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(ProbeEvent::Backup(outcome));
     }
 }
 
 impl RecordingProbe {
+    fn events(&self) -> Vec<ProbeEvent> {
+        self.events.lock().unwrap().clone()
+    }
+
+    /// 只看步骤（既有用例的断言口径）。
     fn steps(&self) -> Vec<StartupStep> {
-        self.steps.lock().unwrap().clone()
+        self.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                ProbeEvent::Step(step) => Some(step),
+                ProbeEvent::Backup(_) => None,
+            })
+            .collect()
+    }
+
+    /// 只看迁移前备份的按需判据结果。
+    fn backups(&self) -> Vec<PreMigrationBackup> {
+        self.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                ProbeEvent::Backup(outcome) => Some(outcome),
+                ProbeEvent::Step(_) => None,
+            })
+            .collect()
     }
 }
 
@@ -75,11 +116,20 @@ fn fixture() -> Fixture {
     }
 }
 
+impl Fixture {
+    /// 临时目录本身：注入的备份目录、以及「让某个路径不可用」的注入都放在它下面。
+    fn dir(&self) -> &Path {
+        self._dir.path()
+    }
+}
+
 fn started(fx: &Fixture) -> Box<worktrace_lib::services::bootstrap::RunningApp> {
     let probe = RecordingProbe::default();
     let sink = Arc::new(RecordingSink::default());
     let outcome = startup(
-        StartupConfig::new(&fx.db_path, &fx.lock_path),
+        // 备份目录**一律注入**临时目录：即便某个用例的库已经存在、按需判据恰好为真，
+        // 产物也只落在临时目录里——测试绝不写进开发机真实的数据目录。
+        StartupConfig::new(&fx.db_path, &fx.lock_path).with_backup_dir(fx.dir().join("backups")),
         Box::new(FakeClock::new(WALL, 0)),
         sink,
         &probe,
@@ -648,4 +698,492 @@ fn a_killed_lock_holder_releases_the_lock() {
         acquired,
         "锁持有者被强杀后，新进程必须能拿到锁（不依赖任何清理逻辑）"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 迁移前的按需一致备份（P6 Task 1 编排）
+//
+// 三条按需分支**按原因**分开断言，不许合并成一条「都没备份」：一个「备份函数恒返回
+// Ok 且什么都不做」的实现会让「无需迁移」那条全绿，所以「需迁移 ⇒ 有产物」必须与它
+// 成对存在。判据读 `PRAGMA user_version`（`current_version`），不是 `meta::read_meta`
+// ——新库在 `migrate` 之前根本没有 `app_meta` 表。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 迁移前的库会带上这张表；迁移后才有的 `app_meta` 则是「备份到底在迁移前还是后」
+/// 的对照物。名字刻意不叫 `app_meta`/`application_run`，免得与 v1 schema 撞。
+const PRE_MIGRATION_TABLE: &str = "pre_migration_marker";
+
+/// 造一个**需要迁移**的既有库：库文件存在、`user_version == 0`，并留下一行事实。
+fn database_needing_migration(path: &Path) {
+    let db = Db::open(path).expect("建库文件");
+    assert_eq!(
+        current_version(db.connection()).unwrap(),
+        0,
+        "「需要迁移」的判据是 user_version < SCHEMA_VERSION"
+    );
+    db.connection()
+        .execute_batch(&format!(
+            "CREATE TABLE {PRE_MIGRATION_TABLE}(note TEXT NOT NULL);
+             INSERT INTO {PRE_MIGRATION_TABLE}(note) VALUES('迁移前的事实');"
+        ))
+        .unwrap();
+}
+
+/// 造一个**已经是当前版本**的既有库（`migrate` 对它就是空操作）。返回库身份。
+fn database_at_current_version(path: &Path) -> String {
+    let mut db = Db::open(path).unwrap();
+    migrate(db.connection()).unwrap();
+    assert_eq!(current_version(db.connection()).unwrap(), SCHEMA_VERSION);
+    let tx = db.connection_mut().unchecked_transaction().unwrap();
+    let meta = init_meta(&tx).unwrap();
+    tx.commit().unwrap();
+    meta.data_epoch
+}
+
+/// 注入的备份目录：与库、锁同在临时目录下——**绝不写进真实的 `%APPDATA%`**。
+fn injected_backup_dir(fx: &Fixture) -> PathBuf {
+    fx.dir().join("backups")
+}
+
+/// 目录里的条目名（升序）。目录不存在 ⇒ 空：这就是「零产物」的判据。
+fn entry_names(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// 迁移前备份在注入目录里的产物名（与 `entry_names` 同一口径，只是过滤出备份）。
+fn backup_names(dir: &Path) -> Vec<String> {
+    entry_names(dir)
+        .into_iter()
+        .filter(|name| name.starts_with("worktrace-f") && name.ends_with(".db"))
+        .collect()
+}
+
+fn marker_note(db: &Db) -> Option<String> {
+    db.connection()
+        .query_row(
+            &format!("SELECT note FROM {PRE_MIGRATION_TABLE}"),
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+}
+
+fn has_table(db: &Db, table: &str) -> bool {
+    user_tables(db.connection())
+        .unwrap()
+        .iter()
+        .any(|name| name == table)
+}
+
+fn foreign_key_violations(db: &Db) -> Vec<String> {
+    let mut stmt = db.connection().prepare("PRAGMA foreign_key_check").unwrap();
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+    rows.map(|row| row.unwrap()).collect()
+}
+
+fn sqlite_version(db: &Db) -> String {
+    db.connection()
+        .query_row("SELECT sqlite_version()", [], |r| r.get::<_, String>(0))
+        .unwrap()
+}
+
+/// ① **需迁移 ⇒ 确实写出一份备份**，而且它是**迁移前**的一致快照：
+/// 顺序断言落在探针的同一条事件流上（拿到锁 → 打开库 → 备份完成 → `migrate` 开始），
+/// 内容断言落在产物自己身上（迁移前的版本与事实都在，v1 的表一张都没有）。
+#[test]
+fn a_database_that_needs_migration_is_backed_up_before_it_is_migrated() {
+    let fx = fixture();
+    let backup_dir = injected_backup_dir(&fx);
+    database_needing_migration(&fx.db_path);
+    assert!(fx.db_path.exists(), "既有库：库文件在启动前就存在");
+
+    let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
+    let window_calls = Arc::new(AtomicUsize::new(0));
+    let open_window = {
+        let counter = Arc::clone(&window_calls);
+        move || -> Result<(), AppError> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    };
+
+    let running = match startup(
+        StartupConfig::new(&fx.db_path, &fx.lock_path).with_backup_dir(&backup_dir),
+        Box::new(FakeClock::new(WALL, 0)),
+        sink,
+        &probe,
+        &open_window,
+    )
+    .expect("迁移前备份成功，启动应当成功")
+    {
+        Startup::Running(running) => running,
+        Startup::AlreadyRunning { .. } => panic!("首个进程应当是唯一实例"),
+    };
+
+    // 「拿到单实例锁 → 备份完成 → migrate 开始」：四条**相邻**事件，不多不少。
+    assert_eq!(
+        probe.events()[..4],
+        [
+            ProbeEvent::Step(StartupStep::SingleInstanceChecked),
+            ProbeEvent::Step(StartupStep::DatabaseOpened),
+            ProbeEvent::Backup(PreMigrationBackup::Taken),
+            ProbeEvent::Step(StartupStep::Migrated),
+        ],
+        "备份必须夹在「打开库」与「迁移」之间"
+    );
+
+    // 恰好一份产物；名字里三个版号与 Unix 毫秒各就各位。
+    let names = backup_names(&backup_dir);
+    assert_eq!(names.len(), 1, "需迁移时恰好一份备份：{names:?}");
+    assert_eq!(
+        names[0],
+        format!(
+            "worktrace-f{BACKUP_FORMAT_VERSION}-s0-v{}-{WALL}.db",
+            env!("CARGO_PKG_VERSION")
+        ),
+        "文件名：格式版号 / 数据库版号（迁移前）/ 应用版本 / Unix 毫秒"
+    );
+
+    // 产物**可独立打开**，并通过完整性与版本校验。
+    let artifact = backup_dir.join(&names[0]);
+    let backup = Db::open(&artifact).expect("备份产物必须能独立打开");
+    let integrity: String = backup
+        .connection()
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok", "备份产物必须通过完整性校验");
+    assert_eq!(foreign_key_violations(&backup), Vec::<String>::new());
+    assert_eq!(
+        current_version(backup.connection()).unwrap(),
+        0,
+        "备份的是**迁移前**的库版本——这正是「先备份后迁移」的顺序证据"
+    );
+    assert_eq!(
+        marker_note(&backup).as_deref(),
+        Some("迁移前的事实"),
+        "备份必须带上迁移前的事实"
+    );
+    assert!(
+        !has_table(&backup, "app_meta"),
+        "迁移前备份里不该有 v1 的表（若备份发生在 migrate 之后，这条会红）"
+    );
+    // `VACUUM INTO` 的可用性证据：bundled SQLite 版本随用例输出（`--nocapture` 可见）。
+    println!("bundled sqlite: {}", sqlite_version(&backup));
+
+    // 真库确实迁移了，且事实没丢。
+    let db = Db::open(&fx.db_path).unwrap();
+    assert_eq!(current_version(db.connection()).unwrap(), SCHEMA_VERSION);
+    assert!(has_table(&db, "app_meta"));
+    assert_eq!(marker_note(&db).as_deref(), Some("迁移前的事实"));
+    assert_eq!(window_calls.load(Ordering::SeqCst), 1, "成功启动照常开窗口");
+    assert!(!running.recovery().requires_recovery());
+}
+
+/// ② **`user_version == SCHEMA_VERSION` ⇒ 零备份产物**，且 `migrate` 被调用（空操作）。
+#[test]
+fn a_database_already_at_the_current_version_produces_no_backup() {
+    let fx = fixture();
+    let backup_dir = injected_backup_dir(&fx);
+    let epoch_before = database_at_current_version(&fx.db_path);
+    let tables_before = {
+        let db = Db::open(&fx.db_path).unwrap();
+        user_tables(db.connection()).unwrap()
+    };
+
+    let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
+    let running = match startup(
+        StartupConfig::new(&fx.db_path, &fx.lock_path).with_backup_dir(&backup_dir),
+        Box::new(FakeClock::new(WALL, 0)),
+        sink,
+        &probe,
+        &|| -> Result<(), AppError> { Ok(()) },
+    )
+    .expect("无需迁移也是一种成功启动")
+    {
+        Startup::Running(running) => running,
+        Startup::AlreadyRunning { .. } => panic!("首个进程应当是唯一实例"),
+    };
+
+    assert_eq!(
+        probe.backups(),
+        vec![PreMigrationBackup::NotNeeded],
+        "按需判据走的是「无需迁移」这条分支"
+    );
+    assert!(
+        probe.steps().contains(&StartupStep::Migrated),
+        "版本相等时 migrate 仍被调用（幂等空操作），否则就是静默跳过迁移"
+    );
+    assert_eq!(
+        backup_names(&backup_dir),
+        Vec::<String>::new(),
+        "无需迁移 ⇒ 零产物"
+    );
+    assert!(
+        !backup_dir.exists(),
+        "连备份目录都不该被建出来：解析只发生在「确实需要迁移」时"
+    );
+
+    // 空操作：版本、表集合、库身份一个都没动。
+    let db = Db::open(&fx.db_path).unwrap();
+    assert_eq!(current_version(db.connection()).unwrap(), SCHEMA_VERSION);
+    assert_eq!(user_tables(db.connection()).unwrap(), tables_before);
+    assert_eq!(
+        running.data_epoch(),
+        epoch_before,
+        "migrate 是空操作，不得重建库身份"
+    );
+}
+
+/// ③ **库文件不存在（首启）⇒ 零产物**，走的是「没有可备份的事实」这条分支。
+///
+/// 注意新库的 `user_version == 0` **属于「需要迁移」**：它在这里被挡下的原因是
+/// 库文件不存在，不是版本相等——两者的原因不同，所以断言也必须分开。
+#[test]
+fn a_first_launch_has_no_database_to_back_up() {
+    let fx = fixture();
+    let backup_dir = injected_backup_dir(&fx);
+    assert!(!fx.db_path.exists(), "首启的前提：库文件不存在");
+
+    let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
+    let running = match startup(
+        StartupConfig::new(&fx.db_path, &fx.lock_path).with_backup_dir(&backup_dir),
+        Box::new(FakeClock::new(WALL, 0)),
+        sink,
+        &probe,
+        &|| -> Result<(), AppError> { Ok(()) },
+    )
+    .expect("首启没有可备份的事实，不是降级")
+    {
+        Startup::Running(running) => running,
+        Startup::AlreadyRunning { .. } => panic!("首个进程应当是唯一实例"),
+    };
+
+    assert_eq!(
+        probe.backups(),
+        vec![PreMigrationBackup::NothingToBackUp],
+        "按需判据走的是「没有可备份的事实」这条分支"
+    );
+    assert!(
+        probe.steps().contains(&StartupStep::Migrated),
+        "首启仍然要迁移：新库 user_version == 0 属于「需要迁移」"
+    );
+    assert_eq!(
+        backup_names(&backup_dir),
+        Vec::<String>::new(),
+        "首启零产物"
+    );
+    assert!(!backup_dir.exists(), "首启不该建出备份目录");
+
+    let db = Db::open(&fx.db_path).unwrap();
+    assert_eq!(current_version(db.connection()).unwrap(), SCHEMA_VERSION);
+    assert!(has_table(&db, "app_meta"));
+    assert_eq!(running.data_epoch().len(), 36, "新库在这里取得库身份");
+}
+
+/// ④ **需迁移但备份失败 ⇒ 拒绝迁移**：`migrate` 零调用、`STORAGE_ERROR`、
+/// 不建 `application_run`、不开窗口、库停在迁移前版本、锁被放开。
+///
+/// 这一条是三条分支里唯一「必须失败」的：不降级、不跳过、不先迁移后补。
+/// 备份目录的父级被做成一个**普通文件**，所以失败发生在写任何东西之前。
+#[test]
+fn a_backup_that_cannot_be_written_refuses_to_migrate() {
+    let fx = fixture();
+    database_needing_migration(&fx.db_path);
+    let blocked = fx.dir().join("blocked");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    let backup_dir = blocked.join("backups");
+
+    let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
+    let window_calls = Arc::new(AtomicUsize::new(0));
+    let open_window = {
+        let counter = Arc::clone(&window_calls);
+        move || -> Result<(), AppError> {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    };
+
+    let err = match startup(
+        StartupConfig::new(&fx.db_path, &fx.lock_path).with_backup_dir(&backup_dir),
+        Box::new(FakeClock::new(WALL, 0)),
+        sink,
+        &probe,
+        &open_window,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("备份失败不得算一次成功启动"),
+    };
+
+    assert_eq!(err.code(), "STORAGE_ERROR", "复用既有码，不新增第六个");
+    assert!(
+        err.detail()
+            .unwrap_or("")
+            .starts_with("pre-migration backup"),
+        "detail 必须带阶段标记：{:?}",
+        err.detail()
+    );
+    assert_eq!(
+        probe.steps(),
+        vec![
+            StartupStep::SingleInstanceChecked,
+            StartupStep::DatabaseOpened
+        ],
+        "失败发生在第②步内部：migrate 零调用、后面每一步都没走"
+    );
+    assert!(
+        probe.backups().is_empty(),
+        "没走完的判据不报结果（原因由错误本身带）"
+    );
+    assert_eq!(window_calls.load(Ordering::SeqCst), 0, "不开窗口");
+
+    // 库停在迁移前：只有那张迁移前的事实表，一张 v1 的表都没有。
+    let db = Db::open(&fx.db_path).unwrap();
+    assert_eq!(
+        current_version(db.connection()).unwrap(),
+        0,
+        "库停在迁移前版本"
+    );
+    let tables = user_tables(db.connection()).unwrap();
+    assert_eq!(
+        tables,
+        vec![PRE_MIGRATION_TABLE.to_string()],
+        "不得留下半套 schema：{tables:?}"
+    );
+    assert!(
+        !tables.iter().any(|table| table == "application_run"),
+        "不得建 application_run"
+    );
+    assert!(
+        InstanceLock::acquire(&fx.lock_path).unwrap().is_some(),
+        "启动中途失败必须放开锁"
+    );
+}
+
+/// ④ 之二：`VACUUM INTO` 自己失败（同名产物已经在那里）**同样拒绝迁移**，
+/// 且**不覆盖**既有产物——备份宁可失败也不静默盖掉上一份。
+#[test]
+fn a_backup_target_that_already_exists_refuses_to_migrate() {
+    let fx = fixture();
+    database_needing_migration(&fx.db_path);
+    let backup_dir = injected_backup_dir(&fx);
+    std::fs::create_dir_all(&backup_dir).unwrap();
+    let taken = backup_dir.join(format!(
+        "worktrace-f{BACKUP_FORMAT_VERSION}-s0-v{}-{WALL}.db",
+        env!("CARGO_PKG_VERSION")
+    ));
+    std::fs::write(&taken, b"existing artifact").unwrap();
+
+    let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
+    let err = match startup(
+        StartupConfig::new(&fx.db_path, &fx.lock_path).with_backup_dir(&backup_dir),
+        Box::new(FakeClock::new(WALL, 0)),
+        sink,
+        &probe,
+        &|| -> Result<(), AppError> { Ok(()) },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("同名产物已在时不得继续迁移"),
+    };
+
+    assert_eq!(err.code(), "STORAGE_ERROR");
+    assert!(
+        err.detail()
+            .unwrap_or("")
+            .starts_with("pre-migration backup"),
+        "detail 必须带阶段标记：{:?}",
+        err.detail()
+    );
+    assert!(
+        !probe.steps().contains(&StartupStep::Migrated),
+        "migrate 零调用"
+    );
+    assert_eq!(
+        std::fs::read(&taken).unwrap(),
+        b"existing artifact".to_vec(),
+        "不得覆盖既有产物"
+    );
+    assert_eq!(backup_names(&backup_dir).len(), 1, "没有第二份产物");
+
+    let db = Db::open(&fx.db_path).unwrap();
+    assert_eq!(
+        current_version(db.connection()).unwrap(),
+        0,
+        "库停在迁移前版本"
+    );
+}
+
+/// 保留策略：**只留最新 5 份**（按文件名里的 Unix 毫秒），
+/// **清理失败只记诊断**（最老的那份是个删不掉的目录，启动照样成功），
+/// 且认不出的名字一律不碰。
+#[test]
+fn the_retention_keeps_the_newest_five_and_survives_an_undeletable_entry() {
+    let fx = fixture();
+    database_needing_migration(&fx.db_path);
+    let backup_dir = injected_backup_dir(&fx);
+    std::fs::create_dir_all(&backup_dir).unwrap();
+
+    let old = |at_ms: i64| backup_dir.join(format!("worktrace-f1-s1-v0.0.9-{at_ms}.db"));
+    // 最老的那份是**目录**：`remove_file` 删不掉它（两个平台都不行）。
+    std::fs::create_dir(old(1_000)).unwrap();
+    for at_ms in [2_000, 3_000, 4_000, 5_000, 6_000] {
+        std::fs::write(old(at_ms), b"old artifact").unwrap();
+    }
+    // 保留策略只认自己写出来的名字：这两份必须原样留着。
+    std::fs::write(backup_dir.join("notes.txt"), b"keep me").unwrap();
+    std::fs::write(
+        backup_dir.join("worktrace-f1-s1-v0.0.9-notatimestamp.db"),
+        b"keep me too",
+    )
+    .unwrap();
+
+    let probe = RecordingProbe::default();
+    let sink = Arc::new(RecordingSink::default());
+    // 本轮写出第 7 份（时间戳最新）⇒ 该删掉最老的两份：目录（失败）与 2000（成功）。
+    match startup(
+        StartupConfig::new(&fx.db_path, &fx.lock_path).with_backup_dir(&backup_dir),
+        Box::new(FakeClock::new(WALL, 0)),
+        sink,
+        &probe,
+        &|| -> Result<(), AppError> { Ok(()) },
+    )
+    .expect("清理失败不得把一次成功启动变成失败")
+    {
+        Startup::Running(_) => {}
+        Startup::AlreadyRunning { .. } => panic!("首个进程应当是唯一实例"),
+    };
+
+    let mut expected = vec![
+        "notes.txt".to_string(),
+        "worktrace-f1-s1-v0.0.9-1000.db".to_string(),
+        "worktrace-f1-s1-v0.0.9-3000.db".to_string(),
+        "worktrace-f1-s1-v0.0.9-4000.db".to_string(),
+        "worktrace-f1-s1-v0.0.9-5000.db".to_string(),
+        "worktrace-f1-s1-v0.0.9-6000.db".to_string(),
+        "worktrace-f1-s1-v0.0.9-notatimestamp.db".to_string(),
+        format!(
+            "worktrace-f{BACKUP_FORMAT_VERSION}-s0-v{}-{WALL}.db",
+            env!("CARGO_PKG_VERSION")
+        ),
+    ];
+    expected.sort();
+    assert_eq!(
+        entry_names(&backup_dir),
+        expected,
+        "只留最新 5 份；删不掉的目录与认不出的名字原样保留"
+    );
+    assert!(old(1_000).is_dir(), "删不掉的那份仍在（清理失败只记诊断）");
+    assert!(!old(2_000).exists(), "最老的**文件**被清掉了");
 }

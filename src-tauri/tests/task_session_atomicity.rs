@@ -137,6 +137,8 @@ fn started(paths: Paths) -> App {
             lock_path: paths.lock_path.clone(),
             // 后台采样线程不得与用例的取样计数抢拍（本文件只测命令路径）。
             sampling_interval_ms: 3_600_000,
+            // 备份目录注入临时目录：测试绝不写进真实的数据目录。
+            backup_dir: Some(paths._dir.path().join("backups")),
         },
         Box::new(CountingClock {
             clock: Arc::clone(&clock),

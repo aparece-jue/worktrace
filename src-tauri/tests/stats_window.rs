@@ -1052,6 +1052,8 @@ fn started(fx: &AppFixture, clock: Arc<Mutex<FakeClock>>) -> Box<RunningApp> {
         db_path: fx.db_path.clone(),
         lock_path: fx.lock_path.clone(),
         sampling_interval_ms: 60_000,
+        // 备份目录注入临时目录：测试绝不写进真实的数据目录。
+        backup_dir: Some(fx.db_path.parent().expect("临时目录").join("backups")),
     };
     let outcome = startup(config, Box::new(clock), Arc::new(NoSink), &NoProbe, &|| {
         Ok(())
