@@ -289,7 +289,7 @@ platform::system_events::spawn(clock, alive, on_event)      // 平台叶子：�
   ```
 
   `AppState`（`:341`，字段私有）新增一个字段：`maintenance: Option<MaintenanceState>`（与 `db`/`coordinator`/`recovery` 并列；**不新增第二把锁**——判定必须与 `db` 在同一临界区里，这正是 D6 的"同一串行边界"）。
-  **（2026-10-04 fix round 2）另四个接缝不在这里重复**：恢复态的取出/装回（`take_runtime` / `install_runtime` / `runtime_present`）与平台可信边界（`system_boundary` → `Coordinator::system_pause`）的签名、归属、三段流程见本节上方「fix round 2」的 **C-B / C-C**；`db()`/`db_mut()`/`coordinator()`/`recovery()` 四个访问器随之改成**可失败**（`Result<_, AppError>`，缺运行态 ⇒ `DataRestoreInProgress`），调用点约 13 处与代价也写在那里。
+  **（2026-10-04 fix round 2）另四个接缝不在这里重复**：恢复态的取出/装回（`take_runtime` / `install_runtime` / `runtime_present`）与平台可信边界（`system_boundary` → `Coordinator::system_pause`）的签名、归属、三段流程见本节上方「fix round 2」的 **C-B / C-C**；仅 `db()`/`db_mut()`/`coordinator()` 三个访问器改为可失败（`Result<_, AppError>`，缺运行态 ⇒ `DataRestoreInProgress`）；`recovery()` 保持 `&RecoveryScan`，该字段不被取走。以实际调用点搜索与编译为准，旧调用数量只是历史证据（见 I-4）。
 
   **采样侧的落点（一处，别加第二处）**：`sampling_action`（`:749`）在 `let mut state = lock_app(app);`（`:750`）之后**第一句**加 `if !state.sampling_allowed() { return; }`，其后逻辑一字不动（`state.sample_tick()` → 有会话才 `broadcaster.emit(EventTimerTick)`，`:751`-`:763`）。
 
@@ -460,3 +460,14 @@ platform::system_events::spawn(clock, alive, on_event)      // 平台叶子：�
 - [ ] 安装新 Runtime 沿用 P3 S1 的 recovery_scan_failed 标记与扫描顺序；扫描失败不得启用业务计时，S12 成功清协调器故障后仍须重扫，不自动重试用户意图。
 - [ ] 提交后重建失败的广播缺口用真实故障注入验收：已提交写保留、不重发，authority/重新握手与 get_revision 收敛可验证，不能把 Err 误当事务回滚；P8 同步显示与手册。
 - [ ] 发布诊断不依赖控制台；采样 panic/失活应停止可信展示并给出可见故障与显式恢复出口，单调硬故障走新 run。实现后把正式 OS 事件与磁盘/WAL 故障证据交给 P8 实机复核。
+
+## 2026-10-08 开工前收口
+
+P1/P2/P3/P4/P5/P7 核心已交付；P5 异常采样入口回归已补齐，各入口都在独立夹具中首次触发异常。当前已确认问题已修复或明确由 P6/P8 承接，允许开始 P6，不表示平台实机验收完成。
+
+- 访问器以 I-4 为准：db/db_mut/coordinator 改为 Result，recovery 不改；正文旧“四个访问器”已修正。P3/P5 新增调用都须适配，不依据历史调用数漏改。
+- 维护态拒绝必须发生在所有 AppState 统计/导出入口采样之前：stats_snapshot/stats_today/export_json/export_weekly_markdown 也可能由采样提交 P2 异常事务，不能按“只读查询”绕过维护隔离。连同重试恢复、系统边界、托盘和周期采样逐条测试；维护期间不得读已取走的运行态或写入任一库。
+- P6 Task 5 的服务级恢复/离线链路在本阶段完成；需要 P8 新增 IPC、Today/恢复/导出/备份页面的“全部 V0.1 功能”实机链路，由 P8 接线后最终验收。P6 记录该部分为待 P8，不能据服务测试标平台通过，也不能因 P8 尚未接线而反向把已有服务前置视为未完成。
+- 历史行号、2026-10-04 的调用数量与未实施描述不作为当前状态。当前证据及交接见[跨阶段复审](../../validation/cross-stage-review-2026-10-08.md)，P8 接线按当前 13 条新增命令契约执行。
+
+P6 承接维护态/恢复切换、WAL 一致备份、迁移前按需备份、正式 OS 事件源、采样线程故障与诊断、退出失败提示、跨进程单实例与并发证据；这些是阶段交付内容，不是开工前必须已经实现的前置。manual_platform_verified 继续为 false。

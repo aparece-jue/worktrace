@@ -22,7 +22,7 @@
 //!
 //! # 断言口径
 //!
-//! 每个断言写**具体数值**：毫秒、版本号、`total_changes` 的增量、行数、审计 JSON 的
+//! 每个断言写**具体数值**：毫秒、版本号、后续调用 `total_changes` 的零增量、行数、审计 JSON 的
 //! 键值、区间的起止与 `duration_ms`。不用「非空」「有变化」代替。
 //!
 //! # 装置
@@ -80,7 +80,7 @@ const MONOTONIC_SETBACK: i64 = -100;
 /// 所以这里用 5000。调用点同时推进单调钟 1000ms，于是 `delta_gap` 正好是它。
 const WALL_JUMP: i64 = 5_000;
 /// 每次撞异常时单调钟额外走的 1000ms：让「余段的候选终点」严格晚于可信前缀终点，
-/// 于是待确认候选真是一条**有端点**的区间（否则零长度余段会被省略）。
+/// 于是待确认候选真是一条**有端点**的区间（零长度待确认候选另有专门回归）。
 const MONOTONIC_STEP: i64 = 1_000;
 // **刻意不钉恢复事务的语句条数**（2026-10-08 控制器裁决）：「一次 `running` + 墙钟异常的
 // 恢复事务由几行写入构成」属 **P2 的内部实现细节**。那笔事务眼下做五步——闭合原区间 /
@@ -181,6 +181,14 @@ enum Entry {
 }
 
 const ENTRIES: [Entry; 3] = [Entry::Today, Entry::Json, Entry::Weekly];
+
+/// 每个入口都必须在独立夹具中首次触发异常，而不只验证前一个入口留下的隔离状态。
+fn entries_with_primary(primary: Entry) -> [Entry; 3] {
+    let mut entries = ENTRIES;
+    let index = entries.iter().position(|entry| *entry == primary).unwrap();
+    entries.rotate_left(index);
+    entries
+}
 
 impl Entry {
     fn name(self) -> &'static str {
@@ -329,6 +337,12 @@ fn cell(view: &TodayView, class: StatsClass, measure: Measure) -> &MeasureColumn
 /// 「下一次成功的读仍然一致」的判据——读出来的必须还是那 1 分钟，而不是 0 或待确认。
 #[test]
 fn a_hard_fault_isolates_every_statistics_entry_with_zero_writes() {
+    for primary in ENTRIES {
+        hard_fault_with_primary(primary);
+    }
+}
+
+fn hard_fault_with_primary(primary: Entry) {
     let fx = fixture();
     let running = started(&fx, &fx.lock_path);
     let epoch = running.data_epoch().to_string();
@@ -390,7 +404,7 @@ fn a_hard_fault_isolates_every_statistics_entry_with_zero_writes() {
 
     // ③ 三个入口各来一次，每次单独量写入。
     let mut deltas = Vec::new();
-    for entry in ENTRIES {
+    for entry in entries_with_primary(primary) {
         let call_revision = {
             let state = lock_app(&app);
             revision(state.db())
@@ -549,6 +563,12 @@ fn a_hard_fault_isolates_every_statistics_entry_with_zero_writes() {
 /// 这一层——B 的场景同时带着前缀与候选，正好两列一起验。
 #[test]
 fn a_wall_clock_jump_commits_exactly_one_recovery_transaction_for_every_entry() {
+    for primary in ENTRIES {
+        wall_clock_jump_with_primary(primary);
+    }
+}
+
+fn wall_clock_jump_with_primary(primary: Entry) {
     let fx = fixture();
     let running = started(&fx, &fx.lock_path);
     let epoch = running.data_epoch().to_string();
@@ -583,7 +603,7 @@ fn a_wall_clock_jump_commits_exactly_one_recovery_transaction_for_every_entry() 
 
     // ② 三个入口各来一次，每次之前都把墙钟拨过阈值。
     let mut deltas = Vec::new();
-    for entry in ENTRIES {
+    for entry in entries_with_primary(primary) {
         {
             let mut clock = fx.clock.lock().unwrap();
             clock.advance_monotonic(MONOTONIC_STEP);
@@ -719,7 +739,7 @@ fn a_wall_clock_jump_commits_exactly_one_recovery_transaction_for_every_entry() 
     }
 
     // ④ 再各叫一次、**不拨钟**：校正已被检测但未被接受，统计入口继续拒绝，仍然零写入。
-    for entry in ENTRIES {
+    for entry in entries_with_primary(primary) {
         let call_changes = {
             let state = lock_app(&app);
             total_changes(state.db())

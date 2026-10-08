@@ -89,3 +89,21 @@ P6/P8 的实机与界面待办继续保留，不能视为本轮自动测试已�
 本轮没有改生产实现，没有推前执行 P8，也没有发现可复现的新运行时缺陷；修复的是后续照计划实现会缺数据源或产生错误参数/序列化的具体问题。代码验证仍引用前轮 657/142，文档差异检查与本轮引用核对另行通过。
 
 补充核对 attention_overview 的全局谓词：当前 run 的故障/待确认会话仍入列，只有正常无待确认的当前计时会话不入列。P8 原先“正在计时的当前 run 会话不进”的全称说明已更正。历史排序使用现有 work_session.started_at/id，无需新增 created_at 列或 schema 迁移。
+
+## 新变动复审（基线 56980b1，2026-10-08）
+
+用户新增提交 2ab4579、0d8418d、56980b1 只新增 tests/stats_entry_anomaly.rs，未修改生产逻辑、schema 或 IPC；此前 d53426d 的空范围/实时交集修复及文档收口仍保留。新测试区分硬故障零写入、运行期墙钟异常的一次恢复及之后的幂等拒绝，并在新 run 经 Today 核对可信前缀与待确认候选，方向与 P2/P3/P5 契约一致。
+
+发现一项测试覆盖缺口（已修复）：固定 Today → JSON → Weekly 顺序，使 JSON/Weekly 没有独立触发首次异常，只证明已故障/恢复状态下拒绝。现两个测试分别轮换三个首入口，每个首入口使用独立数据库与运行实例；三种入口都验证首次异常与后续幂等行为，未钉死 P2 SQL 写入条数。测试名称仍为两个，但共覆盖六个独立首次异常场景。
+
+当前全量复验：Rust 659 passed / 0 failed / 1 ignored；前端 14 文件、142 passed；Clippy all-targets（-D warnings）、fmt、分层、diff 检查通过。日志：D:/ProJect/worktrace-review-20261008-latest-{rust,web,clippy}.log；专门异常入口日志：D:/ProJect/worktrace-review-new-anomaly-fixed.log。
+
+本轮未确认新的生产缺陷或已完成阶段之间的接口/schema 不兼容。测试新增不改变 P1–P5/P7 的职责；P6/P8 与完整平台验收仍未完成，manual_platform_verified 保持 false。
+
+## P6 开工裁定（2026-10-08）
+
+完整通用八项门禁重跑通过，证据 D:/ProJect/worktrace-p6-preflight-20261008/result.json（HEAD 56980b1，工作区含已审核测试和文档修订）。Rust 659/0/1、前端 142、生产构建、Clippy、格式、分层、runner 自证与 diff 检查通过；manual_platform_verified=false。
+
+P6 计划又发现一处内部矛盾已修：正文“四个访问器改 Result”与 I-4“recovery 不改”冲突，统一为 db/db_mut/coordinator 三个。新增维护态要求覆盖 P5 统计与导出的采样异常写入，并明确 Task 5 完整界面实机验收待 P8，服务级验证归 P6。未修改生产逻辑。
+
+裁定：可以开启 P6。已确认的当前范围问题已修复、验证并记录；不能宣称所有潜在问题都消失。正式 OS 事件、采样线程故障、维护态、备份恢复、跨进程并发、发布/多窗口实机等均有后续责任，不视为已验收。无需等待这些 P6/P8 自身交付内容才开始 P6。
