@@ -1901,21 +1901,10 @@ pub fn startup(
             let errors = Arc::clone(&sampling_errors);
             move || sampling_action(&app, &broadcaster, &errors)
         },
-        {
-            // **路 B 的出口**（P6 Task 2b 的看门狗）：线程在没有停止信号的情况下退出
-            // ⇒ `on_tick` panic 展开（dev/test profile；release 是整进程 abort，见
-            // `platform::scheduler` 的模块头）。这里只写一条诊断，不重启、不假装恢复。
-            let diagnostics = diagnostics.clone();
-            move || {
-                diagnostics.record(
-                    EVENT_SAMPLER_DIED,
-                    &format!(
-                        "thread={} effect=ticks_stop_growing",
-                        crate::platform::scheduler::SAMPLER_THREAD_NAME
-                    ),
-                );
-            }
-        },
+        // **路 B 的出口**（P6 Task 2b 的看门狗）：线程在没有停止信号的情况下退出
+        // ⇒ `on_tick` panic 展开（dev/test profile；release 是整进程 abort，见
+        // `platform::scheduler` 的模块头）。这里只写一条诊断，不重启、不假装恢复。
+        sampler_died_report(&diagnostics),
     );
     probe.step(StartupStep::SamplingStarted);
 
@@ -1936,6 +1925,25 @@ pub fn startup(
         recovery,
         sampling_errors,
     })))
+}
+
+/// 看门狗报告的**内容**（P6 Task 2b）：写成一处，用例可以直接核对那一行。
+///
+/// 与 `Scheduler::spawn_watched` 的分工：平台层只提供「线程在没有停止信号的情况下结束了」
+/// 这个事实与**一次回调**，写什么、写到哪由服务层决定（`platform` 不认识业务）。
+///
+/// 回调**不得 panic**：它在 panic 展开过程中执行（见 `platform::scheduler` 的模块头）。
+fn sampler_died_report(diagnostics: &Diagnostics) -> impl FnOnce() + Send + 'static {
+    let diagnostics = diagnostics.clone();
+    move || {
+        diagnostics.record(
+            EVENT_SAMPLER_DIED,
+            &format!(
+                "thread={} effect=ticks_stop_growing",
+                crate::platform::scheduler::SAMPLER_THREAD_NAME
+            ),
+        );
+    }
 }
 
 /// 采样驱动的一拍：**在串行边界内**取快照，有活动会话才广播。
@@ -1986,5 +1994,36 @@ fn sampling_action(app: &SharedApp, broadcaster: &Broadcaster, errors: &AtomicU6
 fn io_err(what: &str, e: std::io::Error) -> AppError {
     AppError::Storage {
         detail: format!("{what}: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 生产侧看门狗报告的那一行必须**逐字**可核对。
+    ///
+    /// 为什么要有这条：[`Scheduler::spawn_watched`] 的契约只是「回调被调用一次」，
+    /// 写什么完全在服务层（见 [`sampler_died_report`]）；`tests/periodic_sampling.rs`
+    /// 注入的是**它自己**的闭包，核不到生产这一份。
+    #[test]
+    fn the_production_sampler_died_report_writes_one_named_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.log");
+        let sink = Diagnostics::to_file(&path);
+
+        sampler_died_report(&sink)();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "event=sampler.died_unexpectedly thread=worktrace-sampler effect=ticks_stop_growing\n"
+        );
+    }
+
+    /// 关闭的落点上报告是**空操作**（不 panic、不建文件）——回调在展开过程中执行，
+    /// 它绝不能出问题。
+    #[test]
+    fn the_production_sampler_died_report_is_a_no_op_when_the_sink_is_disabled() {
+        sampler_died_report(&Diagnostics::disabled())();
     }
 }
