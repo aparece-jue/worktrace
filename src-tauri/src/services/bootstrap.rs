@@ -96,7 +96,7 @@
 //! （P6 Task 2c）；平台事件的实机验收（P8 复核）。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
 
@@ -105,11 +105,12 @@ use rusqlite::Connection;
 use crate::domain::session::SessionState;
 use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
-use crate::platform::clock::Clock;
+use crate::platform::clock::{Clock, ClockSample};
 use crate::platform::diagnostics::Diagnostics;
 use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
 use crate::platform::single_instance::{self, InstanceLock};
+use crate::platform::system_events::{self, SystemEvent, SystemEventKind, SystemEventSource};
 use crate::services::events::{Broadcaster, EventEnvelope, EventSink};
 use crate::services::export::{ExportJson, ExportMarkdown, WeeklyQuery};
 use crate::services::history::{BackfillRequest, CorrectRequest, HistoryEditReport};
@@ -217,6 +218,25 @@ pub const FAULT_PRIOR_FAULT: &str = "prior_fault";
 const OBSERVER_ENTRY_SAMPLING: &str = "sample_tick";
 /// 观察点名字：P3 的显式重试入口（S12）。
 const OBSERVER_ENTRY_RETRY: &str = "retry_recovery";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OS 事件路径的诊断词表（P6 Task 2c）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 维护态期间到达的 OS 事件被**整条跳过**（与周期采样同一个判据）。
+pub const EVENT_SYSTEM_EVENT_SKIPPED: &str = "system_events.skipped";
+
+/// 平台边界调用失败（协调器拒绝 / 库忙 / 故障态）。
+///
+/// 事件是**稀疏**的（锁屏、休眠这种量级），不像采样那样一秒一拍，所以每次失败都记一条
+/// 不会刷爆日志；累计次数另有 [`AppState::system_boundary_errors`] 这个只读出口。
+pub const EVENT_SYSTEM_BOUNDARY_FAILED: &str = "system_events.boundary_failed";
+
+/// 事件源**起不来**（平台不支持或监听注册失败）：组合根只记这一条，不 panic、不假装成功。
+pub const EVENT_SYSTEM_EVENTS_UNAVAILABLE: &str = "system_events.unavailable";
+
+/// 事件源线程**意外结束**（没有停止信号就退出）。
+pub const EVENT_SYSTEM_EVENTS_DIED: &str = "system_events.died_unexpectedly";
 
 /// 诊断行里挂钟取不到时的占位（照实记「不知道」，不编一个时刻）。
 const WALL_MS_UNKNOWN: &str = "unknown";
@@ -709,6 +729,12 @@ pub struct AppState {
     /// 同处一个临界区（不新增第二把锁）：比较与记录必须是一次原子动作，否则两拍并发
     /// （理论上只有一拍，但 `retry_recovery` 也会观察）会各记一条。
     timer_unavailable: Option<bool>,
+    /// 平台边界（OS 事件）路径上 `system_boundary` **失败**的累计次数（P6 Task 2c）。
+    ///
+    /// 与 `RunningApp::sampling_errors` 同档的「连续失败可被上层观察到」出口：事件源起不来
+    /// 是**一次性**的（由组合根记诊断），而事件处理连续失败（例如协调器已经在故障态、
+    /// 或者库忙）需要有一个能读到的计数，否则现象是「锁屏不再暂停，但没有任何一处会红」。
+    system_boundary_errors: u64,
     /// 正式诊断日志的落点（release 的 Windows 子系统没有控制台，见模块头）。
     diagnostics: Diagnostics,
 }
@@ -1255,6 +1281,59 @@ impl AppState {
         } = self;
         coordinator.heartbeat(db)?;
         coordinator.tick(db)
+    }
+
+    /// **平台可信边界**（P6 Task 2c）：通往 `Coordinator::system_pause` 的**唯一**生产入口。
+    ///
+    /// 与周期采样是**并列的第二条**路径，不是同一条：采样走 [`AppState::sample_tick`]
+    /// （心跳 + tick，**永不调 `system_pause`**），本入口走平台边界。两者共用的是
+    /// **同一把锁与同一份 `AppState`**，所以它们不可能并发进入协调器。
+    ///
+    /// 三条纪律：
+    ///
+    /// 1. **取不到锁是正常的**（说明有别的操作在临界区里）——调用方在 `lock_app` 上**排队**，
+    ///    拿到之后按**当时**的状态重新判定。本方法不用 `try_lock`、不丢弃、不 panic。
+    /// 2. **维护态与周期采样同一判据**：调用方（[`system_events_action`]）取锁之后已经问过
+    ///    [`AppState::sampling_allowed`]（跳过并记一条诊断）；这里**再判一次**是防线，
+    ///    让任何未来的调用方都绕不过去——换库窗口里 `db` 这个句柄正被关闭/替换，
+    ///    读它要么报错要么读到已经作废的那个世界。
+    /// 3. **边界合法性一律交 P2**：本方法不写任何时钟判断（`None` = 边界未知/晚到 ⇒
+    ///    `recovering`；唤醒不自动继续）。
+    pub fn system_boundary(
+        &mut self,
+        boundary: Option<ClockSample>,
+    ) -> Result<TimerSnapshot, AppError> {
+        if !self.sampling_allowed() {
+            return Err(maintenance_refused("system boundary"));
+        }
+
+        let outcome = {
+            let AppState {
+                db, coordinator, ..
+            } = self;
+            coordinator.system_pause(db, boundary)
+        };
+
+        if let Err(error) = &outcome {
+            // 「连续失败要能被上层观察到」：计数 + 一条诊断（见 `system_boundary_errors`）。
+            self.system_boundary_errors = self.system_boundary_errors.saturating_add(1);
+            self.diagnostics.record(
+                EVENT_SYSTEM_BOUNDARY_FAILED,
+                &format!(
+                    "errors={} code={} detail={}",
+                    self.system_boundary_errors,
+                    error.code(),
+                    error.detail().unwrap_or_default()
+                ),
+            );
+        }
+
+        outcome
+    }
+
+    /// 平台边界路径的失败累计次数（与 `RunningApp::sampling_errors` 同档的只读出口）。
+    pub fn system_boundary_errors(&self) -> u64 {
+        self.system_boundary_errors
     }
 
     /// **显式退出**的入口（不由 `RunningApp::shutdown` 独享：Task 4 的托盘
@@ -1908,6 +1987,8 @@ pub fn startup(
             // 计时可用性还没被观察过：启动后第一次采样说了算（它要是立刻不可用，
             // 就记 `startup.timer_unavailable` 点名）。
             timer_unavailable: None,
+            // OS 事件路径还没失败过：事件源在启动之后才由组合根挂上（见 `start_system_events`）。
+            system_boundary_errors: 0,
             // `None` = 关闭（显式路径构造的缺省），生产解析到应用数据目录。
             // 路径只在第一次真的记录时才创建文件（见 `platform::diagnostics`）。
             diagnostics: diagnostics.clone(),
@@ -2018,6 +2099,108 @@ fn io_err(what: &str, e: std::io::Error) -> AppError {
     AppError::Storage {
         detail: format!("{what}: {e}"),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OS 事件路径（P6 Task 2c）：与周期采样**并列的第二条**入口，不是同一条
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 平台事件到达之后走的路：**取锁 → 维护态判据 → 平台边界 → 有会话才广播**。
+///
+/// 顺序与 [`sampling_action`] 逐字对齐，只有两点不同（这正是「并列的第二条路径」的含义）：
+///
+/// - 采样走 `sample_tick`（心跳 + tick），本路径走 [`AppState::system_boundary`]
+///   （→ `Coordinator::system_pause`）；
+/// - 取锁用 `lock_app` **排队等**，不是 `try_lock`：事件到达时锁被别人握着是**正常**的，
+///   丢弃一次锁屏通知会让「锁屏即暂停」（R-02）静默落空。拿到锁之后按**当时**的状态
+///   重新判定——所以维护态是「取锁之后」才判的，不是事件到达时判的。
+///
+/// 失败只记账（[`AppState::system_boundary_errors`] + 一条诊断），不 panic：
+/// 事件线程死了就没有下一次通知，而周期采样在另一条线程上照常。
+pub fn system_events_action(app: &SharedApp, broadcaster: &Broadcaster, event: SystemEvent) {
+    let mut state = lock_app(app);
+
+    // **维护态的唯一判据**（与周期采样同一处，P6 Task 2a）：维护态**整条事件跳过**。
+    // 理由与采样那一拍相同——换库窗口里 `db` 正被关闭/替换，而且此时放行一次写入
+    // 就把「封锁写入」戳出一个洞。
+    if !state.sampling_allowed() {
+        state.diagnostics().record(
+            EVENT_SYSTEM_EVENT_SKIPPED,
+            &format!("kind={}", event.kind.as_str()),
+        );
+        return;
+    }
+
+    let boundary = event_boundary(event);
+    // 失败已经在 `system_boundary` 里计数并记了诊断（含协调器故障态那条恢复语义），
+    // 这里不重复记、也不 panic：事件线程死了就没有下一次通知，采样在另一条线程上照常。
+    if let Ok(snapshot) = state.system_boundary(boundary) {
+        if snapshot.session_id.is_some() {
+            // 与采样同一条出口：广播在临界区内完成，顺序 = 提交顺序。
+            broadcaster.emit(EventEnvelope::timer_tick(&snapshot));
+        }
+    }
+}
+
+/// 事件 → 交给协调器的边界样本（**唯一一张表**，别在别处再判一次）。
+///
+/// - `Locked` / `Suspending` 是**离开边界**：平台事实就是「工作到此为止」，把事件时刻的
+///   样本交给 P2；样本拿不到（`None`）就按「边界未知」处理。
+/// - `Unlocked` / `Resumed` / `TimeChanged` **不是**离开边界 ⇒ 交出 `None`。P2 的
+///   `system_pause(None)` 语义是「边界未知/晚到」：有 running 会话时走 `recovering` +
+///   待确认（**不会**把锁屏/改时的跨度静默算成工时），空闲时只是一次只读观察；
+///   **唤醒不自动继续**（本路径永不调 `start`/`resume`）。
+///   把返回边界当成离开边界是错的：那会把锁屏那段时间算成工时。
+///
+/// 本函数**不判断时钟**（不新增任何阈值/规则），只是把「哪个通知是哪类边界」写在这里一处。
+fn event_boundary(event: SystemEvent) -> Option<ClockSample> {
+    match event.kind {
+        SystemEventKind::Locked | SystemEventKind::Suspending => event.boundary,
+        SystemEventKind::Unlocked | SystemEventKind::Resumed | SystemEventKind::TimeChanged => None,
+    }
+}
+
+/// 组合根的事件源接线：起事件线程，注册**失败只记诊断**（不 panic、不假装成功）。
+///
+/// 为什么在这里而不是在组合根里写这几行：①「注册失败 ⇒ 记诊断」这条口径要与
+/// 「意外结束 ⇒ 记诊断」写在**同一处**，否则两处文案迟早漂移；②这几行因此可以用
+/// 注入的事件源直接测（真 `lib.rs` 的接线要 Tauri 运行时，本仓没有启用那个 feature）。
+/// `make_source` 仍由组合根给——事件源要的是与协调器**同源**的时钟，而那份时钟在组合根手里。
+///
+/// 收的是**工厂**而不是现成的事件源：平台对象（窗口句柄之类）只在创建它们的线程上有效，
+/// 而这里正是「哪条线程」的唯一定义处（事件线程由 [`system_events::spawn_watched`] 起）。
+/// 工厂闭包只捕获时钟这类可跨线程的值，所以它自己是 `Send`；成品事件源从不跨线程移动。
+///
+/// 返回 `Err` 只是把原因交回上层（组合根另外打一行 `eprintln!`，与托盘/唤醒接收同一姿势）；
+/// **周期采样不受影响**：它在另一条线程上，本函数不碰它。
+pub fn start_system_events<S>(
+    make_source: S,
+    alive: Arc<AtomicBool>,
+    app: SharedApp,
+    broadcaster: Arc<Broadcaster>,
+    diagnostics: &Diagnostics,
+) -> std::io::Result<()>
+where
+    S: FnOnce() -> Box<dyn SystemEventSource> + Send + 'static,
+{
+    let died = diagnostics.clone();
+    let result = system_events::spawn_watched(
+        make_source,
+        alive,
+        move |event| system_events_action(&app, &broadcaster, event),
+        move || {
+            died.record(
+                EVENT_SYSTEM_EVENTS_DIED,
+                &format!("thread={}", system_events::EVENT_THREAD_NAME),
+            );
+        },
+    );
+
+    if let Err(error) = &result {
+        diagnostics.record(EVENT_SYSTEM_EVENTS_UNAVAILABLE, &format!("detail={error}"));
+    }
+
+    result
 }
 
 #[cfg(test)]

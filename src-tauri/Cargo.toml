@@ -42,6 +42,34 @@ thiserror = "2"
 # `tz-system` 让「今日」能默认取机器时区（本机实测 Asia/Shanghai）。
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform"] }
 
+[target.'cfg(windows)'.dependencies]
+# P6 Task 2c：正式 OS 事件源（锁屏/解锁、休眠/唤醒、系统改时）。
+#
+# **不是新增下载**：`windows-sys 0.61.2` 早就在 `Cargo.lock` 里，而且是本仓 Windows
+# 构建**已经在编译**的传递依赖（`tray-icon 0.25.1` / `muda 0.20.0` / `window-vibrancy`），
+# 源码也已解包在本机 cargo 缓存里。这里只是把它提升为**直接**依赖，并多启用几个
+# feature——feature 是同一份源码的编译期开关，不触发任何下载（`cargo build --offline` 实测）。
+# 版本写 `0.61` 让 lock 里那个 `0.61.2` 满足；**不要**跑 `cargo update`。
+#
+# 逐个 feature 的用途（全部来自 `platform/system_events.rs`）：
+# - `Win32_Foundation`：`HWND` / `WPARAM` / `LPARAM` / `LRESULT` / `HINSTANCE` 这些基础别名；
+# - `Win32_Graphics_Gdi`：`WNDCLASSW` 的 `hbrBackground` 字段类型 `HBRUSH`（窗口类定义的一部分）；
+# - `Win32_System_LibraryLoader`：`GetModuleHandleW`（窗口类与 `UnregisterClassW` 要的实例句柄）；
+# - `Win32_System_RemoteDesktop`：`WTSRegisterSessionNotification` / `WTSUnRegisterSessionNotification`
+#   （锁屏与解锁，`WM_WTSSESSION_CHANGE`）；
+# - `Win32_UI_WindowsAndMessaging`：窗口类与消息循环（`RegisterClassW` / `CreateWindowExW` /
+#   `PeekMessageW` / `DispatchMessageW` / `MsgWaitForMultipleObjectsEx` / `DefWindowProcW` /
+#   `DestroyWindow` / `UnregisterClassW`）以及三类消息与它们的参数常量
+#   （`WM_POWERBROADCAST` + `PBT_APM*`、`WM_WTSSESSION_CHANGE` + `WTS_SESSION_LOCK/UNLOCK`、
+#   `WM_TIMECHANGE`）。
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_RemoteDesktop",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 

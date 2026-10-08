@@ -9,6 +9,8 @@
 //! 「什么时候开」由 debug 构建才存在的 dev 命令决定（理由写在 `sync_lab` 的模块头）。
 //! P6 Task 2a 加上正式诊断日志的落点（`diagnostics`）：release 的 Windows 子系统
 //! 没有控制台，维护态/故障态这类「内存态」的跃迁必须有落盘出口（理由写在模块头）。
+//! P6 Task 2c 加上正式 OS 事件源（`system_events`）：锁屏/解锁、休眠/唤醒、系统改时
+//! 的监听器（一个从不显示的顶层消息窗），只翻成事件与边界样本，怎么处理由上层决定。
 
 pub mod clock;
 // P6 Task 2a：一条一行地记诊断（append）。2b 的故障态进入/清除复用同一落点。
@@ -16,6 +18,8 @@ pub mod diagnostics;
 pub mod paths;
 pub mod scheduler;
 pub mod single_instance;
+// P6 Task 2c：锁屏/解锁、休眠/唤醒、系统改时的正式事件源（可注入 + 本平台实现）。
 pub mod sync_lab;
+pub mod system_events;
 pub mod tray;
 pub mod window;

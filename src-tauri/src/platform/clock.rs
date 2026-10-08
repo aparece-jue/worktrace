@@ -34,6 +34,13 @@ pub trait Clock {
 }
 
 /// 真实时钟。
+///
+/// **可以克隆**（P6 Task 2c）：正事是「时钟必须同源」——组合根建一个，克隆一份给
+/// OS 事件源、原件交给协调器。`Instant` 是 `Copy`，所以克隆共享同一个 `origin`，
+/// 事件边界样本的 `monotonic_ms` 与协调器落在同一个原点上。各建一个新的
+/// `SystemClock` 会得到两个原点，`system_pause` 的边界校验必然拒绝（现象是
+/// 「每次锁屏都掉进 recovering」——静默降级，所以这里写清楚）。
+#[derive(Clone)]
 pub struct SystemClock {
     /// 进程启动时刻。`monotonic_ms` 以它为原点——这就是「只在本次 run 内有效」的含义。
     origin: Instant,

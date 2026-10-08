@@ -231,14 +231,18 @@ fn setup(app: &mut tauri::App, alive: &Arc<AtomicBool>) -> Result<(), Box<dyn st
     let trace = StartupTrace {
         diagnostics: Diagnostics::from_optional_path(config.diagnostic_log.clone()),
     };
-    match bootstrap::startup(
-        config,
-        Box::new(SystemClock::new()),
-        sink,
-        &trace,
-        &open_window,
-    )? {
+    // 时钟**只建一个**（P6 Task 2c）：克隆一份给 OS 事件源，原件交给 `startup`（协调器持有）。
+    // 各建一个会得到两个 `Instant` 原点，事件的边界样本必然过不了 `system_pause` 的校验，
+    // 现象是「每次锁屏都掉进 recovering」——R-02 静默落空。见 `platform::clock::SystemClock`。
+    let clock = SystemClock::new();
+    let event_clock = clock.clone();
+    match bootstrap::startup(config, Box::new(clock), sink, &trace, &open_window)? {
         Startup::Running(running) => {
+            // 事件源的回调捕获 `SharedApp` 与广播出口**本身**（不是 Tauri 托管状态）：
+            // 先克隆、再 `manage`，回调因此不需要在事件线程上查 Tauri 状态。
+            let shared = Arc::clone(running.app());
+            let broadcaster = Arc::clone(running.broadcaster());
+
             // `RunningApp` 必须活到进程退出：它的 `Drop` 会停掉采样线程并释放
             // 单实例锁。交给 Tauri 托管，生命周期就等于进程。
             app.manage(*running);
@@ -249,6 +253,23 @@ fn setup(app: &mut tauri::App, alive: &Arc<AtomicBool>) -> Result<(), Box<dyn st
 
             // 单实例唤醒的接收侧：轮询请求文件 → 抬起（已关则重建）主窗。
             window::spawn_activation_watcher(handle.clone(), lock_path, Arc::clone(alive));
+
+            // 正式 OS 事件源（P6 Task 2c，锁屏/解锁、休眠/唤醒、系统改时）：
+            // 装在 `startup` **成功之后**，与上面两条同一段。它只做适配——事件怎么
+            // 处理由 `services::bootstrap` 那条与周期采样并列的路径决定。
+            // 起不来（平台不支持 / 注册失败）只记诊断：不 panic，也不假装成功；
+            // 周期采样在另一条线程上，不受影响。
+            // 传的是**工厂**：窗口这类平台对象只在创建它们的线程上有效，事件线程由
+            // `start_system_events` 起，所以源要在那条线程上造（见该函数的说明）。
+            if let Err(error) = bootstrap::start_system_events(
+                move || crate::platform::system_events::os_source(event_clock),
+                Arc::clone(alive),
+                shared,
+                broadcaster,
+                &trace.diagnostics,
+            ) {
+                eprintln!("[worktrace] system events unavailable: {error}");
+            }
             Ok(())
         }
         Startup::AlreadyRunning { notified } => {
