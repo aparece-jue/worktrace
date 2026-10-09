@@ -1399,6 +1399,57 @@ fn abort_restore_reinstalls_the_original_library() {
     assert_eq!(last.data_epoch, old_epoch);
 }
 
+/// **回滚必须回到原来那间库**（fix round 2 的 Minor 1）：身份判据在 `install_runtime`
+/// **之前**判，所以它报错时运行态还没有装回——进程留在维护态（一切写入被拒），
+/// 而不是"装上了半个运行态、再回头去把库文件换掉"。
+///
+/// 形态：把回滚副本（"恢复之前那个世界"）的 `data_epoch` 改掉，模拟"改回来的那份不是
+/// 原来那间库"⇒ ③-b 必须拒绝上线：不装运行态、不广播、留在维护态。
+#[test]
+fn abort_restore_refuses_a_library_whose_identity_changed() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+    let app = rig.app();
+    let events_before = rig.events().len();
+
+    let runtime = begin_restore(&app).expect("进入维护态");
+    let artifact = take_backup(&rig);
+    let swap = prepare_and_swap(
+        runtime,
+        &artifact,
+        Some(&rig.backup_dir),
+        &rig.clock_source(),
+    )
+    .unwrap_or_else(|failure| panic!("② 段应当成功：{:?}", failure.error));
+    assert!(swap.is_swapped(), "② 段成功之后文件已经切换过");
+
+    // 把回滚副本的身份改掉：它已经不是"恢复之前那间库"了。
+    {
+        let rollback = Db::open(swap.rollback_path()).unwrap();
+        rollback
+            .connection()
+            .execute("UPDATE app_meta SET data_epoch = 'not-the-original'", [])
+            .unwrap();
+    }
+
+    let error = abort_restore(&app, rig.broadcaster(), swap, &rig.clock_source())
+        .expect_err("回滚回来的库身份不对时必须拒绝上线");
+    assert_eq!(error.code(), "STORAGE_ERROR");
+    assert!(
+        format!("{error:?}").contains("wrong library identity"),
+        "错误必须点明身份不对：{error:?}"
+    );
+    {
+        let state = lock_app(&app);
+        assert!(
+            state.maintenance().is_some(),
+            "判据在装卸之前 ⇒ 仍留在维护态（不是先上线、再回头换库文件）"
+        );
+        assert!(!state.runtime_present(), "没有装上半个运行态");
+    }
+    assert_eq!(rig.events().len(), events_before, "被拒绝的回滚不得广播");
+}
+
 /// **恢复流程永不造库**（fix round 1 的 Important）：主库路径上没有库时回滚必须**拒绝**
 /// 打开它。
 ///
@@ -1447,10 +1498,89 @@ fn abort_restore_refuses_to_create_a_missing_library() {
     );
     // ③ 进程**不留在"以为库是好的"状态**（仍在维护态、运行态不在手 ⇒
     //    任何写入都被 `DATA_RESTORE_IN_PROGRESS` 拒）。
-    let state = lock_app(&app);
+    {
+        // 块作用域：guard 必须在 `RunningApp` 之前释放（`Scheduler::Drop` 要 join 采样线程，
+        // 而采样线程每一拍都要取这把锁）。
+        let state = lock_app(&app);
+        assert!(
+            state.maintenance().is_some(),
+            "拿不到原库 ⇒ 留在维护态（拒绝一切写入，而不是打开一间空库）"
+        );
+        assert!(!state.runtime_present());
+    }
+}
+
+/// **提交路径同样不许造库**（fix round 2 的 Important）。
+///
+/// 形态与上一条对称，但发生在 ② 段**成功之后**：候选库已经在主库路径上，若它在 ③ 之前
+/// 被外部抹掉，`commit_restore` 的 `Db::open` 会创建一个**空文件**——`start_run`/
+/// `rotate_epoch` 随即失败，而**空库留在主库路径上**；下一次启动看到
+/// "文件在 + `user_version = 0`"照样会把它当成待迁移的旧库 ⇒ 用户数据被静默换掉。
+///
+/// 断言：commit 返回 Err、**主库文件没有被创建**、进程留在维护态（不谎报成功），
+/// 且原库完好地躺在回滚副本里（把它改名回来就能读到全部事实）。
+#[test]
+fn commit_restore_refuses_to_create_a_missing_library() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+    let old_epoch = rig.epoch();
+    let app = rig.app();
+
+    let runtime = begin_restore(&app).expect("进入维护态");
+    let artifact = take_backup(&rig);
+    let swap = prepare_and_swap(
+        runtime,
+        &artifact,
+        Some(&rig.backup_dir),
+        &rig.clock_source(),
+    )
+    .unwrap_or_else(|failure| panic!("② 段应当成功：{:?}", failure.error));
+    assert!(swap.is_swapped(), "② 段成功之后文件已经切换过");
+
+    // 外部原因让刚就位的候选库文件不见了（用例直接删掉它来模拟）。
+    std::fs::remove_file(&rig.db_path).unwrap();
+    // 这条用例之前已经有过业务写（`create_task`）⇒ 广播流不是空的，
+    // 断言"没有**新的**广播"才是对的。
+    let events_before = rig.events().len();
+
+    let error = commit_restore(&app, rig.broadcaster(), &swap, &rig.clock_source())
+        .expect_err("目标文件不在时，提交不得凭空造一个");
     assert!(
-        state.maintenance().is_some(),
-        "拿不到原库 ⇒ 留在维护态（拒绝一切写入，而不是打开一间空库）"
+        !rig.db_path.exists(),
+        "提交路径不得创建数据库文件（空库会被下一次启动当成待迁移的旧库 ⇒ 静默换库）"
     );
-    assert!(!state.runtime_present());
+    assert_eq!(error.code(), "STORAGE_ERROR");
+    let detail = format!("{error:?}");
+    assert!(
+        detail.contains("restore-rollback"),
+        "错误必须点明原库（回滚副本）的路径：{detail}"
+    );
+    {
+        let state = lock_app(&app);
+        assert!(
+            state.maintenance().is_some(),
+            "拒绝之后仍留在维护态：不谎报成功、也不把半个运行态装上"
+        );
+        assert!(!state.runtime_present());
+    }
+    assert_eq!(
+        rig.events().len(),
+        events_before,
+        "被拒绝的提交不得广播任何东西"
+    );
+
+    // **原库完好**：它躺在回滚副本里，改名回来就能读到全部事实（拒绝没有破坏任何东西）。
+    let rollback = swap.rollback_path().to_path_buf();
+    assert!(
+        rollback.exists(),
+        "回滚副本必须还在：{}",
+        rollback.display()
+    );
+    std::fs::rename(&rollback, &rig.db_path).unwrap();
+    assert_eq!(rig.epoch(), old_epoch);
+    assert_eq!(
+        rig.scalar("SELECT COUNT(*) FROM task WHERE title = '原库的事实'"),
+        1,
+        "原库的事实一条都不少"
+    );
 }

@@ -409,6 +409,39 @@ impl RestoreSwap {
         }
     }
 
+    /// **两条能走到 `Db::open` 的入口各自拒绝造库**（fix round 1/2 的 Important）。
+    ///
+    /// 为什么必须有：`Db::open` 底层是 `Connection::open`——文件不存在时它会
+    /// **创建一个空文件**；而空文件的 `user_version = 0` 会被下一次启动当成
+    /// "需要迁移的旧库"⇒ 备份它（空的）→ 迁移 → `init_meta` ⇒
+    /// 用户的数据被静默换成一间空库。
+    ///
+    /// **口径（与实现相符，别写成"永不"）**：判据是**逐入口**的——本模块封不住既有的
+    /// `Db::open`，所以 [`commit_restore`] 与 [`abort_restore`] 各判一次。
+    /// 拒绝之后调用方**留在维护态**：所有命令被拒、没有任何写入落进错误的地方，
+    /// 这比"以为库是好的、其实打开了空库"诚实得多。
+    ///
+    /// 空路径（内存库）单独给一条可读文案：那条防线分支在建 swap 时就没有主库路径，
+    /// 不该报出"…is not there: ; the original library should be at "这种半句话。
+    fn require_library_in_place(&self) -> Result<(), AppError> {
+        if self.target.as_os_str().is_empty() {
+            return Err(AppError::Storage {
+                detail: "restore: in-memory database has no path to swap".to_string(),
+            });
+        }
+        if !self.target.exists() {
+            return Err(AppError::Storage {
+                detail: format!(
+                    "restore: refusing to open a database that is not there: {}; \
+                     the original library should be at {} — move it back before retrying",
+                    self.target.display(),
+                    self.rollback.display()
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// 把主库路径改回原库（③-b 的第一句）。
     ///
     /// 顺序：先把**候选库**从主库路径挪开（它已经不可信：可能只跑了一半的事务、
@@ -681,7 +714,11 @@ pub fn commit_restore(
     }
 
     let mut state = lock_app(app);
+    // 顺序写死：**先判维护态、再判"库在不在"**（评审 Minor 2）。反过来的话，
+    // "不在维护态 + 目标缺失"这条组合会从 `DATA_RESTORE_IN_PROGRESS` 变成 `STORAGE_ERROR`，
+    // 把一次接线缺陷说成文件问题。
     require_maintenance_without_runtime(&state)?;
+    swap.require_library_in_place()?;
 
     // 新 run 的起点与归属基线用**同一个样本**（与 `startup` 第③/⑤步同一口径）。
     // 钟**只在这里要一只**：它随后就归新协调器所有。
@@ -694,22 +731,18 @@ pub fn commit_restore(
 
     // 提交路径的**同一事务**：新 run + 新 epoch。`rotate_epoch` 只在这里调一次，
     // 它不 bump revision（00 §5：恢复后的 revision 可以低于原库，只在新 epoch 内比较）。
-    let rotated_epoch = {
+    //
+    // 身份判据**不在这里**：它在 [`rebuild_and_install`] 里、`install_runtime` **之前**判
+    // （fix round 2 的 Minor 1）——过了 `install_runtime` 这次恢复就已经上线了，
+    // 那时再报错等于把一次已提交、已广播的恢复说成失败。
+    {
         let tx = db
             .connection_mut()
             .unchecked_transaction()
             .map_err(map_sqlite)?;
         run_repo::start_run(&tx, &run_id, sample.wall_ms)?;
-        let epoch = meta::rotate_epoch(&tx)?;
+        meta::rotate_epoch(&tx)?;
         tx.commit().map_err(map_sqlite)?;
-        epoch
-    };
-    // **真判据**（fix round 1：原先只有 `debug_assert_ne!`，release 下不生效）：
-    // 换库的提交必须生成全新身份，否则"旧 epoch 的请求被拒"这条判据会形同虚设。
-    if rotated_epoch == swap.previous_data_epoch {
-        return Err(AppError::Storage {
-            detail: "restore: commit did not rotate the data_epoch".to_string(),
-        });
     }
 
     let identity = rebuild_and_install(
@@ -722,18 +755,7 @@ pub fn commit_restore(
         true,
         &swap.previous_data_epoch,
     )?;
-    // 事务里 rotate 出来的那个 epoch 就是**库最终的身份**（后面的两步重扫不动它）。
-    // 真判据（fix round 1：提交路径原先只有 `debug_assert_ne!`）：身份没换掉就等于
-    // "报了新 epoch 却没落库"，与 4a 给 `rotate_epoch` 加影响行数判据是同一条口径。
-    if identity.data_epoch != rotated_epoch {
-        return Err(AppError::Storage {
-            detail: format!(
-                "restore: committed library identity disagrees with the rotated epoch: \
-                 {} != {rotated_epoch}",
-                identity.data_epoch
-            ),
-        });
-    }
+    // 身份判据已经在 `rebuild_and_install` 里、装卸之前判过（提交必须是全新身份）。
     state.diagnostics().record(
         RESTORE_DIAGNOSTIC,
         &format!(
@@ -767,32 +789,20 @@ pub fn abort_restore(
     swap: RestoreSwap,
     clock: &ClockSource,
 ) -> Result<RestoreOutcome, AppError> {
+    let mut state = lock_app(app);
+    // 顺序写死（评审 Minor 2 + 修复轮 2 的 Important）：
+    // **先判状态、再动文件、最后判库在不在**。
+    //
+    // 反过来（先 `rollback_files()`、后判维护态）会在"运行态还活着"的时候把主库文件
+    // 换掉，最后返回一句 `DATA_RESTORE_IN_PROGRESS`——文件被动了、状态没动，
+    // 是最难查的一类不一致。状态是这条路径的**前置条件**，先判它。
+    require_maintenance_without_runtime(&state)?;
     if swap.swapped {
         swap.rollback_files()?;
     }
-
-    // **恢复流程永不造库**（fix round 1 的 Important）：主库路径上必须**已经**有一份库，
-    // 否则 `Db::open` 会替我们创建一个**空文件**，而空文件的 `user_version = 0` 会被
-    // 下一次启动当成"需要迁移的旧库"——备份它（空的）→ 迁移 → `init_meta` ⇒
-    // 用户的数据被静默换成一间空库。
-    //
-    // 这条判据覆盖的正是那条"文件系统连续故障"的路径：切换改名成功、还原改名失败时
-    // 主库路径上是空的，而原库躺在回滚副本里（错误文案由 `swap_files` 给出）。
-    // 拿不到原库时**留在维护态**：所有命令被拒、没有任何写入落进错误的地方——
-    // 这比"以为库是好的、其实打开了空库"诚实得多。
-    if !swap.target.exists() {
-        return Err(AppError::Storage {
-            detail: format!(
-                "restore: refusing to open a database that is not there: {}; \
-                 the original library should be at {} — move it back before retrying",
-                swap.target.display(),
-                swap.rollback.display()
-            ),
-        });
-    }
-
-    let mut state = lock_app(app);
-    require_maintenance_without_runtime(&state)?;
+    // 还原之后（或从未切换过时）主库路径上必须**已经**有一份库：
+    // 没有就拒绝打开它——恢复流程不造库（见 [`RestoreSwap::require_library_in_place`]）。
+    swap.require_library_in_place()?;
 
     let clock = clock();
     let sample = clock
@@ -802,27 +812,15 @@ pub fn abort_restore(
     let mut db = Db::open(&swap.target)?;
 
     // **不 rotate**：原库的 epoch 原样保留——否则"旧 epoch 的请求被拒"这条判据
-    // 会把一个**没被替换**的库也一起拒掉。
-    let kept_epoch = {
+    // 会把一个**没被替换**的库也一起拒掉。身份判据在 [`rebuild_and_install`] 里
+    // 装卸之前判（fix round 2 的 Minor 1）。
+    {
         let tx = db
             .connection_mut()
             .unchecked_transaction()
             .map_err(map_sqlite)?;
         run_repo::start_run(&tx, &run_id, sample.wall_ms)?;
-        let meta = meta::require_meta(&tx)?;
         tx.commit().map_err(map_sqlite)?;
-        meta.data_epoch
-    };
-    // **真判据**（fix round 1：原先是 `debug_assert_eq!`，release 下不生效）：回滚路径
-    // 必须保留原库的身份。不成立说明"主库路径上那份库不是原来那份"——那是最严重的一类
-    // 静默失败（"恢复没发生"是假的），所以照实报错，不靠断言。
-    if kept_epoch != swap.previous_data_epoch {
-        return Err(AppError::Storage {
-            detail: format!(
-                "restore: rollback kept the wrong library identity: expected {}, found {kept_epoch}",
-                swap.previous_data_epoch
-            ),
-        });
     }
 
     let identity = rebuild_and_install(
@@ -877,6 +875,31 @@ fn rebuild_and_install(
     let recovery = scan_recovery(db.connection(), run_id)?;
     // **权威身份**：两步重扫之后的库身份与版本（归一可能刚推进过一次 revision）。
     let meta = meta::require_meta(db.connection())?;
+
+    // **身份判据**（fix round 1 的真判据，fix round 2 挪到这里 = 装卸**之前**）：
+    // 提交必须换新身份、回滚必须保留原身份。位置是契约的一部分——过了下面
+    // `install_runtime` 那条线，这次恢复就已经"上线"（运行态装回、维护态清掉、广播已发），
+    // 那时再报错只会把一个已提交的恢复说成失败，而错误路径还会去动活着的运行态。
+    // 放在这里：失败 ⇒ 运行态仍未装回、维护态仍在 ⇒ 调用方走 ③-b 是安全的。
+    match (
+        committed,
+        meta.data_epoch.as_str() == previous_data_epoch,
+    ) {
+        (true, true) => {
+            return Err(AppError::Storage {
+                detail: "restore: commit did not rotate the data_epoch".to_string(),
+            })
+        }
+        (false, false) => {
+            return Err(AppError::Storage {
+                detail: format!(
+                    "restore: rollback kept the wrong library identity: expected {previous_data_epoch}, found {}",
+                    meta.data_epoch
+                ),
+            })
+        }
+        _ => {}
+    }
 
     // **新协调器**（两条路径都不复用维护前那一个）：时钟来自调用方，锚点用同一个样本。
     // `tick_seq` 随新协调器从 0 起算，旧 `Instant` 基线随旧协调器一起作废。
