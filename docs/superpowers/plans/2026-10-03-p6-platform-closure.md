@@ -560,3 +560,74 @@ P6 承接维护态/恢复切换、WAL 一致备份、迁移前按需备份、正
 > （现在是 `:325-419`），别照它定位；② `AppState`/`bootstrap.rs` **没有内联 `#[cfg(test)] mod tests`**，维护态与恢复编排只能用 `tests/` 集成测试钉；
 > ③ `commands/dev.rs` 的 4 条 debug 命令里只有 `__p7_replay_event:185` 走 `run_command`，另三条不触 `AppState`
 > ⇒ 「`guard_writable` 唯一调用点 + 白名单为空」对触达 `AppState` 的路径仍成立，**托盘那两条是唯一真实例外**（各自判维护态）。
+
+---
+
+## P6 实施记录（2026-10-09，控制器落盘）
+
+> 代码范围 `9242915..4295cad`（15 提交 / 48 文件）；`cargo test --offline` **746 passed / 0 failed / 1 ignored**（P6 前 659）；
+> `fmt --check` / `clippy -D warnings` / `check-layers.ps1` 六条全过；**无新增 IPC 命令**、**schema 未改**、前端只动 3 个文件的注释与码表。
+> 逐条验收、权威清单与 P8 携带项见 `docs/validation/p6-acceptance.md`；实施期裁决（P6-1…P6-21）与逐任务证据见 `.superpowers/sdd/2026-10-03-p6-platform-closure/progress.md`。
+
+### 实际交付（P8 按这些接线；「产出接口」一节以本记录为准）
+
+```rust
+// services/bootstrap.rs（AppState）
+pub struct MaintenancePhase { Restore }                       // 今天只有一个变体
+pub struct MaintenanceState { phase, entered_at_ms }           // + left_at_ms/duration_ms 进诊断
+impl AppState {
+    pub fn maintenance(&self) -> Option<&MaintenanceState>;
+    pub fn begin_maintenance(&mut self, phase, entered_at_ms) -> Result<(), AppError>;   // 重入拒绝
+    pub fn end_maintenance(&mut self) -> Option<MaintenanceState>;                        // 幂等
+    pub fn sampling_allowed(&self) -> bool;                   // 采样/OS 事件整拍跳过的判据
+    pub fn guard_writable(&self) -> Result<(), AppError>;      // 命令层唯一落点 = run_command
+    pub fn begin_exit(&mut self) -> Result<(), AppError>;      // 与维护态双向互斥
+    pub fn timer_faulted(&self) -> bool;                       // 复合语义（faulted || pending_committed_reload）
+    pub fn timer_unavailable_errors(&self) -> u64;             // 锁无关（Arc<AtomicU64>）镜像
+    pub fn system_boundary_errors(&self) -> u64;               // 同上
+    pub fn system_boundary(&mut self, boundary: Option<ClockSample>) -> Result<TimerSnapshot, AppError>;  // system_pause 唯一生产入口
+    pub fn db(&self) -> Result<&Db, AppError>;                 // 缺运行态 ⇒ DataRestoreInProgress
+    pub fn db_mut(&mut self) -> Result<&mut Db, AppError>;
+    pub fn coordinator(&self) -> Result<&Coordinator, AppError>;
+    pub fn recovery(&self) -> &RecoveryScan;                   // 不变（该字段不被取走）
+    pub fn take_runtime(&mut self) -> Result<Runtime, AppError>;
+    pub fn install_runtime(&mut self, runtime: Runtime, recovery: RecoveryScan) -> Result<(), AppError>;
+    pub fn runtime_present(&self) -> bool;
+    pub fn stats_snapshot/stats_today/export_json/export_weekly_markdown(...);   // 四入口在取样本之前过 guard_writable
+    pub fn retry_recovery(...);                                // 同；P6 不自动重试、不自动清故障
+}
+pub struct Runtime { pub db: Db, pub coordinator: Coordinator }   // 刻意不含 Scheduler（G11）
+// services/bootstrap.rs（RunningApp）
+pub fn sampling_ticks(&self) -> u64;  pub fn sampling_errors(&self) -> u64;
+pub fn sampling_died_unexpectedly(&self) -> bool;               // 闩锁：曾经意外结束
+pub fn system_boundary_errors(&self) -> u64;                    // 锁无关
+pub fn attach_clock(&mut self, clock: SystemClock);             // 与协调器/OS 事件源同源
+pub fn clock_source(&self) -> Result<ClockSource, AppError>;    // 恢复用；未挂时 Err，绝不新建兜底
+// services/backup.rs
+pub fn backup_before_migration(...) -> Result<Option<PathBuf>, AppError>;   // 需迁移时写 VACUUM INTO 产物
+pub fn backup_consistent(...) -> Result<PathBuf, AppError>;                 // 一致备份（含 Diagnostics 参数）
+pub fn restore_from_backup(...) -> Result<RestoreOutcome, AppError>;        // 三段一次调用；命令层不得拆
+pub struct RestoreOutcome { pub data_epoch: String, pub run_id: String, pub revision: i64,
+                            pub rollback: Option<PathBuf>, /* + migration_backup */ }
+// storage/meta.rs
+pub fn rotate_epoch(tx: &Transaction<'_>) -> Result<String, AppError>;      // 只换 epoch，不动 revision
+// platform
+pub fn system_events::spawn_watched(...);   // 生产接线（另有 spawn(clock, alive, on_event) 保留 C-C 签名）
+pub fn diagnostics::Diagnostics::{disabled, to_file, is_enabled, path, record};
+```
+
+### 实施期改动的口径（都可追 Ruling 编号）
+
+1. **M6 只取方案②**（P6-2）：release 是 `panic = "abort"`，`catch_unwind` 捕不到 ⇒ 实现"`ticks` 停涨"看门狗；**不改 release profile**。
+2. **`timer_faulted` 是复合语义**（P6-3）：`faulted || pending_committed_reload`；诊断文案写"计时不可用"，非本拍成因只报 `prior_fault`（P6-15）。
+3. **维护态判据三处同一口径**：`sampling_allowed`（采样/OS 事件）、`guard_writable`（命令/统计导出/重试/托盘暂停）、`begin_exit`（退出）；**兜底是访问器**——即使漏判，错误码仍是 `DATA_RESTORE_IN_PROGRESS`。
+4. **恢复三段与锁**（P6-19/P6-20）：`begin_restore` 锁内短 → `prepare_and_swap` **不持锁** → `commit_restore`/`abort_restore` 锁内；同事务 `start_run + rotate_epoch`；**两步重扫**（`scan_at_startup` 归一 → `scan_recovery` 门禁）；两条路径都不复用维护前的 `Coordinator`；**两条能走到 `Db::open` 的入口各自拒绝造库**（逐入口判据，结构性做法 `open_existing` 留给 P8）。
+5. **`windows-sys` 是"已在 lock 且在构建图里"的直接依赖**（P6-18）：零下载；`Cargo.lock` 只 +1 行。
+
+### P8 必须知道的三条硬约束
+
+1. **恢复命令不得走 `run_command`**（它自己取锁；持锁重入会死锁；修复波已把这条从 `debug_assert!` 升级为硬判据）。
+2. **`ClockSource` 必须取自 `RunningApp::clock_source()`**（各建一个 `SystemClock` 会让恢复后每次锁屏/休眠边界被拒，R-02 静默失效）。
+3. **界面必须能区分"正在恢复"与"恢复失败卡住"**（后者进程留在维护态、托盘拒绝退出，只能强杀；日志已有 `startup.failed`/`restore.failed` 可依据）。
+
+> 另有一条 P8 必须知道的既有性质：`services::tx::write_tx` 是 **DEFERRED + 先读后写** ⇒ **任何第二写者会让升级立刻 `SQLITE_BUSY`（不等 `busy_timeout`）**；生产今天只有一条写连接故不可达，**P8 引入第二写者前必须先改这里**。
