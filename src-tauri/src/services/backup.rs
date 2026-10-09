@@ -167,6 +167,17 @@ fn backup_timestamp(path: &Path) -> Option<i64> {
     at_ms.parse::<i64>().ok()
 }
 
+/// 参与"不许删"比较的**规范路径**（A1 复审）。
+///
+/// `protected` 是调用方给的拼写，目录项是文件系统给的拼写：大小写、`.`/`..` 段、
+/// 软链、Windows 的 `\\?\` 前缀都可能不同（P8 的文件选择器给什么拼写不由这里决定）。
+/// 逐字节比字符串会把**同一份文件**判成两份 ⇒ 用户选中那份又变成可删候选。能
+/// `canonicalize` 就用它（两侧此刻都存在），失败（刚被删、权限不足）就退回原路径——
+/// 退回只会让比较更严格，不会多删。
+fn keep_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// 只保留最新的 [`BACKUP_KEEP`] 份备份，但**永不删掉 `protected` 里的任何一份**。
 ///
 /// 为什么要有第二个参数（Task 1 评审留下的那条）：排序键是**文件名里的挂钟毫秒**，
@@ -180,6 +191,9 @@ fn backup_timestamp(path: &Path) -> Option<i64> {
 /// 目录，于是这次备份会顺带触发保留策略，把用户刚选中的那份删掉（staged 拷贝在先，
 /// 恢复本身不受影响，但用户回头就找不到自己选的文件了）。所以调用方把被恢复的路径
 /// 一并传进来，不让保留策略碰它。
+///
+/// 比较走 [`keep_key`]（规范路径）：**同一份文件的不同拼写**也算同一份
+/// （`tests/backup_restore.rs::a_differently_spelled_pick_is_still_protected`）。
 ///
 /// **不返回错误**：清理发生在备份成功之后，失败只记诊断，不能把一次成功启动变成失败。
 ///
@@ -201,11 +215,12 @@ fn prune_old_backups(dir: &Path, protected: &[&Path], diagnostics: &Diagnostics)
         return;
     }
 
+    let keep: Vec<PathBuf> = protected.iter().map(|path| keep_key(path)).collect();
     backups.sort_by_key(|(at_ms, _)| *at_ms);
     let excess = backups.len() - BACKUP_KEEP;
     let removable = backups
         .into_iter()
-        .filter(|(_, path)| !protected.contains(&path.as_path()));
+        .filter(|(_, path)| !keep.contains(&keep_key(path)));
     for (_, path) in removable.take(excess) {
         if let Err(error) = std::fs::remove_file(&path) {
             // 只记诊断（正式诊断落点是 `platform::diagnostics`，见 Task 2a）：清理发生在

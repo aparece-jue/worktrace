@@ -675,13 +675,23 @@ fn the_diagnostic_log_is_off_by_default_and_on_for_the_production_paths() {
         "没注入日志时，运行态里真正接上的诊断落点也必须关着"
     );
 
-    // 正控（同一构造路径 + 同一读口）：注入之后它是**开**的，否则上面那条可能恒真。
+    // 正控（同一构造路径 + 同一读口）：注入之后它**开**着，**而且路径就是注入的那一个**——
+    // 只断 `is_enabled()` 的话，"接了一个开着、但不是这条路径的落点"那种接错仍然绿（B5 复审）。
     let on = fixture();
     let on_running = started(&on, IDLE_INTERVAL_MS, true);
-    assert!(
-        lock_app(&app_of(&on_running)).diagnostics().is_enabled(),
-        "注入日志之后，运行态里的诊断落点必须是开的"
-    );
+    {
+        let app = app_of(&on_running);
+        let state = lock_app(&app);
+        assert!(
+            state.diagnostics().is_enabled(),
+            "注入日志之后，运行态里的诊断落点必须是开的"
+        );
+        assert_eq!(
+            state.diagnostics().path(),
+            Some(on.log_path.as_path()),
+            "接上的落点必须**就是注入的那条路径**（不是另一个开着的落点）"
+        );
+    }
 
     // 只解析路径，**不写任何文件**。
     let production = StartupConfig::from_app_paths().expect("应有 APPDATA / XDG_DATA_HOME / HOME");

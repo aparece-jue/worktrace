@@ -1251,50 +1251,29 @@ fn an_older_schema_candidate_is_backed_up_before_it_is_migrated() {
     );
 }
 
-/// **保留策略不得删掉用户正在恢复的那份产物**（A1）。
+/// A1 的两个用例共用：备份目录里 6 份历史产物（毫秒 `1_000`…`6_000`），其中**次老的
+/// `2_000`** 是一份真的旧 schema 库（`user_version = 0` ⇒ 才会走"备份再迁移"那条分支），
+/// 也就是"用户选中、正在恢复的那一份"。
 ///
-/// 场景：恢复的是一份**旧 schema** 候选库 ⇒ ② 段的"先备份再迁移"分支会往**用户的**
-/// 备份目录里再写一份迁移前备份，而那个目录里还躺着用户自己攒下的历史产物 ⇒ 保留策略
-/// （只留最新 5 份）会把最老的那几份删掉——**包括用户刚选中、正在恢复的这一份**
-/// （staged 拷贝在先，恢复本身不受影响，但用户回头就找不到自己选的文件了）。
-///
-/// 构造：目录里放 6 份产物，用户选中的是**次老**的那一份（`-s0-` 的真库：`user_version = 0`，
-/// 才会走"备份再迁移"）。新写出的那份按假钟挂钟毫秒排在最后 ⇒ 7 份、超出 2 份。
-///
-/// **成对判据**：`left`（留下的产物毫秒集合）断言的是"只删最老的、且用户选中的那份还在"。
-/// 若把 `prune_old_backups` 改成空操作，这条会红在"最老的没被删"上；若只护住刚写出的
-/// 那一份（A1 修复前的行为），则红在"用户选中的那份不见了"上。
-#[test]
-fn the_retention_policy_never_deletes_the_artifact_being_restored() {
-    let rig = launch();
+/// 返回它在**目录里的规整拼写**；用例可以据此造别的拼写（见下一条用例）。
+fn six_artifacts_with_the_pick_second_oldest(rig: &Rig) -> PathBuf {
     std::fs::create_dir_all(&rig.backup_dir).unwrap();
-
     // 产物名照生产形状（保留策略只认自己写出来的名字）：前 6 份毫秒从早到晚。
     let name_at =
         |db_version: i64, at_ms: i64| format!("worktrace-f1-s{db_version}-v0.1.0-{at_ms}.db");
     for at_ms in [1_000i64, 3_000, 4_000, 5_000, 6_000] {
         std::fs::write(rig.backup_dir.join(name_at(1, at_ms)), b"x").unwrap();
     }
-    // 用户选中的是**次老**的那一份（毫秒 2_000）：它是一份真的旧 schema 库，
-    // 这样才走得进"旧版本先备份再迁移"那条分支。
     let picked = rig.backup_dir.join(name_at(0, 2_000));
     {
         let db = Db::open(&picked).unwrap();
         assert_eq!(current_version(db.connection()).unwrap(), 0);
     }
+    picked
+}
 
-    let error = restore_from_backup(
-        &rig.app(),
-        rig.broadcaster(),
-        &picked,
-        Some(&rig.backup_dir),
-        &rig.clock_source(),
-    )
-    .expect_err("迁移后仍没有库身份的候选库必须让提交失败");
-    assert_eq!(error.code(), "STORAGE_ERROR");
-
-    // 目录里现在应当是：用户选中的那份（2_000）+ 次新的三份 + 本次迁移前备份（假钟 WALL）。
-    // 被删掉的恰好是 1_000 与 3_000（超出 2 份，且不碰受保护的两份）。
+/// 一次恢复尝试之后，备份目录里留下的产物毫秒集合（升序）。
+fn artifact_stamps(rig: &Rig) -> Vec<i64> {
     let mut left: Vec<i64> = std::fs::read_dir(&rig.backup_dir)
         .unwrap()
         .flatten()
@@ -1308,12 +1287,98 @@ fn the_retention_policy_never_deletes_the_artifact_being_restored() {
         })
         .collect();
     left.sort_unstable();
+    left
+}
+
+/// **保留策略不得删掉用户正在恢复的那份产物**（A1）。
+///
+/// 场景：恢复的是一份**旧 schema** 候选库 ⇒ ② 段的"先备份再迁移"分支会往**用户的**
+/// 备份目录里再写一份迁移前备份，而那个目录里还躺着用户自己攒下的历史产物 ⇒ 保留策略
+/// （只留最新 5 份）会把最老的那几份删掉——**包括用户刚选中、正在恢复的这一份**
+/// （staged 拷贝在先，恢复本身不受影响，但用户回头就找不到自己选的文件了）。
+///
+/// 构造：目录里放 6 份产物，用户选中的是**次老**的那一份。新写出的那份按假钟挂钟毫秒
+/// 排在最后 ⇒ 7 份、超出 2 份。
+///
+/// **成对判据**：`left`（留下的产物毫秒集合）断言的是"只删最老的、且用户选中的那份还在"。
+/// 若把 `prune_old_backups` 改成空操作，这条会红在"最老的没被删"上；若只护住刚写出的
+/// 那一份（A1 修复前的行为），则红在"用户选中的那份不见了"上。
+#[test]
+fn the_retention_policy_never_deletes_the_artifact_being_restored() {
+    let rig = launch();
+    let picked = six_artifacts_with_the_pick_second_oldest(&rig);
+
+    let error = restore_from_backup(
+        &rig.app(),
+        rig.broadcaster(),
+        &picked,
+        Some(&rig.backup_dir),
+        &rig.clock_source(),
+    )
+    .expect_err("迁移后仍没有库身份的候选库必须让提交失败");
+    assert_eq!(error.code(), "STORAGE_ERROR");
+
+    // 目录里现在应当是：用户选中的那份（2_000）+ 次新的三份 + 本次迁移前备份（假钟 WALL）。
+    // 被删掉的恰好是 1_000 与 3_000（超出 2 份，且不碰受保护的两份）。
     assert_eq!(
-        left,
+        artifact_stamps(&rig),
         vec![2_000, 4_000, 5_000, 6_000, WALL],
         "只许删最老的那几份：用户正在恢复的那份（2_000）必须留下，而清理要真的发生"
     );
     assert!(picked.exists(), "用户选中的产物被删掉了：{picked:?}");
+}
+
+/// **同一份产物的不同拼写也必须受保护**（A1 复审）。
+///
+/// 保护集合是按 `Path` 比较的，而"用户选中的路径"来自 P8 的文件选择器——大小写、`..` 段、
+/// 软链、`\\?\` 前缀都可能与目录项里的拼写不同。逐字节比字符串会把同一份文件判成两份，
+/// 用户选中的那份就又变成可删候选（上一条用例两侧拼写同源，测不到这一点）。
+///
+/// 这里用 **`..` 段**：Rust 的 `Path` 相等会**消掉 `.` 段**（`a/./b == a/b` 为真），
+/// 但**不消 `..`**（`a/sub/../b != a/b`，实测），所以它才是真正能撬动这条判据的拼写。
+/// 大小写/软链/`\\?\` 是同一族的另外几种拼写，规范化那段对它们同样成立。
+#[test]
+fn a_differently_spelled_pick_is_still_protected() {
+    let rig = launch();
+    let canonical_pick = six_artifacts_with_the_pick_second_oldest(&rig);
+    assert!(canonical_pick.exists(), "构造出的候选库必须在磁盘上");
+
+    // 同一个文件的**另一种拼写**：在备份目录**之外**垫一个真实目录，再用 `..` 折回来
+    // （垫在目录里会多出一个目录项，而"目录里只有产物"正是 `artifact_stamps` 与保留策略
+    // 共有的前提）。
+    let detour = rig._dir.path().join("spelling-detour");
+    std::fs::create_dir_all(&detour).unwrap();
+    let parented_pick = detour
+        .join("..")
+        .join("backups")
+        .join(canonical_pick.file_name().expect("产物有文件名"));
+    assert_ne!(
+        parented_pick.as_path(),
+        canonical_pick.as_path(),
+        "这条用例的前提就是两种拼写**不相等**（否则它测不到规范化那段）"
+    );
+    assert!(parented_pick.exists(), "两种拼写必须指向同一份真实文件");
+
+    let error = restore_from_backup(
+        &rig.app(),
+        rig.broadcaster(),
+        &parented_pick,
+        Some(&rig.backup_dir),
+        &rig.clock_source(),
+    )
+    .expect_err("迁移后仍没有库身份的候选库必须让提交失败");
+    assert_eq!(error.code(), "STORAGE_ERROR");
+
+    // 与上一条用例同一组期望：受影响的那份（2_000）还在，清理照常发生。
+    assert_eq!(
+        artifact_stamps(&rig),
+        vec![2_000, 4_000, 5_000, 6_000, WALL],
+        "拼写不同也必须认成同一份：2_000 不许被删，1_000/3_000 照旧被清理"
+    );
+    assert!(
+        canonical_pick.exists(),
+        "用户的产物（另一种拼写）被删掉了：{canonical_pick:?}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

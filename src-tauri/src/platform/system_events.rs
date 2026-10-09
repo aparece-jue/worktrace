@@ -539,14 +539,16 @@ mod windows_source {
                 //   同一件事没有信息量。
                 WTSUnRegisterSessionNotification(hwnd);
                 // `DestroyWindow` 是这里**唯一**会留下可观察残留的一步：失败 ⇒ 窗口还在，
-                // 系统还会往一个已经没有消息循环的线程投广播。它必须留痕：dev/test 下
-                // 立刻红（`debug_assert`），release 下至少有一行 stderr。诊断落点里没有
-                // 这条记录名，而平台层不该凭空造业务事件（口径见 P6 终审 M-3：release 的
-                // Windows 子系统没有控制台，`eprintln!` 只是"好过什么都没有"）。
+                // 系统还会往一个已经没有消息循环的线程投广播。它必须留痕，但**只能是不
+                // 会 panic 的痕迹**：这段跑在事件线程的退出路径上，若线程正在展开（`run`
+                // panic 之后才走到 `drop(source)`），`Drop` 里再 panic 一次就是**整个进程
+                // abort**——那会把"一次收尾失败"升级成"测试进程/应用直接死掉"。
+                // ⇒ 只打一行 stderr（release 的 Windows 子系统没有控制台，见
+                // `platform::diagnostics` 的模块头；这条路径没有诊断落点，平台叶子也不该
+                // 凭空造业务事件）。**不要**在这里补 `debug_assert!`。
                 if DestroyWindow(hwnd) == 0 {
                     let error = std::io::Error::last_os_error();
                     eprintln!("[worktrace] system events: DestroyWindow failed: {error}");
-                    debug_assert!(false, "DestroyWindow 收尾失败：{error}");
                 }
                 UnregisterClassW(class.as_ptr(), GetModuleHandleW(std::ptr::null()));
             }

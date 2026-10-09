@@ -786,6 +786,47 @@ fn the_literal_scanner_sees_every_string_shape_and_ignores_plain_code() {
     );
 }
 
+/// **游离引号不得翻转引号配对**（A2 复审的可失败形态）。
+///
+/// 三类"游离引号"各一条，后面那句真字面量**必须仍然被抓到**。修复前（按引号朴素配对的
+/// 版本）这三种形态**全都静默漏报**：字符字面量 `'"'` 里的引号会与后面真字面量的**开引号**
+/// 配成一对，于是 `task.title` 落进"间隙"、永不被扫描 —— 那正是"零命中"变成假绿的路。
+#[test]
+fn the_literal_scanner_survives_stray_quotes() {
+    let strays = [
+        // ① 字符字面量里的引号。
+        "let q = '\"'; let s = \"task.title\";",
+        // ② 块注释里的引号（Rust 的块注释可嵌套）。
+        "/* 注释里的 \" 与 /* 嵌套 */ 也是 */ let s = \"task.title\";",
+        // ③ 行尾注释里的落单引号。
+        "let x = 1; // 行尾注释里的 \"\nlet s = \"task.title\";",
+    ];
+    for stray in strays {
+        let literals = string_literals(stray);
+        assert!(
+            literals
+                .iter()
+                .any(|(_, literal)| literal.contains("task.title")),
+            "游离引号翻转了配对 ⇒ 后面的真字面量被静默漏掉：{stray:?} → {literals:?}"
+        );
+        // 反过来：注释/字符字面量里的内容**不**算字面量（别把注释算成文案）。
+        assert!(
+            !literals
+                .iter()
+                .any(|(_, literal)| literal.contains("注释里的") || literal.contains("嵌套")),
+            "注释内容不该被当成字面量：{stray:?} → {literals:?}"
+        );
+    }
+}
+
+/// 正控**自身可失败**：喂它一段"没有收尾的普通串"（配对必然错位、把代码吞进伪字面量），
+/// 它必须炸，而不是把 `let` 当字面量内容交出去。
+#[test]
+#[should_panic(expected = "配对错位")]
+fn the_literal_scanner_control_fires_on_a_mispairing() {
+    let _ = string_literals("let s = \"abc; let x = 1;\n");
+}
+
 /// `code` 里每个**字符串字面量**的 `(起始行, 内容)`。
 ///
 /// 认三种形状：`"…"`（含带 `b` 前缀的字节串）、`r"…"`、`r#"…"#`（`#` 任意多个，
@@ -795,11 +836,28 @@ fn the_literal_scanner_sees_every_string_shape_and_ignores_plain_code() {
 /// 两条刻意的口径：
 /// - **不还原转义**：判据是"这段英文出现在某个字面量里"，还原只会多一层可能与事实
 ///   不符的推断（`\n` 之流对本次的片段没有影响）；返回的是去掉引号的原始内容。
-/// - **不认字符字面量 `'…'`**：本次的片段都是多字符词组，一个 `char` 装不下；而把
-///   `'`（生命周期、泛型里到处都是）当字面量起点会造出大量假边界。
+/// - **不返回字符字面量的内容**：但**必须显式跳过** `'…'`——见下。
 ///
-/// 已知边界：`src_rust_sources` 只剔**整行**注释，所以**行尾注释**里被引号包住的片段
-/// 仍会算命中——那一边是"多报"而不是"漏报"，宁可让人来看一眼。
+/// # 为什么必须跳过字符字面量与注释（A2 复审的 Important-minor）
+///
+/// 本函数是**按引号配对**取字面量的（每个引号配下一个未转义引号），所以源码里任何一个
+/// **游离引号**都会把配对翻转：其后的真字面量整段落进"间隙"、**永远不被扫描**（静默漏报，
+/// 这是最坏的一种——"零命中"变成假绿），同一错位还会把代码吞进伪字面量（误报）。
+/// 三类来源都实测过（`the_literal_scanner_survives_stray_quotes`）：字符字面量 `'"'`、
+/// 块注释里的 `"`、行尾注释里的落单 `"`。
+///
+/// ⇒ 逐一跳过：块注释（Rust 允许嵌套）、行注释（跳到行尾）、字符字面量 `'x'` / `'\n'` /
+/// `'\''` / `'\u{…}'`。**这不是因为"一个 `char` 装不下本次的片段"**（那是错的理由），
+/// 而是因为它的引号会翻转配对。生命周期 `'a` 不会被误吞：检测要求第三个字节就是 `'`
+/// （或第二字节是 `\`），而 `'a` 后面跟的是标识符字符。
+///
+/// 只剔**整行**注释的那一步在 [`src_rust_sources`] 里；本函数另外把**行尾注释**也跳过
+/// （注释里的引号既不配对、也不该算"回潮的文案"）。
+///
+/// # 正控（同一轮复审）
+///
+/// 配对若还是错位，被吞进来的"字面量"里就会出现 [CODE_MARKERS] 这些**代码片段**
+/// （它们在真实语料上零命中）⇒ 这里直接炸，而不是交出一份"零命中"的假绿结果。
 fn string_literals(code: &str) -> Vec<(usize, String)> {
     fn line_of(code: &str, at: usize) -> usize {
         code[..at].matches('\n').count() + 1
@@ -809,6 +867,55 @@ fn string_literals(code: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
+        // 块注释（可嵌套）：整段跳过，里面的引号不参与配对。
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let mut depth = 1usize;
+            let mut j = i + 2;
+            while j < bytes.len() && depth > 0 {
+                if bytes[j..].starts_with(b"/*") {
+                    depth += 1;
+                    j += 2;
+                } else if bytes[j..].starts_with(b"*/") {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            i = j;
+            continue;
+        }
+        // 行尾注释：跳到行尾。`//` 出现在字面量里的情况不会走到这里（字面量在上面的
+        // 循环里已经被整段取走）。
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            i = match bytes[i..].iter().position(|byte| *byte == b'\n') {
+                Some(offset) => i + offset + 1,
+                None => bytes.len(),
+            };
+            continue;
+        }
+        // 字符字面量：`'x'` / `'\n'` / `'\''` / `'\u{…}'` 整个跳过（内容不进结果）。
+        if bytes[i] == b'\'' {
+            if bytes.get(i + 1) == Some(&b'\\') {
+                // 转义形式：先跳过"反斜杠 + 被转义的那个字符"，再找收尾引号。
+                let mut j = (i + 2).min(bytes.len());
+                if j < bytes.len() {
+                    j += 1;
+                }
+                while j < bytes.len() && bytes[j] != b'\'' {
+                    j += 1;
+                }
+                if j < bytes.len() {
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            if bytes.get(i + 2) == Some(&b'\'') && bytes.get(i + 1) != Some(&b'\n') {
+                i += 3;
+                continue;
+            }
+        }
         // 原始字面量：`r"…"` / `r#"…"#`（可选 `b` 前缀）。
         let after_prefix = if bytes[i] == b'r' {
             Some(i + 1)
@@ -852,8 +959,32 @@ fn string_literals(code: &str) -> Vec<(usize, String)> {
         }
         i += 1;
     }
+
+    // 正控：配对错位的兜底（见上面的文档）。
+    for (line, literal) in &out {
+        if let Some(marker) = CODE_MARKERS
+            .iter()
+            .find(|marker| literal.contains(**marker))
+        {
+            panic!(
+                "字符串字面量扫描疑似**配对错位**：第 {line} 行的\"字面量\"里有代码片段 {marker:?} \
+                 ⇒ 引号配对已经翻转（字符字面量/注释里的游离引号是常见原因），它后面的真字面量会\
+                 被静默漏掉。先修扫描器，再信这次扫描的\"零命中\"。片段内容：{:?}",
+                literal.chars().take(120).collect::<String>()
+            );
+        }
+    }
     out
 }
+
+/// 只可能出现在**代码**里的片段：真字面量的内容不该含它们（在 `src/**/*.rs` 的**全部**
+/// 字面量上实测零命中）。它们是 [`string_literals`] 那个正控的判据——**不是**给
+/// `retired` 用的禁用词表。
+///
+/// 挑这几个是因为"代码特征强、正常文案弱"：`let `/`fn `/`pub ` 是语句与定义开头，
+/// `self.`/`();`/` == ` 是表达式片段。代价是理论上可能误伤一条含这些词的英文文案——
+/// 那时正控会炸在一条**可读**的消息上（说明怎么区分真字面量与配对错位），不是静默放过。
+const CODE_MARKERS: [&str; 6] = ["let ", "fn ", "pub ", "self.", "();", " == "];
 
 /// `TagNameTaken` 的两件事必须分开：字段留**代码里的取值**（诊断与 T6 的结构化载荷要用），
 /// 只有面向用户的 `Display` 走 `zh_kind` 翻成中文（术语见 99-glossary §5）。
