@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use worktrace_lib::commands;
+use worktrace_lib::envelope::WriteEnvelope;
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::{Clock, ClockSample, FakeClock, SampleError};
 use worktrace_lib::services::backup::{
@@ -38,6 +39,7 @@ use worktrace_lib::services::bootstrap::{
     lock_app, startup, MaintenancePhase, NoProbe, RunningApp, SharedApp, Startup, StartupConfig,
 };
 use worktrace_lib::services::events::{Broadcaster, EventEnvelope, EventSink};
+use worktrace_lib::services::recovery::DiscardSessionRequest;
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta;
 use worktrace_lib::storage::migrations::{current_version, migrate, SCHEMA_VERSION};
@@ -526,6 +528,19 @@ fn during_maintenance_the_runtime_is_absent_and_writes_are_refused() {
     let rig = launch();
     create_task(&rig, "维护前的事实").unwrap();
     let app = rig.app();
+    // 一条**正在跑**的会话：下面那条被拒的命令（作废整次）在正常路径上会写一条
+    // `time_edit` 审计 —— 这样"无审计"这条断言才有判别力（在 `create_task` 上断等于恒真，
+    // 它本来就不写审计：评审 Minor 4）。
+    let session = start_timer(&rig);
+    let session_version: i64 = rig
+        .db()
+        .connection()
+        .query_row(
+            "SELECT row_version FROM work_session WHERE id = ?1",
+            [&session],
+            |row| row.get(0),
+        )
+        .unwrap();
     let before = rig.facts();
     let epoch = rig.epoch();
 
@@ -581,6 +596,17 @@ fn during_maintenance_the_runtime_is_absent_and_writes_are_refused() {
         )
         .expect_err("维护态期间不得受理写入");
         assert_restore_refusal(&refused);
+
+        // 再来一条**会写审计**的写命令（作废整次）：它被拒 ⇒ `time_edit` 一行都不许多。
+        let refused = state
+            .discard_session(
+                WriteEnvelope::for_update(epoch.clone(), session_version),
+                DiscardSessionRequest {
+                    session_id: session.clone(),
+                },
+            )
+            .expect_err("维护态期间不得受理会写审计的写入");
+        assert_restore_refusal(&refused);
     }
 
     // 被拒的用户命令**四件事**：revision 不变、无新行、无审计、既有记录字段一致。
@@ -604,6 +630,44 @@ fn during_maintenance_the_runtime_is_absent_and_writes_are_refused() {
     let outcome =
         commit_restore(&app, rig.broadcaster(), &swap, &rig.clock_source()).expect("③-a 提交");
     assert!(outcome.committed);
+
+    // **正控**：出了维护态，同一条命令成功并且**真的写了审计** ⇒ 上面那条
+    // "维护态零审计"是被判据挡住的，而不是这条命令本来就不写审计。
+    let audit_before = rig.facts().audit;
+    let (version_now, epoch_now) = {
+        let state = lock_app(&app);
+        let db = state.db().unwrap();
+        (
+            db.connection()
+                .query_row(
+                    "SELECT row_version FROM work_session WHERE id = ?1",
+                    [&session],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            meta::read_meta(db.connection())
+                .unwrap()
+                .unwrap()
+                .data_epoch,
+        )
+    };
+    {
+        // 恢复之后那条会话是外来事实（`recovering`）——作废整次本来就接它。
+        let mut state = lock_app(&app);
+        state
+            .discard_session(
+                WriteEnvelope::for_update(epoch_now, version_now),
+                DiscardSessionRequest {
+                    session_id: session.clone(),
+                },
+            )
+            .expect("维护结束之后同一条命令应当成功");
+    }
+    assert_eq!(
+        rig.facts().audit,
+        audit_before + 1,
+        "这条命令在正常路径上写审计（正控）"
+    );
 }
 
 /// 计划："维护态期间到达的写命令与采样拍都不能写新库"。
@@ -853,6 +917,25 @@ fn a_successful_restore_commits_a_new_epoch_and_a_new_run() {
     }
 
     // 广播：一条带**新 epoch** 的 `domain.changed`（客户端据此重新握手）。
+    // **回滚副本可被发现**（fix round 1 的 Minor 1）：提交成功后它是"恢复前那个世界"
+    // 的唯一完整副本，路径必须从结果里拿得到，而且要真的在磁盘上。
+    let rollback = outcome
+        .rollback
+        .clone()
+        .expect("提交路径必须报出回滚副本的路径");
+    assert!(
+        rollback.exists(),
+        "回滚副本必须真的在磁盘上：{}",
+        rollback.display()
+    );
+    assert_eq!(
+        rollback,
+        rig.db_path.with_file_name(format!(
+            "{}.restore-rollback",
+            rig.db_path.file_name().unwrap().to_string_lossy()
+        ))
+    );
+
     let broadcast = rig.events();
     let last = broadcast.last().expect("恢复完成必须广播一条");
     assert_eq!(last.event, "domain.changed");
@@ -1249,12 +1332,28 @@ fn after_a_restore_the_driver_keeps_running_against_the_new_runtime() {
 #[test]
 fn abort_restore_reinstalls_the_original_library() {
     let rig = launch();
+    create_task(&rig, "原库独有的事实").unwrap();
     let old_epoch = rig.epoch();
     let old_run = rig.run_id();
     let app = rig.app();
 
-    let runtime = begin_restore(&app).expect("进入维护态");
+    // 候选库 = 当前库的拷贝，再塞一条**只有候选库才有**的事实。
+    // 没有这条标记，"装回原库"与"留着候选库"在断言上不可区分
+    // （候选是原库的 `VACUUM INTO` 拷贝，epoch/行数全同：评审 Minor 3）。
     let artifact = take_backup(&rig);
+    {
+        let candidate = Db::open(&artifact).unwrap();
+        candidate
+            .connection()
+            .execute(
+                "INSERT INTO task(id,title,status,row_version,created_at,updated_at)
+                 VALUES('t-candidate','候选库独有的事实','Ready',0,1000,1000)",
+                [],
+            )
+            .unwrap();
+    }
+
+    let runtime = begin_restore(&app).expect("进入维护态");
     let swap = prepare_and_swap(
         runtime,
         &artifact,
@@ -1263,6 +1362,12 @@ fn abort_restore_reinstalls_the_original_library() {
     )
     .unwrap_or_else(|failure| panic!("② 段应当成功：{:?}", failure.error));
     assert!(swap.is_swapped(), "② 段成功之后文件已经切换过");
+    // 切换之后主库路径上**就是候选库**：那条独有事实在。
+    assert_eq!(
+        rig.scalar("SELECT COUNT(*) FROM task WHERE id = 't-candidate'"),
+        1,
+        "切换之后主库路径上应当是候选库"
+    );
 
     let outcome =
         abort_restore(&app, rig.broadcaster(), swap, &rig.clock_source()).expect("③-b 回滚");
@@ -1270,10 +1375,82 @@ fn abort_restore_reinstalls_the_original_library() {
     assert_eq!(outcome.data_epoch, old_epoch, "回滚保留原 epoch");
     assert_ne!(outcome.run_id, old_run, "回滚也要建新 run");
     assert_eq!(rig.epoch(), old_epoch);
+    assert_eq!(
+        outcome.rollback, None,
+        "回滚路径上副本被消耗掉（改名回主库路径），所以没有可发现的副本"
+    );
+    // **判别力**：候选库那条独有事实必须不在（把 `rollback_files` 改成空操作，
+    // 这条断言会红），而原库自己的事实必须在。
+    assert_eq!(
+        rig.scalar("SELECT COUNT(*) FROM task WHERE id = 't-candidate'"),
+        0,
+        "回滚之后主库路径上必须**不是**候选库"
+    );
+    assert_eq!(
+        rig.scalar("SELECT COUNT(*) FROM task WHERE title = '原库独有的事实'"),
+        1,
+        "原库的事实必须还在"
+    );
     assert!(
         rig.db().connection().is_autocommit(),
         "原库可以正常打开（连接不是挂在半个事务上）"
     );
     let last = rig.events().last().cloned().expect("回滚要广播");
     assert_eq!(last.data_epoch, old_epoch);
+}
+
+/// **恢复流程永不造库**（fix round 1 的 Important）：主库路径上没有库时回滚必须**拒绝**
+/// 打开它。
+///
+/// 为什么这是必需的：`Db::open` 走 `Connection::open`，文件不存在时它会**创建一个空文件**；
+/// 而空文件的 `user_version = 0` 会被下一次启动当成"需要迁移的旧库"⇒ 备份它（空的）→
+/// 迁移 → `init_meta` ⇒ 用户的数据被静默换成一间空库。
+///
+/// 形态是可达的：② 段失败之后（切换从未发生、`swapped = false`）原库文件若因为任何
+/// 外部原因不在了（杀毒隔离、同步工具、用户手动删），`abort_restore` 就是最后一道门。
+#[test]
+fn abort_restore_refuses_to_create_a_missing_library() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+    let app = rig.app();
+
+    let runtime = begin_restore(&app).expect("进入维护态");
+    let corrupt = rig._dir.path().join("corrupt.db");
+    std::fs::write(&corrupt, b"this is not a sqlite database at all").unwrap();
+    let failure = prepare_and_swap(
+        runtime,
+        &corrupt,
+        Some(&rig.backup_dir),
+        &rig.clock_source(),
+    )
+    .expect_err("坏候选库必须被拒绝");
+    assert!(!failure.swap.is_swapped(), "切换从未发生");
+
+    // 外部原因让原库文件不见了（用例直接删掉它来模拟）。
+    std::fs::remove_file(&rig.db_path).unwrap();
+
+    let error = abort_restore(&app, rig.broadcaster(), failure.swap, &rig.clock_source())
+        .expect_err("主库路径上没有库时，回滚不得凭空造一个");
+
+    // 三件事一起断言，**先断最要命的那条**：
+    // ② `Db::open` 没有替我们创建一个空文件（`Connection::open` 的默认行为）；
+    assert!(
+        !rig.db_path.exists(),
+        "恢复流程不得创建数据库文件（空库会被下一次启动当成待迁移的旧库 ⇒ 静默换库）"
+    );
+    // ① 错误点明回滚副本的路径，用户才找得到数据；
+    assert_eq!(error.code(), "STORAGE_ERROR");
+    let detail = format!("{error:?}");
+    assert!(
+        detail.contains("restore-rollback"),
+        "错误必须点明回滚副本的路径，用户才找得到数据：{detail}"
+    );
+    // ③ 进程**不留在"以为库是好的"状态**（仍在维护态、运行态不在手 ⇒
+    //    任何写入都被 `DATA_RESTORE_IN_PROGRESS` 拒）。
+    let state = lock_app(&app);
+    assert!(
+        state.maintenance().is_some(),
+        "拿不到原库 ⇒ 留在维护态（拒绝一切写入，而不是打开一间空库）"
+    );
+    assert!(!state.runtime_present());
 }

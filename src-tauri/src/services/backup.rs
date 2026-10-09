@@ -103,6 +103,12 @@ const PRE_MIGRATION_STAGE: &str = "pre-migration backup";
 /// 恢复候选库（旧版本 schema）迁移前那次备份的阶段标记。
 const PRE_RESTORE_STAGE: &str = "pre-restore backup";
 
+/// 恢复完成的**正式诊断记录名**（提交与回滚各写一条，含库身份、原身份与回滚副本路径）。
+///
+/// 与维护态/故障态跃迁写的是同一个落点（`AppState.diagnostics` ⇒ `StartupConfig.diagnostic_log`）：
+/// release 的 Windows 子系统没有控制台，这条记录是"那天到底恢没恢复、副本在哪"的唯一线索。
+const RESTORE_DIAGNOSTIC: &str = "restore.finished";
+
 /// 备份阶段失败的统一形状：`detail` 带阶段标记，便于把「备份失败」与后续动作分开；
 /// 用户文案仍走 `AppError::message()`（`Storage` 的 detail 不进用户可见文案）。
 fn stage_error(stage: &str, e: AppError) -> AppError {
@@ -284,6 +290,13 @@ pub struct RestoreOutcome {
     pub recovery: RecoveryScan,
     /// 候选库 schema 偏旧时、迁移前那份一致备份的产物路径（`None` = 没走到那条分支）。
     pub migration_backup: Option<PathBuf>,
+    /// **恢复之前那个世界**的完整副本（`<db>.restore-rollback`）；`None` = 没有副本留下。
+    ///
+    /// 为什么必须报出来（fix round 1 的 Minor 1）：提交成功后这份副本**刻意保留**，
+    /// 而它是"误恢复"唯一能退回的地方；不报路径的话，`rollback_path()` 就是个零调用者，
+    /// 用户只能靠翻库目录才知道它存在。产品口径（保留多久、怎么清）留给 P8。
+    /// 回滚路径上是 `None`：那时副本已经被改名回主库路径（被消耗掉了）。
+    pub rollback: Option<PathBuf>,
 }
 
 /// 切换前后的路径账：③ 的回滚路径要用它把原库改回来。
@@ -353,6 +366,12 @@ impl RestoreSwap {
     ///
     /// 第一步失败（原库改不出去）⇒ 什么都没变；第二步失败 ⇒ **把原库改回来**再报错。
     /// 副作用只在"两步都成功"之后才置 `swapped`。
+    ///
+    /// **还原那一步不许吞错误**（fix round 1 的 Important）：第二步失败之后主库路径上
+    /// **已经没有原库了**（它刚被改名为回滚副本）。如果"改回来"也失败而我们照旧返回
+    /// 一个"切换没发生"的错误，调用方会以为原库还在主库路径上——而 `Db::open` 会
+    /// **创建一个空文件**，下一次启动就把这间空库当成了用户的数据（静默的数据丢失）。
+    /// 所以这条路径返回的错误**必须点明原库在哪**，让用户/接线方找得到它。
     fn swap_files(&mut self, staged: &Path) -> Result<(), AppError> {
         let had_original = self.target.exists();
         if had_original {
@@ -371,8 +390,19 @@ impl RestoreSwap {
             }
             Err(error) => {
                 if had_original {
-                    let _ = move_sidecars(&self.rollback, &self.target);
-                    let _ = std::fs::rename(&self.rollback, &self.target);
+                    // 撤销：把原库改回主库路径。两步都可能失败（同一类 IO 故障），
+                    // 任何一步失败都**原样报出去**，绝不吞。
+                    let undone = move_sidecars(&self.rollback, &self.target).and_then(|()| {
+                        std::fs::rename(&self.rollback, &self.target)
+                            .map_err(|e| restore_io("swap original back", e))
+                    });
+                    if let Err(undo) = undone {
+                        return Err(restore_io_at(
+                            "swap candidate in (and the original could not be moved back)",
+                            &self.rollback,
+                            undo,
+                        ));
+                    }
                 }
                 Err(restore_io("swap candidate in", error))
             }
@@ -471,7 +501,17 @@ pub fn begin_restore(app: &SharedApp) -> Result<Runtime, AppError> {
     let mut state = lock_app(app);
     let entered_at_ms = state.now_ms()?;
     state.begin_maintenance(MaintenancePhase::Restore, entered_at_ms)?;
-    state.take_runtime()
+    match state.take_runtime() {
+        Ok(runtime) => Ok(runtime),
+        // **加固**（fix round 1 的 Minor 7）：`begin_maintenance` 已经置位而运行态取不出来时，
+        // 不能把维护态**永久闩住**（那会让所有命令永远拿到 `DATA_RESTORE_IN_PROGRESS`、
+        // 且没有任何回滚路径）。今天不可达（两者在同一把锁的同一个临界区里），
+        // 但一行清位就能把这条"闩死"的可能性关掉。
+        Err(error) => {
+            state.end_maintenance();
+            Err(error)
+        }
+    }
 }
 
 /// ② 段：关连接 → 候选库拷到同目录暂存 → 完整性/外键/版本验证（旧版本先备份再迁移）
@@ -664,10 +704,13 @@ pub fn commit_restore(
         tx.commit().map_err(map_sqlite)?;
         epoch
     };
-    debug_assert_ne!(
-        rotated_epoch, swap.previous_data_epoch,
-        "恢复提交必须生成全新的 data_epoch"
-    );
+    // **真判据**（fix round 1：原先只有 `debug_assert_ne!`，release 下不生效）：
+    // 换库的提交必须生成全新身份，否则"旧 epoch 的请求被拒"这条判据会形同虚设。
+    if rotated_epoch == swap.previous_data_epoch {
+        return Err(AppError::Storage {
+            detail: "restore: commit did not rotate the data_epoch".to_string(),
+        });
+    }
 
     let identity = rebuild_and_install(
         &mut state,
@@ -680,13 +723,34 @@ pub fn commit_restore(
         &swap.previous_data_epoch,
     )?;
     // 事务里 rotate 出来的那个 epoch 就是**库最终的身份**（后面的两步重扫不动它）。
-    debug_assert_eq!(identity.data_epoch, rotated_epoch);
+    // 真判据（fix round 1：提交路径原先只有 `debug_assert_ne!`）：身份没换掉就等于
+    // "报了新 epoch 却没落库"，与 4a 给 `rotate_epoch` 加影响行数判据是同一条口径。
+    if identity.data_epoch != rotated_epoch {
+        return Err(AppError::Storage {
+            detail: format!(
+                "restore: committed library identity disagrees with the rotated epoch: \
+                 {} != {rotated_epoch}",
+                identity.data_epoch
+            ),
+        });
+    }
+    state.diagnostics().record(
+        RESTORE_DIAGNOSTIC,
+        &format!(
+            "outcome=committed run_id={run_id} data_epoch={} previous_data_epoch={} rollback={}",
+            identity.data_epoch,
+            swap.previous_data_epoch,
+            swap.rollback.display()
+        ),
+    );
     Ok(RestoreOutcome {
         committed: true,
         data_epoch: identity.data_epoch,
         run_id,
         recovery: identity.recovery,
         migration_backup: swap.migration_backup.clone(),
+        // 提交成功 ⇒ 原库留成回滚副本（**不删**），路径报给调用方。
+        rollback: Some(swap.rollback.clone()),
     })
 }
 
@@ -705,6 +769,26 @@ pub fn abort_restore(
 ) -> Result<RestoreOutcome, AppError> {
     if swap.swapped {
         swap.rollback_files()?;
+    }
+
+    // **恢复流程永不造库**（fix round 1 的 Important）：主库路径上必须**已经**有一份库，
+    // 否则 `Db::open` 会替我们创建一个**空文件**，而空文件的 `user_version = 0` 会被
+    // 下一次启动当成"需要迁移的旧库"——备份它（空的）→ 迁移 → `init_meta` ⇒
+    // 用户的数据被静默换成一间空库。
+    //
+    // 这条判据覆盖的正是那条"文件系统连续故障"的路径：切换改名成功、还原改名失败时
+    // 主库路径上是空的，而原库躺在回滚副本里（错误文案由 `swap_files` 给出）。
+    // 拿不到原库时**留在维护态**：所有命令被拒、没有任何写入落进错误的地方——
+    // 这比"以为库是好的、其实打开了空库"诚实得多。
+    if !swap.target.exists() {
+        return Err(AppError::Storage {
+            detail: format!(
+                "restore: refusing to open a database that is not there: {}; \
+                 the original library should be at {} — move it back before retrying",
+                swap.target.display(),
+                swap.rollback.display()
+            ),
+        });
     }
 
     let mut state = lock_app(app);
@@ -729,10 +813,17 @@ pub fn abort_restore(
         tx.commit().map_err(map_sqlite)?;
         meta.data_epoch
     };
-    debug_assert_eq!(
-        kept_epoch, swap.previous_data_epoch,
-        "回滚路径必须保留原 data_epoch"
-    );
+    // **真判据**（fix round 1：原先是 `debug_assert_eq!`，release 下不生效）：回滚路径
+    // 必须保留原库的身份。不成立说明"主库路径上那份库不是原来那份"——那是最严重的一类
+    // 静默失败（"恢复没发生"是假的），所以照实报错，不靠断言。
+    if kept_epoch != swap.previous_data_epoch {
+        return Err(AppError::Storage {
+            detail: format!(
+                "restore: rollback kept the wrong library identity: expected {}, found {kept_epoch}",
+                swap.previous_data_epoch
+            ),
+        });
+    }
 
     let identity = rebuild_and_install(
         &mut state,
@@ -744,12 +835,21 @@ pub fn abort_restore(
         false,
         &swap.previous_data_epoch,
     )?;
+    state.diagnostics().record(
+        RESTORE_DIAGNOSTIC,
+        &format!(
+            "outcome=rolled_back run_id={run_id} data_epoch={} previous_data_epoch={}",
+            identity.data_epoch, swap.previous_data_epoch
+        ),
+    );
     Ok(RestoreOutcome {
         committed: false,
         data_epoch: identity.data_epoch,
         run_id,
         recovery: identity.recovery,
         migration_backup: swap.migration_backup.clone(),
+        // 回滚路径上那份副本**被消耗掉了**（改名回主库路径），所以没有可发现的副本。
+        rollback: None,
     })
 }
 
@@ -832,6 +932,20 @@ fn clock_unavailable(detail: &str) -> AppError {
 fn restore_io(stage: &str, e: std::io::Error) -> AppError {
     AppError::Storage {
         detail: format!("restore: {stage}: {e}"),
+    }
+}
+
+/// 与 [`restore_io`] 相同，外加一句**原库在哪里**——只在"原库不在主库路径上"的失败里用。
+///
+/// 为什么单列一条：这类失败之后用户的数据**没有丢**，只是躺在一个可预期的路径上
+/// （`<db>.restore-rollback`）。错误文案里必须写出那个路径，否则现象是
+/// "应用起不来 + 库目录里多一个看不懂的文件"。
+fn restore_io_at(stage: &str, stranded: &Path, cause: AppError) -> AppError {
+    AppError::Storage {
+        detail: format!(
+            "restore: {stage}: {cause:?}; the original library is at {} (rename it back to the database path before restarting)",
+            stranded.display()
+        ),
     }
 }
 
