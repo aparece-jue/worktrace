@@ -15,6 +15,7 @@
 - `.../00-architecture.zh.md` §5（快照、去重、维护态）
 
 **依赖的前置计划：** P3、P5、P6、P7。2026-10-08：P3/P5 服务与 P7 核心已交付，P6 尚未实施，完整平台验收仍未完成。Today/恢复/导出 IPC 包装与页面由 P8 实施；备份恢复仍以 P6 服务交付为硬前置。
+**2026-10-10 更新（前置状态）：** **P6 核心与后续存量清理已交付并推送**（核对基线 `a92541f`；Rust 753 passed / 前端 142 / 八项门禁全 0）。上面那句「P6 尚未实施」只作历史记录，**P8 的硬前置已满足**；接线要求见文末「2026-10-10 P6 实现交接对齐」一节（含三条硬约束）。
 
 **边界（不要越界）：**
 - **HUD 与全局捕获热键属 V0.1b**（F-012/F-013），不做。
@@ -229,7 +230,7 @@
 | 8 | `attention_overview` | epoch 请求 → `AttentionOverview`（P3 计划 **§0.5**；服务入口 `services::recovery::attention_overview`） | **只读**：同一读事务取 `data_epoch`/`revision`；恢复页与"待确认"栏的**唯一数据源**（P3「下游接口」第 2 条） |
 | 9 | `export_data` | `ExportRequest`（按 format 区分：json 带 from/to，markdown 带可选 anchor；两者均带 timezone/expected_data_epoch） → `ExportResult { path: String, bytes: u64, data_epoch: String, revision: i64 }` | **P8 自己的**（Task 3）：调 P5 的生成函数（`services/export.rs`，返回字符串/字节）→ 写入 `<app_data_dir>/exports/` → 返回**真实绝对路径**（界面用 `revealItemInDir` 打开所在位置）。P5 内容生成服务已交付，IPC 与落盘尚未实施；json 转发 `StatsRangeQuery`，markdown 转发 `WeeklyQuery`，不能用任意范围冒充服务算出的自然周 |
 | 10 | `backup` | `BackupRequest { expected_data_epoch: String }` → `BackupResult { path: String, bytes: u64, data_epoch: String, revision: i64 }` | **写**（它产生一份库副本，**不修改业务事实** ⇒ 不加 `revision`、不广播 `domain.changed`；`WriteEnvelope` 只用 `expected_data_epoch` 做身份校验，`expected_row_version: None`）。服务入口 = P6 的 `services/backup.rs`（`VACUUM INTO`，见 P6 Task 1 的裁决）；**维护态期间被 `guard_writable` 拒绝**（P6 的 I1）。**进程内串行**：备份走同一把锁的短临界区，不放长活到锁外 |
-| 11 | `restore` | `RestoreRequest { backup_path: String, expected_data_epoch: String, confirmed: bool }` → `RestoreResult { data_epoch: String, revision: i64, applied: bool }` | **写、且是全项目唯一的危险操作**：① `confirmed` 必须为 `true`（前端的**二次确认**是硬前置，命令层再校验一次，缺它就拒绝——不要只靠界面）；② 服务入口 = P6 的三段流程（`begin_restore` →（锁外）`prepare_and_swap` → `commit_restore`/`abort_restore`），**这是唯一不进 `run_command` 单临界区形状的命令**（见下「执行骨架」）；③ 成功后返回**新 `data_epoch`**，前端据此重新握手（旧展示必须丢）；④ 失败（回滚成功）返回 `applied: false` + **原 `data_epoch`**，**不是错误**——界面按"恢复未生效"提示，进程不死 |
+| 11 | `restore` | `RestoreRequest { backup_path: String, expected_data_epoch: String, confirmed: bool }` → `RestoreResult { data_epoch: String, revision: i64, applied: bool }`（**`applied` 在成功时恒为 `true`**：服务失败一律返回 `Err`，没有可达的正常 `false`；且 `revision` 需 P8 在锁内冻结，见文末 2026-10-10 节） | **写、且是全项目唯一的危险操作**：① `confirmed` 必须为 `true`（前端的**二次确认**是硬前置，命令层再校验一次，缺它就拒绝——不要只靠界面）；② 服务入口 = P6 的三段流程（`begin_restore` →（锁外）`prepare_and_swap` → `commit_restore`/`abort_restore`），**这是唯一不进 `run_command` 单临界区形状的命令**（见下「执行骨架」）；③ 成功后返回**新 `data_epoch`**，前端据此重新握手（旧展示必须丢）；④ 以 P6 当前 `restore_from_backup` 为准：恢复失败即使回滚成功也返回原始 `Err(cause)`；回滚失败返回回滚错误，维护态可能保留。不得把失败伪装成正常结果；回滚成功后可重新握手，回滚失败则显示明确的失败状态与诊断位置 |
 
 | 12 | `stats_today` | `TodayQuery { expected_data_epoch, timezone }` → `TodayView`（P5 当前服务 DTO） | 转发 `AppState::stats_today`；一次响应含五项及 `data_epoch`/`revision`/`as_of`/范围/时区。正常只读，异常采样可能先提交 P2 恢复事务再报错；不得由命令层补采时钟或重算数字 |
 
@@ -308,3 +309,17 @@ P1/P2/P3/P4/P5/P7 核心已交付，P6/P8 未实施。P5 复审修复及当前�
 - [ ] **恢复 DTO**：P3 服务报告与请求当前不全部具备 serde；P8 在命令 DTO 层显式解析字符串枚举并映射服务类型，响应使用可序列化 DTO，测试字段与权威版本。不能假设一行转发即可编译，也不能为方便接线绕过现有领域校验。
 
 新增历史查询是既定历史修正页面的数据源补齐，尚未实施，不计入 P3/P5 已完成成果。P8 注册和转发契约共 13 条（24 → 37）。本节取代旧评审表中的累计计数，历史记录不作为当前计数权威。
+
+## 2026-10-10 P6 实现交接对齐
+
+P6 核心及存量清理已交付，当前核对基线 a92541f，完整八项自动门禁通过。P8 仍待实施，历史“P6 未实施”描述不作为当前状态。
+
+- [ ] Task 3 恢复命令在一次后台调用内执行 `restore_from_backup`，不能走持锁的 run_command；从 `RunningApp::clock_source()` 获取组合根提供的同源时钟，不能另建独立 SystemClock。接线测试验证恢复后的系统事件不会因单调原点不同而掉入 recovering。
+- [ ] 恢复结果按当前服务形状映射：成功取 RestoreOutcome 的 committed/data_epoch/run_id/**recovery**/rollback/migration_backup（`recovery.requires_recovery()` 就是"要不要先确认历史"的门禁）；失败保留 Err（回滚成功仍报原错误），不得假定可取得正常的 applied=false 结果。界面显示失败原因，并区分“原库已回滚可继续”与“回滚失败、运行态缺失”。后者不可永远显示“正在恢复”；显示诊断文件及安全重启指引。没有运行态时错误响应 authority=None，不能为捕获权威版本强读缺失 Db，也不能吞掉原错误统一变成维护态码。
+- [ ] 现有 RestoreOutcome **不带 revision**。要维持表中的 RestoreResult 版本信封，P8 应在 P6 的提交/回滚锁内冻结结果版本并扩展返回材料及测试；不能换库完成、放锁后再独立读取 revision 拼接旧 outcome。失败不创建伪成功信封；重新握手获取权威状态。
+- [ ] 保留并展示 outcome.rollback 路径；这是恢复前完整副本，不能当临时文件自动删除。
+- [ ] 引入第二写连接前先调整 write_tx 的事务获取/重试策略；现有单写者模型保持。open_existing 的结构改进归后续存储接线，不把它写成已交付；若实施必须验证缺失路径不创建空库与临时文件失踪窗口。
+
+上述为 P8 待实施与验收要求，不新增 P6 已完成项，也不声称实机通过。
+
+**另（前提已变，需按"做"的分支执行）**：表中 §6.3-9 那条写的是「退出事务失败的用户可见提示……**若 P6 未实施则记「未做，原因：无界面出口」**」——P6 已实施（诊断出口 `startup.failed`/`restore.failed`/`backup.prune_failed` 等已落盘），该前提不再成立 ⇒ P8 的 Task 5 **必须真的加一步**"制造一次退出失败 ⇒ 有可见提示"，不能记"未做"。
