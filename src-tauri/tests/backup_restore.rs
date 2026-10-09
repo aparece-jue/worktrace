@@ -28,9 +28,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use worktrace_lib::commands;
+use worktrace_lib::domain::session::{SessionMode, TimerKind};
 use worktrace_lib::envelope::WriteEnvelope;
 use worktrace_lib::error::AppError;
-use worktrace_lib::platform::clock::{Clock, ClockSample, FakeClock, SampleError};
+use worktrace_lib::platform::clock::{Clock, ClockSample, FakeClock, SampleError, SystemClock};
+use worktrace_lib::platform::diagnostics::Diagnostics;
 use worktrace_lib::services::backup::{
     abort_restore, backup_consistent, begin_restore, commit_restore, prepare_and_swap,
     restore_from_backup, ClockSource,
@@ -40,6 +42,7 @@ use worktrace_lib::services::bootstrap::{
 };
 use worktrace_lib::services::events::{Broadcaster, EventEnvelope, EventSink};
 use worktrace_lib::services::recovery::DiscardSessionRequest;
+use worktrace_lib::services::timer::coordinator::StartRequest;
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta;
 use worktrace_lib::storage::migrations::{current_version, migrate, SCHEMA_VERSION};
@@ -127,6 +130,9 @@ struct Rig {
     _dir: tempfile::TempDir,
     db_path: PathBuf,
     backup_dir: PathBuf,
+    /// 正式诊断落点（注入临时目录：绝不写真实数据目录）。用例读它来断言
+    /// "失败的原因有没有落盘"（P6 终审 I-2）。
+    log_path: PathBuf,
     running: Box<RunningApp>,
     sink: Arc<RecordingSink>,
     clock: Arc<SwitchableClock>,
@@ -193,6 +199,22 @@ impl Rig {
         self.sink.events.lock().unwrap().clone()
     }
 
+    /// 诊断落点（与生产同一个 `Diagnostics`，只是路径在临时目录）。
+    fn diagnostics(&self) -> Diagnostics {
+        Diagnostics::to_file(&self.log_path)
+    }
+
+    /// 诊断日志里**最后一条** `event=<名字>` 记录（没有就是 `None`）。
+    fn last_log_line(&self, event: &str) -> Option<String> {
+        let needle = format!("event={event} ");
+        std::fs::read_to_string(&self.log_path)
+            .ok()?
+            .lines()
+            .rev()
+            .find(|line| line.starts_with(&needle))
+            .map(str::to_string)
+    }
+
     fn clock_source(&self) -> ClockSource {
         clock_source(&self.clock)
     }
@@ -244,6 +266,7 @@ fn launch_with_interval(sampling_interval_ms: u64) -> Rig {
     let db_path = dir.path().join("worktrace.db");
     let lock_path = dir.path().join("instance.lock");
     let backup_dir = dir.path().join("backups");
+    let log_path = dir.path().join("worktrace.log");
 
     {
         let mut db = Db::open(&db_path).unwrap();
@@ -260,7 +283,7 @@ fn launch_with_interval(sampling_interval_ms: u64) -> Rig {
     }
 
     let clock = Arc::new(SwitchableClock::new());
-    let mut config = StartupConfig::new(&db_path, &lock_path);
+    let mut config = StartupConfig::new(&db_path, &lock_path).with_diagnostic_log(&log_path);
     config.sampling_interval_ms = sampling_interval_ms;
     let sink = Arc::new(RecordingSink::default());
     let running = match startup(
@@ -280,6 +303,7 @@ fn launch_with_interval(sampling_interval_ms: u64) -> Rig {
         _dir: dir,
         db_path,
         backup_dir,
+        log_path,
         running,
         sink,
         clock,
@@ -296,6 +320,7 @@ fn take_backup(rig: &Rig) -> PathBuf {
         version,
         &FakeClock::new(WALL, MONO),
         "test backup",
+        &rig.diagnostics(),
     )
     .expect("备份应当成功")
 }
@@ -625,6 +650,7 @@ fn during_maintenance_the_runtime_is_absent_and_writes_are_refused() {
         &artifact,
         Some(&rig.backup_dir),
         &rig.clock_source(),
+        &rig.diagnostics(),
     )
     .unwrap_or_else(|failure| panic!("② 段应当成功：{:?}", failure.error));
     let outcome =
@@ -680,10 +706,13 @@ fn sampling_ticks_during_maintenance_write_nothing() {
     let app = rig.app();
     // 有一个**正在跑**的会话：健康路径下每一拍都会 tick，30 秒到点还会写检查点。
     start_timer(&rig);
-    let before = rig.facts();
-    let events_before = rig.events().len();
 
     let runtime = begin_restore(&app).expect("进入维护态并取走运行态");
+    // **快照取在进入维护态之后**：从"记起点"到"置上维护态"之间，采样线程还可以**合法地**
+    // 跑完一拍并广播（那一刻还没进维护态）。把它算成"维护态期间的写入/广播"是假红
+    // ——这条竞态在 10ms 节拍下真的咬过一次（P6 终审修复波的门禁首跑）。
+    let before = rig.facts();
+    let events_before = rig.events().len();
 
     // 等真的过了若干拍（`ticks` 是"触发了几次"，维护态**照涨**）。
     let ticks_at_entry = rig.running.sampling_ticks();
@@ -712,6 +741,7 @@ fn sampling_ticks_during_maintenance_write_nothing() {
         &artifact,
         Some(&rig.backup_dir),
         &rig.clock_source(),
+        &rig.diagnostics(),
     )
     .unwrap_or_else(|failure| panic!("② 段应当成功：{:?}", failure.error));
     commit_restore(&app, rig.broadcaster(), &swap, &rig.clock_source()).expect("③-a 提交");
@@ -773,6 +803,7 @@ fn a_failing_sampler_cannot_bypass_maintenance() {
         &artifact,
         Some(&rig.backup_dir),
         &rig.clock_source(),
+        &rig.diagnostics(),
     )
     .unwrap_or_else(|failure| panic!("② 段应当成功：{:?}", failure.error));
     commit_restore(&app, rig.broadcaster(), &swap, &rig.clock_source()).expect("③-a 提交");
@@ -1359,6 +1390,7 @@ fn abort_restore_reinstalls_the_original_library() {
         &artifact,
         Some(&rig.backup_dir),
         &rig.clock_source(),
+        &rig.diagnostics(),
     )
     .unwrap_or_else(|failure| panic!("② 段应当成功：{:?}", failure.error));
     assert!(swap.is_swapped(), "② 段成功之后文件已经切换过");
@@ -1419,6 +1451,7 @@ fn abort_restore_refuses_a_library_whose_identity_changed() {
         &artifact,
         Some(&rig.backup_dir),
         &rig.clock_source(),
+        &rig.diagnostics(),
     )
     .unwrap_or_else(|failure| panic!("② 段应当成功：{:?}", failure.error));
     assert!(swap.is_swapped(), "② 段成功之后文件已经切换过");
@@ -1450,8 +1483,10 @@ fn abort_restore_refuses_a_library_whose_identity_changed() {
     assert_eq!(rig.events().len(), events_before, "被拒绝的回滚不得广播");
 }
 
-/// **恢复流程永不造库**（fix round 1 的 Important）：主库路径上没有库时回滚必须**拒绝**
-/// 打开它。
+/// **恢复流程的逐入口判据：主库路径上没有库时，回滚必须拒绝打开它**
+/// （fix round 1 的 Important；口径是**逐入口**而不是"永不造库"——见
+/// `services::backup` 里 `RestoreSwap::require_library_in_place` 的注释：
+/// 本模块封不住既有的 `Db::open`，所以 [commit_restore] 与 [abort_restore] 各判一次）。
 ///
 /// 为什么这是必需的：`Db::open` 走 `Connection::open`，文件不存在时它会**创建一个空文件**；
 /// 而空文件的 `user_version = 0` 会被下一次启动当成"需要迁移的旧库"⇒ 备份它（空的）→
@@ -1473,6 +1508,7 @@ fn abort_restore_refuses_to_create_a_missing_library() {
         &corrupt,
         Some(&rig.backup_dir),
         &rig.clock_source(),
+        &rig.diagnostics(),
     )
     .expect_err("坏候选库必须被拒绝");
     assert!(!failure.swap.is_swapped(), "切换从未发生");
@@ -1533,6 +1569,7 @@ fn commit_restore_refuses_to_create_a_missing_library() {
         &artifact,
         Some(&rig.backup_dir),
         &rig.clock_source(),
+        &rig.diagnostics(),
     )
     .unwrap_or_else(|failure| panic!("② 段应当成功：{:?}", failure.error));
     assert!(swap.is_swapped(), "② 段成功之后文件已经切换过");
@@ -1582,5 +1619,263 @@ fn commit_restore_refuses_to_create_a_missing_library() {
         rig.scalar("SELECT COUNT(*) FROM task WHERE title = '原库的事实'"),
         1,
         "原库的事实一条都不少"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P6 终审修复波：锁重入防线（M-2）、失败落盘（I-2）、恢复之后的同源时钟（I-1）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **恢复不得在持锁线程上开始**（P6 终审 M-2）。
+///
+/// 防线原先是 `debug_assert!`，而 release 会把它整条编译掉 ⇒ P8 一旦把恢复放进
+/// `run_command` 闭包（正持锁）里调用，现象是**静默死锁**（① 段的 `lock_app` 永远等不到）。
+/// 判据换成与 `RunningApp::shutdown` 同一条标准的硬判据。
+///
+/// 断言：返回 `STORAGE_ERROR`（既不 panic 也不卡住），**拒绝时不碰任何东西**——
+/// 维护态没置位、运行态还在手、库身份没变、业务事实一条没动。
+#[test]
+fn restore_refuses_to_start_on_the_thread_that_holds_the_serial_boundary() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+    let app = rig.app();
+    let epoch_before = rig.epoch();
+    let revision_before = rig.revision();
+    let artifact = take_backup(&rig);
+
+    let error = {
+        // 本线程**正持着**串行边界：恢复内部要再取一次锁，走进去就是自死锁。
+        let _guard = lock_app(&app);
+        restore_from_backup(
+            &app,
+            rig.broadcaster(),
+            &artifact,
+            Some(&rig.backup_dir),
+            &rig.clock_source(),
+        )
+        .expect_err("持锁线程上开始恢复必须被拒绝")
+    };
+    assert_eq!(error.code(), "STORAGE_ERROR");
+    assert!(
+        format!("{error:?}").contains("锁外"),
+        "拒绝文案要说清正确姿势（在锁外调用）：{error:?}"
+    );
+
+    {
+        let state = lock_app(&app);
+        assert!(state.maintenance().is_none(), "拒绝时不进维护态");
+        assert!(state.runtime_present(), "运行态没有被取走");
+    }
+    assert_eq!(rig.epoch(), epoch_before, "库身份没被动过");
+    assert_eq!(rig.revision(), revision_before, "一次被拒的调用不得改版本");
+}
+
+/// **恢复失败必须落盘**（P6 终审 I-2）：两条失败臂各写一条 `event=restore.failed`，
+/// 带 `stage=`（哪一段失败）、`rolled_back=`（原库有没有重建回来）与 `rollback=`（副本路径）。
+///
+/// 为什么这是必需的：原先只有成功路径写 `restore.finished` ⇒「恢复失败**且回滚也失败**」
+/// （原库没重建回来、进程永久停在维护态、托盘拒绝退出）在日志里与"正在恢复"不可区分。
+#[test]
+fn a_failed_restore_records_its_stage_and_rollback_copy() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+
+    // ① ② 段失败：候选库根本不是 SQLite 文件（验证就拒，原库一个字节都没动）。
+    let corrupt = rig._dir.path().join("corrupt.db");
+    std::fs::write(&corrupt, b"this is not a sqlite database at all").unwrap();
+    let error = restore_from_backup(
+        &rig.app(),
+        rig.broadcaster(),
+        &corrupt,
+        Some(&rig.backup_dir),
+        &rig.clock_source(),
+    )
+    .expect_err("坏候选库必须被拒绝");
+    assert_eq!(error.code(), "STORAGE_ERROR");
+    let line = rig
+        .last_log_line("restore.failed")
+        .expect("② 段失败必须写 restore.failed");
+    assert!(
+        line.contains("stage=prepare_and_swap"),
+        "哪一段失败：{line}"
+    );
+    assert!(line.contains("rolled_back=true"), "原库重建回来了：{line}");
+    assert!(line.contains("code=STORAGE_ERROR"), "code 要落盘：{line}");
+    assert!(
+        line.contains("rollback=") && line.contains(".restore-rollback"),
+        "回滚副本路径要落盘：{line}"
+    );
+
+    // ③-a 失败：候选库结构合法但没有库身份（`rotate_epoch` 影响行数不对）⇒ 提交失败、回滚。
+    let candidate = candidate_without_identity(rig._dir.path(), "candidate.db");
+    let error = restore_from_backup(
+        &rig.app(),
+        rig.broadcaster(),
+        &candidate,
+        Some(&rig.backup_dir),
+        &rig.clock_source(),
+    )
+    .expect_err("没有库身份的候选库必须让提交失败");
+    assert_eq!(error.code(), "STORAGE_ERROR");
+    let line = rig
+        .last_log_line("restore.failed")
+        .expect("③ 段失败必须写 restore.failed");
+    assert!(line.contains("stage=commit_restore"), "哪一段失败：{line}");
+    assert!(line.contains("rolled_back=true"), "原库重建回来了：{line}");
+    assert!(line.contains("code=STORAGE_ERROR"), "code 要落盘：{line}");
+    assert!(
+        line.contains(".restore-rollback"),
+        "回滚副本路径要落盘：{line}"
+    );
+}
+
+/// 恢复用的那只钟从哪来（[`boundary_state_after_restore`] 的两种形态）。
+enum RestoreClock {
+    /// **生产形态**：组合根那一份（`RunningApp::clock_source()`），与 OS 事件源同源。
+    FromRunningApp,
+    /// **I-1 描述的故障形态**：另建一只 `SystemClock`（两个 `Instant` 原点）。
+    FreshInstance,
+}
+
+/// 走一遍「真启动 → 备份 → 恢复 → 起计时 → 锁屏边界」，返回边界之后那条会话的状态。
+///
+/// 时钟形状按**生产**摆：组合根建一只手 `SystemClock`，克隆一份交给 `startup`（协调器），
+/// 原件留给 `RunningApp`；OS 事件源在生产里拿的是**同一个实例**的又一份克隆，所以这里
+/// 直接用那只钟取边界样本（`lib.rs::setup` 的 `event_clock` 就是它）。
+fn boundary_state_after_restore(which: RestoreClock) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("worktrace.db");
+    let lock_path = dir.path().join("instance.lock");
+    let backup_dir = dir.path().join("backups");
+    {
+        let mut db = Db::open(&db_path).unwrap();
+        migrate(db.connection()).unwrap();
+        let tx = db.connection_mut().unchecked_transaction().unwrap();
+        meta::init_meta(&tx).unwrap();
+        tx.execute(
+            "INSERT INTO task(id,title,status,row_version,created_at,updated_at)
+             VALUES('t1','任务一','Ready',0,1000,1000)",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    let clock = SystemClock::new();
+    let mut config = StartupConfig::new(&db_path, &lock_path).with_backup_dir(&backup_dir);
+    config.sampling_interval_ms = IDLE_SAMPLING_MS;
+    let sink = Arc::new(RecordingSink::default());
+    let mut running = match startup(
+        config,
+        Box::new(clock.clone()),
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        &NoProbe,
+        &|| -> Result<(), AppError> { Ok(()) },
+    )
+    .expect("启动应当成功")
+    {
+        Startup::Running(running) => running,
+        Startup::AlreadyRunning { .. } => panic!("测试进程应当是唯一实例"),
+    };
+    // 组合根那一句（`lib.rs::setup`）：启动成功后把同源句柄挂给 P8。
+    running.attach_clock(clock.clone());
+
+    let source: ClockSource = match which {
+        RestoreClock::FromRunningApp => running.clock_source().expect("组合根已挂同源时钟"),
+        RestoreClock::FreshInstance => {
+            Box::new(|| Box::new(SystemClock::new()) as Box<dyn Clock + Send>)
+        }
+    };
+
+    // 备份（恢复的输入）：此刻**没有任何会话**，所以恢复之后门禁是开的。
+    let artifact = {
+        let db = Db::open(&db_path).unwrap();
+        let version = current_version(db.connection()).unwrap();
+        let naming_clock = source();
+        backup_consistent(
+            Some(&backup_dir),
+            db.connection(),
+            version,
+            &*naming_clock,
+            "i1 backup",
+            &Diagnostics::disabled(),
+        )
+        .expect("备份应当成功")
+    };
+
+    // **先让真实时间走一段**：组合根那只钟的 `monotonic` 必须明显大于恢复时新建的钟
+    // （负控的判别力就来自这个差；生产里这个差就是"进程已经跑了多久"）。
+    std::thread::sleep(Duration::from_millis(50));
+
+    let app = Arc::clone(running.app());
+    let outcome = restore_from_backup(&app, running.broadcaster(), &artifact, None, &source)
+        .expect("恢复应当成功");
+    assert!(outcome.committed, "这条路径是提交");
+
+    // 新 epoch 从库里读（`RunningApp::data_epoch()` 是启动快照，恢复之后过期）。
+    let epoch = meta::read_meta(Db::open(&db_path).unwrap().connection())
+        .unwrap()
+        .expect("app_meta 已初始化")
+        .data_epoch;
+    let session_id = {
+        let mut state = lock_app(&app);
+        state
+            .start(StartRequest {
+                expected_data_epoch: epoch,
+                task_id: "t1".to_string(),
+                task_expected_version: 0,
+                mode: SessionMode::Foreground,
+                timer_kind: TimerKind::Stopwatch,
+                target_duration_ms: None,
+                expected_interval_ms: 30_000,
+            })
+            .expect("恢复之后应当能起计时（备份里没有未完成会话）")
+            .snapshot
+            .session_id
+            .expect("开始之后有会话")
+    };
+
+    // 锁屏：边界样本取自**组合根那只钟**（生产里 OS 事件源拿的就是它的克隆）。
+    std::thread::sleep(Duration::from_millis(20));
+    let boundary = clock.sample().expect("真实时钟可用");
+    {
+        let mut state = lock_app(&app);
+        state
+            .system_boundary(Some(boundary))
+            .expect("边界处理本身是一次成功调用（接受或转入待确认）");
+    }
+
+    Db::open(&db_path)
+        .unwrap()
+        .connection()
+        .query_row(
+            "SELECT state FROM work_session WHERE id = ?1",
+            [&session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap()
+}
+
+/// **恢复之后 OS 边界仍然可信**（P6 终审 I-1）。
+///
+/// 组合根把唯一那份 `SystemClock` 再克隆一份挂在 `RunningApp` 上，恢复建的新协调器从
+/// `RunningApp::clock_source()` 取钟 ⇒ 与 OS 事件源**同源**，锁屏边界被 `system_pause`
+/// **接受**（会话转 `paused`，没有待确认区间）。
+///
+/// 同一条用例里的负控是**I-1 描述的生产故障形态**：恢复的时钟来源另建一只
+/// `SystemClock`（"全仓 `ClockSource` 只在测试里被构造"时 P8 唯一写得出来的形状）
+/// ⇒ 两个 `Instant` 原点，同一条边界被拒，会话掉进 `recovering`。两条一起断言，
+/// 这条用例才不是恒真断言（sabotage：把 `clock_source` 换成新建一只钟，第一条立即红）。
+#[test]
+fn a_restore_keeps_the_os_boundary_trusted_because_the_clock_is_shared() {
+    assert_eq!(
+        boundary_state_after_restore(RestoreClock::FromRunningApp),
+        "paused",
+        "同源时钟 ⇒ 锁屏边界被接受（R-02 成立）"
+    );
+    assert_eq!(
+        boundary_state_after_restore(RestoreClock::FreshInstance),
+        "recovering",
+        "另建一只 SystemClock ⇒ 边界被拒（这正是 I-1 的生产故障形态）"
     );
 }

@@ -128,7 +128,7 @@ use rusqlite::Connection;
 use crate::domain::session::SessionState;
 use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
-use crate::platform::clock::{Clock, ClockSample};
+use crate::platform::clock::{Clock, ClockSample, SystemClock};
 use crate::platform::diagnostics::Diagnostics;
 use crate::platform::paths;
 use crate::platform::scheduler::Scheduler;
@@ -478,6 +478,15 @@ pub struct RunningApp {
     /// 而 P8 的状态展示会被一次长事务（恢复、导出）挡住。这份镜像与
     /// [`RunningApp::sampling_errors`] 同档：**无锁可读**，写仍只发生在锁内。
     system_boundary_errors: Arc<AtomicU64>,
+    /// 恢复流程要用的**同源**时钟（P6 终审 I-1；由组合根在 `startup` 成功后
+    /// [`RunningApp::attach_clock`]）。
+    ///
+    /// 为什么是**具体类型**而不是 `Box<dyn Clock>`：同源只能靠"克隆**同一个**实例"保证
+    /// （`Instant` 原点在实例里），而 trait 对象不可克隆；组合根手里那一份正是
+    /// [`SystemClock`]。`startup` 收到的 `Box<dyn Clock>` 已经交给协调器，拿不回来。
+    /// `None` = 没挂（测试夹具）——那时 [`RunningApp::clock_source`] 明确失败，
+    /// **绝不**新建一只钟兜底（各建一只就是"两个原点"的那个 bug）。
+    clock: Option<SystemClock>,
 }
 
 impl RunningApp {
@@ -520,6 +529,34 @@ impl RunningApp {
     /// 免得被一次长事务（恢复、导出）挡在串行边界外面。
     pub fn system_boundary_errors(&self) -> u64 {
         self.system_boundary_errors.load(Ordering::SeqCst)
+    }
+
+    /// 组合根在 `startup` 成功之后挂上的**同源时钟**（P6 终审 I-1）。
+    ///
+    /// 生产接线（`lib.rs::setup`）只做一件事：把交给 `startup` 的那只 `SystemClock`
+    /// 再克隆一份挂到这里——与 OS 事件源拿到的那一份是**同一个实例**。
+    pub fn attach_clock(&mut self, clock: SystemClock) {
+        self.clock = Some(clock);
+    }
+
+    /// 恢复流程的时钟来源（[`backup::ClockSource`]）：每次调用交出一只新钟，
+    /// 但它们与组合根、OS 事件源用的是**同一个 `Instant` 原点**。
+    ///
+    /// 这是 P8 唯一正确的取法（[`backup::restore_from_backup`] 的 `clock` 参数直接收它）。
+    /// 为什么可失败：`RunningApp` 是 `startup` 造出来的，而 `startup` 只拿到
+    /// `Box<dyn Clock>`——拿不回可克隆的实例。没挂上时**明确失败**：在这里新建一只
+    /// `SystemClock::new()` 会得到第二个原点，恢复之后的每次锁屏/休眠边界都会被
+    /// `system_pause` 拒绝（会话掉进 `recovering` + 待确认，R-02 静默落空）。
+    pub fn clock_source(&self) -> Result<backup::ClockSource, AppError> {
+        let Some(clock) = self.clock.clone() else {
+            return Err(AppError::Storage {
+                detail: "组合根没有挂上同源时钟（RunningApp::attach_clock）：恢复流程不得                         另建一只钟（两个 Instant 原点会让锁屏/休眠边界全部被拒）"
+                    .to_string(),
+            });
+        };
+        Ok(Box::new(move || {
+            Box::new(clock.clone()) as Box<dyn Clock + Send>
+        }))
     }
 
     /// 采样线程是否**意外结束**（P6 Task 2b 的看门狗出口）。
@@ -1842,6 +1879,12 @@ pub fn startup(
     probe: &dyn StartupProbe,
     open_window: &dyn Fn() -> Result<(), AppError>,
 ) -> Result<Startup, AppError> {
+    // 正式诊断日志的落点**只解析一次**（P6 Task 2b）：一份给状态跃迁（`AppState`），
+    // 一份给采样线程的失活看门狗，**还有一份给第②步的按需迁移前备份**（它的保留策略
+    // 清理失败只能落诊断，见 P6 终审 M-3）。同一条 `config.diagnostic_log` ⇒ 同一个文件；
+    // 组合根那条启动探针也按同一个字段构造（`Diagnostics::from_optional_path`）。
+    let diagnostics = Diagnostics::from_optional_path(config.diagnostic_log.clone());
+
     // ① 单实例检查——必须先于任何持久化初始化。
     let lock = match InstanceLock::acquire(&config.lock_path).map_err(|e| io_err("lock", e))? {
         Some(lock) => {
@@ -1889,6 +1932,7 @@ pub fn startup(
             db.connection(),
             from_version,
             &*clock,
+            &diagnostics,
         )?;
         PreMigrationBackup::Taken(artifact)
     } else {
@@ -1946,11 +1990,6 @@ pub fn startup(
     let mut coordinator = Coordinator::new(clock, run_id.clone());
     coordinator.establish_anchor(sample);
     probe.step(StartupStep::CoordinatorStarted);
-
-    // 正式诊断日志的落点**只解析一次**（P6 Task 2b）：一份给状态跃迁（`AppState`），
-    // 一份给采样线程的失活看门狗。同一条 `config.diagnostic_log` ⇒ 同一个文件；
-    // 组合根那条启动探针也按同一个字段构造（`Diagnostics::from_optional_path`）。
-    let diagnostics = Diagnostics::from_optional_path(config.diagnostic_log.clone());
 
     // 平台边界路径的失败计数（P6 Task 2c）：`AppState` 与 `RunningApp` 共享**同一个**
     // `Arc<AtomicU64>`（Task 4b 收掉 2c 的 Minor 2）——写入仍只在锁内的
@@ -2015,6 +2054,9 @@ pub fn startup(
         recovery,
         sampling_errors,
         system_boundary_errors,
+        // 组合根在启动成功之后挂上（`RunningApp::attach_clock`）：`startup` 只拿到
+        // `Box<dyn Clock>`，那份实例的句柄只在组合根手里。
+        clock: None,
     })))
 }
 

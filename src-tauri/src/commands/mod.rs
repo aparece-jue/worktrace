@@ -1387,6 +1387,18 @@ pub fn spawn_tray_pause(app: &AppHandle) {
 /// 此刻退出会让库停在中间态。所以那时 `shutdown()` 的 `begin_exit` 先拒绝，
 /// 这里**不调 `handle.exit`**——采样线程仍在跑、进程继续活着，拒绝原因落盘。
 /// （恢复很短；这是"不阻止用户用操作系统的强杀"，不是"没有出口"。）
+///
+/// **事件名按事实选**（P6 终审 M-8）：维护态拒绝退出 = 进程有意留着（`refused`）；
+/// 其它失败 = 退出事务没做成、随后仍以非零码退出（`failed`）。两者原先共用一个
+/// `tray.quit.refused`，事后排查会把"退出事务失败"读成"维护态拒绝退出"。
+fn tray_quit_refusal_event(error: &AppError) -> &'static str {
+    if is_maintenance_refusal(error) {
+        "tray.quit.refused"
+    } else {
+        "tray.quit.failed"
+    }
+}
+
 pub fn spawn_tray_quit(app: &AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -1408,15 +1420,16 @@ pub fn spawn_tray_quit(app: &AppHandle) {
                 // 落盘诊断：release 的 Windows 子系统没有控制台（见 `spawn_tray_pause`）。
                 // 退出被拒时这一行是**唯一**能说明"为什么点了没反应"的东西。
                 let shared = Arc::clone(handle.state::<RunningApp>().app());
+                let refusal = is_maintenance_refusal(&error);
                 lock_app(&shared)
                     .diagnostics()
-                    .record("tray.quit.refused", &tray_diagnostic(&error));
+                    .record(tray_quit_refusal_event(&error), &tray_diagnostic(&error));
                 eprintln!(
                     "[worktrace] tray: 退出失败：{}（{}）",
                     diagnostic(&error),
                     error.code()
                 );
-                if is_maintenance_refusal(&error) {
+                if refusal {
                     // 维护态：拒绝退出（见上面的文档）。判定按第六个码
                     // `DATA_RESTORE_IN_PROGRESS`（[`is_maintenance_refusal`]）。
                     return;
@@ -1425,4 +1438,26 @@ pub fn spawn_tray_quit(app: &AppHandle) {
             }
         }
     });
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 退出被拒的诊断事件名必须与事实相符（P6 终审 M-8）：
+    /// 维护态 ⇒ `refused`（进程有意留着）；退出事务失败 ⇒ `failed`（随后非零码退出）。
+    #[test]
+    fn the_tray_quit_event_name_matches_the_kind_of_refusal() {
+        assert_eq!(
+            tray_quit_refusal_event(&AppError::DataRestoreInProgress),
+            "tray.quit.refused",
+            "维护态拒绝退出"
+        );
+        assert_eq!(
+            tray_quit_refusal_event(&AppError::Storage {
+                detail: "退出事务失败".to_string()
+            }),
+            "tray.quit.failed",
+            "退出事务失败不是维护态拒绝"
+        );
+    }
 }

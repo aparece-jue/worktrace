@@ -59,6 +59,7 @@ use worktrace_lib::domain::task::{TaskStatus, TransitionCause};
 use worktrace_lib::envelope::WriteEnvelope;
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::{Clock, FakeClock};
+use worktrace_lib::platform::diagnostics::Diagnostics;
 use worktrace_lib::services::backup::{backup_consistent, restore_from_backup, ClockSource};
 use worktrace_lib::services::bootstrap::{
     lock_app, startup, NoProbe, RunningApp, Startup, StartupConfig,
@@ -300,6 +301,7 @@ impl Fixture {
             version,
             &*self.clock,
             "task5 chain backup",
+            &Diagnostics::disabled(),
         )
         .expect("备份应当成功")
     }

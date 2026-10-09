@@ -31,7 +31,8 @@
 //! 保留最近 [`BACKUP_KEEP`] 份，**但永不删掉刚写出的那一份**——纯按文件名挂钟毫秒排序时，
 //! 系统时间被回拨且已有 ≥5 份会让"本次产物"成为名义上最老的那份，现象是"启动成功、
 //! 日志说已备份、产物却没了"。清理失败只记诊断：它发生在备份成功之后，不能把一次成功
-//! 启动变成失败。
+//! 启动变成失败；落点是**注入的诊断出口**（[`Diagnostics`]），不是控制台——release 的
+//! Windows 子系统没有控制台（P6 终审 M-3）。
 //!
 //! ## 恢复的三段流程（P6 Task 4b；顺序写死，别按别处的措辞猜）
 //!
@@ -69,6 +70,7 @@ use rusqlite::Connection;
 
 use crate::error::AppError;
 use crate::platform::clock::{Clock, ClockSample};
+use crate::platform::diagnostics::Diagnostics;
 use crate::platform::paths;
 use crate::services::bootstrap::{
     holds_app_lock, lock_app, scan_recovery, MaintenancePhase, RecoveryScan, Runtime, SharedApp,
@@ -103,11 +105,26 @@ const PRE_MIGRATION_STAGE: &str = "pre-migration backup";
 /// 恢复候选库（旧版本 schema）迁移前那次备份的阶段标记。
 const PRE_RESTORE_STAGE: &str = "pre-restore backup";
 
+/// 保留策略清理失败的**正式诊断记录名**（P6 终审 M-3）。
+///
+/// 为什么要有它：清理失败原先只打 `eprintln!`，而 release 的 Windows 子系统没有控制台
+/// ⇒「备份目录里的旧产物删不掉」在真机上永久不可见（磁盘被慢慢占满，日志里一条线索都没有）。
+/// 清理失败**不影响这次备份的成功**，所以它只能走诊断：`event=backup.prune_failed`。
+const BACKUP_PRUNE_FAILED: &str = "backup.prune_failed";
+
 /// 恢复完成的**正式诊断记录名**（提交与回滚各写一条，含库身份、原身份与回滚副本路径）。
 ///
 /// 与维护态/故障态跃迁写的是同一个落点（`AppState.diagnostics` ⇒ `StartupConfig.diagnostic_log`）：
 /// release 的 Windows 子系统没有控制台，这条记录是"那天到底恢没恢复、副本在哪"的唯一线索。
 const RESTORE_DIAGNOSTIC: &str = "restore.finished";
+
+/// 恢复**失败**的正式诊断记录名（P6 终审 I-2）：两条失败臂各写一条。
+///
+/// 为什么必须有：原先只有成功路径写 `restore.finished` ⇒「恢复失败**且回滚也失败**」
+/// （原库没重建回来、进程永久停在维护态、托盘拒绝退出）在日志里与「正在恢复」不可区分。
+/// 记录带 `stage=`（① 还是 ② ③ 段失败）、`rolled_back=`（原库有没有重建回来）与
+/// `rollback=`（回滚副本路径）。失败时**也**会把原因交回调用方，这一条只是落盘。
+const RESTORE_FAILED: &str = "restore.failed";
 
 /// 备份阶段失败的统一形状：`detail` 带阶段标记，便于把「备份失败」与后续动作分开；
 /// 用户文案仍走 `AppError::message()`（`Storage` 的 detail 不进用户可见文案）。
@@ -158,7 +175,11 @@ fn backup_timestamp(path: &Path) -> Option<i64> {
 /// 在回拨下同样不可信），只是把本次产物排除在候选之外，多删一份次老的。
 ///
 /// **不返回错误**：清理发生在备份成功之后，失败只记诊断，不能把一次成功启动变成失败。
-fn prune_old_backups(dir: &Path, just_written: &Path) {
+///
+/// `diagnostics` 是**注入的**落点（P6 终审 M-3）：这里原先是 `eprintln!`，而 release 的
+/// Windows 子系统没有控制台 ⇒ 保留策略清理失败在真机上永久不可见。落点关闭时
+/// （[`Diagnostics::disabled`]）什么都不写，这也是测试夹具的缺省。
+fn prune_old_backups(dir: &Path, just_written: &Path, diagnostics: &Diagnostics) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -180,10 +201,11 @@ fn prune_old_backups(dir: &Path, just_written: &Path) {
         .filter(|(_, path)| path.as_path() != just_written);
     for (_, path) in removable.take(excess) {
         if let Err(error) = std::fs::remove_file(&path) {
-            // 只记诊断（正式诊断落点是 `platform::diagnostics`，见 Task 2a）。
-            eprintln!(
-                "[worktrace] backup prune: cannot remove {}: {error} (ignored)",
-                path.display()
+            // 只记诊断（正式诊断落点是 `platform::diagnostics`，见 Task 2a）：清理发生在
+            // 备份**成功之后**，删不掉一份旧产物不该让这次备份（乃至这次启动）变成失败。
+            diagnostics.record(
+                BACKUP_PRUNE_FAILED,
+                &format!("file={} error={error}", path.display()),
             );
         }
     }
@@ -199,13 +221,14 @@ fn prune_old_backups(dir: &Path, just_written: &Path) {
 ///
 /// 顺序写死：解析目录 → `create_dir_all` → 取一次时钟样本给产物命名 → 同名即拒绝
 /// （**不覆盖**：这比让 `VACUUM INTO` 自己撞出来可诊断得多）→ `VACUUM INTO` →
-/// 保留策略（**永不删本次产物**）。
+/// 保留策略（**永不删本次产物**，清理失败只记 `diagnostics` 里那一条）。
 pub fn backup_consistent(
     dir_override: Option<&Path>,
     conn: &Connection,
     db_version: i64,
     clock: &(dyn Clock + Send),
     stage: &str,
+    diagnostics: &Diagnostics,
 ) -> Result<PathBuf, AppError> {
     let dir = match dir_override {
         Some(dir) => dir.to_path_buf(),
@@ -237,7 +260,7 @@ pub fn backup_consistent(
         .map_err(|e| stage_error(stage, e))?;
 
     // 备份已经落地，之后才是保留策略：它失败只记诊断，且**永不删刚写出的这一份**。
-    prune_old_backups(&dir, &target);
+    prune_old_backups(&dir, &target, diagnostics);
     Ok(target)
 }
 
@@ -250,8 +273,16 @@ pub fn backup_before_migration(
     conn: &Connection,
     from_version: i64,
     clock: &(dyn Clock + Send),
+    diagnostics: &Diagnostics,
 ) -> Result<PathBuf, AppError> {
-    backup_consistent(dir_override, conn, from_version, clock, PRE_MIGRATION_STAGE)
+    backup_consistent(
+        dir_override,
+        conn,
+        from_version,
+        clock,
+        PRE_MIGRATION_STAGE,
+        diagnostics,
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -464,7 +495,8 @@ impl RestoreSwap {
 /// **必须在一次调用里走完**（P8 接线时也只在一个 `#[tauri::command]` 的阻塞段里调它）：
 /// ②③ 之间没有任何 IPC 命令进得来（维护态里全部命令被 `guard_writable` 拒），
 /// 而恢复自己**不重新进 `commands::run_command`**——这条约束的落点就是本函数
-/// （另有一条 `debug_assert` 钉住"不在持锁线程上开始"）。
+/// （另有一条**硬判据**钉住"不在持锁线程上开始"：`debug_assert!` 在 release 会被编译掉，
+/// 接线缺陷必须在 release 也明确失败，见 P6 终审 M-2）。
 ///
 /// - `backup`：待恢复的产物（`VACUUM INTO` 出来的单文件快照，或任何一份合法的库文件）。
 /// - `backup_dir`：候选库 schema 偏旧时，迁移前那次备份的落盘目录（`None` = 生产缺省）。
@@ -483,27 +515,55 @@ pub fn restore_from_backup(
     backup_dir: Option<&Path>,
     clock: &ClockSource,
 ) -> Result<RestoreOutcome, AppError> {
-    // **不重新进 `run_command` 的机读断言**：恢复不能在已持有串行边界的线程上开始
-    // （① 要取锁），也不该从命令体内部被调用。
-    debug_assert!(
-        !holds_app_lock(app),
-        "恢复流程必须在锁外开始（它自己按三段取锁），不要在持有串行边界的线程上调用"
-    );
+    // **不重新进 `run_command` 的硬判据**（P6 终审 M-2）：恢复不能在已持有串行边界的
+    // 线程上开始（① 要取锁），也不该从命令体内部被调用。原先这里只有 `debug_assert!`，
+    // 而 release 会把它整条编译掉 ⇒ P8 一旦把恢复放进 `run_command` 闭包（正持锁）调用，
+    // 现象是**静默死锁**（① 段的 `lock_app` 永远等不到）。判据与 [`RunningApp::shutdown`]
+    // 的自死锁防线同一条标准：明确失败，并说清正确姿势；**拒绝时不碰任何东西**。
+    if holds_app_lock(app) {
+        return Err(AppError::Storage {
+            detail: "恢复流程必须在锁外开始（它自己按三段取锁），不要在持有串行边界的线程上调用"
+                .to_string(),
+        });
+    }
+
+    // 诊断落点**只取一次**：两条失败臂共用（`Diagnostics` 只是路径句柄，Clone 便宜）。
+    let diagnostics = lock_app(app).diagnostics().clone();
 
     // ① 进入维护态 + 取走运行态（锁内，短）。
     let runtime = begin_restore(app)?;
 
     // ② 关连接 + 临时路径验证 + 同目录可回滚切换（**不持锁**）。
-    let swap = match prepare_and_swap(runtime, backup, backup_dir, clock) {
+    let swap = match prepare_and_swap(runtime, backup, backup_dir, clock, &diagnostics) {
         Ok(swap) => swap,
         Err(failure) => {
             // 拆箱：路径账与原因都要用（`RestoreFailure` 只是为了让 Err 变体不撑大 Result）。
             let RestoreFailure { error: cause, swap } = *failure;
+            let rollback = swap.rollback_path().to_path_buf();
             return match abort_restore(app, broadcaster, swap, clock) {
                 // 原库重建成功：把"这次恢复没做成"的原因交回调用方。
-                Ok(_) => Err(cause),
-                // 连原库都重建不起来：那条错误更严重，直接透出。
-                Err(rollback_error) => Err(rollback_error),
+                Ok(_) => {
+                    record_restore_failure(
+                        &diagnostics,
+                        "prepare_and_swap",
+                        true,
+                        &cause,
+                        &rollback,
+                    );
+                    Err(cause)
+                }
+                // 连原库都重建不起来：那条错误更严重，直接透出（同样落盘，且点明
+                // `rolled_back=false`——这正是"与正在恢复不可区分"的那条路径）。
+                Err(rollback_error) => {
+                    record_restore_failure(
+                        &diagnostics,
+                        "prepare_and_swap",
+                        false,
+                        &rollback_error,
+                        &rollback,
+                    );
+                    Err(rollback_error)
+                }
             };
         }
     };
@@ -513,13 +573,49 @@ pub fn restore_from_backup(
         Ok(outcome) => Ok(outcome),
         Err(cause) => {
             // ③-a 失败 ⇒ ③-b 回滚：把原库改回来、重开、新 run + 两步重扫 + 新协调器。
-            let rolled_back = abort_restore(app, broadcaster, swap, clock);
-            match rolled_back {
-                Ok(_) => Err(cause),
-                Err(rollback_error) => Err(rollback_error),
+            let rollback = swap.rollback_path().to_path_buf();
+            match abort_restore(app, broadcaster, swap, clock) {
+                Ok(_) => {
+                    record_restore_failure(&diagnostics, "commit_restore", true, &cause, &rollback);
+                    Err(cause)
+                }
+                Err(rollback_error) => {
+                    record_restore_failure(
+                        &diagnostics,
+                        "commit_restore",
+                        false,
+                        &rollback_error,
+                        &rollback,
+                    );
+                    Err(rollback_error)
+                }
             }
         }
     }
+}
+
+/// 恢复失败的**唯一落盘出口**（P6 终审 I-2）。
+///
+/// 字段口径：`stage` = 哪一段失败（`prepare_and_swap` / `commit_restore`）、
+/// `rolled_back` = 原库有没有被重建回来、`error` = **交回调用方的那条错误**
+/// （回滚也失败时透出的是回滚那条，所以这里记的也是它）、`rollback` = 回滚副本路径
+/// （`rolled_back=false` 时它就是"恢复之前那个世界"还在的地方）。
+fn record_restore_failure(
+    diagnostics: &Diagnostics,
+    stage: &str,
+    rolled_back: bool,
+    error: &AppError,
+    rollback: &Path,
+) {
+    diagnostics.record(
+        RESTORE_FAILED,
+        &format!(
+            "stage={stage} rolled_back={rolled_back} code={} rollback={} detail={}",
+            error.code(),
+            rollback.display(),
+            error.detail().unwrap_or_default()
+        ),
+    );
 }
 
 /// ① 段：进入维护态 + 取走运行态（**锁内，短**）。
@@ -554,6 +650,7 @@ pub fn prepare_and_swap(
     backup: &Path,
     backup_dir: Option<&Path>,
     clock: &ClockSource,
+    diagnostics: &Diagnostics,
 ) -> Result<RestoreSwap, Box<RestoreFailure>> {
     // 路径与身份必须在**关连接之前**读出来（`Runtime` 一 drop，库句柄就没了）。
     // 路径读不到（内存库）时连路径账都建不起来，只能报一个空 swap——生产上库一定在磁盘上
@@ -607,7 +704,7 @@ pub fn prepare_and_swap(
     let copied = remove_db_files(&staged)
         .and_then(|()| std::fs::copy(backup, &staged).map_err(|e| restore_io("stage candidate", e)))
         .and_then(|_| {
-            validate_candidate(&staged, backup_dir, clock)
+            validate_candidate(&staged, backup_dir, clock, diagnostics)
                 .map(|artifact| swap.migration_backup = artifact)
         });
     if let Err(error) = copied {
@@ -636,6 +733,7 @@ fn validate_candidate(
     staged: &Path,
     backup_dir: Option<&Path>,
     clock: &ClockSource,
+    diagnostics: &Diagnostics,
 ) -> Result<Option<PathBuf>, AppError> {
     let db = Db::open(staged)?;
     let integrity: String = db
@@ -684,6 +782,7 @@ fn validate_candidate(
         from_version,
         &*clock(),
         PRE_RESTORE_STAGE,
+        diagnostics,
     )?;
     migrate(db.connection())?;
     Ok(Some(artifact))
@@ -1020,4 +1119,76 @@ fn staged_path(target: &Path) -> PathBuf {
 
 fn rollback_path(target: &Path) -> PathBuf {
     sidecar(target, ROLLBACK_SUFFIX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 合规的产物名（保留策略只认自己写出来的名字）。
+    fn artifact_name(at_ms: i64) -> String {
+        format!("{BACKUP_PREFIX}{BACKUP_FORMAT_VERSION}-s1-v0.1.0-{at_ms}{BACKUP_SUFFIX}")
+    }
+
+    /// **保留策略清理失败要落诊断**（P6 终审 M-3）。
+    ///
+    /// 形态：目录里放 6 份产物 + 1 份**同名目录**（`remove_file` 对目录必然失败，
+    /// 两个平台一致），它按时间戳是最老的一份 ⇒ 清理会删它、失败、记一条。
+    /// 这条诊断是 release 里唯一的线索：那时没有控制台，`eprintln!` 没人看得见。
+    #[test]
+    fn a_failed_prune_records_a_diagnostic_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("worktrace.log");
+        let diagnostics = Diagnostics::to_file(&log);
+
+        let names: Vec<String> = (0..7).map(|i| artifact_name(1_000 + i)).collect();
+        // 最老的那一份做成目录（删不掉），其余做成正常文件。
+        std::fs::create_dir(dir.path().join(&names[0])).unwrap();
+        for name in &names[1..] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        // `just_written` 不在这个目录里：本次产物不进候选，7 份 ⇒ 超出 2 份。
+        let just_written = dir.path().join("elsewhere.db");
+
+        prune_old_backups(dir.path(), &just_written, &diagnostics);
+
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            text.contains(&format!("event={BACKUP_PRUNE_FAILED}")),
+            "清理失败必须落诊断：{text}"
+        );
+        assert!(
+            text.contains(&format!("file={}", dir.path().join(&names[0]).display())),
+            "诊断里要点明删不掉的是哪一份：{text}"
+        );
+        assert!(
+            dir.path().join(&names[0]).is_dir(),
+            "删不掉的那一份（目录）还在"
+        );
+        assert!(
+            !dir.path().join(&names[1]).exists(),
+            "能删的那一份（次老）必须真的被删掉"
+        );
+    }
+
+    /// 正控：全部删得掉时**一条诊断都不写**——否则上面那条就不是"失败才写"。
+    #[test]
+    fn a_successful_prune_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("worktrace.log");
+        let diagnostics = Diagnostics::to_file(&log);
+
+        for i in 0..7 {
+            std::fs::write(dir.path().join(artifact_name(1_000 + i)), b"x").unwrap();
+        }
+        prune_old_backups(dir.path(), &dir.path().join("elsewhere.db"), &diagnostics);
+
+        assert!(
+            !log.exists(),
+            "清理成功不该产生任何诊断行（`Diagnostics` 只在真的写时才建文件）"
+        );
+        assert!(!dir.path().join(artifact_name(1_000)).exists());
+        assert!(!dir.path().join(artifact_name(1_001)).exists());
+        assert!(dir.path().join(artifact_name(1_002)).exists());
+    }
 }

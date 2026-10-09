@@ -236,8 +236,21 @@ fn setup(app: &mut tauri::App, alive: &Arc<AtomicBool>) -> Result<(), Box<dyn st
     // 现象是「每次锁屏都掉进 recovering」——R-02 静默落空。见 `platform::clock::SystemClock`。
     let clock = SystemClock::new();
     let event_clock = clock.clone();
-    match bootstrap::startup(config, Box::new(clock), sink, &trace, &open_window)? {
+    // **同源句柄留在组合根**（P6 终审 I-1）：恢复要建新协调器，它的钟必须与交给
+    // `startup` 的那份、以及 OS 事件源那份**共用同一个 `Instant` 原点**，所以这里再留
+    // 一份克隆，启动成功后挂到 `RunningApp` 上交给 P8（`RunningApp::clock_source`）。
+    // 各建一只 `SystemClock::new()` 会得到两个原点：恢复之后每次锁屏/休眠边界都会被
+    // `system_pause` 拒绝，会话掉进 `recovering` + 待确认（R-02 静默落空）。
+    let restore_clock = clock.clone();
+    match finish_startup(
+        &trace.diagnostics,
+        bootstrap::startup(config, Box::new(clock), sink, &trace, &open_window),
+    )? {
         Startup::Running(running) => {
+            // `RunningApp` 只有在启动**成功**之后才拿得到；时钟句柄在这里挂上，
+            // 之后它随 `app.manage` 一起活到进程退出。
+            let mut running = running;
+            running.attach_clock(restore_clock);
             // 事件源的回调捕获 `SharedApp` 与广播出口**本身**（不是 Tauri 托管状态）：
             // 先克隆、再 `manage`，回调因此不需要在事件线程上查 Tauri 状态。
             let shared = Arc::clone(running.app());
@@ -280,6 +293,30 @@ fn setup(app: &mut tauri::App, alive: &Arc<AtomicBool>) -> Result<(), Box<dyn st
             Ok(())
         }
     }
+}
+
+/// 启动失败时**先把原因落盘再返回**（P6 终审 I-2）。
+///
+/// 为什么必须有：`AppError::Storage` 的 `Display` 是固定串（`error.rs`），`detail` 不在
+/// 其中；而 Tauri 对 `setup` 返回的 `Err` 直接 **panic**（`tauri::app::App::run`），release
+/// 又没有控制台 ⇒ 真机上"启动失败"只剩一句 panic，`worktrace.log` 停在
+/// `startup.step step=database_opened`，**为什么起不来**无从查起。这一行在返回之前写下：
+/// `code=` 给分支、`detail=` 给原因。成功路径**不写**（负控在下面那条用例里）。
+fn finish_startup(
+    diagnostics: &Diagnostics,
+    started: Result<Startup, AppError>,
+) -> Result<Startup, AppError> {
+    if let Err(error) = &started {
+        diagnostics.record(
+            "startup.failed",
+            &format!(
+                "code={} detail={}",
+                error.code(),
+                error.detail().unwrap_or_default()
+            ),
+        );
+    }
+    started
 }
 
 /// 托盘动作去往哪一类入口（Task 4）。
@@ -325,5 +362,57 @@ fn on_tray_action(app: &AppHandle, action: TrayAction) {
         },
         TrayDispatch::Pause => commands::spawn_tray_pause(app),
         TrayDispatch::Quit => commands::spawn_tray_quit(app),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **启动失败必须先把原因落盘再返回**（P6 终审 I-2）。
+    ///
+    /// 断言的是真落盘：`event=startup.failed` 那一行里同时有 `code=` 与 `detail=`。
+    /// release 的 Windows 子系统没有控制台，而 Tauri 会对 `setup` 的 `Err` 直接 panic
+    /// —— 没有这一行，"为什么起不来"在真机上就查不到。
+    #[test]
+    fn a_failed_startup_is_recorded_with_its_code_and_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worktrace.log");
+        let diagnostics = Diagnostics::to_file(&path);
+
+        let started = finish_startup(
+            &diagnostics,
+            Err(AppError::Storage {
+                detail: "pre-migration backup: disk full".to_string(),
+            }),
+        );
+
+        assert!(started.is_err(), "失败结果必须原样交回调用方");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(
+                "event=startup.failed code=STORAGE_ERROR detail=pre-migration backup: disk full"
+            ),
+            "启动失败的原因必须落盘（code 与 detail 都在）：{text}"
+        );
+    }
+
+    /// 正控：成功返回**不写**这一行——否则这条记录就不是"失败才写"。
+    #[test]
+    fn a_successful_startup_records_no_failure_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worktrace.log");
+        let diagnostics = Diagnostics::to_file(&path);
+
+        // `AlreadyRunning` 是最容易构造的一种成功返回：不碰库、不建 run、不拿锁。
+        let started = finish_startup(
+            &diagnostics,
+            Ok(Startup::AlreadyRunning { notified: false }),
+        );
+        assert!(started.is_ok());
+        assert!(
+            !path.exists() || std::fs::read_to_string(&path).unwrap().is_empty(),
+            "成功路径不该写 startup.failed"
+        );
     }
 }

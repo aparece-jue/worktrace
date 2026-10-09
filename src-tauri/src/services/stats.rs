@@ -712,6 +712,12 @@ pub struct TodayQuery {
 
 /// 当前任务与运行状态（F-010 的第二项）。
 ///
+/// ⚠️ **「有 `current`」≠「正在计时」**：它是协调器镜像里**最后装载**的那条会话
+/// （`Coordinator::live`），而那条会话**可能已经结束**——`state` 为 `Finished`（`finish`
+/// 提交之后镜像照实装载那一行）或 `Discarded`。判「是否正在计时」必须看 `state`
+/// （`Running`）与 [`TodayView::live`] 那一列的 `intervals`，**不要**按 `current.is_some()`
+/// 分支（Ruling P6-21；行为由 `tests/today.rs` 与 `tests/offline_and_recovery.rs` 钉住）。
+///
 /// `state` 取自**同一次** [`StatsSample`]：本层不推断 session 状态——从
 /// `open_interval_id.is_some()` 猜会把 `paused` 与 `recovering` 混为一谈。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -741,7 +747,12 @@ pub struct TodayView {
     /// ① 今日选择列表：P4 的顺序（`task.created_at, task.id`）。**完成的任务保留在
     /// 列表里**并带自己的状态，不因完成而消失。
     pub tasks: Vec<TaskRow>,
-    /// ② 当前任务与运行状态；没有活动会话时为 `None`。
+    /// ② 当前任务与运行状态；**没有装载过任何会话时为 `None`**。
+    ///
+    /// **它可能指向一条已经结束的会话**（`state == Finished` / `Discarded`）：`None`
+    /// 只在「本次 run 里还没有任何会话被装载进协调器镜像」时出现。**判「是否正在计时」
+    /// 请看 `state` 与 ④ [`Self::live`] 那一列**，不要把 `is_some()` 当成"在跑"
+    /// （Ruling P6-21；`tests/today.rs` / `tests/offline_and_recovery.rs` 钉住该行为）。
     pub current: Option<CurrentTask>,
     /// ③ 已确认：今日真实日界内已确认闭合（含 `recovering` 会话里已可信的前缀），
     /// 按 [`Measure::ALL`] 固定四项。`Human` 那一列就是 F-010 的「确认人工工时」。

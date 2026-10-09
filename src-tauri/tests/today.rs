@@ -978,4 +978,46 @@ fn the_current_task_and_run_state_come_from_the_same_sample() {
         "没有开放区间就没有运行暂计"
     );
     assert_eq!(human(&paused_view, StatsClass::Live).intervals, 0);
+
+    // 结束之后：`current` **仍然是 `Some`**，只是 `state == Finished`。
+    //
+    // 这是 `stats.rs` 里 `TodayView::current` / `CurrentTask` 的契约：`current` 是
+    // **协调器镜像里最后装载的那条会话**，不保证还在计时（Ruling P6-21）。今天没有任何
+    // 用例把它钉在 Today 这一侧 ⇒ P8 的今日页把「有 current」读成「正在计时」是最自然的
+    // 误读，所以这里连状态与 Live 列一起断言。
+    {
+        let mut guard = lock_app(&app);
+        let snapshot = guard.snapshot().unwrap();
+        guard
+            .finish(SessionRequest {
+                expected_data_epoch: epoch.clone(),
+                session_id: snapshot.session_id.clone().unwrap(),
+                session_expected_version: snapshot.session_version.unwrap(),
+            })
+            .unwrap();
+    }
+    let finished_view = {
+        let mut guard = lock_app(&app);
+        guard.stats_today(&query(&epoch, "Asia/Shanghai")).unwrap()
+    };
+    let current = finished_view
+        .current
+        .as_ref()
+        .expect("结束之后 `current` 仍指向协调器镜像里最后装载的那条会话");
+    assert_eq!(current.task_id, "t-1");
+    assert_eq!(
+        current.state,
+        SessionState::Finished,
+        "「有 current」≠「正在计时」：判运行中必须看 state"
+    );
+    assert_eq!(
+        human(&finished_view, StatsClass::Live).intervals,
+        0,
+        "已结束的会话没有开放区间 ⇒ Live 列没有条目"
+    );
+    assert_eq!(
+        human(&finished_view, StatsClass::Live).ms,
+        Some(0),
+        "计时已停：运行暂计是 0"
+    );
 }
