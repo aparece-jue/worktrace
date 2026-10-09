@@ -30,9 +30,10 @@
 //!
 //! 保留最近 [`BACKUP_KEEP`] 份，**但永不删掉刚写出的那一份**——纯按文件名挂钟毫秒排序时，
 //! 系统时间被回拨且已有 ≥5 份会让"本次产物"成为名义上最老的那份，现象是"启动成功、
-//! 日志说已备份、产物却没了"。清理失败只记诊断：它发生在备份成功之后，不能把一次成功
-//! 启动变成失败；落点是**注入的诊断出口**（[`Diagnostics`]），不是控制台——release 的
-//! Windows 子系统没有控制台（P6 终审 M-3）。
+//! 日志说已备份、产物却没了"。恢复流程那条"旧版本先备份再迁移"的分支还多护一份：
+//! **用户正在恢复的那份产物**（它就在同一个目录里，A1）。清理失败只记诊断：它发生在
+//! 备份成功之后，不能把一次成功启动变成失败；落点是**注入的诊断出口**（[`Diagnostics`]），
+//! 不是控制台——release 的 Windows 子系统没有控制台（P6 终审 M-3）。
 //!
 //! ## 恢复的三段流程（P6 Task 4b；顺序写死，别按别处的措辞猜）
 //!
@@ -166,7 +167,7 @@ fn backup_timestamp(path: &Path) -> Option<i64> {
     at_ms.parse::<i64>().ok()
 }
 
-/// 只保留最新的 [`BACKUP_KEEP`] 份备份，但**永不删掉 `just_written`**。
+/// 只保留最新的 [`BACKUP_KEEP`] 份备份，但**永不删掉 `protected` 里的任何一份**。
 ///
 /// 为什么要有第二个参数（Task 1 评审留下的那条）：排序键是**文件名里的挂钟毫秒**，
 /// 而挂钟可以被回拨（对时、跨时区、用户改表）。5 份既有产物都比本次更晚时，本次产物
@@ -174,12 +175,18 @@ fn backup_timestamp(path: &Path) -> Option<i64> {
 /// 时间戳排序仍然是保留策略的口径（不改成 mtime：那要读文件系统时间，而"哪份更新"
 /// 在回拨下同样不可信），只是把本次产物排除在候选之外，多删一份次老的。
 ///
+/// `protected` 有两类（A1）：① 本次刚写出的产物（上面那条）；② 恢复流程里
+/// **用户正在恢复的那份产物**——"旧版本先备份再迁移"那条分支复用的是用户自己的备份
+/// 目录，于是这次备份会顺带触发保留策略，把用户刚选中的那份删掉（staged 拷贝在先，
+/// 恢复本身不受影响，但用户回头就找不到自己选的文件了）。所以调用方把被恢复的路径
+/// 一并传进来，不让保留策略碰它。
+///
 /// **不返回错误**：清理发生在备份成功之后，失败只记诊断，不能把一次成功启动变成失败。
 ///
 /// `diagnostics` 是**注入的**落点（P6 终审 M-3）：这里原先是 `eprintln!`，而 release 的
 /// Windows 子系统没有控制台 ⇒ 保留策略清理失败在真机上永久不可见。落点关闭时
 /// （[`Diagnostics::disabled`]）什么都不写，这也是测试夹具的缺省。
-fn prune_old_backups(dir: &Path, just_written: &Path, diagnostics: &Diagnostics) {
+fn prune_old_backups(dir: &Path, protected: &[&Path], diagnostics: &Diagnostics) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -198,7 +205,7 @@ fn prune_old_backups(dir: &Path, just_written: &Path, diagnostics: &Diagnostics)
     let excess = backups.len() - BACKUP_KEEP;
     let removable = backups
         .into_iter()
-        .filter(|(_, path)| path.as_path() != just_written);
+        .filter(|(_, path)| !protected.contains(&path.as_path()));
     for (_, path) in removable.take(excess) {
         if let Err(error) = std::fs::remove_file(&path) {
             // 只记诊断（正式诊断落点是 `platform::diagnostics`，见 Task 2a）：清理发生在
@@ -230,6 +237,32 @@ pub fn backup_consistent(
     stage: &str,
     diagnostics: &Diagnostics,
 ) -> Result<PathBuf, AppError> {
+    backup_consistent_keeping(
+        dir_override,
+        conn,
+        db_version,
+        clock,
+        stage,
+        diagnostics,
+        None,
+    )
+}
+
+/// [`backup_consistent`] 的实体，外加一位"保留策略**不许删**的路径"（A1）。
+///
+/// 为什么不让 `backup_consistent` 自己多收一位：它是公开原语，启动路径、恢复路径与
+/// `tests/` 的夹具都按现有的六个参数调用（改公开签名会牵动每一条调用点），而
+/// **只有恢复流程**需要"多留一份"——那条分支复用的是用户的备份目录，用户选中的产物
+/// 就在同一个目录里。多出来的这一位因此只留在内层。
+fn backup_consistent_keeping(
+    dir_override: Option<&Path>,
+    conn: &Connection,
+    db_version: i64,
+    clock: &(dyn Clock + Send),
+    stage: &str,
+    diagnostics: &Diagnostics,
+    also_keep: Option<&Path>,
+) -> Result<PathBuf, AppError> {
     let dir = match dir_override {
         Some(dir) => dir.to_path_buf(),
         None => paths::app_data_dir()
@@ -259,8 +292,13 @@ pub fn backup_consistent(
         .map_err(map_sqlite)
         .map_err(|e| stage_error(stage, e))?;
 
-    // 备份已经落地，之后才是保留策略：它失败只记诊断，且**永不删刚写出的这一份**。
-    prune_old_backups(&dir, &target, diagnostics);
+    // 备份已经落地，之后才是保留策略：它失败只记诊断，且**永不删刚写出的这一份**
+    // （恢复分支还要再护住"用户正在恢复的那一份"）。
+    let mut protected = vec![target.as_path()];
+    if let Some(also_keep) = also_keep {
+        protected.push(also_keep);
+    }
+    prune_old_backups(&dir, &protected, diagnostics);
     Ok(target)
 }
 
@@ -704,7 +742,7 @@ pub fn prepare_and_swap(
     let copied = remove_db_files(&staged)
         .and_then(|()| std::fs::copy(backup, &staged).map_err(|e| restore_io("stage candidate", e)))
         .and_then(|_| {
-            validate_candidate(&staged, backup_dir, clock, diagnostics)
+            validate_candidate(&staged, backup, backup_dir, clock, diagnostics)
                 .map(|artifact| swap.migration_backup = artifact)
         });
     if let Err(error) = copied {
@@ -729,8 +767,12 @@ pub fn prepare_and_swap(
 /// `start_run` 同一个事务，所以**什么都不会落库**。
 ///
 /// 返回旧版本分支里那份迁移前备份的产物路径（没走那条分支就是 `None`）。
+///
+/// `backup` 是**用户选中的那份产物**（不是 `staged` 副本）：旧版本分支的保留策略要护住它
+/// （A1），所以这里必须拿到原路径。
 fn validate_candidate(
     staged: &Path,
+    backup: &Path,
     backup_dir: Option<&Path>,
     clock: &ClockSource,
     diagnostics: &Diagnostics,
@@ -776,13 +818,18 @@ fn validate_candidate(
 
     // 旧版本：**先备份再迁移**（02 §9 的括号原文）。用的是与迁移前备份同一个原语，
     // 阶段标记不同（`pre-restore backup`），产物路径随结果交回调用方。
-    let artifact = backup_consistent(
+    //
+    // `also_keep = Some(backup)`（A1）：这次备份落在**用户自己的**备份目录里、与
+    // "用户正在恢复的那一份"同目录，所以保留策略必须同时护住它——否则用户选中一份
+    // 次老的产物来恢复，回头就发现它被这次"迁移前备份"的清理删掉了。
+    let artifact = backup_consistent_keeping(
         backup_dir,
         db.connection(),
         from_version,
         &*clock(),
         PRE_RESTORE_STAGE,
         diagnostics,
+        Some(backup),
     )?;
     migrate(db.connection())?;
     Ok(Some(artifact))
@@ -984,6 +1031,13 @@ fn rebuild_and_install(
         committed,
         meta.data_epoch.as_str() == previous_data_epoch,
     ) {
+        // **这一臂构造性不可达，所以不为它造注入**（4b 残余①）：提交路径在上面那个
+        // 事务里先 `rotate_epoch`（写一个全新的 uuid），它失败（影响行数 ≠ 1）就走不到
+        // 这里；而"新 uuid 恰好等于旧值"要撞上 2^-122 量级的巧合。要真驱动它，只能改
+        // `rotate_epoch` 的产物形状（让它可以返回旧值）——那是为一条不可达路径改生产
+        // 代码，代价与收益不成比例。回滚那一臂**有**真驱动的用例
+        // （`abort_restore_refuses_a_library_whose_identity_changed`：改掉回滚副本的
+        // epoch，③-b 必须拒绝上线）。
         (true, true) => {
             return Err(AppError::Storage {
                 detail: "restore: commit did not rotate the data_epoch".to_string(),
@@ -1150,7 +1204,7 @@ mod tests {
         // `just_written` 不在这个目录里：本次产物不进候选，7 份 ⇒ 超出 2 份。
         let just_written = dir.path().join("elsewhere.db");
 
-        prune_old_backups(dir.path(), &just_written, &diagnostics);
+        prune_old_backups(dir.path(), &[just_written.as_path()], &diagnostics);
 
         let text = std::fs::read_to_string(&log).unwrap();
         assert!(
@@ -1181,7 +1235,8 @@ mod tests {
         for i in 0..7 {
             std::fs::write(dir.path().join(artifact_name(1_000 + i)), b"x").unwrap();
         }
-        prune_old_backups(dir.path(), &dir.path().join("elsewhere.db"), &diagnostics);
+        let elsewhere = dir.path().join("elsewhere.db");
+        prune_old_backups(dir.path(), &[elsewhere.as_path()], &diagnostics);
 
         assert!(
             !log.exists(),

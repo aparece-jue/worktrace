@@ -1251,6 +1251,71 @@ fn an_older_schema_candidate_is_backed_up_before_it_is_migrated() {
     );
 }
 
+/// **保留策略不得删掉用户正在恢复的那份产物**（A1）。
+///
+/// 场景：恢复的是一份**旧 schema** 候选库 ⇒ ② 段的"先备份再迁移"分支会往**用户的**
+/// 备份目录里再写一份迁移前备份，而那个目录里还躺着用户自己攒下的历史产物 ⇒ 保留策略
+/// （只留最新 5 份）会把最老的那几份删掉——**包括用户刚选中、正在恢复的这一份**
+/// （staged 拷贝在先，恢复本身不受影响，但用户回头就找不到自己选的文件了）。
+///
+/// 构造：目录里放 6 份产物，用户选中的是**次老**的那一份（`-s0-` 的真库：`user_version = 0`，
+/// 才会走"备份再迁移"）。新写出的那份按假钟挂钟毫秒排在最后 ⇒ 7 份、超出 2 份。
+///
+/// **成对判据**：`left`（留下的产物毫秒集合）断言的是"只删最老的、且用户选中的那份还在"。
+/// 若把 `prune_old_backups` 改成空操作，这条会红在"最老的没被删"上；若只护住刚写出的
+/// 那一份（A1 修复前的行为），则红在"用户选中的那份不见了"上。
+#[test]
+fn the_retention_policy_never_deletes_the_artifact_being_restored() {
+    let rig = launch();
+    std::fs::create_dir_all(&rig.backup_dir).unwrap();
+
+    // 产物名照生产形状（保留策略只认自己写出来的名字）：前 6 份毫秒从早到晚。
+    let name_at =
+        |db_version: i64, at_ms: i64| format!("worktrace-f1-s{db_version}-v0.1.0-{at_ms}.db");
+    for at_ms in [1_000i64, 3_000, 4_000, 5_000, 6_000] {
+        std::fs::write(rig.backup_dir.join(name_at(1, at_ms)), b"x").unwrap();
+    }
+    // 用户选中的是**次老**的那一份（毫秒 2_000）：它是一份真的旧 schema 库，
+    // 这样才走得进"旧版本先备份再迁移"那条分支。
+    let picked = rig.backup_dir.join(name_at(0, 2_000));
+    {
+        let db = Db::open(&picked).unwrap();
+        assert_eq!(current_version(db.connection()).unwrap(), 0);
+    }
+
+    let error = restore_from_backup(
+        &rig.app(),
+        rig.broadcaster(),
+        &picked,
+        Some(&rig.backup_dir),
+        &rig.clock_source(),
+    )
+    .expect_err("迁移后仍没有库身份的候选库必须让提交失败");
+    assert_eq!(error.code(), "STORAGE_ERROR");
+
+    // 目录里现在应当是：用户选中的那份（2_000）+ 次新的三份 + 本次迁移前备份（假钟 WALL）。
+    // 被删掉的恰好是 1_000 与 3_000（超出 2 份，且不碰受保护的两份）。
+    let mut left: Vec<i64> = std::fs::read_dir(&rig.backup_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.trim_end_matches(".db")
+                .rsplit('-')
+                .next()
+                .and_then(|ms| ms.parse::<i64>().ok())
+                .unwrap_or_else(|| panic!("产物名不合形状：{name}"))
+        })
+        .collect();
+    left.sort_unstable();
+    assert_eq!(
+        left,
+        vec![2_000, 4_000, 5_000, 6_000, WALL],
+        "只许删最老的那几份：用户正在恢复的那份（2_000）必须留下，而清理要真的发生"
+    );
+    assert!(picked.exists(), "用户选中的产物被删掉了：{picked:?}");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 与在途采样/心跳互斥
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1808,8 +1873,17 @@ fn boundary_state_after_restore(which: RestoreClock) -> String {
     std::thread::sleep(Duration::from_millis(50));
 
     let app = Arc::clone(running.app());
-    let outcome = restore_from_backup(&app, running.broadcaster(), &artifact, None, &source)
-        .expect("恢复应当成功");
+    // 备份目录**显式注入**（A5）：产物此刻的 schema 与 `SCHEMA_VERSION` 相等，所以今天
+    // 走不到"先备份再迁移"那条分支；但夹具若哪天改喂旧 schema 候选，`None` 会落到**真实**
+    // 的 `app_data_dir()/backups`（写开发机的 %APPDATA%）。注入之后这条路径永远只碰临时目录。
+    let outcome = restore_from_backup(
+        &app,
+        running.broadcaster(),
+        &artifact,
+        Some(&backup_dir),
+        &source,
+    )
+    .expect("恢复应当成功");
     assert!(outcome.committed, "这条路径是提交");
 
     // 新 epoch 从库里读（`RunningApp::data_epoch()` 是启动快照，恢复之后过期）。

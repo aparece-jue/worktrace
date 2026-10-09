@@ -317,7 +317,9 @@ fn rule2_applied_revision_never_exceeds_seen_revision() {
     ];
 
     let mut gate = RevisionGate::new();
-    let (mut snapshots, mut notifications, mut rule2_hits) = (0, 0, 0);
+    // 名字说的是**谓词命中次数**（下面那个 `if` 的条件成立了几次），**不是**"真的走到过
+    // ②判定"——②是 `RevisionGate` 内部的判据，黑盒用例数不到它（Task 3 ⑤）。
+    let (mut snapshots, mut notifications, mut rule2_predicate_hits) = (0, 0, 0);
 
     for step in &steps {
         match step {
@@ -348,7 +350,7 @@ fn rule2_applied_revision_never_exceeds_seen_revision() {
                         NotificationVerdict::Drop,
                         "同 epoch 且不高于已应用水位的通知只可能被丢弃"
                     );
-                    rule2_hits += 1;
+                    rule2_predicate_hits += 1;
                 }
                 // 通知只作缓存失效信号：它推 `seen`，但**不得**动已应用水位。
                 assert_eq!(
@@ -372,8 +374,10 @@ fn rule2_applied_revision_never_exceeds_seen_revision() {
         "步骤表被改过就重新核对覆盖面（首跑正是这条先红：计数与表对不上）"
     );
     assert!(
-        rule2_hits >= 2,
-        "至少要真的走到两次「②命中」的判定，否则这条性质是空过（实际 {rule2_hits} 次）"
+        rule2_predicate_hits >= 2,
+        "步表里至少要**两次**命中「同 epoch 且不高于已应用水位」这个**谓词**（实际 \
+         {rule2_predicate_hits} 次），否则「②命中时③必然也命中」那两条子断言是空过；\
+         注意它数的是谓词命中，②判定本身在 `RevisionGate` 内部，黑盒数不到"
     );
     // 收尾状态：换库后的 epoch，水位线 = 那一代的权威版本。
     assert_eq!(gate.epoch(), Some(EPOCH_B));
@@ -583,9 +587,14 @@ impl EventSink for PanicOnceSink {
 
 /// 真应用夹具（形状照 `tests/dev_injections.rs::launch`）：临时库 + 真命令路径。
 /// 采样节拍设成 1 小时——本文件不测采样，别让心跳插进来写检查点。
+///
+/// **字段顺序是刻意的**（Task 3 ⑦）：`running` 在 `_dir` **之前**。Rust 按声明顺序丢弃
+/// 结构体字段，所以 `RunningApp`（库连接 + 采样线程 + 单实例锁）先落，临时目录后删——
+/// 反过来时目录里的库文件还被打开着，Windows 上 `TempDir::drop` 会**静默**删不掉，
+/// 一次跑下来留一地临时目录。
 struct Rig {
-    _dir: tempfile::TempDir,
     running: Box<RunningApp>,
+    _dir: tempfile::TempDir,
     epoch: String,
 }
 
@@ -774,7 +783,15 @@ fn a_lost_notification_converges_through_get_revision_without_rolling_back_the_w
         "迟到通知不得把已见水位拉回去"
     );
 
-    assert_eq!(broadcaster.diagnostics().out_of_order, 0, "广播按提交顺序");
+    // `out_of_order == 0` 只说**本用例这条路径**上广播层没观察到同 epoch 的版本倒退
+    // （`Broadcaster::emit` 的编程错误计数器）。「广播按提交顺序」那条性质由**真实采样
+    // 路径**钉（`tests/periodic_sampling.rs`：同一串行边界内、提交之后广播）；这里没有
+    // 并发、没有事务交错，本判据不声称那件事（Task 3 ⑥）。
+    assert_eq!(
+        broadcaster.diagnostics().out_of_order,
+        0,
+        "本路径上广播层没有观察到版本倒退（「广播按提交顺序」由 periodic_sampling 的真实路径钉）"
+    );
 }
 
 /// **订阅者 panic**（违约，不是返回 `Err`）。

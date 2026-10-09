@@ -1042,7 +1042,12 @@ fn a_backup_that_cannot_be_written_refuses_to_migrate() {
         Ok(_) => panic!("备份失败不得算一次成功启动"),
     };
 
-    assert_eq!(err.code(), "STORAGE_ERROR", "复用既有码，不新增第六个");
+    assert_eq!(
+        err.code(),
+        "STORAGE_ERROR",
+        "备份失败复用既有的 `STORAGE_ERROR`（不是维护态那个第六个码 `DATA_RESTORE_IN_PROGRESS`：\
+         这次启动根本没进维护态）"
+    );
     assert!(
         err.detail()
             .unwrap_or("")

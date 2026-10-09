@@ -321,8 +321,12 @@ pub struct StatsSnapshot {
     pub open_interval_id: Option<String>,
     /// 归属终点 `A(M)`：实时暂计算到这里为止（**不另取墙钟**）。
     pub attributed_end: i64,
-    /// 同一次样本里的会话状态（`None` = 没有活动会话）。T2 的「当前任务与运行状态」要用它
-    /// ——从 `open_interval_id.is_some()` 猜会把 `paused` 与 `recovering` 混为一谈。
+    /// 同一次样本里的会话状态。**`None` = 协调器镜像里还没有装载过任何会话**
+    /// （`Coordinator::live == None`），**不是**"当前没有活动会话"——镜像里最后装载的
+    /// 那条会话可能已经结束，那时这里是 `Some(Finished)` / `Some(Discarded)`。
+    /// 判「有没有在计时」请看 `Some(Running)`（以及 [`Self::open_interval_id`]），
+    /// 不要按 `state.is_none()` 分支；T2 的「当前任务与运行状态」要用它——从
+    /// `open_interval_id.is_some()` 猜会把 `paused` 与 `recovering` 混为一谈。
     pub state: Option<SessionState>,
     pub data_epoch: String,
     pub revision: i64,
@@ -874,16 +878,16 @@ fn current_task(conn: &Connection, sample: &StatsSample) -> Result<Option<Curren
         session_repo::get_session(conn, session_id)?.ok_or_else(|| AppError::Storage {
             detail: "the stats sample points at a session that is not in the database".into(),
         })?;
-    // 变量名不叫 `task`：`task.title` 是 `tests/error_contract.rs` 里已收口的**英文错误
-    // 文案**片段（作为原始子串扫描），这里只是字段访问，别让它撞上那条门禁。
-    let task_row =
+    // 变量名就叫 `task`：`task.title` 是普通字段访问，而 `tests/error_contract.rs` 的
+    // 禁用片段扫描**只认字符串字面量内**的出现（A2 的收口），所以这里不会误报。
+    let task =
         task_repo::get_task(conn, &session_row.task_id)?.ok_or_else(|| AppError::Storage {
             detail: "the current session points at a task that is not in the database".into(),
         })?;
     Ok(Some(CurrentTask {
         session_id: session_row.id,
-        task_id: task_row.id,
-        task_title: task_row.title,
+        task_id: task.id,
+        task_title: task.title,
         state,
     }))
 }

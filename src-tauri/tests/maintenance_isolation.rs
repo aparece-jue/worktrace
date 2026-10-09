@@ -653,6 +653,11 @@ fn maintenance_entry_and_exit_are_recorded_once_with_values() {
 
 /// 显式路径构造（`new`）**默认关闭**诊断落盘：夹具忘了注入也不会写进真实数据目录
 /// （Task 1 的变异实测过那种污染）。生产走 `from_app_paths()`，它必须开启。
+///
+/// **不看配置字段，要看真正接上的那个 sink**（B5）：`StartupConfig.diagnostic_log` 是
+/// `None` 只说明"没注入"，而运行态里接的是不是同一个 `Diagnostics` 是另一件事（接错的
+/// 话字段再干净也照样往真实数据目录写）。所以下面用**同一个读口**
+/// （`lock_app(&app).diagnostics()`）把两极都断一遍。
 #[test]
 fn the_diagnostic_log_is_off_by_default_and_on_for_the_production_paths() {
     let fx = fixture();
@@ -660,6 +665,22 @@ fn the_diagnostic_log_is_off_by_default_and_on_for_the_production_paths() {
     assert!(
         explicit.diagnostic_log.is_none(),
         "显式路径构造必须默认关闭诊断落盘"
+    );
+
+    // 没注入 ⇒ 运行态里的落点是**关**的（`record` 一次系统调用都不做）。
+    let off = fixture();
+    let off_running = started(&off, IDLE_INTERVAL_MS, false);
+    assert!(
+        !lock_app(&app_of(&off_running)).diagnostics().is_enabled(),
+        "没注入日志时，运行态里真正接上的诊断落点也必须关着"
+    );
+
+    // 正控（同一构造路径 + 同一读口）：注入之后它是**开**的，否则上面那条可能恒真。
+    let on = fixture();
+    let on_running = started(&on, IDLE_INTERVAL_MS, true);
+    assert!(
+        lock_app(&app_of(&on_running)).diagnostics().is_enabled(),
+        "注入日志之后，运行态里的诊断落点必须是开的"
     );
 
     // 只解析路径，**不写任何文件**。

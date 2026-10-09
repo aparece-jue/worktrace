@@ -719,6 +719,30 @@ fn an_app_without_any_session_returns_an_empty_view_instead_of_an_error() {
         None,
         "一条候选都没有 ⇒ 不给毫秒（零长度候选那条路径见另一个用例）"
     );
+    // **三类 × 全部四项**的形状也要在这条路径上钉死（B3）：`TodayView::column` 里是
+    // `expect("每一类固定含全部 measure 列")`，`report()` 哪天少给一列，P8 的运行时
+    // 就是 panic 而不是这里的一条断言。空库的取值口径：已确认/实时暂计四项全是 0、
+    // 待确认四项都没有候选（`ms = None`，条数 0）。
+    for class in [StatsClass::Confirmed, StatsClass::Live, StatsClass::Pending] {
+        assert_four_measures(&view, class);
+        for measure in Measure::ALL {
+            let column = view.column(class, measure);
+            assert_eq!(
+                column.intervals, 0,
+                "空库每一类每一项都不该有条目：{class:?}/{measure:?}"
+            );
+            match class {
+                StatsClass::Pending => {
+                    assert_eq!(column.ms, None, "没有候选就不给毫秒：{class:?}/{measure:?}")
+                }
+                _ => assert_eq!(
+                    column.ms,
+                    Some(0),
+                    "空库的这一项是 0、不是缺失：{class:?}/{measure:?}"
+                ),
+            }
+        }
+    }
     // 口径字段一个不少：时区过归一入口（小写 utc → UTC），日期按该时区算。
     assert_eq!(view.timezone, "UTC");
     assert_eq!(view.date, "2026-03-10");

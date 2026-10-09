@@ -112,10 +112,13 @@ pub struct SystemEvent {
 }
 
 /// 事件源适配接口（**可注入**：测试与将来别的平台都实现它）。
+///
+/// **没有 `name()`**（A6 删掉的死 API）：全仓零调用者，生产诊断里的身份是线程名
+/// [`EVENT_THREAD_NAME`]。要用它就得改 [`spawn_watched`] 的 `on_unexpected_exit`
+/// 回调签名（回调由调用方构造，而源实例是线程里用工厂造出来的——调用方拿不到它的名字），
+/// 而"注册失败"那条诊断（`system_events.unavailable`）发生时源对象**根本不存在**；
+/// 也就是说想让它有信息量的两个位置都够不着它。删掉比留一个零调用者的方法诚实。
 pub trait SystemEventSource {
-    /// 诊断名。
-    fn name(&self) -> &'static str;
-
     /// 注册监听。**在事件线程上调用**。
     ///
     /// `Err` = 本平台不支持 / 注册失败：调用方记诊断即可，**不得**返回 `Ok` 假装成功。
@@ -133,10 +136,6 @@ pub struct UnsupportedSource {
 }
 
 impl SystemEventSource for UnsupportedSource {
-    fn name(&self) -> &'static str {
-        "unsupported"
-    }
-
     fn start(&mut self) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -469,10 +468,6 @@ mod windows_source {
     }
 
     impl SystemEventSource for WindowsSource {
-        fn name(&self) -> &'static str {
-            "windows"
-        }
-
         fn start(&mut self) -> std::io::Result<()> {
             WindowsSource::start(self)
         }
@@ -500,6 +495,12 @@ mod windows_source {
                     }
                     // 然后睡到「有消息」或超时：**发送**过来的 `WM_POWERBROADCAST` /
                     // `WM_WTSSESSION_CHANGE` 就是在这类等待里被派发到窗口过程的。
+                    //
+                    // 返回值**刻意只做 best-effort 处理**（A7）：正常两态是「有消息」
+                    // 与「超时」，两者都只会让循环再转一圈；只有 `WAIT_FAILED` 会让它
+                    // 空转（立刻返回 ⇒ `PeekMessage` 又没有消息），而改退出条件属于行为
+                    // 变更（这条路径在生产里没有可达证据）。按 [`super::MESSAGE_WAIT_MS`]
+                    // 的既有契约，失败也不影响「停止信号最多等一拍」这条性质。
                     MsgWaitForMultipleObjectsEx(
                         0,
                         std::ptr::null(),
@@ -526,8 +527,27 @@ mod windows_source {
                 return;
             };
             unsafe {
+                // 收尾（顺序与注册相反）。这段跑在**事件线程的退出路径**上：既没有诊断
+                // 落点（平台叶子不持有 `Diagnostics`，给 `os_source` 加一位属于接口变更），
+                // 也不该在 `Drop` 里 panic（Drop 撞上正在展开的栈就是 abort）。所以逐个
+                // 说明为什么不判返回值——**best-effort**：
+                //
+                // - `WTSUnRegisterSessionNotification`：注册本身就绑在这个 HWND 上，
+                //   窗口随后就销毁 ⇒ 通知随窗口一起失效，失败没有可补救的动作；
+                // - `UnregisterClassW`：类随进程消失；它失败最常见的原因正是"还有窗口
+                //   在用这个类"，也就是下面 `DestroyWindow` 失败的下游现象——重复报
+                //   同一件事没有信息量。
                 WTSUnRegisterSessionNotification(hwnd);
-                DestroyWindow(hwnd);
+                // `DestroyWindow` 是这里**唯一**会留下可观察残留的一步：失败 ⇒ 窗口还在，
+                // 系统还会往一个已经没有消息循环的线程投广播。它必须留痕：dev/test 下
+                // 立刻红（`debug_assert`），release 下至少有一行 stderr。诊断落点里没有
+                // 这条记录名，而平台层不该凭空造业务事件（口径见 P6 终审 M-3：release 的
+                // Windows 子系统没有控制台，`eprintln!` 只是"好过什么都没有"）。
+                if DestroyWindow(hwnd) == 0 {
+                    let error = std::io::Error::last_os_error();
+                    eprintln!("[worktrace] system events: DestroyWindow failed: {error}");
+                    debug_assert!(false, "DestroyWindow 收尾失败：{error}");
+                }
                 UnregisterClassW(class.as_ptr(), GetModuleHandleW(std::ptr::null()));
             }
         }
@@ -536,6 +556,8 @@ mod windows_source {
     #[cfg(test)]
     mod tests {
         use super::*;
+        // 文件级（`system_events`）的那个判据：`use super::*` 只带 windows_source 自己的项。
+        use crate::platform::system_events::registration_refused;
         use std::sync::mpsc;
         use std::sync::Arc;
         use std::time::{Duration, Instant};
@@ -574,15 +596,27 @@ mod windows_source {
         ///
         /// 它**不依赖系统真的锁屏或休眠**（那是 P8 的实机项），但确实经过真窗口、
         /// 真消息队列与真的 `WTSRegisterSessionNotification` 注册。
+        ///
+        /// **环境不适用则显式跳过**（A4）：非交互 / 服务会话下 WTS 注册会被拒
+        /// （`ERROR_ACCESS_DENIED`）——那正是生产侧已登记的环境缺口（G5），不是本用例
+        /// 要判的红。跳过时打印原因（`--nocapture` 可见），**其余错误照旧红**。
         #[test]
         fn the_hidden_window_turns_system_messages_into_events() {
             let (tx, rx) = mpsc::channel();
+            // 注册结果先回一条：主线程据此决定"跑往返"还是"环境不适用，跳过"。
+            let (ready_tx, ready_rx) = mpsc::channel();
             let alive = Arc::new(AtomicBool::new(true));
             let stop = Arc::clone(&alive);
 
             let runner = std::thread::spawn(move || {
                 let mut source = WindowsSource::new(SystemClock::new());
-                source.start().expect("注册消息窗与会话通知");
+                // 注册失败在这里**原样交回主线程**：本线程只负责把 WindowsSource 造在
+                // 将跑消息循环的那条线程上（句柄不跨线程）。
+                if let Err(error) = source.start() {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+                let _ = ready_tx.send(Ok(()));
                 let hwnd = source.window().expect("窗口已建");
                 unsafe {
                     PostMessageW(hwnd, WM_TIMECHANGE, 0, 0);
@@ -596,6 +630,22 @@ mod windows_source {
                     })
                     .expect("消息循环");
             });
+
+            match ready_rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if registration_refused(&error) => {
+                    eprintln!(
+                        "SKIP the_hidden_window_turns_system_messages_into_events: \
+                         WTSRegisterSessionNotification 被拒（非交互/服务会话，G5 已登记的环境缺口）：\
+                         {error:?}"
+                    );
+                    alive.store(false, Ordering::SeqCst);
+                    runner.join().expect("事件线程退出");
+                    return;
+                }
+                Ok(Err(error)) => panic!("注册消息窗与会话通知失败（不是环境不适用）：{error:?}"),
+                Err(error) => panic!("事件线程没有交回注册结果：{error}"),
+            }
 
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut seen = Vec::new();
@@ -630,6 +680,17 @@ mod windows_source {
     }
 }
 
+/// 「注册被拒」= **环境不适用**，不是用例要判的红（A4）。
+///
+/// 非交互 / 服务会话下 `WTSRegisterSessionNotification` 会以 `ERROR_ACCESS_DENIED`
+/// （`io::ErrorKind::PermissionDenied`）失败——这正是生产侧已登记的环境缺口（G5：
+/// 会话通知在服务会话里装不上，组合根只记一条诊断，采样照常）。**只认这一种**：不支持、
+/// 参数错之类的错误仍然要让用例红（否则这两条 Windows 用例在真坏掉时也会"跳过"）。
+#[cfg(test)]
+fn registration_refused(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+}
+
 /// [`spawn`] 的对外行为：**本平台能注册就注册成功，不能注册就同步报出原因**。
 ///
 /// 为什么单列一条：它是 C-C 点名的生产入口签名（`spawn(clock, alive, on_event)`），
@@ -649,6 +710,15 @@ mod tests {
 
         match spawned {
             Ok(()) => {}
+            // **环境不适用 ⇒ 显式跳过**（A4）：非交互 / 服务会话下 WTS 注册被拒
+            // （G5 已登记的环境缺口）。打印原因，不把套件打红。
+            Err(error) if registration_refused(&error) => {
+                eprintln!(
+                    "SKIP the_production_entry_registers_or_reports_why_not: \
+                     WTSRegisterSessionNotification 被拒（非交互/服务会话，G5 已登记的环境缺口）：\
+                     {error:?}"
+                );
+            }
             Err(error) => assert_eq!(
                 error.kind(),
                 io::ErrorKind::Unsupported,
@@ -659,5 +729,25 @@ mod tests {
         // 停止信号之后线程自己收尾（没有任何路径 join 它）。
         alive.store(false, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(MESSAGE_WAIT_MS as u64 + 50));
+    }
+
+    /// 跳过判据只认"访问被拒"：判据本身也要可失败，否则它要么永远不触发（跳过失效），
+    /// 要么把真故障也当成"环境不适用"（假绿）。
+    #[test]
+    fn only_an_access_denied_registration_counts_as_an_inapplicable_environment() {
+        assert!(registration_refused(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "denied"
+        )));
+        #[cfg(windows)]
+        assert!(
+            registration_refused(&io::Error::from_raw_os_error(5)),
+            "ERROR_ACCESS_DENIED 要映射成 PermissionDenied（非交互/服务会话下的真实形状）"
+        );
+        assert!(!registration_refused(&io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no system event source"
+        )));
+        assert!(!registration_refused(&io::Error::other("boom")));
     }
 }

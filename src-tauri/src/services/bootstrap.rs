@@ -550,7 +550,7 @@ impl RunningApp {
     pub fn clock_source(&self) -> Result<backup::ClockSource, AppError> {
         let Some(clock) = self.clock.clone() else {
             return Err(AppError::Storage {
-                detail: "组合根没有挂上同源时钟（RunningApp::attach_clock）：恢复流程不得                         另建一只钟（两个 Instant 原点会让锁屏/休眠边界全部被拒）"
+                detail: "组合根没有挂上同源时钟（RunningApp::attach_clock）：恢复流程不得另建一只钟（两个 Instant 原点会让锁屏/休眠边界全部被拒）"
                     .to_string(),
             });
         };
@@ -2033,7 +2033,8 @@ pub fn startup(
         // **路 B 的出口**（P6 Task 2b 的看门狗）：线程在没有停止信号的情况下退出
         // ⇒ `on_tick` panic 展开（dev/test profile；release 是整进程 abort，见
         // `platform::scheduler` 的模块头）。这里只写一条诊断，不重启、不假装恢复。
-        sampler_died_report(&diagnostics),
+        // `run_id` 在接线时捕获（回调不许取锁，见 `sampler_died_report`）。
+        sampler_died_report(&diagnostics, &run_id),
     );
     probe.step(StartupStep::SamplingStarted);
 
@@ -2066,13 +2067,21 @@ pub fn startup(
 /// 这个事实与**一次回调**，写什么、写到哪由服务层决定（`platform` 不认识业务）。
 ///
 /// 回调**不得 panic**：它在 panic 展开过程中执行（见 `platform::scheduler` 的模块头）。
-fn sampler_died_report(diagnostics: &Diagnostics) -> impl FnOnce() + Send + 'static {
+///
+/// `run_id` 是**这次启动**的 run（C4 的口径）：采样线程与调度器在恢复期间**不重建**
+/// （`services::backup` 模块头那条"`Scheduler` 全程不 stop、不重启"），所以这一次启动里
+/// 装上的看门狗永远只会报这一个 run。要报"此刻是谁"必须取串行边界，而本回调在展开过程中
+/// **绝不能取锁**——那正是这一行**不带 `wall_ms`** 的原因：`timer.unavailable.*` 那几条
+/// 诊断的 `wall_ms` 来自同一次采样/`Coordinator::wall_ms()`，都需要锁，这里只能在接线时
+/// 把不需要锁的 `run_id` 先捕获下来（口径不一致是刻意的，不是漏了）。
+fn sampler_died_report(diagnostics: &Diagnostics, run_id: &str) -> impl FnOnce() + Send + 'static {
     let diagnostics = diagnostics.clone();
+    let run_id = run_id.to_string();
     move || {
         diagnostics.record(
             EVENT_SAMPLER_DIED,
             &format!(
-                "thread={} effect=ticks_stop_growing",
+                "thread={} run_id={run_id} effect=ticks_stop_growing",
                 crate::platform::scheduler::SAMPLER_THREAD_NAME
             ),
         );
@@ -2241,17 +2250,21 @@ mod tests {
     /// 为什么要有这条：[`Scheduler::spawn_watched`] 的契约只是「回调被调用一次」，
     /// 写什么完全在服务层（见 [`sampler_died_report`]）；`tests/periodic_sampling.rs`
     /// 注入的是**它自己**的闭包，核不到生产这一份。
+    ///
+    /// `run_id` 是 C4 补上的：同一族的 `timer.unavailable.*` 行都带 `run_id=…`，只有这条
+    /// 没有 ⇒ 事后读日志分不清"哪一次启动的采样线程死了"。
     #[test]
     fn the_production_sampler_died_report_writes_one_named_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.log");
         let sink = Diagnostics::to_file(&path);
 
-        sampler_died_report(&sink)();
+        sampler_died_report(&sink, "run-42")();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "event=sampler.died_unexpectedly thread=worktrace-sampler effect=ticks_stop_growing\n"
+            "event=sampler.died_unexpectedly thread=worktrace-sampler run_id=run-42 \
+             effect=ticks_stop_growing\n"
         );
     }
 
@@ -2259,6 +2272,6 @@ mod tests {
     /// 它绝不能出问题。
     #[test]
     fn the_production_sampler_died_report_is_a_no_op_when_the_sink_is_disabled() {
-        sampler_died_report(&Diagnostics::disabled())();
+        sampler_died_report(&Diagnostics::disabled(), "run-42")();
     }
 }

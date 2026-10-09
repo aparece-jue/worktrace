@@ -698,7 +698,12 @@ fn inline_user_facing_error_literals_are_chinese() {
     }
 }
 
-/// **禁用子串**：本次收口删掉的英文片段不得回到 `src`。
+/// **禁用子串**：本次收口删掉的英文片段不得回到 `src` 的**字符串字面量**里。
+///
+/// 判据只认**字面量内**的出现（A2 的收口）：这些片段是"曾经被拼进用户文案的英文"，
+/// 而它们的形状会和**字段访问**撞车——`change.task.title` 是普通代码，用 `contains`
+/// 扫全文本时会把它当成回潮（当初为躲这条误报，`services/stats.rs` 只好把局部变量
+/// 改名成 `task_row`）。现在只有被引号包住的才算：`"task.title"` / `r#"task.title"#`。
 ///
 /// 表里**没有** `vanished`：`AppError::Storage` 的 detail 是内部诊断（`message()` 固定为
 /// 「存储暂时不可用，请稍后重试。」），按契约保留英文，所以 `task vanished after insert`
@@ -716,16 +721,138 @@ fn src_has_no_retired_english_error_text() {
     ];
 
     for (path, code) in src_rust_sources() {
+        // 每个字面量**只在自己的内容里**找这些片段：字符串之外的同一个词（字段访问、
+        // 变量名、标识符）不是"回潮的文案"。
+        let literals = string_literals(&code);
         for fragment in retired {
-            assert!(
-                !code.contains(fragment),
-                "{} 里还有已收口的英文文案 {:?}：用户可见的错误文案要走 `DomainError`（中文），\
-                 或 `EmptyText`/`NotInThisVersion` 的中文字面量；内部诊断才用 `AppError::Storage`",
-                path.display(),
-                fragment
-            );
+            if let Some((line, literal)) = literals
+                .iter()
+                .find(|(_, literal)| literal.contains(fragment))
+            {
+                panic!(
+                    "{}:{} 的字符串字面量里还有已收口的英文文案 {:?}（字面量：{:?}）：用户可见的\
+                     错误文案要走 `DomainError`（中文），或 `EmptyText`/`NotInThisVersion` 的\
+                     中文字面量；内部诊断才用 `AppError::Storage`",
+                    path.display(),
+                    line,
+                    fragment,
+                    literal
+                );
+            }
         }
     }
+}
+
+/// 扫描器**自证**（否则上一条的"零命中"可能只是因为一条字面量都没取到）。
+///
+/// 五种形状各一条：普通串、带转义引号的串、`b"…"`、`r#"…"#`、`br##"…"##`——最后两种
+/// 一旦漏掉，`src/storage/schema_v1.rs` 的建表 SQL（多行原始字面量）就会从扫描面消失。
+/// 另一半是 A2 的**误报类**：`change.task.title` 是字段访问、没有引号，不该算字面量。
+#[test]
+fn the_literal_scanner_sees_every_string_shape_and_ignores_plain_code() {
+    let code = r###"
+        let plain = "task.title";
+        let escaped = "say \"task.title\" now";
+        let byte = b"task.title";
+        let raw = r#"task.title"#;
+        let raw_byte = br##"task.title"##;
+        let field = change.task.title;
+    "###;
+
+    let literals: Vec<String> = string_literals(code)
+        .into_iter()
+        .map(|(_, literal)| literal)
+        .collect();
+    assert_eq!(
+        literals.len(),
+        5,
+        "五种字面量形状各算一条（`change.task.title` 不是字面量）：{literals:?}"
+    );
+    assert!(
+        literals
+            .iter()
+            .all(|literal| literal.contains("task.title")),
+        "每条字面量的内容都要取到（含转义与原始串）：{literals:?}"
+    );
+    // 行号是**字面量起始行**（多行原始串只报第一行），报错时能直接定位。
+    assert_eq!(
+        string_literals(code).first().map(|(line, _)| *line),
+        Some(2)
+    );
+    // 字段访问：同一个词、没有引号 ⇒ 一条字面量都没有。
+    assert!(
+        string_literals("let field = change.task.title;").is_empty(),
+        "字段访问不是字符串字面量（A2 的误报类）"
+    );
+}
+
+/// `code` 里每个**字符串字面量**的 `(起始行, 内容)`。
+///
+/// 认三种形状：`"…"`（含带 `b` 前缀的字节串）、`r"…"`、`r#"…"#`（`#` 任意多个，
+/// `b` 前缀同样认，例如 `br#"…"#`）。`src/storage/schema_v1.rs` 的建表 SQL 就是一条
+/// 多行原始字面量，漏掉 `r#"…"#` 会让整个 schema 从扫描面里消失。
+///
+/// 两条刻意的口径：
+/// - **不还原转义**：判据是"这段英文出现在某个字面量里"，还原只会多一层可能与事实
+///   不符的推断（`\n` 之流对本次的片段没有影响）；返回的是去掉引号的原始内容。
+/// - **不认字符字面量 `'…'`**：本次的片段都是多字符词组，一个 `char` 装不下；而把
+///   `'`（生命周期、泛型里到处都是）当字面量起点会造出大量假边界。
+///
+/// 已知边界：`src_rust_sources` 只剔**整行**注释，所以**行尾注释**里被引号包住的片段
+/// 仍会算命中——那一边是"多报"而不是"漏报"，宁可让人来看一眼。
+fn string_literals(code: &str) -> Vec<(usize, String)> {
+    fn line_of(code: &str, at: usize) -> usize {
+        code[..at].matches('\n').count() + 1
+    }
+
+    let bytes = code.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // 原始字面量：`r"…"` / `r#"…"#`（可选 `b` 前缀）。
+        let after_prefix = if bytes[i] == b'r' {
+            Some(i + 1)
+        } else if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'r') {
+            Some(i + 2)
+        } else {
+            None
+        };
+        if let Some(mut cursor) = after_prefix {
+            let mut hashes = 0usize;
+            while bytes.get(cursor) == Some(&b'#') {
+                hashes += 1;
+                cursor += 1;
+            }
+            if bytes.get(cursor) == Some(&b'"') {
+                let start = cursor + 1;
+                let closer = format!("\"{}", "#".repeat(hashes));
+                if let Some(end) = code[start..].find(&closer) {
+                    out.push((line_of(code, i), code[start..start + end].to_string()));
+                    i = start + end + closer.len();
+                    continue;
+                }
+                // 没有收尾（源码不完整）：当普通文本继续走，别把后面全吞掉。
+            }
+        }
+        // 普通字面量：`"…"`（`b` 前缀在上一轮已经跳过）。
+        if bytes[i] == b'"' {
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' => j += 2,
+                    b'"' => break,
+                    _ => j += 1,
+                }
+            }
+            let end = j.min(bytes.len());
+            out.push((line_of(code, i), code[start..end].to_string()));
+            i = end + 1;
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 /// `TagNameTaken` 的两件事必须分开：字段留**代码里的取值**（诊断与 T6 的结构化载荷要用），

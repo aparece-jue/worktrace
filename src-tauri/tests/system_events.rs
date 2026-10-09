@@ -90,10 +90,6 @@ struct ScriptedSource {
 }
 
 impl SystemEventSource for ScriptedSource {
-    fn name(&self) -> &'static str {
-        "scripted"
-    }
-
     fn start(&mut self) -> io::Result<()> {
         Ok(())
     }
@@ -115,10 +111,6 @@ impl SystemEventSource for ScriptedSource {
 struct FailingSource;
 
 impl SystemEventSource for FailingSource {
-    fn name(&self) -> &'static str {
-        "failing"
-    }
-
     fn start(&mut self) -> io::Result<()> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -135,10 +127,6 @@ impl SystemEventSource for FailingSource {
 struct DyingSource;
 
 impl SystemEventSource for DyingSource {
-    fn name(&self) -> &'static str {
-        "dying"
-    }
-
     fn start(&mut self) -> io::Result<()> {
         Ok(())
     }

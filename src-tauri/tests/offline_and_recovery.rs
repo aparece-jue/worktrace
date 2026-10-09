@@ -867,6 +867,19 @@ fn the_service_chain_survives_windows_crash_restart_backup_and_restore() {
 
     // 门禁关着 ⇒ 新计时被拒，且**四件事**成立（逐字段比对，不只比行数）。
     let before = fx.facts();
+    // 第四件事是**既有记录逐字段不变**（B2）。只断标题的话，一个把 `status` 或
+    // `row_version` 改掉的实现照样绿。`t1` 在这条链路里已经被 `start` 推成
+    // `Doing` / `row_version = 2`（冻结估时基准 0→1、再把状态推到 Doing 1→2，同一事务两跳）。
+    let row_before = (
+        fx.text("SELECT title FROM task WHERE id = 't1'"),
+        fx.text("SELECT status FROM task WHERE id = 't1'"),
+        fx.scalar("SELECT row_version FROM task WHERE id = 't1'"),
+    );
+    assert_eq!(
+        row_before,
+        ("任务一".to_string(), "Doing".to_string(), 2),
+        "被拒之前那一行的取值（下面比的是它有没有被改动）"
+    );
     let refused = {
         let mut state = lock_app(&app);
         state
@@ -875,7 +888,15 @@ fn the_service_chain_survives_windows_crash_restart_backup_and_restore() {
     };
     assert_code(&refused, "RECOVERY_REQUIRED");
     assert_eq!(fx.facts(), before, "被门禁拒绝的命令不得写入任何东西");
-    assert_eq!(fx.text("SELECT title FROM task WHERE id = 't1'"), "任务一");
+    assert_eq!(
+        (
+            fx.text("SELECT title FROM task WHERE id = 't1'"),
+            fx.text("SELECT status FROM task WHERE id = 't1'"),
+            fx.scalar("SELECT row_version FROM task WHERE id = 't1'"),
+        ),
+        row_before,
+        "被门禁拒绝的命令不得改动既有任务的任何一个字段（逐字段比对）"
+    );
 
     // ── ⑦ 备份：先写一条「只有这一时刻才有」的标记，再备份 ────────────────
     fx.create_task(&restarted, "恢复前独有的事实").unwrap();
@@ -1124,7 +1145,17 @@ fn the_service_chain_survives_windows_crash_restart_backup_and_restore() {
 /// 判据是**源码面**（`src/**/*.rs`）+ **依赖面**（`Cargo.toml` 的依赖段），
 /// 不是"跑一遍看看报不报错"：后者在联网的机器上永远绿。
 /// 注释里出现的 URL **不**算（文档链接不是出网路径），所以这里只认客户端符号。
-const NETWORK_SYMBOLS: [&str; 17] = [
+///
+/// **边界（B4，报告里也披露过）——只证它写的那两件事**：
+///
+/// - **只扫直接依赖**：[`declared_dependencies`] 读的是 `Cargo.toml` 的依赖段，
+///   **不递归** `Cargo.lock` / 传递依赖。所以"某个传递依赖自带 HTTP 客户端"不在射程内；
+/// - **固定符号表**：下面这张表是**人工维护**的已知客户端符号（外加 `tauri::http`
+///   与 `process::command`），新出现的、叫别的名字的出网方式（自写 socket、FFI 调
+///   系统 API、`Command` 之外的进程启动）抓不到；
+/// - 因此它证明的是「本项目自己的源码与直接依赖里没有**已知的**出网/起进程符号」，
+///   不是"二进制不可能出网"。真实拔网线跑通归 P8（见本用例的收尾说明）。
+const NETWORK_SYMBOLS: [&str; 19] = [
     "std::net",
     "tcpstream",
     "tcplistener",
@@ -1142,6 +1173,11 @@ const NETWORK_SYMBOLS: [&str; 17] = [
     "openai",
     "anthropic",
     "api_key",
+    // B4 补的两类：Tauri 自带的 HTTP 客户端（零新增依赖就能出网），以及起子进程
+    // （`process::command` 同时覆盖 `std::process::Command` 与 `use std::process::Command`
+    // 两种写法，而 `std::process::id()` 不会被它命中）。
+    "tauri::http",
+    "process::command",
 ];
 
 /// 直接依赖里一旦出现这些名字，依赖面就不再是"离线自足"的。

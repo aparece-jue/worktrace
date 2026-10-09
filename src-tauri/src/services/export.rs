@@ -734,7 +734,10 @@ fn render(
     }
     let _ = writeln!(out);
     if pending.is_empty() {
-        let _ = writeln!(out, "本周没有待确认记录。");
+        // **限定词不能省**（A3）：这里的 `pending` 只是**人工**候选（`REVIEW_MEASURES`），
+        // 所以"这一周只有机器 / 等待的候选"时也会走到这一行——写"本周没有待确认记录"
+        // 会把"本回顾不列它们"读成"这一周没有任何待确认"。
+        let _ = writeln!(out, "本周没有待人工确认的记录。");
     } else {
         let _ = writeln!(out, "| 开始日期 | 结束日期 | 类型 | 任务 |");
         let _ = writeln!(out, "| --- | --- | --- | --- |");

@@ -936,7 +936,9 @@ fn an_empty_week_is_still_a_valid_document() {
     );
 
     let pending = section(&text, "## 三、待确认记录");
-    assert!(pending.contains("本周没有待确认记录。"));
+    // **限定词要在**（A3）：本节只列**人工**的候选，"没有待确认记录"会被读成
+    // "这一周没有任何待确认"——而只有机器 / 等待候选的周也会走到这一行。
+    assert!(pending.contains("本周没有待人工确认的记录。"));
     // 一条候选都没有时跨度一栏写「无候选」，不是 0（不推算）；且第三节只列人工（P5-24）。
     assert_eq!(
         line_starting_with(pending, "| 人工 |"),
