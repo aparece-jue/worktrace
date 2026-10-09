@@ -167,15 +167,51 @@ fn backup_timestamp(path: &Path) -> Option<i64> {
     at_ms.parse::<i64>().ok()
 }
 
-/// 参与"不许删"比较的**规范路径**（A1 复审）。
+/// 参与"不许删"比较的**保护键**（A1 复审；回退方向由该轮复审的 Minor 收口）。
 ///
 /// `protected` 是调用方给的拼写，目录项是文件系统给的拼写：大小写、`.`/`..` 段、
 /// 软链、Windows 的 `\\?\` 前缀都可能不同（P8 的文件选择器给什么拼写不由这里决定）。
-/// 逐字节比字符串会把**同一份文件**判成两份 ⇒ 用户选中那份又变成可删候选。能
-/// `canonicalize` 就用它（两侧此刻都存在），失败（刚被删、权限不足）就退回原路径——
-/// 退回只会让比较更严格，不会多删。
-fn keep_key(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+/// 逐字节比字符串会把**同一份文件**判成两份 ⇒ 用户选中那份又变成可删候选。
+///
+/// 所以比较走两条腿：能 `canonicalize` 的按**规范路径**比；拿不到规范路径的
+/// （路径尚不存在、权限不足）退到**文件名**比。退路取**宽**的方向：同名的那份也受保护，
+/// 代价只是保留策略少删一份（多留一份旧产物）；反过来取"窄"会把用户选中那份重新变成
+/// 可删候选——那正是 A1 要修的缺陷。同一目录里产物名唯一，所以退路在常规情形与按路径比
+/// 等价（`tests/backup_restore.rs::a_differently_spelled_pick_is_still_protected` 走前者，
+/// 本模块的 `a_pick_without_a_canonical_path_still_protects_by_name` 走后者）。
+struct ProtectedKeys {
+    paths: Vec<PathBuf>,
+    names: Vec<std::ffi::OsString>,
+}
+
+impl ProtectedKeys {
+    fn of(protected: &[&Path]) -> Self {
+        let mut keys = Self {
+            paths: Vec::with_capacity(protected.len()),
+            names: Vec::with_capacity(protected.len()),
+        };
+        for path in protected {
+            match std::fs::canonicalize(path) {
+                Ok(canonical) => keys.paths.push(canonical),
+                Err(_) => {
+                    if let Some(name) = path.file_name() {
+                        keys.names.push(name.to_os_string());
+                    }
+                }
+            }
+        }
+        keys
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        if let Ok(canonical) = std::fs::canonicalize(path) {
+            if self.paths.contains(&canonical) {
+                return true;
+            }
+        }
+        path.file_name()
+            .is_some_and(|name| self.names.iter().any(|kept| kept == name))
+    }
 }
 
 /// 只保留最新的 [`BACKUP_KEEP`] 份备份，但**永不删掉 `protected` 里的任何一份**。
@@ -192,7 +228,7 @@ fn keep_key(path: &Path) -> PathBuf {
 /// 恢复本身不受影响，但用户回头就找不到自己选的文件了）。所以调用方把被恢复的路径
 /// 一并传进来，不让保留策略碰它。
 ///
-/// 比较走 [`keep_key`]（规范路径）：**同一份文件的不同拼写**也算同一份
+/// 比较走 [`ProtectedKeys`]：**同一份文件的不同拼写**也算同一份
 /// （`tests/backup_restore.rs::a_differently_spelled_pick_is_still_protected`）。
 ///
 /// **不返回错误**：清理发生在备份成功之后，失败只记诊断，不能把一次成功启动变成失败。
@@ -215,12 +251,10 @@ fn prune_old_backups(dir: &Path, protected: &[&Path], diagnostics: &Diagnostics)
         return;
     }
 
-    let keep: Vec<PathBuf> = protected.iter().map(|path| keep_key(path)).collect();
+    let keep = ProtectedKeys::of(protected);
     backups.sort_by_key(|(at_ms, _)| *at_ms);
     let excess = backups.len() - BACKUP_KEEP;
-    let removable = backups
-        .into_iter()
-        .filter(|(_, path)| !keep.contains(&keep_key(path)));
+    let removable = backups.into_iter().filter(|(_, path)| !keep.contains(path));
     for (_, path) in removable.take(excess) {
         if let Err(error) = std::fs::remove_file(&path) {
             // 只记诊断（正式诊断落点是 `platform::diagnostics`，见 Task 2a）：清理发生在
@@ -1260,5 +1294,32 @@ mod tests {
         assert!(!dir.path().join(artifact_name(1_000)).exists());
         assert!(!dir.path().join(artifact_name(1_001)).exists());
         assert!(dir.path().join(artifact_name(1_002)).exists());
+    }
+
+    /// **拿不到规范路径时退回文件名比较，而且退路必须是"宽"的**（A1 复审的 Minor）。
+    ///
+    /// 形态：`protected` 给一个**不存在**的路径（`canonicalize` 必失败 ⇒ 走退路），但它的
+    /// **文件名**与目录里最老的那份产物相同 ⇒ 那份必须活下来。按"退到原路径逐字节比"的旧
+    /// 写法，两者永远不相等、最老那份会被删掉——那正是 A1 要修的缺陷在回退路径上复现。
+    #[test]
+    fn a_pick_without_a_canonical_path_still_protects_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let diagnostics = Diagnostics::disabled();
+        for i in 0..7 {
+            std::fs::write(dir.path().join(artifact_name(1_000 + i)), b"x").unwrap();
+        }
+        // 不存在的路径（`canonicalize` 必失败），文件名与最老那份产物相同。
+        let ghost = dir.path().join("ghost-dir").join(artifact_name(1_000));
+        prune_old_backups(dir.path(), &[ghost.as_path()], &diagnostics);
+
+        assert!(
+            dir.path().join(artifact_name(1_000)).exists(),
+            "拿不到规范路径时也要按文件名护住用户选中那份"
+        );
+        assert!(
+            !dir.path().join(artifact_name(1_001)).exists(),
+            "护住一份之后，清理仍按保留策略删最老的（次老那份）"
+        );
+        assert!(dir.path().join(artifact_name(1_006)).exists());
     }
 }
