@@ -11,11 +11,13 @@
 //!    并发写者每个事务恰好"加一行 + `revision` +1"，所以任何**同一个读事务**里取到的
 //!    `(items/total, revision)` 必须满足 `Δ计数 == Δrevision`；把元数据读挪到读事务之外
 //!    （两次独立快照）会让两边来自不同的提交，等式立刻不成立。**判别力有实测 RED**：
-//!    `require_meta` 挪出读事务 ⇒ 红在 `:210` 的等式上（`count=20000 revision=12`，
-//!    `.dsh_tmp/fw-sab-wal-readtx.txt`）；写者多推一次 `revision` ⇒ 同样红
-//!    （`count=20012 revision=24`，`.dsh_tmp/fw-sab-wal3d.txt`）。
-//!    ⚠️ 行号一律是**本修订**口径；那两份日志跑在 BASE `ca3995b` 上，里面写的是旧号
-//!    `:193`（差 17 行，正是本段注释加出来的）。
+//!    `require_meta` 挪出读事务 ⇒ 红在 `hold_one_snapshot` 里那条
+//!    `count - base.0 == revision - base.1` 的等式上（`count=20000 revision=12`，
+//!    `.dsh_tmp/fw-sab-wal-readtx.txt`；那份日志跑在 BASE `ca3995b` 上，里面的行号是**那时的**
+//!    旧号）；写者多推一次 `revision` ⇒ 同样红（`count=20012 revision=24`，
+//!    `.dsh_tmp/fw-sab-wal3d.txt`）。
+//!    ⚠️ 本文件一律用**判据名**引用位置，不写行号：行号会随注释增删漂移（这条注记本身就是
+//!    被复审点出来的教训——上一版写死了行号，加了三行说明就对不上了）。
 //! 2. **两个连接同时提交**（catalog 的写入口）：两边交回的 `revision` 合起来必须构成
 //!    **无重复、无空洞**的连续序列。
 //!
@@ -27,9 +29,10 @@
 //!    里的闭包，测试插不进"提交之后、读回之前"）。
 //!
 //!    **但断言本身不空**：同一条变异把窗口人为撑开（补读之前 `sleep 50ms`）就立刻红在
-//!    `:558` 的 `assert_eq!`（BASE 口径 `:541`），重复与空洞一起出现（`left` 里
+//!    `two_connections_committing_at_once_return_unique_consecutive_revisions` 的
+//!    `assert_eq!(revisions, expected, …)` 上（重复与空洞一起出现：`left` 里
 //!    `2,2 / 14,14 / 40,40…`，`right` 是 `1..81`）——日志 `.dsh_tmp/wal-sab-c2-wide.txt`
-//!    （同样跑在 BASE 上，行号是旧号）。缺的是"能把窗口撑开的注入手段"，不是判据。
+//!    （同样跑在 BASE `ca3995b` 上）。缺的是"能把窗口撑开的注入手段"，不是判据。
 //! 3. **P2 提交后的单一读事务**（`Coordinator::rebuild_from_committed`）：命令交回的快照
 //!    必须反映**这次提交**的会话事实，且 `revision` 逐次严格增长、终态账等于
 //!    「并发写次数 + 会话写次数」（每个写事务仍然恰好 +1）。
