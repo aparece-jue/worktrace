@@ -11,7 +11,7 @@
 
 | 项 | 结果 |
 | --- | --- |
-| `cargo test --offline` | **746 passed / 0 failed / 1 ignored**（P6 前 659；终审修复波后 746） |
+| `cargo test --offline` | **753 passed / 0 failed / 1 ignored**（P6 前 659；终审修复波后 746；P6 后存量清理 +7） |
 | `cargo fmt --check` | 0 |
 | `cargo clippy --all-targets --offline -- -D warnings` | 0 告警 |
 | `scripts/check-layers.ps1` | **六条全 PASSED**（含 `platform/` 不得出现 `services|storage|commands`、`services/` 不得取系统时间、入口点不得自己 `Db::open`/`migrate(`/`run_repo::`） |
@@ -62,6 +62,28 @@ Task 2c 两次（删两处维护态判据 ⇒ 2 红；`try_lock` 替排队等锁
 - **`Today.current` 可能指向已结束会话**（`CurrentTask` 带 `state`）⇒ 界面必须按 `state` 分支，不能把"有 current"当成"正在计时"。
 - **维护态对 UI 的出口只有两条**：写命令返回 `DATA_RESTORE_IN_PROGRESS`（按码显示"正在恢复"并禁用入口）、维护结束后的 `data_epoch` 变化走既有收敛路径。**没有第三个事件名**。
 - **恢复期间不能退出进程**（托盘退出被拒）；界面要显示"正在恢复"并禁用退出入口。
+
+
+## 9. P6 之后的存量清理（2026-10-10）
+
+P6 收口后、P8 开工前，把 P5/P6 两阶段评审累积的存量问题一次清完（用户要求"先修复之前存在的问题"）：
+
+- **`1bf6496`**（16 文件 +577/−81）：**A 真缺陷 7 条 + B 断言强度 5 条 + C 诊断文案 8 条 = 22 条**。要点：
+  ① **保留策略不再可能删掉用户正在恢复的那份产物**（恢复的"旧版本先备份再迁移"分支复用用户备份目录）；
+  ② **`error_contract.rs` 的"禁用英文片段"扫描改成只认字符串字面量**——原先 `contains` 会误伤任何 `task.title` 字段访问（当初为躲它把变量改名 `task_row`，现已还原）；
+  ③ 导出周回顾在只有机器/等待候选时不再印"本周没有待确认记录。"；
+  ④ `system_events` 两条 Windows 单测把"访问被拒"当环境不适用（其余失败仍红）；
+  ⑤ 离线 needle 补 `tauri::http`/`std::process::Command`；
+  ⑥ `Today` 空库用例钉住三类×全部 measure 列（`TodayView::column` 的 `expect` 若失效会在 P8 运行时 panic）；
+  ⑦ `wal_concurrency` 的判别力声明按事实降级（并补一次撑窗变异证明断言不空）；
+  ⑧ 若干诊断/文案（`tx::write_tx` 旁写明 DEFERRED + 先读后写 ⇒ 第二写者会让升级立刻 BUSY；看门狗诊断行补 `run_id` 等）。
+- **`3deda6b` + `af6fd9e`**：该轮复审留下的 5 条 Minor 收口（扫描器的引号配对漏报模式 + 正控、`Drop` 里不再 `debug_assert!`（撞上展开中的栈会 abort 整个进程）、注释不再写会漂的行号、保护集合按规范路径比 + 不同拼写用例、诊断正控断到落点路径）。
+- **`ee09bc6`**：保护键的**回退方向取"宽"**（能 canonicalize 的按规范路径比，拿不到的退到文件名比；旧写法退回原路径逐字节比会让用户选中那份重新可删）+ 一条能钉住回退分支的单测。
+
+清理后的门禁：**753 passed / 0 failed / 1 ignored**、fmt/clippy `-D warnings`/分层六条全过。
+**副产品（供后续避坑）**：Rust 的 `Path` 相等会消掉 `.` 段但**不消 `..`**；"在注释里写行号"必然漂移（评审两次抓到）；工作树里是 CRLF 的文件不止 `commands/mod.rs`（`export.rs`/`stats.rs` 也是，而提交 blob 仍是 LF）——一律按文件探测 EOL。
+
+**仍留给 P8**（与 §8 一致）：实机验收、`Db::open_existing`、前端 `pnpm exec tsc --noEmit`、`tauri-plugin-opener` 摘除、`services/tx.rs::write_tx` 的事务模式（引入第二写者前必须先改）。
 
 ## 7. 终审与修复波
 
