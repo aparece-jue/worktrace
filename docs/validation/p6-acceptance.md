@@ -51,7 +51,7 @@ Task 2c 两次（删两处维护态判据 ⇒ 2 红；`try_lock` 替排队等锁
 
 - **IPC 与界面**：13 条新增命令（含恢复、备份、Today、`history_view`）与全部页面；恢复入口的 `expected_data_epoch` 守卫。
 - **实机链路**（P6 计划 2026-10-08 收口第四条明确归 P8）：真实拔网线跑 V0.1 功能；手动触发备份与恢复并核对 `data_epoch` 变化与旧请求被拒；界面拿旧请求被拒；强杀后重启核对单实例未重复初始化；**锁屏 30 分钟 / 休眠唤醒（含 Modern Standby 可能不发 `PBT_APMSUSPEND`）/ 正反改时的到达延迟与行为**；OS 级磁盘耗尽与 WAL 写失败；双窗口实机；HUD/安装包与 R-04 发布产物门禁。
-- **发布收口**：`tauri-plugin-opener` 是脚手架遗留、**全仓零调用点**（4 处全是注册/配置），建议在 P8 的发布收口一并摘掉（零调用，摘掉会动 `Cargo.lock` 与 capabilities，属构建形态变更）。
+- **发布收口**：`tauri-plugin-opener` 是脚手架遗留、**全仓零调用点**（4 处全是注册/配置），P8 先核对导出页打开所在位置的方案；若使用 revealItemInDir 则保留并登记权限，否则确认无消费者后再摘掉（会动 Cargo.lock 与 capabilities）。
 - `manual_platform_verified` 保持 **false**。
 
 ## 6. 与 P8 的接口口径（交接）
@@ -111,8 +111,8 @@ P6 收口后、P8 开工前，把 P5/P6 两阶段评审累积的存量问题一�
 **要接线/要验的**：
 - 13 条新增 IPC（含恢复、备份、Today、`history_view`）与全部页面；恢复入口的 `expected_data_epoch` 守卫。
 - 实机：真实拔网线、手动备份/恢复并核对 `data_epoch` 与旧请求被拒、强杀后重启核对单实例、**锁屏 30 分钟 / 休眠唤醒 / 正反改时的到达延迟与行为**、OS 级磁盘耗尽与 WAL 写失败、双窗口实机、HUD/安装包与 R-04。
-- 前端 `pnpm exec tsc --noEmit` 跑一次（P6 只改了注释与 `ERROR_CODES`，未跑前端门禁）。
-- `tauri-plugin-opener` 零调用点 ⇒ 发布收口时摘掉（会动 `Cargo.lock` 与 capabilities）。
+- 前端类型、测试及构建已在 2026-10-10 完整门禁复验通过（pnpm build 包含 tsc，142 个前端测试通过），证据 D:/ProJect/worktrace-review-20261010-gate/result.json；不再列作尚未验证。
+- `tauri-plugin-opener` 当前零调用点；P8 导出计划需要打开所在位置，先确定是否用 opener 的 revealItemInDir。若采用则保留并登记最小权限；仅在选用其它实现且确认仍无调用后摘掉，不能提前按“零调用”删除计划将消费的能力。
 - 结构债（建议在 P8 动 storage 时一起做，别在 P6 收口轮扩大 diff）：`storage::Db::open_existing`（一次关掉 `require_library_in_place` 的逐入口判据与 `backup.rs` 的 copy→open 窗口）。
 
 **已明确归属、不算遗漏**：OS 磁盘耗尽/WAL 写失败 → P8 实机；Task 5 的人工验收 → P8（`manual_platform_verified` 保持 false）；`platform/single_instance.rs` 未改（P7 既有用例已覆盖，G10 明令不要重写）。
