@@ -201,7 +201,7 @@ pub fn replay_event_impl(
     broadcaster: &Broadcaster,
     revision: i64,
 ) -> Result<EventEnvelope, AppError> {
-    let identity = handshake::get_revision(app.db())?;
+    let identity = handshake::get_revision(app.db()?)?;
     let envelope = EventEnvelope::domain_changed(
         identity.data_epoch,
         revision,

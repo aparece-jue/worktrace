@@ -441,7 +441,7 @@ fn confirming_every_pending_interval_in_one_command_closes_the_session() {
     let run = running.run_id().to_string();
 
     assert_eq!(
-        pending_ids(state.db(), "s1"),
+        pending_ids(state.db().unwrap(), "s1"),
         ["s1-cand", "s1-unknown"],
         "归一后的两段都在待确认集合里"
     );
@@ -468,7 +468,7 @@ fn confirming_every_pending_interval_in_one_command_closes_the_session() {
     assert_eq!(report.session.state, SessionState::Paused);
     assert_eq!(report.intervals.len(), 3, "报告给出该会话的全部区间");
 
-    let db = state.db();
+    let db = state.db().unwrap();
     // 两条待确认段各自被确认：起止、时长、needs_review 全变。
     assert_eq!(
         interval(db, "s1-cand"),
@@ -564,7 +564,7 @@ fn confirming_to_finished_stamps_the_session_end_from_trusted_intervals() {
         )
         .unwrap();
 
-    let db = state.db();
+    let db = state.db().unwrap();
     let s = session(db, "s1");
     assert_eq!(s.state, "finished");
     assert_eq!(
@@ -603,7 +603,7 @@ fn confirming_an_empty_pending_set_only_moves_the_session_state() {
         )
         .unwrap();
 
-    let db = state.db();
+    let db = state.db().unwrap();
     let s = session(db, "s-empty");
     assert_eq!(s.state, "finished");
     assert_eq!(s.needs_review, 0);
@@ -687,8 +687,8 @@ fn a_range_list_that_does_not_cover_the_pending_set_is_rejected() {
     ];
 
     for (label, ranges) in cases {
-        let before = facts(state.db(), "s1");
-        let before_other = facts(state.db(), "s2");
+        let before = facts(state.db().unwrap(), "s1");
+        let before_other = facts(state.db().unwrap(), "s2");
         let error = state
             .reconcile(
                 env(&epoch, 0),
@@ -696,9 +696,13 @@ fn a_range_list_that_does_not_cover_the_pending_set_is_rejected() {
             )
             .unwrap_err();
         assert_code(&error, "DOMAIN_ERROR");
-        assert_eq!(facts(state.db(), "s1"), before, "{label}：必须零变化");
         assert_eq!(
-            facts(state.db(), "s2"),
+            facts(state.db().unwrap(), "s1"),
+            before,
+            "{label}：必须零变化"
+        );
+        assert_eq!(
+            facts(state.db().unwrap(), "s2"),
             before_other,
             "{label}：别的会话也不许动"
         );
@@ -723,7 +727,7 @@ fn an_unknown_session_is_rejected() {
         )
         .unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(revision(state.db()), 0);
+    assert_eq!(revision(state.db().unwrap()), 0);
 }
 
 #[test]
@@ -737,7 +741,7 @@ fn a_stale_session_version_is_rejected_without_writing() {
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
 
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     let error = state
         .reconcile(
             env(&epoch, 7),
@@ -745,7 +749,7 @@ fn a_stale_session_version_is_rejected_without_writing() {
         )
         .unwrap_err();
     assert_code(&error, "VERSION_CONFLICT");
-    assert_eq!(facts(state.db(), "s1"), before);
+    assert_eq!(facts(state.db().unwrap(), "s1"), before);
 }
 
 #[test]
@@ -759,7 +763,7 @@ fn a_missing_record_version_is_rejected() {
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
 
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     let error = state
         .reconcile(
             WriteEnvelope::for_create(&epoch),
@@ -767,7 +771,7 @@ fn a_missing_record_version_is_rejected() {
         )
         .unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(facts(state.db(), "s1"), before);
+    assert_eq!(facts(state.db().unwrap(), "s1"), before);
 }
 
 #[test]
@@ -780,7 +784,7 @@ fn an_epoch_mismatch_is_rejected_without_writing() {
     let running = started(&fx);
     let mut state = lock_app(running.app());
 
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     let error = state
         .reconcile(
             env("epoch-from-another-database", 0),
@@ -788,7 +792,7 @@ fn an_epoch_mismatch_is_rejected_without_writing() {
         )
         .unwrap_err();
     assert_code(&error, "DATA_EPOCH_MISMATCH");
-    assert_eq!(facts(state.db(), "s1"), before);
+    assert_eq!(facts(state.db().unwrap(), "s1"), before);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -828,7 +832,7 @@ fn a_confirmed_range_that_overlaps_confirmed_human_time_is_rejected() {
     let epoch = running.data_epoch().to_string();
 
     // 与别的会话的已确认区间相交 ⇒ 拒绝（半开：完全落在内部）。
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     let error = state
         .reconcile(
             env(&epoch, 0),
@@ -843,7 +847,7 @@ fn a_confirmed_range_that_overlaps_confirmed_human_time_is_rejected() {
         )
         .unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(facts(state.db(), "s1"), before, "重叠必须整条拒绝");
+    assert_eq!(facts(state.db().unwrap(), "s1"), before, "重叠必须整条拒绝");
 
     // 与**本会话的可信前缀**相交（把起点往前改）⇒ 同样拒绝（S7 不是特例）。
     let error = state
@@ -860,7 +864,7 @@ fn a_confirmed_range_that_overlaps_confirmed_human_time_is_rejected() {
         )
         .unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(facts(state.db(), "s1"), before);
+    assert_eq!(facts(state.db().unwrap(), "s1"), before);
 
     // 端点相接**不算**重叠：确认段正好收在别人起点上。
     let outcome = state
@@ -879,7 +883,7 @@ fn a_confirmed_range_that_overlaps_confirmed_human_time_is_rejected() {
     let (report, _) = outcome.into_parts();
     assert_eq!(report.session.state, SessionState::Paused);
     assert_eq!(
-        interval(state.db(), "s1-unknown").ended_at,
+        interval(state.db().unwrap(), "s1-unknown").ended_at,
         Some(WALL - 5_000)
     );
 }
@@ -899,7 +903,7 @@ fn a_confirmed_range_that_touches_an_open_running_interval_is_rejected() {
     // 当前 run 里另有一条正在计时的会话：它的区间还没有终点（`ended_at IS NULL`），
     // 所以任何晚于它起点的确认都会与它重叠——那会造出两段互相覆盖的人工时间。
     insert_session(
-        state.db(),
+        state.db().unwrap(),
         "s-live",
         &run,
         "FOREGROUND",
@@ -909,7 +913,7 @@ fn a_confirmed_range_that_touches_an_open_running_interval_is_rejected() {
         0,
     );
     insert_interval(
-        state.db(),
+        state.db().unwrap(),
         "s-live-open",
         "s-live",
         WALL - 1_000,
@@ -919,7 +923,7 @@ fn a_confirmed_range_that_touches_an_open_running_interval_is_rejected() {
         None,
     );
 
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     let error = state
         .reconcile(
             env(&epoch, 0),
@@ -934,7 +938,7 @@ fn a_confirmed_range_that_touches_an_open_running_interval_is_rejected() {
         )
         .unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(facts(state.db(), "s1"), before);
+    assert_eq!(facts(state.db().unwrap(), "s1"), before);
 
     // 收在它的起点上：端点相接，不算重叠。
     state
@@ -963,7 +967,7 @@ fn confirmed_ranges_that_overlap_each_other_are_rejected() {
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
 
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     let error = state
         .reconcile(
             env(&epoch, 0),
@@ -978,7 +982,7 @@ fn confirmed_ranges_that_overlap_each_other_are_rejected() {
         )
         .unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(facts(state.db(), "s1"), before);
+    assert_eq!(facts(state.db().unwrap(), "s1"), before);
 }
 
 #[test]
@@ -992,7 +996,7 @@ fn a_confirmed_range_that_ends_in_the_future_is_rejected() {
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
 
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     let error = state
         .reconcile(
             env(&epoch, 0),
@@ -1007,7 +1011,7 @@ fn a_confirmed_range_that_ends_in_the_future_is_rejected() {
         )
         .unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(facts(state.db(), "s1"), before);
+    assert_eq!(facts(state.db().unwrap(), "s1"), before);
 }
 
 #[test]
@@ -1021,7 +1025,7 @@ fn a_confirmed_range_that_ends_before_it_starts_is_rejected() {
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
 
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     let error = state
         .reconcile(
             env(&epoch, 0),
@@ -1036,7 +1040,7 @@ fn a_confirmed_range_that_ends_before_it_starts_is_rejected() {
         )
         .unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(facts(state.db(), "s1"), before);
+    assert_eq!(facts(state.db().unwrap(), "s1"), before);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1096,7 +1100,7 @@ fn a_session_that_is_not_recovering_is_rejected_field_by_field() {
     let epoch = running.data_epoch().to_string();
 
     for session_id in ["s-paused", "s-fin"] {
-        let before = facts(state.db(), session_id);
+        let before = facts(state.db().unwrap(), session_id);
         let error = state
             .reconcile(
                 env(&epoch, 0),
@@ -1105,12 +1109,12 @@ fn a_session_that_is_not_recovering_is_rejected_field_by_field() {
             .unwrap_err();
         assert_code(&error, "DOMAIN_ERROR");
         assert_eq!(
-            facts(state.db(), session_id),
+            facts(state.db().unwrap(), session_id),
             before,
             "{session_id}：前置不满足必须整条拒绝"
         );
         assert_eq!(
-            pending_ids(state.db(), session_id).len(),
+            pending_ids(state.db().unwrap(), session_id).len(),
             1,
             "{session_id}：待确认事实原样保留"
         );
@@ -1171,7 +1175,7 @@ fn a_session_with_a_broken_invariant_is_rejected_and_points_at_diagnostics() {
     let epoch = running.data_epoch().to_string();
 
     for session_id in ["s-broken", "s-running"] {
-        let before = facts(state.db(), session_id);
+        let before = facts(state.db().unwrap(), session_id);
         let error = state
             .reconcile(
                 env(&epoch, 0),
@@ -1184,7 +1188,11 @@ fn a_session_with_a_broken_invariant_is_rejected_and_points_at_diagnostics() {
             detail.contains("损坏"),
             "文案必须指向诊断而不是「确认一下就修好」：{detail}"
         );
-        assert_eq!(facts(state.db(), session_id), before, "损坏会话零写入");
+        assert_eq!(
+            facts(state.db().unwrap(), session_id),
+            before,
+            "损坏会话零写入"
+        );
     }
     // 损坏的会话仍然算恢复材料：门禁不因为被拒而放开。
     assert!(state.recovery().requires_recovery());
@@ -1219,7 +1227,7 @@ fn discarding_uncertain_intervals_voids_only_the_pending_ones() {
     let epoch = running.data_epoch().to_string();
     let run = running.run_id().to_string();
 
-    let before_other = facts(state.db(), "s2");
+    let before_other = facts(state.db().unwrap(), "s2");
     let outcome = state
         .reconcile(env(&epoch, 0), discard("s1", ReconcileTargetState::Paused))
         .unwrap();
@@ -1227,7 +1235,7 @@ fn discarding_uncertain_intervals_voids_only_the_pending_ones() {
     assert!(changed);
     assert_eq!(report.intervals.len(), 4);
 
-    let db = state.db();
+    let db = state.db().unwrap();
     // 零长度候选与终点未知段：作废 + 清 needs_review，`ended_at` 清为 NULL（不许补零时长）。
     assert_eq!(
         interval(db, "s1-cand"),
@@ -1324,7 +1332,7 @@ fn discard_uncertain_refuses_an_explicit_range_list() {
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
 
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     let mut req = discard("s1", ReconcileTargetState::Paused);
     req.ranges = vec![ConfirmedRange {
         interval_id: "s1-cand".into(),
@@ -1333,7 +1341,7 @@ fn discard_uncertain_refuses_an_explicit_range_list() {
     }];
     let error = state.reconcile(env(&epoch, 0), req).unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(facts(state.db(), "s1"), before);
+    assert_eq!(facts(state.db().unwrap(), "s1"), before);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1366,7 +1374,7 @@ fn the_audit_records_before_and_after_for_every_processed_interval() {
         )
         .unwrap();
 
-    let db = state.db();
+    let db = state.db().unwrap();
     assert_eq!(
         scalar(db, "SELECT COUNT(*) FROM time_edit WHERE session_id='s1'"),
         1,
@@ -1430,7 +1438,7 @@ fn the_audit_of_a_discard_names_its_own_reason_and_keeps_the_candidate_endpoint(
         )
         .unwrap();
 
-    let (before, after, reason) = time_edit_of(state.db(), "s1");
+    let (before, after, reason) = time_edit_of(state.db().unwrap(), "s1");
     assert_eq!(reason.as_deref(), Some("reconcile:discard_uncertain"));
     assert_eq!(
         before["intervals"][1]["ended_at"], PREFIX_END,
@@ -1482,7 +1490,7 @@ fn a_confirmed_session_can_be_resumed() {
     assert!(!report.session.needs_review, "确认必须清会话级待确认");
     assert_eq!(report.session.run_id, run);
 
-    let version = session(state.db(), "s1").row_version;
+    let version = session(state.db().unwrap(), "s1").row_version;
     state
         .resume(ResumeRequest {
             expected_data_epoch: epoch,
@@ -1493,7 +1501,7 @@ fn a_confirmed_session_can_be_resumed() {
         })
         .expect("确认之后该会话必须能继续");
 
-    let db = state.db();
+    let db = state.db().unwrap();
     let s = session(db, "s1");
     assert_eq!(s.state, "running");
     assert_eq!(s.run_id, run);
@@ -1529,10 +1537,11 @@ fn a_failure_after_the_interval_writes_rolls_the_whole_transaction_back() {
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
 
-    let before = facts(state.db(), "s1");
+    let before = facts(state.db().unwrap(), "s1");
     // 让审计写不进去：区间与会话的 UPDATE 已经执行过，失败必须整体回滚。
     state
         .db()
+        .unwrap()
         .connection()
         .execute("DROP TABLE time_edit", [])
         .unwrap();
@@ -1553,15 +1562,27 @@ fn a_failure_after_the_interval_writes_rolls_the_whole_transaction_back() {
     assert_code(&error, "STORAGE_ERROR");
 
     assert_eq!(
-        session(state.db(), "s1"),
+        session(state.db().unwrap(), "s1"),
         before.session,
         "会话状态必须回滚"
     );
     for (id, expected) in &before.intervals {
-        assert_eq!(&interval(state.db(), id), expected, "{id} 必须回滚");
+        assert_eq!(
+            &interval(state.db().unwrap(), id),
+            expected,
+            "{id} 必须回滚"
+        );
     }
-    assert_eq!(revision(state.db()), before.revision, "版本必须回滚");
-    assert_eq!(pending_ids(state.db(), "s1").len(), 2, "待确认集合原样保留");
+    assert_eq!(
+        revision(state.db().unwrap()),
+        before.revision,
+        "版本必须回滚"
+    );
+    assert_eq!(
+        pending_ids(state.db().unwrap(), "s1").len(),
+        2,
+        "待确认集合原样保留"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1617,10 +1638,10 @@ fn the_recovery_gate_opens_only_after_every_recovery_fact_is_resolved() {
     state
         .start(start_request(&epoch))
         .expect("门禁解除后 start 必须成功");
-    assert_eq!(session(state.db(), "s1").state, "paused");
-    assert_eq!(session(state.db(), "s2").state, "finished");
-    assert_ne!(session(state.db(), "s1").run_id, OLD_RUN);
-    assert_eq!(session(state.db(), "s1").run_id, run);
+    assert_eq!(session(state.db().unwrap(), "s1").state, "paused");
+    assert_eq!(session(state.db().unwrap(), "s2").state, "finished");
+    assert_ne!(session(state.db().unwrap(), "s1").run_id, OLD_RUN);
+    assert_eq!(session(state.db().unwrap(), "s1").run_id, run);
 }
 
 #[test]
@@ -1641,6 +1662,7 @@ fn a_failed_rescan_keeps_the_gate_closed_until_a_later_scan_succeeds() {
     // 注入「三条扫描查询失败」：把 work_interval 改名（查询会报 no such table）。
     state
         .db()
+        .unwrap()
         .connection()
         .execute_batch("ALTER TABLE work_interval RENAME TO work_interval_hidden;")
         .unwrap();
@@ -1667,6 +1689,7 @@ fn a_failed_rescan_keeps_the_gate_closed_until_a_later_scan_succeeds() {
     // 扫描恢复成功 ⇒ 清标记，门禁放开，start 可用（不要求重做任何已提交命令）。
     state
         .db()
+        .unwrap()
         .connection()
         .execute_batch("ALTER TABLE work_interval_hidden RENAME TO work_interval;")
         .unwrap();
@@ -1699,6 +1722,7 @@ fn a_failed_rescan_preserves_a_non_default_snapshot() {
     // 让三条扫描查询失败（改表名 ⇒ no such table）。
     state
         .db()
+        .unwrap()
         .connection()
         .execute_batch("ALTER TABLE work_interval RENAME TO work_interval_hidden;")
         .unwrap();
@@ -1733,12 +1757,12 @@ fn rescan_recovery_reports_the_new_facts_and_preserves_the_committed_ones() {
     let epoch = running.data_epoch().to_string();
 
     // 直接重扫（幂等）：没有写入，版本不动。
-    let before = revision(state.db());
+    let before = revision(state.db().unwrap());
     let scan = state.rescan_recovery().unwrap();
     assert!(scan.requires_recovery());
     assert_eq!(scan.pending_intervals, ["s1-cand", "s1-unknown"]);
     assert_eq!(scan.unfinished_sessions, ["s1"]);
-    assert_eq!(revision(state.db()), before, "重扫是只读的");
+    assert_eq!(revision(state.db().unwrap()), before, "重扫是只读的");
 
     // 提交之后再重扫：事实变了，快照跟着变。
     state
@@ -1778,16 +1802,16 @@ fn reconciling_another_session_does_not_clobber_the_live_mirror() {
 
     // 正在计时的 B：本 run 的会话，协调器镜像的就是它。
     state.start(start_request(&epoch)).unwrap();
-    let live_id = state.coordinator().live().unwrap().id.clone();
+    let live_id = state.coordinator().unwrap().live().unwrap().id.clone();
     assert_eq!(
-        state.coordinator().live().unwrap().state,
+        state.coordinator().unwrap().live().unwrap().state,
         SessionState::Running
     );
 
     // 同一个 run 里另一条会话 A 变 `recovering`（门禁只数**别的** run，所以它不挡计时；
     // 这也正是「本 run 有 recovering + 用户合法 start 了另一条」的可达位移）。
     insert_session(
-        state.db(),
+        state.db().unwrap(),
         "s-a",
         &run,
         "FOREGROUND",
@@ -1801,14 +1825,14 @@ fn reconciling_another_session_does_not_clobber_the_live_mirror() {
         .reconcile(env(&epoch, 0), discard("s-a", ReconcileTargetState::Paused))
         .unwrap();
 
-    let live = state.coordinator().live().expect("镜像还在");
+    let live = state.coordinator().unwrap().live().expect("镜像还在");
     assert_eq!(live.id, live_id, "对账别的会话不得把 live 换成它");
     assert_eq!(
         live.state,
         SessionState::Running,
         "正在计时那条的镜像必须原样保留"
     );
-    assert_eq!(session(state.db(), "s-a").state, "paused");
+    assert_eq!(session(state.db().unwrap(), "s-a").state, "paused");
 }
 
 /// 被改动的会话**正是**镜像那条时，必须按已提交事实刷新它——不能继续按旧状态出快照。
@@ -1824,9 +1848,10 @@ fn reconciling_the_mirrored_session_refreshes_its_live_state() {
 
     // A 由本 run 自己 `start`：镜像就是它。
     state.start(start_request(&epoch)).unwrap();
-    let live_id = state.coordinator().live().unwrap().id.clone();
+    let live_id = state.coordinator().unwrap().live().unwrap().id.clone();
     let (open_id, started_at): (String, i64) = state
         .db()
+        .unwrap()
         .connection()
         .query_row(
             "SELECT id, started_at FROM work_interval
@@ -1840,6 +1865,7 @@ fn reconciling_the_mirrored_session_refreshes_its_live_state() {
     // 而内存镜像还停在 `running`（这就是「留了一个按旧状态出快照的 live」）。
     state
         .db()
+        .unwrap()
         .connection()
         .execute(
             "UPDATE work_interval SET ended_at = started_at, needs_review = 1
@@ -1849,6 +1875,7 @@ fn reconciling_the_mirrored_session_refreshes_its_live_state() {
         .unwrap();
     state
         .db()
+        .unwrap()
         .connection()
         .execute(
             "UPDATE work_session SET state = 'recovering', needs_review = 1,
@@ -1857,7 +1884,7 @@ fn reconciling_the_mirrored_session_refreshes_its_live_state() {
             [&live_id],
         )
         .unwrap();
-    let version = session(state.db(), &live_id).row_version;
+    let version = session(state.db().unwrap(), &live_id).row_version;
 
     state
         .reconcile(
@@ -1870,7 +1897,7 @@ fn reconciling_the_mirrored_session_refreshes_its_live_state() {
         )
         .unwrap();
 
-    let live = state.coordinator().live().expect("镜像还在");
+    let live = state.coordinator().unwrap().live().expect("镜像还在");
     assert_eq!(live.id, live_id);
     assert_eq!(
         live.state,
@@ -1956,7 +1983,7 @@ fn attention_overview_keeps_the_live_session_out_and_the_terminal_ones_in() {
 
     // 当前 run 里正在计时的会话：与计时快照分离，不进列表。
     insert_session(
-        state.db(),
+        state.db().unwrap(),
         "s-live",
         &run,
         "FOREGROUND",
@@ -1966,7 +1993,7 @@ fn attention_overview_keeps_the_live_session_out_and_the_terminal_ones_in() {
         0,
     );
     insert_interval(
-        state.db(),
+        state.db().unwrap(),
         "s-live-open",
         "s-live",
         WALL - 1_000,
@@ -1976,10 +2003,10 @@ fn attention_overview_keeps_the_live_session_out_and_the_terminal_ones_in() {
         None,
     );
 
-    let revision_before = revision(state.db());
-    let overview = attention_overview(state.db(), &epoch, &run).unwrap();
+    let revision_before = revision(state.db().unwrap());
+    let overview = attention_overview(state.db().unwrap(), &epoch, &run).unwrap();
 
-    assert_eq!(revision(state.db()), revision_before, "概览是纯读");
+    assert_eq!(revision(state.db().unwrap()), revision_before, "概览是纯读");
     assert_eq!(overview.data_epoch, epoch);
     assert_eq!(overview.revision, revision_before);
     let ids: Vec<&str> = overview
@@ -2083,8 +2110,8 @@ fn attention_overview_marks_current_run_sessions_and_rejects_a_stale_epoch() {
 
     // 干净的库：正在计时的会话不进列表。
     state.start(start_request(&epoch)).unwrap();
-    let live_id = state.coordinator().live().unwrap().id.clone();
-    let overview = attention_overview(state.db(), &epoch, &run).unwrap();
+    let live_id = state.coordinator().unwrap().live().unwrap().id.clone();
+    let overview = attention_overview(state.db().unwrap(), &epoch, &run).unwrap();
     assert!(
         overview.items.is_empty(),
         "正在计时的会话与恢复概览分离：{:?}",
@@ -2098,6 +2125,7 @@ fn attention_overview_marks_current_run_sessions_and_rejects_a_stale_epoch() {
     // 且 `is_current_run` 为真（P8 据此分组）。
     state
         .db()
+        .unwrap()
         .connection()
         .execute(
             "INSERT INTO work_interval(id,session_id,started_at,ended_at,duration_ms,needs_review)
@@ -2105,7 +2133,7 @@ fn attention_overview_marks_current_run_sessions_and_rejects_a_stale_epoch() {
             rusqlite::params![live_id, WALL - 500, WALL - 400],
         )
         .unwrap();
-    let overview = attention_overview(state.db(), &epoch, &run).unwrap();
+    let overview = attention_overview(state.db().unwrap(), &epoch, &run).unwrap();
     assert_eq!(overview.items.len(), 1);
     assert_eq!(overview.items[0].session_id, live_id);
     assert!(overview.items[0].is_current_run);
@@ -2119,10 +2147,11 @@ fn attention_overview_marks_current_run_sessions_and_rejects_a_stale_epoch() {
     );
     assert_eq!(
         overview.items[0].session_row_version,
-        session(state.db(), &live_id).row_version
+        session(state.db().unwrap(), &live_id).row_version
     );
 
     // 库身份守卫照旧。
-    let error = attention_overview(state.db(), "epoch-from-another-database", &run).unwrap_err();
+    let error =
+        attention_overview(state.db().unwrap(), "epoch-from-another-database", &run).unwrap_err();
     assert_code(&error, "DATA_EPOCH_MISMATCH");
 }

@@ -92,11 +92,31 @@
 //!
 //! ## 本阶段不做
 //!
-//! 恢复确认与历史修正的用户命令、门禁重扫（P3 Task 2 起）；**装卸运行态**
-//! （`take_runtime`/`install_runtime`/`runtime_present`、三个访问器改 `Result`）与恢复的
-//! 三段流程（P6 Task 4b）；正式 OS 事件源与 `AppState::system_boundary`
-//! （P6 Task 2c）；平台事件的实机验收（P8 复核）。**备份编排**在第②步里，原语已搬到
+//! 恢复确认与历史修正的用户命令、门禁重扫（P3 Task 2 起）；恢复的**三段流程本体**
+//! （P6 Task 4b，落在 [`crate::services::backup`]——本文件只提供 `AppState` 上的
+//! 装卸接缝）；平台事件的实机验收（P8 复核）。**备份编排**在第②步里，原语已搬到
 //! [`crate::services::backup`]（Task 4a），本文件不再持有任何拷贝逻辑。
+//!
+//! ## 运行态的装卸（P6 Task 4b）
+//!
+//! 恢复的换库窗口里，库句柄与协调器**不在手**：`AppState.{db, coordinator}` 是
+//! `Option`，由 [`AppState::take_runtime`] 取走、[`AppState::install_runtime`] 装回，
+//! [`AppState::runtime_present`] 回答"在不在手"。三个访问器
+//! （[`AppState::db`] / [`AppState::db_mut`] / [`AppState::coordinator`]）因此**可失败**：
+//! 缺运行态一律 [`AppError::DataRestoreInProgress`]（**不 `unwrap`、不 panic**）。
+//! [`AppState::recovery`] 与 `recovery` 字段**不动**——那份快照不被取走。
+//!
+//! 两条写死的纪律：
+//!
+//! 1. **[`Runtime`] 不含 [`Scheduler`]**（G11 的自死锁陷阱）：恢复的 ①③ 两段是持锁临界区，
+//!    而 `Scheduler::Drop` 会 `stop()`（`join` 采样线程），采样线程又要取这把锁——
+//!    在持锁临界区丢弃持有调度器的运行态就是自死锁。调度器由 [`RunningApp`] 持有，
+//!    **全程不 stop、不重启**。
+//! 2. **恢复流程留在一次命令体内**：②③ 两段在同一次后台阻塞调用里**连续**调
+//!    `services::backup` 的服务原语（`begin_restore` → `prepare_and_swap` →
+//!    `commit_restore` / `abort_restore`），**不重新进 `run_command`**。维护态里
+//!    **没有任何 IPC 命令名**在白名单上——恢复自己是唯一能穿过这扇门的调用方，
+//!    而它走的是服务原语而不是命令。落点见 `services::backup::restore_from_backup`。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -310,7 +330,13 @@ impl StartupStep {
 ///
 /// 三条分支都会表现为「这一次没有备份发生」（`NotNeeded` 与 `NothingToBackUp`），
 /// 但**原因不同**，所以它们分开报：断言与诊断都按原因看，不合并成「都没备份」。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// **`Taken` 带产物路径**（P6 Task 4b 收掉 4a 评审的 Minor 4）：原语返回的 `PathBuf`
+/// 原先在那个唯一的调用点被 `?;` 丢掉，于是"日志说已备份、产物却没了"（Task 1 的
+/// Minor ①）事后无从查起。现在路径随这一条信号一起交回探针 ⇒ 生产诊断行里直接有
+/// 产物路径（`StartupTrace::pre_migration_backup`）。代价是这个枚举不再是 `Copy`
+/// （`PathBuf` 不是），测试与实现各改一处。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreMigrationBackup {
     /// 库文件本来就不存在（首启）：**没有可备份的事实**。
     ///
@@ -319,8 +345,8 @@ pub enum PreMigrationBackup {
     NothingToBackUp,
     /// 库已经在 [`SCHEMA_VERSION`]：`migrate` 是幂等空操作，没有要保护的迁移动作。
     NotNeeded,
-    /// 需要迁移：**已经在 `migrate` 之前**写出一份一致备份。
-    Taken,
+    /// 需要迁移：**已经在 `migrate` 之前**写出一份一致备份；里面是本次产物的路径。
+    Taken(PathBuf),
 }
 
 /// 启动次序的观察者。生产侧接诊断日志，测试侧记录次序。
@@ -446,6 +472,12 @@ pub struct RunningApp {
     data_epoch: String,
     recovery: RecoveryScan,
     sampling_errors: Arc<AtomicU64>,
+    /// 平台边界路径的失败计数：与 `AppState` 里那个字段是**同一个** `Arc`（Minor 2）。
+    ///
+    /// 为什么在这里再持一份：`AppState::system_boundary_errors` 要**取锁**才读得到，
+    /// 而 P8 的状态展示会被一次长事务（恢复、导出）挡住。这份镜像与
+    /// [`RunningApp::sampling_errors`] 同档：**无锁可读**，写仍只发生在锁内。
+    system_boundary_errors: Arc<AtomicU64>,
 }
 
 impl RunningApp {
@@ -479,6 +511,15 @@ impl RunningApp {
     /// 采样出错的累计次数。**只记诊断**：采样失败不该把进程打死。
     pub fn sampling_errors(&self) -> u64 {
         self.sampling_errors.load(Ordering::SeqCst)
+    }
+
+    /// 平台边界（OS 事件）路径失败的累计次数（P6 Task 4b 收掉 2c 的 Minor 2）。
+    ///
+    /// 与 [`AppState::system_boundary_errors`] 是**同一个计数**（同一个 `Arc`），
+    /// 区别只在读法：这一个**不取锁**。P8 做状态展示时用这一条，
+    /// 免得被一次长事务（恢复、导出）挡在串行边界外面。
+    pub fn system_boundary_errors(&self) -> u64 {
+        self.system_boundary_errors.load(Ordering::SeqCst)
     }
 
     /// 采样线程是否**意外结束**（P6 Task 2b 的看门狗出口）。
@@ -539,10 +580,10 @@ impl RunningApp {
             state.begin_exit()?;
             // 退出时刻必须来自协调器的时钟（生产是 SystemClock，测试是 FakeClock）：
             // 这不仅是为了可测，也是为了让「退出」与「归属」用同一个时间来源。
-            let AppState {
-                db, coordinator, ..
-            } = &mut *state;
-            coordinator.snapshot(db)?.as_of
+            // 走 `AppState::snapshot` 而不是字段解构：运行态可能不在手（维护态），那时它按
+            // `DATA_RESTORE_IN_PROGRESS` 拒绝——而维护态在上面的 `begin_exit` 就被挡住了，
+            // 所以这条 Err 是防线，不是路径。
+            state.snapshot()?.as_of
         };
 
         self.sampling.stop();
@@ -678,6 +719,20 @@ fn fault_origin(verdict: SampleVerdict, faulted_before: bool) -> &'static str {
     FAULT_NO_TRUSTED_BASELINE
 }
 
+/// 运行态：库 + 协调器。维护态期间它可以**不在手**（[`AppState::take_runtime`] 取出、
+/// [`AppState::install_runtime`] 装回）。
+///
+/// **为什么不含 `Scheduler`**（G11 的自死锁陷阱，别"顺手"加进来）：`Scheduler::Drop`
+/// **无条件**调 `stop()`（`platform/scheduler.rs`），而 `stop()` 要 `join` 采样线程、
+/// 采样线程每一拍都要取 `lock_app`。恢复的 ①③ 两段正是**持锁临界区**——运行态里若带着
+/// 调度器，那两段里任何一次丢弃都会在持锁状态下等一个等锁的线程：进程静默卡死。
+/// 调度器由 [`RunningApp`] 持有、**全程不 stop 也不重启**（`stop` 不可逆）；它的闭包每拍
+/// 从 `AppState` 里读**当前**运行态，换库之后自然对新运行态工作。
+pub struct Runtime {
+    pub db: Db,
+    pub coordinator: Coordinator,
+}
+
 /// 进程内**唯一**的数据库句柄与计时协调器。
 ///
 /// 一次只允许一条路径进入（外部那层 `Mutex`），所以「用户命令」与「周期采样」
@@ -687,9 +742,15 @@ fn fault_origin(verdict: SampleVerdict, faulted_before: bool) -> &'static str {
 /// 方法（`start`/`resume`/`snapshot`/`tick`/`sample_tick`/`explicit_exit`）——
 /// 其中 `start`/`resume` 挂着恢复门禁（第 8 条）。若把 `&mut Coordinator` 递出去，
 /// 「不得忽略历史」就只剩纪律；Task 1 的命令层就在下一轮，这道口子不能留。
+///
+/// **`db` 与 `coordinator` 是 `Option`**（P6 Task 4b）：恢复的换库窗口里它们**不在手**
+/// （被 [`AppState::take_runtime`] 取走），此时三个访问器
+/// （[`AppState::db`] / [`AppState::db_mut`] / [`AppState::coordinator`]）一律返回
+/// [`AppError::DataRestoreInProgress`]——**不 `unwrap`、不 panic**。`recovery` 字段
+/// **不被取走**（它只是一份内存快照），所以 [`AppState::recovery`] 的签名与返回类型不变。
 pub struct AppState {
-    db: Db,
-    coordinator: Coordinator,
+    db: Option<Db>,
+    coordinator: Option<Coordinator>,
     recovery: RecoveryScan,
     /// 上一次恢复扫描**失败**的标记（P3 S1）。启动成功时一定是 `false`。
     ///
@@ -722,7 +783,13 @@ pub struct AppState {
     /// 与 `RunningApp::sampling_errors` 同档的「连续失败可被上层观察到」出口：事件源起不来
     /// 是**一次性**的（由组合根记诊断），而事件处理连续失败（例如协调器已经在故障态、
     /// 或者库忙）需要有一个能读到的计数，否则现象是「锁屏不再暂停，但没有任何一处会红」。
-    system_boundary_errors: u64,
+    ///
+    /// **为什么是 `Arc<AtomicU64>` 而不是 `u64`**（P6 Task 4b 收掉 2c 的 Minor 2）：
+    /// `sampling_errors` 是**无锁可读**的（`RunningApp` 上那个 `Arc<AtomicU64>`），
+    /// 而这个计数原先只能**取锁**读——P8 的状态展示会被一次长事务挡住。同一个
+    /// `Arc` 克隆给 [`RunningApp`]，读它就不再经过串行边界；写入仍只发生在
+    /// `system_boundary`（锁内），所以计数与库状态的一致性没有被削弱。
+    system_boundary_errors: Arc<AtomicU64>,
     /// 正式诊断日志的落点（release 的 Windows 子系统没有控制台，见模块头）。
     diagnostics: Diagnostics,
 }
@@ -807,14 +874,43 @@ fn lock_holder(boundary: &AppBoundary) -> MutexGuard<'_, Option<ThreadId>> {
 impl AppState {
     /// 只读借用数据库句柄：诊断与只读校验（例如在 App **自己那条连接**上取
     /// `total_changes()`）。写入一律走服务方法。
-    pub fn db(&self) -> &Db {
-        &self.db
+    ///
+    /// **运行态不在手 ⇒ `Err(DataRestoreInProgress)`**（P6 Task 4b）：维护态的换库窗口里
+    /// 这个句柄正被关闭/替换，读它要么报错要么读到已经作废的那个世界。调用方**不得**
+    /// `unwrap`；命令层的错误路径在拿不到它时**不能再读库**（见 `commands::run_command`）。
+    pub fn db(&self) -> Result<&Db, AppError> {
+        self.db.as_ref().ok_or(AppError::DataRestoreInProgress)
     }
 
     /// 只读借用协调器：展示运行态（`run_id`/`tick_seq`/`live`/故障标记）。
     /// 需要可变入口时用本类型的命令方法，别在这里开第二条路。
-    pub fn coordinator(&self) -> &Coordinator {
-        &self.coordinator
+    ///
+    /// 缺运行态同样是 [`AppError::DataRestoreInProgress`]（与 [`AppState::db`] 同口径）。
+    pub fn coordinator(&self) -> Result<&Coordinator, AppError> {
+        self.coordinator
+            .as_ref()
+            .ok_or(AppError::DataRestoreInProgress)
+    }
+
+    /// 运行态的两个字段一起借出（只读）：**唯一**能同时拿到 `&Db` 与 `&Coordinator`
+    /// 的私有接缝。分成两次调用会撞上「先可变借 `self.db`、再借 `self.coordinator`」
+    /// 的借用冲突，所以本类型内部一律走这一对（以及 [`AppState::runtime_mut`]）。
+    ///
+    /// 两个字段必须**同时在手**：缺任意一个都说明正处在恢复的换库窗口里
+    /// ⇒ 与访问器同一口径（`DataRestoreInProgress`），**不**给出半个运行态。
+    fn runtime(&self) -> Result<(&Db, &Coordinator), AppError> {
+        match (self.db.as_ref(), self.coordinator.as_ref()) {
+            (Some(db), Some(coordinator)) => Ok((db, coordinator)),
+            _ => Err(AppError::DataRestoreInProgress),
+        }
+    }
+
+    /// 运行态的两个字段一起借出（可变）。语义与 [`AppState::runtime`] 相同。
+    fn runtime_mut(&mut self) -> Result<(&mut Db, &mut Coordinator), AppError> {
+        match (self.db.as_mut(), self.coordinator.as_mut()) {
+            (Some(db), Some(coordinator)) => Ok((db, coordinator)),
+            _ => Err(AppError::DataRestoreInProgress),
+        }
     }
 
     /// 取一次墙钟毫秒：写命令的 `created_at` / `updated_at` 与审计行用它。
@@ -825,7 +921,7 @@ impl AppState {
     ///
     /// 采样**用完即弃**：它不喂给锚点/检测器，也不推进任何采样状态。
     pub fn now_ms(&self) -> Result<i64, AppError> {
-        self.coordinator.wall_ms()
+        self.coordinator()?.wall_ms()
     }
 
     /// 写服务要的可变库句柄（`services::catalog` / `services::daily_plan` 的写入口）。
@@ -834,8 +930,67 @@ impl AppState {
     /// 而协调器仍然只有只读访问器 [`AppState::coordinator`]——拿到 `&mut Db` 也拿不到
     /// 可以随便动的计时状态（Task 0 收口时私有化字段，堵的是 `&mut Coordinator`，
     /// 不是业务写本身）。
-    pub fn db_mut(&mut self) -> &mut Db {
-        &mut self.db
+    pub fn db_mut(&mut self) -> Result<&mut Db, AppError> {
+        self.db.as_mut().ok_or(AppError::DataRestoreInProgress)
+    }
+
+    /// 取出运行态（P6 Task 4b 的 ① 段：**锁内、短**）。
+    ///
+    /// 前置条件：**已经在维护态**（调用方先 [`AppState::begin_maintenance`]）。不满足时
+    /// 拒绝——维护态之外把运行态拿走，会让进程落进「没有库、也没有维护态」的中间世界，
+    /// 那个状态没有任何出口。
+    ///
+    /// 重复调用同样拒绝（运行态已经不在手）：两个错误都用
+    /// [`AppError::DataRestoreInProgress`]——它们是同一件事的两种到达方式
+    /// （「此刻没有可用的运行态」），而调用方**只有**恢复流程一个。
+    ///
+    /// 取出的 [`Runtime`] 由调用方在**锁外**丢弃/使用：旧 `Db` 随它一起 drop
+    /// （**这时才关连接**，02 §9 的「关闭连接」），而**绝不能**在持锁临界区里丢弃
+    /// 任何持有 [`Scheduler`] 的东西（G11 的自死锁，见 [`Runtime`] 的说明）。
+    pub fn take_runtime(&mut self) -> Result<Runtime, AppError> {
+        if self.maintenance.is_none() {
+            return Err(AppError::DataRestoreInProgress);
+        }
+        match (self.db.take(), self.coordinator.take()) {
+            (Some(db), Some(coordinator)) => Ok(Runtime { db, coordinator }),
+            // 只可能取到一半（另一个已经被取走）：放回去，保持「要么都在、要么都不在」。
+            (db, coordinator) => {
+                self.db = db;
+                self.coordinator = coordinator;
+                Err(AppError::DataRestoreInProgress)
+            }
+        }
+    }
+
+    /// 装回运行态（P6 Task 4b 的 ③ 段：**锁内**）。成功路径装的是**新库那一套**，
+    /// 回滚路径装的是**重开原库后重建的那一套**——两条路都带新 `run_id` 与新协调器。
+    ///
+    /// 同时替换恢复门禁快照并清掉「上次扫描失败」的标记：装进来的 `recovery` 是**刚扫过**
+    /// 的结论（新 run 之后重扫），旧的失败标记对它是无关的历史。
+    ///
+    /// 前置条件：维护态已置位、运行态**不在手**（重复安装会覆盖掉一份正在用的运行态）。
+    /// 两条都不满足时拒绝，且**不改变任何字段**。
+    ///
+    /// **不在这里清维护态**：顺序是 `install_runtime` → [`AppState::end_maintenance`]
+    /// （结束维护的时长要从**新**运行态那条时钟接缝读，见后者的说明）。
+    pub fn install_runtime(
+        &mut self,
+        runtime: Runtime,
+        recovery: RecoveryScan,
+    ) -> Result<(), AppError> {
+        if self.maintenance.is_none() || self.runtime_present() {
+            return Err(AppError::DataRestoreInProgress);
+        }
+        self.db = Some(runtime.db);
+        self.coordinator = Some(runtime.coordinator);
+        self.recovery = recovery;
+        self.recovery_scan_failed = false;
+        Ok(())
+    }
+
+    /// 运行态是否在手（命令门禁与诊断用）。维护态的换库窗口里为 `false`。
+    pub fn runtime_present(&self) -> bool {
+        self.db.is_some() && self.coordinator.is_some()
     }
 
     pub fn recovery(&self) -> &RecoveryScan {
@@ -862,7 +1017,10 @@ impl AppState {
     /// **Task 4 的口径（先写在这里，免得装卸运行态时漏掉）**：运行态不在手（维护态的换库
     /// 窗口）时返回 `false`——观察口不制造「故障」这种结论。
     pub fn timer_faulted(&self) -> bool {
-        self.coordinator.is_faulted()
+        self.coordinator
+            .as_ref()
+            .map(Coordinator::is_faulted)
+            .unwrap_or(false)
     }
 
     /// 观察一次「计时是否可用」，在**跃迁**上记一条诊断，返回本次观察值（P6 Task 2b）。
@@ -895,7 +1053,13 @@ impl AppState {
             return unavailable;
         }
 
-        let run_id = self.coordinator.run_id().to_string();
+        // 运行态不在手（维护态换库窗口）：观察口没有可记的身份。两个观察点都在取锁之后
+        // 第一句问过 `sampling_allowed`/`guard_writable`，所以这是**防线**而不是路径。
+        let Ok(coordinator) = self.coordinator() else {
+            return unavailable;
+        };
+        let run_id = coordinator.run_id().to_string();
+        let last_verdict = coordinator.last_verdict();
         let wall_ms = self.diagnostic_wall_ms(entry, snapshot_wall_ms);
         if unavailable {
             // **启动路径点名只属于采样拍**（"启动后第一次采样"）：事件名按**观察点**取，
@@ -906,7 +1070,7 @@ impl AppState {
             } else {
                 EVENT_TIMER_UNAVAILABLE_BEGIN
             };
-            let origin = fault_origin(self.coordinator.last_verdict(), faulted_before);
+            let origin = fault_origin(last_verdict, faulted_before);
             self.diagnostics.record(
                 event,
                 &format!(
@@ -938,7 +1102,7 @@ impl AppState {
             return wall_ms.to_string();
         }
         if entry == OBSERVER_ENTRY_SAMPLING {
-            if let Ok(wall_ms) = self.coordinator.wall_ms() {
+            if let Ok(wall_ms) = self.now_ms() {
                 return wall_ms.to_string();
             }
         }
@@ -1073,27 +1237,23 @@ impl AppState {
     /// 结论，不能当这次的结果。扫描查询本身是幂等的，再次扫描成功就清标记；
     /// 清标记**不要求重做**任何已提交的用户命令（已提交事实保留，不重复审计、不重复加版本）。
     pub fn rescan_recovery(&mut self) -> Result<RecoveryScan, AppError> {
-        let AppState {
-            db,
-            coordinator,
-            recovery,
-            recovery_scan_failed,
-            // 维护态/退出意图/诊断落点与这次重扫无关（Task 2a 新增；`..` 同时让以后
-            // 新增字段不再需要改这一处）。
-            ..
-        } = self;
-        let run_id = coordinator.run_id().to_string();
-        match scan_recovery(db.connection(), &run_id) {
+        // 两条查询借出的都是 `self` 的字段：先取出扫描结论（**自有值**），再改本类型的字段，
+        // 免得「读 `db` 的借用」与「写 `recovery`」在同一个 `match` 里撞车。
+        let scanned = {
+            let (db, coordinator) = self.runtime()?;
+            scan_recovery(db.connection(), coordinator.run_id())
+        };
+        match scanned {
             Ok(scan) => {
                 // 成功才替换快照并清标记：两者同一步完成，不留「新快照 + 旧标记」的中间态。
-                *recovery = scan.clone();
-                *recovery_scan_failed = false;
+                self.recovery = scan.clone();
+                self.recovery_scan_failed = false;
                 Ok(scan)
             }
             Err(_) => {
                 // 底层诊断（SQLite 原文）在这里没地方落：契约只要求按码分支，
                 // 用户看到的是 RECOVERY_REQUIRED 那句话。失败的**结论**留在标记里。
-                *recovery_scan_failed = true;
+                self.recovery_scan_failed = true;
                 Err(AppError::RecoveryRequired)
             }
         }
@@ -1102,50 +1262,38 @@ impl AppState {
     /// 开始计时（先过恢复门禁）。
     pub fn start(&mut self, req: StartRequest) -> Result<CommandOutcome, AppError> {
         self.guard_business_timing()?;
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         coordinator.start(db, req)
     }
 
     /// 继续计时（先过恢复门禁）。
     pub fn resume(&mut self, req: ResumeRequest) -> Result<CommandOutcome, AppError> {
         self.guard_business_timing()?;
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         coordinator.resume(db, req)
     }
 
     /// 暂停（**不过**恢复门禁：它不是「开始新计时」，而是把一个正在跑的会话停下来）。
     pub fn pause(&mut self, req: SessionRequest) -> Result<CommandOutcome, AppError> {
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         coordinator.pause(db, req)
     }
 
     /// 结束计时（同为「停止」类，不过恢复门禁）。
     pub fn finish(&mut self, req: SessionRequest) -> Result<CommandOutcome, AppError> {
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         coordinator.finish(db, req)
     }
 
     /// 查询快照（无新计时，不受恢复门禁限制）。
     pub fn snapshot(&mut self) -> Result<TimerSnapshot, AppError> {
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         coordinator.snapshot(db)
     }
 
     /// 推进一步（同上）。
     pub fn tick(&mut self) -> Result<TimerSnapshot, AppError> {
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         coordinator.tick(db)
     }
 
@@ -1170,9 +1318,7 @@ impl AppState {
     /// 异常时它会提交 P2 的恢复事务（见上段），所以不能按"只读"绕过维护隔离。
     pub fn stats_snapshot(&mut self, query: &StatsRangeQuery) -> Result<StatsSnapshot, AppError> {
         self.guard_writable()?;
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         let sample = coordinator.stats_sample(db)?;
         crate::services::stats::snapshot(db, sample, query)
     }
@@ -1190,9 +1336,7 @@ impl AppState {
     /// （幂等分支与硬故障回滚分支**零写入**），随后返回恢复错误。IPC 命令归 P8。
     pub fn stats_today(&mut self, query: &TodayQuery) -> Result<TodayView, AppError> {
         self.guard_writable()?;
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         let sample = coordinator.stats_sample(db)?;
         crate::services::stats::today(db, sample, query)
     }
@@ -1212,9 +1356,7 @@ impl AppState {
     /// （Ruling P5-19）——两者不相等时，导出不代表数据更新到了那一刻。
     pub fn export_json(&mut self, query: &StatsRangeQuery) -> Result<ExportJson, AppError> {
         self.guard_writable()?;
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         let sample = coordinator.stats_sample(db)?;
         let generated_at = coordinator.wall_ms()?;
         crate::services::export::json(db, sample, query, generated_at)
@@ -1241,9 +1383,7 @@ impl AppState {
         query: &WeeklyQuery,
     ) -> Result<ExportMarkdown, AppError> {
         self.guard_writable()?;
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         let sample = coordinator.stats_sample(db)?;
         let generated_at = coordinator.wall_ms()?;
         crate::services::export::weekly(db, sample, query, generated_at)
@@ -1255,9 +1395,7 @@ impl AppState {
     /// tick 走 `TimerSnapshot::idle` 分支——只有读。这是「不空转制造 revision」
     /// 的落点（00 §5：心跳、tick 不加业务 revision）。
     pub fn sample_tick(&mut self) -> Result<TimerSnapshot, AppError> {
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         coordinator.heartbeat(db)?;
         coordinator.tick(db)
     }
@@ -1287,20 +1425,22 @@ impl AppState {
         }
 
         let outcome = {
-            let AppState {
-                db, coordinator, ..
-            } = self;
+            let (db, coordinator) = self.runtime_mut()?;
             coordinator.system_pause(db, boundary)
         };
 
         if let Err(error) = &outcome {
             // 「连续失败要能被上层观察到」：计数 + 一条诊断（见 `system_boundary_errors`）。
-            self.system_boundary_errors = self.system_boundary_errors.saturating_add(1);
+            // 计数是 `Arc<AtomicU64>`：**加一取回新值**（`fetch_add`），读的人不必取锁。
+            let errors = self
+                .system_boundary_errors
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
             self.diagnostics.record(
                 EVENT_SYSTEM_BOUNDARY_FAILED,
                 &format!(
                     "errors={} code={} detail={}",
-                    self.system_boundary_errors,
+                    errors,
                     error.code(),
                     error.detail().unwrap_or_default()
                 ),
@@ -1311,8 +1451,11 @@ impl AppState {
     }
 
     /// 平台边界路径的失败累计次数（与 `RunningApp::sampling_errors` 同档的只读出口）。
+    ///
+    /// 调用方在锁内（本方法取 `&self` 的那个临界区）时用这一条；**不必进临界区**时用
+    /// [`RunningApp::system_boundary_errors`]（同一个 `Arc`，无锁可读）。
     pub fn system_boundary_errors(&self) -> u64 {
-        self.system_boundary_errors
+        self.system_boundary_errors.load(Ordering::SeqCst)
     }
 
     /// **显式退出**的入口（不由 `RunningApp::shutdown` 独享：Task 4 的托盘
@@ -1326,9 +1469,7 @@ impl AppState {
     ///
     /// 不是杀进程；长事务不得跑在 UI 回调里——调用方在阻塞线程上执行它。
     pub fn explicit_exit(&mut self, at: i64) -> Result<ExitReport, AppError> {
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         let run_id = coordinator.run_id().to_string();
 
         let tx = db
@@ -1415,12 +1556,12 @@ impl AppState {
         req: ReconcileRequest,
     ) -> Result<WriteOutcome<ReconcileReport>, AppError> {
         let (now, run_id) = {
-            let coordinator = &self.coordinator;
+            let coordinator = self.coordinator()?;
             (coordinator.wall_ms()?, coordinator.run_id().to_string())
         };
         let session_id = req.session_id.clone();
         let outcome = {
-            let AppState { db, .. } = self;
+            let db = self.db_mut()?;
             crate::services::recovery::reconcile(db, env, req, now, &run_id)?
         };
 
@@ -1452,7 +1593,7 @@ impl AppState {
     fn refresh_mirror_if_live(&mut self, session_id: &str) -> Result<(), AppError> {
         // `live()` 是只读访问器；先问清楚「镜像的是不是这条」，再决定要不要刷新。
         let mirrored = {
-            let AppState { coordinator, .. } = self;
+            let coordinator = self.coordinator()?;
             coordinator
                 .live()
                 .map(|live| live.id == session_id)
@@ -1461,9 +1602,7 @@ impl AppState {
         if !mirrored {
             return Ok(());
         }
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         coordinator
             .refresh_committed_session(db.connection(), session_id)
             .map_err(|_| AppError::RecoveryRequired)
@@ -1484,10 +1623,10 @@ impl AppState {
         env: WriteEnvelope,
         req: CorrectRequest,
     ) -> Result<WriteOutcome<HistoryEditReport>, AppError> {
-        let now = self.coordinator.wall_ms()?;
+        let now = self.now_ms()?;
         let session_id = req.session_id.clone();
         let outcome = {
-            let AppState { db, .. } = self;
+            let db = self.db_mut()?;
             crate::services::history::correct(db, env, req, now)?
         };
 
@@ -1509,10 +1648,10 @@ impl AppState {
         req: BackfillRequest,
     ) -> Result<WriteOutcome<HistoryEditReport>, AppError> {
         let (now, run_id) = {
-            let coordinator = &self.coordinator;
+            let coordinator = self.coordinator()?;
             (coordinator.wall_ms()?, coordinator.run_id().to_string())
         };
-        let AppState { db, .. } = self;
+        let db = self.db_mut()?;
         crate::services::history::backfill(db, env, req, now, &run_id)
     }
 
@@ -1540,10 +1679,10 @@ impl AppState {
         env: WriteEnvelope,
         req: DiscardSessionRequest,
     ) -> Result<WriteOutcome<HistoryEditReport>, AppError> {
-        let now = self.coordinator.wall_ms()?;
+        let now = self.now_ms()?;
         let session_id = req.session_id.clone();
         let outcome = {
-            let AppState { db, .. } = self;
+            let db = self.db_mut()?;
             crate::services::recovery::discard_session(db, env, req, now)?
         };
 
@@ -1569,9 +1708,7 @@ impl AppState {
         env: WriteEnvelope,
         req: TransitionTaskRequest,
     ) -> Result<WriteOutcome<TaskTransitionReport>, AppError> {
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         crate::services::tasks::transition_task(db, coordinator, env, req)
     }
 
@@ -1588,9 +1725,7 @@ impl AppState {
         &mut self,
         expected_data_epoch: &str,
     ) -> Result<ClockCorrectionAccepted, AppError> {
-        let AppState {
-            db, coordinator, ..
-        } = self;
+        let (db, coordinator) = self.runtime_mut()?;
         coordinator.accept_detected_clock_correction(
             db,
             AcceptClockCorrectionRequest {
@@ -1638,7 +1773,7 @@ impl AppState {
         // 1. 只读预检：epoch 是**请求带来的**期望值，不与「读出来的当前值」自比。
         {
             let tx = self
-                .db
+                .db()?
                 .connection()
                 .unchecked_transaction()
                 .map_err(map_sqlite)?;
@@ -1649,9 +1784,7 @@ impl AppState {
         // 2. 重试那笔恢复事务；成功提交后才清故障态。
         let faulted_before = self.timer_faulted();
         let retried = {
-            let AppState {
-                db, coordinator, ..
-            } = self;
+            let (db, coordinator) = self.runtime_mut()?;
             coordinator.retry_recovery(db)
         };
 
@@ -1747,13 +1880,17 @@ pub fn startup(
         // 原语在 `services::backup`（Task 4a 整体搬走）：本入口只负责**编排与顺序**。
         // 备份目录在这里才解析——下面的参数是 `Option`，`None` 的缺省路径由原语自己算，
         // 所以首启与「版本相等」两条路径都不碰应用数据目录。
-        backup::backup_before_migration(
+        //
+        // **产物路径不再丢弃**（Task 4b）：它随 `Taken` 一起交给探针，生产诊断行里因此
+        // 记得下"备份到哪了"——Task 1 的 Minor ①（"日志说已备份、产物却没了"）在事后
+        // 只能靠这个路径去查。
+        let artifact = backup::backup_before_migration(
             config.backup_dir.as_deref(),
             db.connection(),
             from_version,
             &*clock,
         )?;
-        PreMigrationBackup::Taken
+        PreMigrationBackup::Taken(artifact)
     } else {
         PreMigrationBackup::NotNeeded
     };
@@ -1815,10 +1952,16 @@ pub fn startup(
     // 组合根那条启动探针也按同一个字段构造（`Diagnostics::from_optional_path`）。
     let diagnostics = Diagnostics::from_optional_path(config.diagnostic_log.clone());
 
+    // 平台边界路径的失败计数（P6 Task 2c）：`AppState` 与 `RunningApp` 共享**同一个**
+    // `Arc<AtomicU64>`（Task 4b 收掉 2c 的 Minor 2）——写入仍只在锁内的
+    // `system_boundary`，读它不经过串行边界。
+    let system_boundary_errors = Arc::new(AtomicU64::new(0));
+
     let app: SharedApp = Arc::new(AppBoundary {
         state: Mutex::new(AppState {
-            db,
-            coordinator,
+            // 运行态在启动时一定在手；恢复的换库窗口才把它取走（Task 4b）。
+            db: Some(db),
+            coordinator: Some(coordinator),
             recovery: recovery.clone(),
             // 启动能走到这里就说明第 ④ 步的扫描成功了：没有「扫描失败」的遗留。
             recovery_scan_failed: false,
@@ -1829,7 +1972,9 @@ pub fn startup(
             // 就记 `startup.timer_unavailable` 点名）。
             timer_unavailable: None,
             // OS 事件路径还没失败过：事件源在启动之后才由组合根挂上（见 `start_system_events`）。
-            system_boundary_errors: 0,
+            // **同一个 `Arc` 也给 `RunningApp`**（Task 4b 收掉 2c 的 Minor 2）：
+            // 状态展示因此不必取串行边界的锁。
+            system_boundary_errors: Arc::clone(&system_boundary_errors),
             // `None` = 关闭（显式路径构造的缺省），生产解析到应用数据目录。
             // 路径只在第一次真的记录时才创建文件（见 `platform::diagnostics`）。
             diagnostics: diagnostics.clone(),
@@ -1869,6 +2014,7 @@ pub fn startup(
         data_epoch,
         recovery,
         sampling_errors,
+        system_boundary_errors,
     })))
 }
 

@@ -1180,13 +1180,16 @@ fn the_app_state_entry_point_renders_the_same_week_as_the_service() {
         let guard = lock_app(&app);
         guard
             .db()
+            .unwrap()
             .connection()
             .query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
             .unwrap()
     };
     let before_revision = {
         let guard = lock_app(&app);
-        require_meta(guard.db().connection()).unwrap().revision
+        require_meta(guard.db().unwrap().connection())
+            .unwrap()
+            .revision
     };
 
     let exported = {
@@ -1218,6 +1221,7 @@ fn the_app_state_entry_point_renders_the_same_week_as_the_service() {
         let guard = lock_app(&app);
         guard
             .db()
+            .unwrap()
             .connection()
             .query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
             .unwrap()

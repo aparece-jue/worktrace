@@ -160,6 +160,7 @@ fn start_session(app: &SharedApp, epoch: &str) {
 fn reject_time_edit_writes(app: &SharedApp) {
     lock_app(app)
         .db()
+        .unwrap()
         .connection()
         .execute_batch(
             "CREATE TRIGGER reject_time_edit BEFORE INSERT ON time_edit
@@ -171,6 +172,7 @@ fn reject_time_edit_writes(app: &SharedApp) {
 fn allow_time_edit_writes(app: &SharedApp) {
     lock_app(app)
         .db()
+        .unwrap()
         .connection()
         .execute_batch("DROP TRIGGER reject_time_edit;")
         .unwrap();
@@ -384,6 +386,7 @@ fn retry_recovery_clears_the_fault_and_records_exactly_one_recovery_line() {
 fn poison_the_committed_rebuild(app: &SharedApp, run_id: &str) {
     lock_app(app)
         .db()
+        .unwrap()
         .connection()
         .execute_batch(&format!(
             "PRAGMA ignore_check_constraints = ON;
@@ -418,7 +421,12 @@ fn fault_from_the_command_path(
     // ① 暂停：`finish` 在 `paused` 上合法（02 §3），而且这一步的重建是**成功**的。
     let session_id = {
         let mut state = lock_app(app);
-        let live = state.coordinator().live().expect("刚 start 过").clone();
+        let live = state
+            .coordinator()
+            .unwrap()
+            .live()
+            .expect("刚 start 过")
+            .clone();
         state
             .pause(SessionRequest {
                 expected_data_epoch: epoch.to_string(),
@@ -436,6 +444,7 @@ fn fault_from_the_command_path(
     //    所以「这一拍判出什么」由用例决定，不是竞态。
     let version = lock_app(app)
         .coordinator()
+        .unwrap()
         .live()
         .expect("刚 pause 过")
         .row_version;
@@ -484,7 +493,7 @@ fn a_fault_raised_by_the_command_path_is_reported_as_prior_fault() {
     fault_from_the_command_path(&fx, &app, &epoch, running.run_id(), true);
 
     assert_eq!(
-        lock_app(&app).coordinator().last_verdict(),
+        lock_app(&app).coordinator().unwrap().last_verdict(),
         SampleVerdict::Suspended { gap_ms: LONG_GAP },
         "构造的是「判定停在非 Trusted」那条可达路径"
     );
@@ -548,7 +557,7 @@ fn a_command_side_fault_is_prior_fault_even_when_the_verdict_is_trusted() {
     fault_from_the_command_path(&fx, &app, &epoch, running.run_id(), false);
 
     assert_eq!(
-        lock_app(&app).coordinator().last_verdict(),
+        lock_app(&app).coordinator().unwrap().last_verdict(),
         SampleVerdict::Trusted,
         "对照组：判定停在 Trusted"
     );

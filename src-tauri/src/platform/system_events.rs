@@ -48,11 +48,23 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
+use std::time::Duration;
 
 use crate::platform::clock::{ClockSample, SystemClock};
 
 /// 事件线程名（诊断按它点名）。
 pub const EVENT_THREAD_NAME: &str = "worktrace-system-events";
+
+/// 等事件源报告注册结果的上限（P6 Task 4b 收掉 2c 的 Minor 3）。
+///
+/// 注册是**同步**交回调用方的（`spawn_watched` 要按它决定返回 `Ok` 还是 `Err`），
+/// 而调用方在 `setup` 里——没有超时的话，平台调用一旦挂住，应用就起不来而且**没有任何
+/// 诊断**。5 秒是"注册一次窗口类 + `WTSRegisterSessionNotification`"的正常耗时的
+/// 两个数量级以上，又短到用户能等到"打开失败"的结论。
+///
+/// 超时**不**杀线程：平台调用没有取消机制，而且若它随后真的注册成功，事件路径照常工作
+/// ——那比进程挂死或强行收尾都好。上层按注册失败记诊断，周期采样不受影响。
+const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 消息循环一次等待的上限：`alive` 置假之后最多这么久就退出。
 ///
@@ -220,10 +232,21 @@ where
         ));
     }
 
-    match ready_rx.recv() {
+    match ready_rx.recv_timeout(REGISTRATION_TIMEOUT) {
         Ok(result) => result,
+        // 注册调用**挂住**：不能连带把 `startup`（`setup`）挂住等它——那会让应用起不来
+        // 而且没有任何诊断（P6 Task 4b 收掉 2c 的 Minor 3）。照注册失败报出去，由调用方
+        // 记诊断、保持周期采样可用。**线程仍在**（平台调用没有超时机制，不能强杀它），
+        // 若它随后真的注册成功，事件路径照常工作——那是比挂死更好的结局。
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "system event source did not report registration within {} ms",
+                REGISTRATION_TIMEOUT.as_millis()
+            ),
+        )),
         // 线程在报告注册结果之前就没了（例如工厂 panic）：不假装成功。
-        Err(_) => Err(io::Error::other(
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::other(
             "system event thread ended before reporting its registration",
         )),
     }
@@ -358,7 +381,16 @@ mod windows_source {
         }
 
         /// 建窗并注册会话通知。**必须在将跑消息循环的那条线程上调用**。
+        ///
+        /// **时钟装在第一步**（P6 Task 4b 收掉 2c 的 Minor 1）：窗口过程从**消息一到**
+        /// 就要能取边界样本，而系统是主动发广播的——它不等我们注册完。原先装在
+        /// "建窗 + 注册通知"之后，"建窗 → 装钟"这一瞬到达的 `WM_TIMECHANGE`/
+        /// `PBT_APMSUSPEND` 会拿到 `None` 边界、被路由成"边界未知"⇒ 有 running 会话时
+        /// **白送一次 `recovering` + 待确认**。装钟只是一次 `RefCell` 写，提前到最前面
+        /// 没有任何代价。
         pub fn start(&mut self) -> std::io::Result<()> {
+            CLOCK.with(|clock| *clock.borrow_mut() = Some(self.clock.clone()));
+
             let class = wide(&format!(
                 "worktrace.system_events.{}.{}",
                 std::process::id(),
@@ -415,9 +447,8 @@ mod windows_source {
 
                 self.hwnd = Some(hwnd);
                 self.class = Some(class);
-                // 时钟在这里就装进本线程：窗口过程从**消息一到**就要能取边界样本，
-                // 而第一条消息可能早于 `run` 的循环（系统是主动发的，不排队等我们）。
-                CLOCK.with(|clock| *clock.borrow_mut() = Some(self.clock.clone()));
+                // 时钟**不在这里装**：它在 `start` 的第一句就装好了（见那里的说明）——
+                // 装在这儿的窗口是"建窗 → 注册"这一段里到达的广播，它们会拿到 `None` 边界。
                 Ok(())
             }
         }

@@ -32,15 +32,53 @@
 //! 系统时间被回拨且已有 ≥5 份会让"本次产物"成为名义上最老的那份，现象是"启动成功、
 //! 日志说已备份、产物却没了"。清理失败只记诊断：它发生在备份成功之后，不能把一次成功
 //! 启动变成失败。
+//!
+//! ## 恢复的三段流程（P6 Task 4b；顺序写死，别按别处的措辞猜）
+//!
+//! 02 §9 的顺序——「停计时、暂停写入、**关闭连接** → 在临时路径验证待恢复库完整性/
+//! 外键/schema（未来版本拒绝，旧版本先备份再迁移）→ **同目录可回滚切换** → 重开校验；
+//! 失败还原原路径并重新打开原库」——在代码里就是三段，边界与锁的关系是**硬约束**：
+//!
+//! | 段 | 持锁 | 做什么 |
+//! | --- | --- | --- |
+//! | ① [`begin_restore`] | **锁内、短** | `begin_maintenance(Restore)` → `take_runtime()` → 立即放开锁 |
+//! | ② [`prepare_and_swap`] | **不持锁** | 旧 `Db` 随 `Runtime` drop（**这时才关连接**）→ 候选库拷到同目录暂存 → 完整性/外键/版本验证（旧版本先备份再迁移）→ 同目录改名切换（原库留成回滚副本） |
+//! | ③ [`commit_restore`] / [`abort_restore`] | **锁内** | `Db::open` → 同一事务 `start_run` + `rotate_epoch`（**只在提交路径**）→ `scan_at_startup` 归一 → `scan_recovery` 门禁 → 新协调器 + 锚点 → `install_runtime` → `end_maintenance` → 广播 |
+//!
+//! 为什么 ① 与 ③ 必须短、② 必须不持锁：维护态的意义就是"长活不占锁"——换库与验证
+//! 期间别的调用取到锁之后**立刻**拿到 [`AppError::DataRestoreInProgress`]，而不是挂住。
+//!
+//! **唯一入口是 [`restore_from_backup`]**：它在**同一次后台阻塞调用**里连续调上面那几个
+//! 服务原语，**不重新进 `commands::run_command`**（维护态里没有任何 IPC 命令名在白名单上；
+//! 见 `services::bootstrap` 模块头与 `commands::run_command` 的注释）。P8 接线时也只在
+//! 一个 `#[tauri::command]` 里调它——**不要**把三段拆到三个命令里去。
+//!
+//! **两条路径都不得复用维护前的协调器**（"维护窗口不计入工时"的第二层补偿）：提交路径
+//! 装的是新库上的新协调器；回滚路径重开原库、建**新 run**、再建**新协调器**
+//! （旧 `Instant` 基线随旧协调器一起作废）。维护前那条 `running` 会话在新 run 里是
+//! **外来事实**，由 P3 的扫描归一 + 门禁挡住新计时，必须走 F-015 的用户确认才成事实。
+//!
+//! **`Scheduler` 全程不 stop、不重启**（`stop` 不可逆）：[`Runtime`] 里**没有**调度器，
+//! 它在 `RunningApp` 上活着，闭包每拍从 `AppState` 读**当前**运行态 ⇒ 换库后自然对新
+//! 运行态工作。反过来，若把调度器塞进运行态，①③ 两段里任何一次丢弃都会在持锁状态下
+//! `join` 一个正在等这把锁的线程（G11 的自死锁）。
 
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
 use crate::error::AppError;
-use crate::platform::clock::Clock;
+use crate::platform::clock::{Clock, ClockSample};
 use crate::platform::paths;
-use crate::storage::db::map_sqlite;
+use crate::services::bootstrap::{
+    holds_app_lock, lock_app, scan_recovery, MaintenancePhase, RecoveryScan, Runtime, SharedApp,
+};
+use crate::services::events::{Broadcaster, EventEnvelope};
+use crate::services::timer::coordinator::Coordinator;
+use crate::storage::db::{map_sqlite, Db};
+use crate::storage::meta;
+use crate::storage::migrations::{current_version, migrate, SCHEMA_VERSION};
+use crate::storage::run_repo;
 
 /// 备份产物的**格式版号**：与库 schema 版号、应用版本并列的第三个版号。
 ///
@@ -59,18 +97,24 @@ const BACKUP_KEEP: usize = 5;
 const BACKUP_PREFIX: &str = "worktrace-f";
 const BACKUP_SUFFIX: &str = ".db";
 
-/// 备份阶段的失败：`detail` 统一带阶段标记，便于把「备份失败」与「迁移失败」分开；
+/// 迁移前备份的阶段标记：`detail` 里用它把「备份失败」与「迁移失败」分开。
+const PRE_MIGRATION_STAGE: &str = "pre-migration backup";
+
+/// 恢复候选库（旧版本 schema）迁移前那次备份的阶段标记。
+const PRE_RESTORE_STAGE: &str = "pre-restore backup";
+
+/// 备份阶段失败的统一形状：`detail` 带阶段标记，便于把「备份失败」与后续动作分开；
 /// 用户文案仍走 `AppError::message()`（`Storage` 的 detail 不进用户可见文案）。
-fn backup_stage(e: AppError) -> AppError {
+fn stage_error(stage: &str, e: AppError) -> AppError {
     AppError::Storage {
-        detail: format!("pre-migration backup: {}", e.detail().unwrap_or(e.code())),
+        detail: format!("{stage}: {}", e.detail().unwrap_or(e.code())),
     }
 }
 
 /// 备份目录相关的 IO 失败：`detail` 与阶段标记同前缀，便于读日志时一眼归位。
-fn dir_error(e: std::io::Error) -> AppError {
+fn dir_error(stage: &str, e: std::io::Error) -> AppError {
     AppError::Storage {
-        detail: format!("pre-migration backup dir: {e}"),
+        detail: format!("{stage} dir: {e}"),
     }
 }
 
@@ -139,53 +183,704 @@ fn prune_old_backups(dir: &Path, just_written: &Path) {
     }
 }
 
-/// 迁移前的按需一致备份：**在同一个已打开的连接上** `VACUUM INTO`，返回本次产物路径。
+/// 一致备份的**通用原语**：在**同一个已打开的连接**上 `VACUUM INTO` 一份快照，返回产物路径。
 ///
-/// `dir_override` = 调用方注入的备份目录（测试与将来的恢复流程用）；`None` ⇒
+/// `dir_override` = 调用方注入的备份目录（测试与恢复流程用）；`None` ⇒
 /// `app_data_dir()/backups`。**目录只在被调用时解析**，所以"无需迁移"的启动不碰数据目录。
+///
+/// `stage` 是失败 `detail` 的阶段标记：同一个动作在两个调用点含义不同
+/// （迁移前 vs 恢复候选库迁移前），日志里必须分得开。
 ///
 /// 顺序写死：解析目录 → `create_dir_all` → 取一次时钟样本给产物命名 → 同名即拒绝
 /// （**不覆盖**：这比让 `VACUUM INTO` 自己撞出来可诊断得多）→ `VACUUM INTO` →
 /// 保留策略（**永不删本次产物**）。
+pub fn backup_consistent(
+    dir_override: Option<&Path>,
+    conn: &Connection,
+    db_version: i64,
+    clock: &(dyn Clock + Send),
+    stage: &str,
+) -> Result<PathBuf, AppError> {
+    let dir = match dir_override {
+        Some(dir) => dir.to_path_buf(),
+        None => paths::app_data_dir()
+            .map_err(|e| dir_error(stage, e))?
+            .join(BACKUP_DIR_NAME),
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| dir_error(stage, e))?;
+
+    // 时间戳走注入的时钟：`services` 不得自取系统时间（分层门禁那条规则的用意是
+    // 「服务层的时间必须来自 `Clock`」）。时钟取不到就没法给产物命名 ⇒ 同样拒绝。
+    let sample = clock.sample().map_err(|_| AppError::Storage {
+        detail: format!("{stage}: clock sample unavailable for the artifact name"),
+    })?;
+    let target = dir.join(backup_file_name(db_version, sample.wall_ms));
+
+    // 同名产物（同一毫秒）在这里就拒绝：**不覆盖**是刻意的。
+    if target.exists() {
+        return Err(AppError::Storage {
+            detail: format!("{stage}: artifact already exists: {}", target.display()),
+        });
+    }
+
+    let target_sql = target.to_str().ok_or_else(|| AppError::Storage {
+        detail: format!("{stage}: artifact path is not valid UTF-8"),
+    })?;
+    conn.execute("VACUUM INTO ?1", [target_sql])
+        .map_err(map_sqlite)
+        .map_err(|e| stage_error(stage, e))?;
+
+    // 备份已经落地，之后才是保留策略：它失败只记诊断，且**永不删刚写出的这一份**。
+    prune_old_backups(&dir, &target);
+    Ok(target)
+}
+
+/// 迁移前的按需一致备份：**在同一个已打开的连接上** `VACUUM INTO`，返回本次产物路径。
+///
+/// 判据（只在 `user_version < SCHEMA_VERSION` 时执行）、命名与保留策略见模块头；
+/// 具体动作是 [`backup_consistent`]，本函数只把阶段标记钉死成「迁移前」。
 pub fn backup_before_migration(
     dir_override: Option<&Path>,
     conn: &Connection,
     from_version: i64,
     clock: &(dyn Clock + Send),
 ) -> Result<PathBuf, AppError> {
-    let dir = match dir_override {
-        Some(dir) => dir.to_path_buf(),
-        None => paths::app_data_dir()
-            .map_err(dir_error)?
-            .join(BACKUP_DIR_NAME),
+    backup_consistent(dir_override, conn, from_version, clock, PRE_MIGRATION_STAGE)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 恢复：三段流程（P6 Task 4b）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 恢复流程的**时钟来源**：每调用一次交出一个新的钟。
+///
+/// 为什么是"来源"而不是一个 `Box<dyn Clock + Send>`：③ 的提交与回滚**互斥、但都要建新
+/// 协调器**，而 `Coordinator::new` 会拿走那只钟的所有权——提交失败之后回滚还得再要一只。
+/// 生产侧闭包捕获**同一个 [`crate::platform::clock::SystemClock`] 并 `clone()` 它：
+/// `SystemClock` 的克隆共享 `origin`，所以"时钟必须同源"仍然成立（各建一个新的
+/// `SystemClock` 会得到两个原点，OS 边界样本会被 `system_pause` 全部拒绝——R-02 静默落空）。
+pub type ClockSource = Box<dyn Fn() -> Box<dyn Clock + Send> + Send>;
+
+/// 候选库在**同目录**里的暂存名后缀（验证在它上面做，切换就是它的改名）。
+///
+/// 为什么放在**同一个目录**而不是系统临时目录：最后一步必须是**同卷改名**才不会退化成
+/// "先删后拷"（那正是"不能覆盖仍打开的 WAL 数据库"之外最危险的中间态）。计划原文的
+/// "临时路径验证 + 同目录可回滚切换"落到代码里就是这两句。
+const STAGED_SUFFIX: &str = ".restore-staged";
+
+/// 原库在切换期间的回滚副本后缀（**同目录**，切换失败或 ③ 失败时改回来）。
+const ROLLBACK_SUFFIX: &str = ".restore-rollback";
+
+/// 一次恢复的结果（提交与回滚共用同一个形状——`committed` 是唯一的判据）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreOutcome {
+    /// `true` = 换库成功（新库、**新 `data_epoch`**）；`false` = 回滚（**原库、原 epoch**）。
+    pub committed: bool,
+    /// 恢复之后库里的 `data_epoch`（提交路径 = 全新值；回滚路径 = 原值）。
+    pub data_epoch: String,
+    /// 恢复之后**当前 run** 的 id（两条路径都是**新的**）。
+    pub run_id: String,
+    /// 恢复之后的重扫门禁快照（`requires_recovery()` 就是"要不要先确认历史"）。
+    pub recovery: RecoveryScan,
+    /// 候选库 schema 偏旧时、迁移前那份一致备份的产物路径（`None` = 没走到那条分支）。
+    pub migration_backup: Option<PathBuf>,
+}
+
+/// 切换前后的路径账：③ 的回滚路径要用它把原库改回来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreSwap {
+    /// 主库路径（切换后这里已经是**候选库**）。
+    target: PathBuf,
+    /// 原库的回滚副本（同目录；提交后**保留**，见 [`RestoreSwap::rollback_path`]）。
+    rollback: PathBuf,
+    /// 恢复**之前**的 `data_epoch`——回滚路径广播的就是它（客户端据此知道恢复没发生）。
+    previous_data_epoch: String,
+    /// 恢复**之前**的 `run_id`（只用于诊断与报告）。
+    previous_run_id: String,
+    /// 候选库偏旧时的迁移前备份产物。
+    migration_backup: Option<PathBuf>,
+    /// 文件是否**已经**切换过（② 段失败时会把切换撤销并把它改回 `false`）。
+    swapped: bool,
+}
+
+/// ② 段失败时的返回值：**原因 + 还可以用来回滚的路径账**。
+///
+/// 为什么错误要带着 `swap` 一起回：失败之后必须走 ③-b 把运行态重建起来（否则进程留在
+/// "没有库的维护态"里，任何命令都只能拿到 `DATA_RESTORE_IN_PROGRESS`），而重建需要
+/// 主库路径与恢复前的身份——那两样只有 `swap` 有。
+///
+/// **装在 `Box` 里返回**（`Result<RestoreSwap, Box<RestoreFailure>>`）：它带着整份路径账，
+/// 不装箱的话 `Err` 变体比 `Ok` 大得多，clippy 的 `result_large_err` 会红。
+#[derive(Debug)]
+pub struct RestoreFailure {
+    /// 失败原因（原样交给调用方）。
+    pub error: AppError,
+    /// 路径账：`swapped == false`（② 段已经自己撤销过切换），所以 ③-b 不必再撤一次。
+    pub swap: RestoreSwap,
+}
+
+impl RestoreSwap {
+    /// 切换后主库路径（= 恢复完成之后 `Db::open` 的那个路径）。
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+
+    /// 恢复之前的 `data_epoch`。
+    pub fn previous_data_epoch(&self) -> &str {
+        &self.previous_data_epoch
+    }
+
+    /// 恢复之前的 `run_id`。
+    pub fn previous_run_id(&self) -> &str {
+        &self.previous_run_id
+    }
+
+    /// 原库回滚副本的路径；切换是否已经发生（`false` = 主库路径上还是原库）。
+    pub fn is_swapped(&self) -> bool {
+        self.swapped
+    }
+
+    /// 原库回滚副本的路径。
+    ///
+    /// **提交成功后它仍然留在磁盘上**：它是"恢复之前那个世界"的唯一完整副本，而计划没有
+    /// 授权任何一步悄悄删掉它（下一次恢复会先删掉它再用新的副本顶上）。
+    /// 要手工回退：把主库文件挪开，再把这个文件改名成主库路径即可。
+    pub fn rollback_path(&self) -> &Path {
+        &self.rollback
+    }
+
+    /// 同目录可回滚切换：原库 → 回滚副本，候选库（`staged`）→ 主库路径。
+    ///
+    /// 第一步失败（原库改不出去）⇒ 什么都没变；第二步失败 ⇒ **把原库改回来**再报错。
+    /// 副作用只在"两步都成功"之后才置 `swapped`。
+    fn swap_files(&mut self, staged: &Path) -> Result<(), AppError> {
+        let had_original = self.target.exists();
+        if had_original {
+            remove_db_files(&self.rollback)?;
+            std::fs::rename(&self.target, &self.rollback)
+                .map_err(|e| restore_io("swap original aside", e))?;
+            // 边车（`-wal`/`-shm`）跟着原库走：留一份旧库的 WAL 在主库路径上，
+            // 下一次打开会拿它去恢复一个**不相干**的库（正是"不能覆盖仍打开的
+            // WAL 数据库"要防的那件事，只是方向相反）。
+            move_sidecars(&self.target, &self.rollback)?;
+        }
+        match std::fs::rename(staged, &self.target) {
+            Ok(()) => {
+                self.swapped = true;
+                Ok(())
+            }
+            Err(error) => {
+                if had_original {
+                    let _ = move_sidecars(&self.rollback, &self.target);
+                    let _ = std::fs::rename(&self.rollback, &self.target);
+                }
+                Err(restore_io("swap candidate in", error))
+            }
+        }
+    }
+
+    /// 把主库路径改回原库（③-b 的第一句）。
+    ///
+    /// 顺序：先把**候选库**从主库路径挪开（它已经不可信：可能只跑了一半的事务、
+    /// 或者根本没有库身份），再把回滚副本改回主库路径。两份边车文件一起搬。
+    ///
+    /// 候选库文件**直接删掉**（不是留成第三份副本）：它只是用户挑的那份备份的拷贝，
+    /// 原产物还在备份目录里；留一份"失败的候选库"在库目录里只会让人以为那是可用的库。
+    fn rollback_files(&self) -> Result<(), AppError> {
+        remove_db_files(&self.target)?;
+        std::fs::rename(&self.rollback, &self.target)
+            .map_err(|e| restore_io("rollback original", e))?;
+        move_sidecars(&self.rollback, &self.target)?;
+        Ok(())
+    }
+}
+
+/// 三段流程的**唯一入口**：① 进入维护态 + 取走运行态（锁内，短）→ ② 关连接、临时路径
+/// 验证、同目录可回滚切换（**不持锁**）→ ③ 提交或回滚（锁内）。
+///
+/// **必须在一次调用里走完**（P8 接线时也只在一个 `#[tauri::command]` 的阻塞段里调它）：
+/// ②③ 之间没有任何 IPC 命令进得来（维护态里全部命令被 `guard_writable` 拒），
+/// 而恢复自己**不重新进 `commands::run_command`**——这条约束的落点就是本函数
+/// （另有一条 `debug_assert` 钉住"不在持锁线程上开始"）。
+///
+/// - `backup`：待恢复的产物（`VACUUM INTO` 出来的单文件快照，或任何一份合法的库文件）。
+/// - `backup_dir`：候选库 schema 偏旧时，迁移前那次备份的落盘目录（`None` = 生产缺省）。
+/// - `clock`：**新**协调器的时钟来源。必须与组合根交给 `startup` 的那一份**同源**
+///   （生产是同一个 `SystemClock` 实例的克隆）：OS 事件边界样本的 `monotonic_ms` 与
+///   协调器落在同一个原点上，否则 `system_pause` 的边界校验必然拒绝（R-02 静默落空）。
+///
+/// 返回：**成功提交** ⇒ `Ok(RestoreOutcome { committed: true, .. })`；
+/// **没换成** ⇒ 先走 ③-b 把原库重建起来，再把它那条原因作为 `Err` 交回
+/// （"恢复没发生"对用户是一次失败，而回滚本身是**结果**不是错误——`abort_restore`
+/// 单独调用时返回 `Ok(committed: false)`）。回滚自己再失败 ⇒ 透出回滚那条错误。
+pub fn restore_from_backup(
+    app: &SharedApp,
+    broadcaster: &Broadcaster,
+    backup: &Path,
+    backup_dir: Option<&Path>,
+    clock: &ClockSource,
+) -> Result<RestoreOutcome, AppError> {
+    // **不重新进 `run_command` 的机读断言**：恢复不能在已持有串行边界的线程上开始
+    // （① 要取锁），也不该从命令体内部被调用。
+    debug_assert!(
+        !holds_app_lock(app),
+        "恢复流程必须在锁外开始（它自己按三段取锁），不要在持有串行边界的线程上调用"
+    );
+
+    // ① 进入维护态 + 取走运行态（锁内，短）。
+    let runtime = begin_restore(app)?;
+
+    // ② 关连接 + 临时路径验证 + 同目录可回滚切换（**不持锁**）。
+    let swap = match prepare_and_swap(runtime, backup, backup_dir, clock) {
+        Ok(swap) => swap,
+        Err(failure) => {
+            // 拆箱：路径账与原因都要用（`RestoreFailure` 只是为了让 Err 变体不撑大 Result）。
+            let RestoreFailure { error: cause, swap } = *failure;
+            return match abort_restore(app, broadcaster, swap, clock) {
+                // 原库重建成功：把"这次恢复没做成"的原因交回调用方。
+                Ok(_) => Err(cause),
+                // 连原库都重建不起来：那条错误更严重，直接透出。
+                Err(rollback_error) => Err(rollback_error),
+            };
+        }
     };
-    std::fs::create_dir_all(&dir).map_err(dir_error)?;
 
-    // 时间戳走注入的时钟：`services` 不得自取系统时间（分层门禁那条规则的用意是
-    // 「服务层的时间必须来自 `Clock`」）。时钟取不到就没法给产物命名 ⇒ 同样拒绝迁移。
-    let sample = clock.sample().map_err(|_| AppError::Storage {
-        detail: "pre-migration backup: clock sample unavailable for the artifact name".to_string(),
-    })?;
-    let target = dir.join(backup_file_name(from_version, sample.wall_ms));
+    // ③-a 提交（锁内）。
+    match commit_restore(app, broadcaster, &swap, clock) {
+        Ok(outcome) => Ok(outcome),
+        Err(cause) => {
+            // ③-a 失败 ⇒ ③-b 回滚：把原库改回来、重开、新 run + 两步重扫 + 新协调器。
+            let rolled_back = abort_restore(app, broadcaster, swap, clock);
+            match rolled_back {
+                Ok(_) => Err(cause),
+                Err(rollback_error) => Err(rollback_error),
+            }
+        }
+    }
+}
 
-    // 同名产物（同一毫秒）在这里就拒绝：**不覆盖**是刻意的。
-    if target.exists() {
+/// ① 段：进入维护态 + 取走运行态（**锁内，短**）。
+///
+/// 返回的 [`Runtime`] 由调用方在**锁外**持有/丢弃：旧 `Db` 随它 drop 时连接才真正关闭
+/// （02 §9 的"关闭连接"），而它**不含** [`crate::platform::scheduler::Scheduler`]
+/// （G11 的自死锁陷阱，见 `services::bootstrap` 模块头）。
+///
+/// 已处于维护态（或退出意图已置位）⇒ 拒绝：`begin_maintenance` 不重入；
+/// 而进入时刻取自**同一条时钟接缝**（`AppState::now_ms`），运行态不在手时那一步就先拒了。
+pub fn begin_restore(app: &SharedApp) -> Result<Runtime, AppError> {
+    let mut state = lock_app(app);
+    let entered_at_ms = state.now_ms()?;
+    state.begin_maintenance(MaintenancePhase::Restore, entered_at_ms)?;
+    state.take_runtime()
+}
+
+/// ② 段：关连接 → 候选库拷到同目录暂存 → 完整性/外键/版本验证（旧版本先备份再迁移）
+/// → 同目录可回滚切换。**全程不持锁**。
+pub fn prepare_and_swap(
+    runtime: Runtime,
+    backup: &Path,
+    backup_dir: Option<&Path>,
+    clock: &ClockSource,
+) -> Result<RestoreSwap, Box<RestoreFailure>> {
+    // 路径与身份必须在**关连接之前**读出来（`Runtime` 一 drop，库句柄就没了）。
+    // 路径读不到（内存库）时连路径账都建不起来，只能报一个空 swap——生产上库一定在磁盘上
+    // （`Db::open` 是唯一入口），所以那条分支只是防线。
+    let Some(target) = runtime.db.path().map(Path::to_path_buf) else {
+        return Err(Box::new(RestoreFailure {
+            error: AppError::Storage {
+                detail: "restore: in-memory database has no path to swap".to_string(),
+            },
+            swap: RestoreSwap {
+                target: PathBuf::new(),
+                rollback: PathBuf::new(),
+                previous_data_epoch: String::new(),
+                previous_run_id: String::new(),
+                migration_backup: None,
+                swapped: false,
+            },
+        }));
+    };
+    let mut swap = RestoreSwap {
+        rollback: rollback_path(&target),
+        target,
+        previous_data_epoch: String::new(),
+        previous_run_id: runtime.coordinator.run_id().to_string(),
+        migration_backup: None,
+        swapped: false,
+    };
+
+    // 当前库的身份：恢复**之前**那个 `data_epoch`（回滚路径广播的就是它）。
+    // 读不到就不是一次可以开始的恢复——原库没有 `app_meta` 行时它是读不出来的。
+    match runtime.db.connection().query_row(
+        "SELECT data_epoch FROM app_meta WHERE singleton = 1",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(epoch) => swap.previous_data_epoch = epoch,
+        Err(error) => {
+            let error = AppError::Storage {
+                detail: format!("restore: cannot read current data_epoch: {error}"),
+            };
+            return Err(Box::new(RestoreFailure { error, swap }));
+        }
+    }
+
+    // **关闭连接**：旧 `Db` 随 `runtime` 一起 drop。WAL 在最后一次连接干净关闭时被
+    // checkpoint 回主库文件并删除，之后才轮到"同目录改名"。
+    drop(runtime);
+
+    let staged = staged_path(&swap.target);
+    // 候选库 → 同目录暂存（"临时路径验证"）。先清掉上一次失败留下的同名文件。
+    let copied = remove_db_files(&staged)
+        .and_then(|()| std::fs::copy(backup, &staged).map_err(|e| restore_io("stage candidate", e)))
+        .and_then(|_| {
+            validate_candidate(&staged, backup_dir, clock)
+                .map(|artifact| swap.migration_backup = artifact)
+        });
+    if let Err(error) = copied {
+        let _ = remove_db_files(&staged);
+        return Err(Box::new(RestoreFailure { error, swap }));
+    }
+
+    // 同目录可回滚切换（原库留成回滚副本）。
+    if let Err(error) = swap.swap_files(&staged) {
+        let _ = remove_db_files(&staged);
+        return Err(Box::new(RestoreFailure { error, swap }));
+    }
+    Ok(swap)
+}
+
+/// 候选库的验证：完整性 → 外键 → schema 版本（未来版本**拒绝**；旧版本**先备份再迁移**）。
+///
+/// `Db::open` 顺带把"磁盘库必须是 WAL"这条既有校验也走一遍（`storage/db.rs`）。
+///
+/// **`app_meta` 的缺失不在这里判**：02 §9 给这道门的判据就是这三条。库身份由 ③-a 的
+/// `rotate_epoch` 兜底——没有 `app_meta` 行时它拒绝（影响行数 ≠ 1），而那个事务与
+/// `start_run` 同一个事务，所以**什么都不会落库**。
+///
+/// 返回旧版本分支里那份迁移前备份的产物路径（没走那条分支就是 `None`）。
+fn validate_candidate(
+    staged: &Path,
+    backup_dir: Option<&Path>,
+    clock: &ClockSource,
+) -> Result<Option<PathBuf>, AppError> {
+    let db = Db::open(staged)?;
+    let integrity: String = db
+        .connection()
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(map_sqlite)?;
+    if !integrity.eq_ignore_ascii_case("ok") {
         return Err(AppError::Storage {
-            detail: format!(
-                "pre-migration backup: artifact already exists: {}",
-                target.display()
-            ),
+            detail: format!("restore: integrity_check failed on candidate: {integrity}"),
         });
     }
 
-    let target_sql = target.to_str().ok_or_else(|| AppError::Storage {
-        detail: "pre-migration backup: artifact path is not valid UTF-8".to_string(),
-    })?;
-    conn.execute("VACUUM INTO ?1", [target_sql])
-        .map_err(map_sqlite)
-        .map_err(backup_stage)?;
+    // 外键：`foreign_key_check` 有行就是违规（空集 = 通过）。
+    let violations: i64 = {
+        let mut statement = db
+            .connection()
+            .prepare("SELECT count(*) FROM pragma_foreign_key_check")
+            .map_err(map_sqlite)?;
+        statement
+            .query_row([], |row| row.get(0))
+            .map_err(map_sqlite)?
+    };
+    if violations != 0 {
+        return Err(AppError::Storage {
+            detail: format!("restore: foreign_key_check failed on candidate: {violations} rows"),
+        });
+    }
 
-    // 备份已经落地，之后才是保留策略：它失败只记诊断，且**永不删刚写出的这一份**。
-    prune_old_backups(&dir, &target);
-    Ok(target)
+    let from_version = current_version(db.connection())?;
+    if from_version > SCHEMA_VERSION {
+        return Err(AppError::Storage {
+            detail: format!(
+                "restore: candidate schema v{from_version} is newer than this build (v{SCHEMA_VERSION})"
+            ),
+        });
+    }
+    if from_version == SCHEMA_VERSION {
+        return Ok(None);
+    }
+
+    // 旧版本：**先备份再迁移**（02 §9 的括号原文）。用的是与迁移前备份同一个原语，
+    // 阶段标记不同（`pre-restore backup`），产物路径随结果交回调用方。
+    let artifact = backup_consistent(
+        backup_dir,
+        db.connection(),
+        from_version,
+        &*clock(),
+        PRE_RESTORE_STAGE,
+    )?;
+    migrate(db.connection())?;
+    Ok(Some(artifact))
+}
+
+/// ③-a 段：提交（**锁内**）。顺序写死，别调换：
+///
+/// `Db::open(新路径)` → **同一事务**里 `run_repo::start_run(new_run_id)`
+/// **+ `meta::rotate_epoch`**（**只有这条路径** rotate；回滚保留原 epoch）
+/// → `services::recovery::scan_at_startup(&mut db, …)`（P3 的四类归一）
+/// → [`scan_recovery`]（门禁；**必须在归一之后**，它只是三条只读查询）
+/// → `Coordinator::new(clock, new_run_id)` + `establish_anchor(sample)`
+/// → `install_runtime` → `end_maintenance` → 广播**新 epoch** 的 `domain.changed`。
+///
+/// **两步重扫的顺序不能倒**，也不能合成一步：`scan_recovery` 不归一，缺了前一步，
+/// 备份里旧 run 的 `running` 会话会永远停在 `running` 并占着全局的
+/// `uq_running_foreground`（那条索引不带 run 过滤）⇒ 恢复之后根本 start 不起来。
+pub fn commit_restore(
+    app: &SharedApp,
+    broadcaster: &Broadcaster,
+    swap: &RestoreSwap,
+    clock: &ClockSource,
+) -> Result<RestoreOutcome, AppError> {
+    if !swap.swapped {
+        return Err(AppError::Storage {
+            detail: "restore: candidate is not swapped in yet".to_string(),
+        });
+    }
+
+    let mut state = lock_app(app);
+    require_maintenance_without_runtime(&state)?;
+
+    // 新 run 的起点与归属基线用**同一个样本**（与 `startup` 第③/⑤步同一口径）。
+    // 钟**只在这里要一只**：它随后就归新协调器所有。
+    let clock = clock();
+    let sample = clock
+        .sample()
+        .map_err(|_| clock_unavailable("restore: clock sample unavailable at commit"))?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let mut db = Db::open(&swap.target)?;
+
+    // 提交路径的**同一事务**：新 run + 新 epoch。`rotate_epoch` 只在这里调一次，
+    // 它不 bump revision（00 §5：恢复后的 revision 可以低于原库，只在新 epoch 内比较）。
+    let rotated_epoch = {
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        run_repo::start_run(&tx, &run_id, sample.wall_ms)?;
+        let epoch = meta::rotate_epoch(&tx)?;
+        tx.commit().map_err(map_sqlite)?;
+        epoch
+    };
+    debug_assert_ne!(
+        rotated_epoch, swap.previous_data_epoch,
+        "恢复提交必须生成全新的 data_epoch"
+    );
+
+    let identity = rebuild_and_install(
+        &mut state,
+        broadcaster,
+        db,
+        &run_id,
+        sample,
+        clock,
+        true,
+        &swap.previous_data_epoch,
+    )?;
+    // 事务里 rotate 出来的那个 epoch 就是**库最终的身份**（后面的两步重扫不动它）。
+    debug_assert_eq!(identity.data_epoch, rotated_epoch);
+    Ok(RestoreOutcome {
+        committed: true,
+        data_epoch: identity.data_epoch,
+        run_id,
+        recovery: identity.recovery,
+        migration_backup: swap.migration_backup.clone(),
+    })
+}
+
+/// ③-b 段：回滚（**锁内**）。先把主库路径改回原库（若切换已经发生过），再**重开原库并
+/// 重建运行态**——`Db::open(原路径)` → 新 run（**不 rotate**）→ 两步重扫 → 新协调器 →
+/// `install_runtime` → `end_maintenance` → 广播（**原 epoch**：客户端据此知道恢复没发生）。
+///
+/// **不回装原来的协调器**：它的 `Instant` 基线随旧 `Db`/旧 run 一起作废，复用它就是
+/// 把维护窗口算进工时（计划原文禁止）。重建可能把原来 `running` 的会话推成 `recovering`
+/// ——那正是 P3 的恢复规则，原库的工时事实一条都不会丢。
+pub fn abort_restore(
+    app: &SharedApp,
+    broadcaster: &Broadcaster,
+    swap: RestoreSwap,
+    clock: &ClockSource,
+) -> Result<RestoreOutcome, AppError> {
+    if swap.swapped {
+        swap.rollback_files()?;
+    }
+
+    let mut state = lock_app(app);
+    require_maintenance_without_runtime(&state)?;
+
+    let clock = clock();
+    let sample = clock
+        .sample()
+        .map_err(|_| clock_unavailable("restore: clock sample unavailable at rollback"))?;
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let mut db = Db::open(&swap.target)?;
+
+    // **不 rotate**：原库的 epoch 原样保留——否则"旧 epoch 的请求被拒"这条判据
+    // 会把一个**没被替换**的库也一起拒掉。
+    let kept_epoch = {
+        let tx = db
+            .connection_mut()
+            .unchecked_transaction()
+            .map_err(map_sqlite)?;
+        run_repo::start_run(&tx, &run_id, sample.wall_ms)?;
+        let meta = meta::require_meta(&tx)?;
+        tx.commit().map_err(map_sqlite)?;
+        meta.data_epoch
+    };
+    debug_assert_eq!(
+        kept_epoch, swap.previous_data_epoch,
+        "回滚路径必须保留原 data_epoch"
+    );
+
+    let identity = rebuild_and_install(
+        &mut state,
+        broadcaster,
+        db,
+        &run_id,
+        sample,
+        clock,
+        false,
+        &swap.previous_data_epoch,
+    )?;
+    Ok(RestoreOutcome {
+        committed: false,
+        data_epoch: identity.data_epoch,
+        run_id,
+        recovery: identity.recovery,
+        migration_backup: swap.migration_backup.clone(),
+    })
+}
+
+/// 两条 ③ 路径共用的后半段：**两步重扫 → 新协调器 + 锚点 → 装卸 → 广播**。
+///
+/// 广播用的 `data_epoch`/`revision` 在这里、**在两步重扫之后**才读：P3 的归一可能改事实，
+/// 而那会**增加一次 revision**（02 §"启动扫描的版本与审计补充"）——广播必须报库**最终**
+/// 的那个版本，否则客户端会拿着比库小一号的水位线（`domain.changed` 的 `revision` 就是
+/// 客户端的水位线，差一格就要靠下一次 `get_revision` 兜）。
+#[allow(clippy::too_many_arguments)]
+fn rebuild_and_install(
+    state: &mut crate::services::bootstrap::AppGuard<'_>,
+    broadcaster: &Broadcaster,
+    mut db: Db,
+    run_id: &str,
+    sample: ClockSample,
+    clock: Box<dyn Clock + Send>,
+    committed: bool,
+    previous_data_epoch: &str,
+) -> Result<Identity, AppError> {
+    // 第一步：P3 的四类归一（**唯一**做归一的那一步）。备份必然可能带旧 run 的
+    // `running` 会话（备份取自计时中的库），不归一它就会永远占着全局唯一索引。
+    let _scan_report = crate::services::recovery::scan_at_startup(&mut db, run_id, sample.wall_ms)?;
+    // 第二步：门禁快照（三条只读查询，**必须在归一之后**，否则判的是归一前的事实）。
+    let recovery = scan_recovery(db.connection(), run_id)?;
+    // **权威身份**：两步重扫之后的库身份与版本（归一可能刚推进过一次 revision）。
+    let meta = meta::require_meta(db.connection())?;
+
+    // **新协调器**（两条路径都不复用维护前那一个）：时钟来自调用方，锚点用同一个样本。
+    // `tick_seq` 随新协调器从 0 起算，旧 `Instant` 基线随旧协调器一起作废。
+    let mut coordinator = Coordinator::new(clock, run_id.to_string());
+    coordinator.establish_anchor(sample);
+
+    // 装回运行态 → 结束维护态（顺序不能反：结束维护的时长要从**新**运行态那条时钟接缝读）。
+    state.install_runtime(Runtime { db, coordinator }, recovery.clone())?;
+    state.end_maintenance();
+
+    // 恢复完成/回滚的**唯一**广播：`domain.changed` 带**恢复之后**的 epoch。
+    // 客户端闸门规则①（未知 epoch ⇒ 重新握手）据此自动重新握手——**不新造事件名**。
+    broadcaster.emit(EventEnvelope::domain_changed(
+        meta.data_epoch.clone(),
+        meta.revision,
+        sample.wall_ms,
+        serde_json::json!({
+            "restore": if committed { "committed" } else { "rolled_back" },
+            "run_id": run_id,
+            "previous_data_epoch": previous_data_epoch,
+        }),
+    ));
+
+    Ok(Identity {
+        data_epoch: meta.data_epoch,
+        recovery,
+    })
+}
+
+/// [`rebuild_and_install`] 装完之后库里的**权威身份**（广播用的就是这一份）。
+struct Identity {
+    data_epoch: String,
+    recovery: RecoveryScan,
+}
+
+/// ③ 两段的前置：**还在维护态、运行态不在手**。不满足就是不变量被破坏（不是用户错误），
+/// 照实报 `DATA_RESTORE_IN_PROGRESS`——它正是"此刻没有可用运行态"那个码。
+fn require_maintenance_without_runtime(
+    state: &crate::services::bootstrap::AppGuard<'_>,
+) -> Result<(), AppError> {
+    if state.maintenance().is_none() || state.runtime_present() {
+        return Err(AppError::DataRestoreInProgress);
+    }
+    Ok(())
+}
+
+fn clock_unavailable(detail: &str) -> AppError {
+    AppError::Storage {
+        detail: detail.to_string(),
+    }
+}
+
+fn restore_io(stage: &str, e: std::io::Error) -> AppError {
+    AppError::Storage {
+        detail: format!("restore: {stage}: {e}"),
+    }
+}
+
+// ── 文件助手（都在同一个目录里改名字，所以不跨卷） ──────────────────────────────
+
+/// SQLite 的边车文件是「主库路径 + 后缀」（不是换扩展名）：`worktrace.db-wal`。
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// 把 `from` 的两份边车文件搬到 `to`（两边同名后缀）。
+fn move_sidecars(from: &Path, to: &Path) -> Result<(), AppError> {
+    for suffix in ["-wal", "-shm"] {
+        let source = sidecar(from, suffix);
+        if !source.exists() {
+            continue;
+        }
+        let destination = sidecar(to, suffix);
+        if destination.exists() {
+            std::fs::remove_file(&destination).map_err(|e| restore_io("replace sidecar", e))?;
+        }
+        std::fs::rename(&source, &destination).map_err(|e| restore_io("move sidecar", e))?;
+    }
+    Ok(())
+}
+
+/// 删掉一份库文件**及其边车**（不存在就当作成功）。
+fn remove_db_files(path: &Path) -> Result<(), AppError> {
+    if path.as_os_str().is_empty() {
+        return Ok(());
+    }
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|e| restore_io("remove db file", e))?;
+    }
+    for suffix in ["-wal", "-shm"] {
+        let extra = sidecar(path, suffix);
+        if extra.exists() {
+            std::fs::remove_file(&extra).map_err(|e| restore_io("remove sidecar", e))?;
+        }
+    }
+    Ok(())
+}
+
+fn staged_path(target: &Path) -> PathBuf {
+    sidecar(target, STAGED_SUFFIX)
+}
+
+fn rollback_path(target: &Path) -> PathBuf {
+    sidecar(target, ROLLBACK_SUFFIX)
 }

@@ -90,7 +90,7 @@ pub struct CommandOutcome {
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // IPC 形状里 `mode` / `timer_kind` 是**字符串**：serde 的枚举反序列化失败拿不到
-// `ErrorResponse.code`，非法取值会退化成 Tauri 的反序列化错误（00 §4 只认那五个码）。
+// `ErrorResponse.code`，非法取值会退化成 Tauri 的反序列化错误（00 §4 只认那六个码）。
 // 所以命令层收到字符串后必须显式过这里，而不是让请求类型去 derive `Deserialize`。
 // 两个函数与 `services::catalog::parse_tag_kind` 同一形状：解析规则只有 domain 那一处。
 

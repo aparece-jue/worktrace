@@ -336,7 +336,7 @@ fn probe(app: &SharedApp) -> Probe {
 
 /// 同上，但在**已经持锁**的地方用（`std::sync::Mutex` 不可重入：再 `lock_app` 会自死锁）。
 fn probe_in(state: &worktrace_lib::services::bootstrap::AppState) -> Probe {
-    let conn = state.db().connection();
+    let conn = state.db().unwrap().connection();
     let scalar = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
     Probe {
         revision: scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
@@ -363,7 +363,7 @@ fn state_in(
     state: &worktrace_lib::services::bootstrap::AppState,
     session_id: &str,
 ) -> Option<worktrace_lib::domain::session::SessionState> {
-    session_repo::get_session(state.db().connection(), session_id)
+    session_repo::get_session(state.db().unwrap().connection(), session_id)
         .unwrap()
         .map(|session| session.state)
 }
@@ -372,7 +372,7 @@ fn state_in(
 fn active_ms_of(app: &SharedApp, session_id: &str) -> Option<i64> {
     let intervals = {
         let state = lock_app(app);
-        session_repo::intervals_of_session(state.db().connection(), session_id).unwrap()
+        session_repo::intervals_of_session(state.db().unwrap().connection(), session_id).unwrap()
     };
     let mut total = 0;
     for interval in intervals {

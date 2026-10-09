@@ -160,7 +160,14 @@ where
         if let Err(error) = guard.guard_writable() {
             return Err(maintenance_response(&error));
         }
-        body(&mut guard).map_err(|error| capture_error_response(guard.db(), &error, &targets))
+        body(&mut guard).map_err(|error| match guard.db() {
+            Ok(db) => capture_error_response(db, &error, &targets),
+            // **运行态不在手**（维护态的换库窗口）：错误路径**不能再读库**——
+            // 拿不到权威版本就不编一个，按维护态的形状回答（`authority: None`）。
+            // 这条分支今天不可达：上面的 `guard_writable` 已经先拒了维护态；
+            // 留着它是为了让「取不到库」不会退化成 panic 或假版本。
+            Err(_) => maintenance_response(&AppError::DataRestoreInProgress),
+        })
     })
     .await
     {
@@ -406,7 +413,7 @@ pub async fn get_revision(
 
 /// [`get_revision`] 的命令体（IPC 包装只做转发）。
 pub fn get_revision_impl(app: &mut AppState) -> Result<handshake::RevisionSnapshot, AppError> {
-    handshake::get_revision(app.db())
+    handshake::get_revision(app.db()?)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -440,7 +447,7 @@ pub fn list_projects_impl(
         Some(raw) => Some(catalog::parse_project_status_read(raw)?),
         None => None,
     };
-    catalog::list_projects(app.db(), &request.expected_data_epoch, status)
+    catalog::list_projects(app.db()?, &request.expected_data_epoch, status)
 }
 
 /// 新建任务时可选的项目：**只列 active**（F-004）。归档/done 从这里消失，
@@ -466,7 +473,7 @@ pub fn list_selectable_projects_impl(
     app: &mut AppState,
     request: EpochRequest,
 ) -> Result<catalog::ProjectList, AppError> {
-    catalog::list_selectable_projects(app.db(), &request.expected_data_epoch)
+    catalog::list_selectable_projects(app.db()?, &request.expected_data_epoch)
 }
 
 /// 新建项目。同名项目允许存在（schema 没有唯一索引，F-004 也没要求）。
@@ -496,7 +503,7 @@ pub fn create_project_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
     let (change, changed) =
-        catalog::create_project(app.db_mut(), env, &request.name, now)?.into_parts();
+        catalog::create_project(app.db_mut()?, env, &request.name, now)?.into_parts();
     Ok(announce(
         broadcaster,
         changed,
@@ -535,7 +542,7 @@ pub fn rename_project_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
     let (change, changed) =
-        catalog::rename_project(app.db_mut(), env, &request.project_id, &request.name, now)?
+        catalog::rename_project(app.db_mut()?, env, &request.project_id, &request.name, now)?
             .into_parts();
     Ok(announce(
         broadcaster,
@@ -575,7 +582,7 @@ pub fn archive_project_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
     let (change, changed) =
-        catalog::archive_project(app.db_mut(), env, &request.project_id, now)?.into_parts();
+        catalog::archive_project(app.db_mut()?, env, &request.project_id, now)?.into_parts();
     Ok(announce(
         broadcaster,
         changed,
@@ -616,7 +623,7 @@ pub fn list_tags_impl(
         Some(raw) => Some(catalog::parse_tag_kind(raw)?),
         None => None,
     };
-    catalog::list_tags(app.db(), &request.expected_data_epoch, kind)
+    catalog::list_tags(app.db()?, &request.expected_data_epoch, kind)
 }
 
 /// 新建标签。
@@ -646,7 +653,7 @@ pub fn create_tag_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
     let (change, changed) = catalog::create_tag(
-        app.db_mut(),
+        app.db_mut()?,
         env,
         &request.kind,
         &request.name,
@@ -686,7 +693,7 @@ pub fn tags_of_task_impl(
     app: &mut AppState,
     request: TaskTagsRequest,
 ) -> Result<catalog::TagList, AppError> {
-    catalog::tags_of_task(app.db(), &request.expected_data_epoch, &request.task_id)
+    catalog::tags_of_task(app.db()?, &request.expected_data_epoch, &request.task_id)
 }
 
 /// 打标：把**一个**标签加到**一个**任务上。
@@ -719,7 +726,7 @@ pub fn tag_task_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
     let (change, changed) =
-        catalog::tag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?.into_parts();
+        catalog::tag_task(app.db_mut()?, env, &request.task_id, &request.tag_id, now)?.into_parts();
     Ok(announce(
         broadcaster,
         changed,
@@ -757,7 +764,7 @@ pub fn untag_task_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
     let (change, changed) =
-        catalog::untag_task(app.db_mut(), env, &request.task_id, &request.tag_id, now)?
+        catalog::untag_task(app.db_mut()?, env, &request.task_id, &request.tag_id, now)?
             .into_parts();
     Ok(announce(
         broadcaster,
@@ -799,7 +806,7 @@ pub fn list_tasks_impl(
     request: catalog::TaskQueryRequest,
 ) -> Result<catalog::TaskQueryResult, AppError> {
     let query = catalog::TaskQuery::try_from(request)?;
-    catalog::list_tasks_filtered(app.db(), query)
+    catalog::list_tasks_filtered(app.db()?, query)
 }
 
 /// 捕获一个任务（F-002 的 Inbox 入口）。空标题被服务拒绝。
@@ -829,7 +836,7 @@ pub fn create_task_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
     let (change, changed) = catalog::create_task(
-        app.db_mut(),
+        app.db_mut()?,
         env,
         &request.title,
         request.project_id.as_deref(),
@@ -874,7 +881,7 @@ pub fn clarify_ready_impl(
 ) -> Result<catalog::TaskChange, AppError> {
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let change = catalog::clarify_ready(app.db_mut(), env, &request.task_id, now)?;
+    let change = catalog::clarify_ready(app.db_mut()?, env, &request.task_id, now)?;
     // `services::catalog::clarify_ready` 没有 `Unchanged` 分支：它只在真的跃迁时成功，
     // 所以这一次业务写必然改了库。
     Ok(announce(
@@ -915,7 +922,7 @@ pub fn set_task_project_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
     let (change, changed) =
-        catalog::set_task_project(app.db_mut(), env, &request.task_id, request.project, now)?
+        catalog::set_task_project(app.db_mut()?, env, &request.task_id, request.project, now)?
             .into_parts();
     Ok(announce(
         broadcaster,
@@ -950,7 +957,7 @@ pub fn plan_for_impl(
     app: &mut AppState,
     request: daily_plan::DailyPlanQuery,
 ) -> Result<daily_plan::DailyPlanView, AppError> {
-    daily_plan::plan_for(app.db(), request)
+    daily_plan::plan_for(app.db()?, request)
 }
 
 /// 把一个任务加入今日计划。重复加入 ⇒ 幂等。
@@ -977,7 +984,7 @@ pub fn add_to_plan_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
     let (change, changed) = daily_plan::add_to_plan(
-        app.db_mut(),
+        app.db_mut()?,
         env,
         &request.task_id,
         &request.date,
@@ -1023,7 +1030,7 @@ pub fn remove_from_plan_impl(
     let now = app.now_ms()?;
     let env = WriteEnvelope::for_create(request.expected_data_epoch);
     let (change, changed) = daily_plan::remove_from_plan(
-        app.db_mut(),
+        app.db_mut()?,
         env,
         &request.task_id,
         &request.date,

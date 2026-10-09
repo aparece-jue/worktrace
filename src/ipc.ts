@@ -68,7 +68,7 @@ export const EVENT_CHANNEL = "worktrace:event";
 /**
  * 客户端本地码：**没走到命令体**（命令名不存在、参数反序列化失败、IPC 通道故障）。
  *
- * 它不是 Rust 的五个码之一，也永远不该被展示成"未知错误"以外的东西：
+ * 它不是 Rust 的六个码之一，也永远不该被展示成"未知错误"以外的东西：
  * 前端按未知 `code` 的规则直接展示 `message`（R8）。
  */
 export const TRANSPORT_ERROR = "TRANSPORT_ERROR";
@@ -131,7 +131,7 @@ function describe(cause: unknown): string {
  * 把 Tauri 抛出的任何东西统一成 {@link IpcError}。
  *
  * 两条路径：
- * - 命令体返回 `Err(ErrorResponse)` ⇒ 原样五个字段（五个码原样透传）；
+ * - 命令体返回 `Err(ErrorResponse)` ⇒ 原样五个字段（六个码原样透传）；
  * - **Tauri 自己的失败**（参数反序列化、命令不存在、IPC 故障）⇒ `TRANSPORT_ERROR` +
  *   原始 message。**这条兜底是必需的**：非法 `project` 形状走的就是它，
  *   那种失败在类型上根本到不了 `ErrorResponse`。

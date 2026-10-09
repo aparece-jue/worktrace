@@ -265,6 +265,7 @@ impl Rig {
     fn app_scalar(&self, sql: &str) -> i64 {
         lock_app(self.running.app())
             .db()
+            .unwrap()
             .connection()
             .query_row(sql, [], |r| r.get(0))
             .unwrap()

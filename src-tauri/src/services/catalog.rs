@@ -684,7 +684,7 @@ impl From<ProjectSelector> for task_repo::ProjectFilter {
 /// 解析与校验只有一处（下面的 [`TryFrom`] 实现）。
 ///
 /// **枚举一律是字符串**：serde 的枚举反序列化失败拿不到 `ErrorResponse.code`，
-/// 非法取值会退化成 Tauri 的反序列化错误（00 §4 只认那五个码），所以校验必须显式做。
+/// 非法取值会退化成 Tauri 的反序列化错误（00 §4 只认那六个码），所以校验必须显式做。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct TaskQueryRequest {
     /// 状态集合；**空集合 = 不限制状态**（与 `TaskFilter` 同义）。

@@ -366,7 +366,7 @@ fn hard_fault_with_primary(primary: Entry) {
         let mut state = lock_app(&app);
         let request = session_request(&mut state, &epoch);
         state.finish(request).expect("结束计时");
-        let live = state.coordinator().live().expect("镜像还在");
+        let live = state.coordinator().unwrap().live().expect("镜像还在");
         assert_eq!(live.state, SessionState::Finished);
         assert!(
             live.open_interval.is_none(),
@@ -376,18 +376,18 @@ fn hard_fault_with_primary(primary: Entry) {
     };
     let interval_id = {
         let state = lock_app(&app);
-        let rows = intervals_of(state.db(), &sid);
+        let rows = intervals_of(state.db().unwrap(), &sid);
         assert_eq!(rows.len(), 1, "结束后只有一条闭合区间");
         rows[0].id.clone()
     };
 
     let before_revision = {
         let state = lock_app(&app);
-        revision(state.db())
+        revision(state.db().unwrap())
     };
     let before_changes = {
         let state = lock_app(&app);
-        total_changes(state.db())
+        total_changes(state.db().unwrap())
     };
     // 进入 ③ **之前**协调器不在故障态（事实，不是推断）：第一次入口调用才是判出硬故障、
     // 并把协调器锁进故障态的那一拍。没有这一条，后面的 `is_faulted()` 断言就分不清
@@ -395,7 +395,7 @@ fn hard_fault_with_primary(primary: Entry) {
     {
         let state = lock_app(&app);
         assert!(
-            !state.coordinator().is_faulted(),
+            !state.coordinator().unwrap().is_faulted(),
             "硬故障是 ③ 里那一次入口调用判出来的，不是装置提前造出来的"
         );
     }
@@ -411,11 +411,11 @@ fn hard_fault_with_primary(primary: Entry) {
     for entry in entries_with_primary(primary) {
         let call_revision = {
             let state = lock_app(&app);
-            revision(state.db())
+            revision(state.db().unwrap())
         };
         let call_changes = {
             let state = lock_app(&app);
-            total_changes(state.db())
+            total_changes(state.db().unwrap())
         };
         let result = {
             let mut state = lock_app(&app);
@@ -429,11 +429,11 @@ fn hard_fault_with_primary(primary: Entry) {
         );
         let after_revision = {
             let state = lock_app(&app);
-            revision(state.db())
+            revision(state.db().unwrap())
         };
         let after_changes = {
             let state = lock_app(&app);
-            total_changes(state.db())
+            total_changes(state.db().unwrap())
         };
         assert_eq!(
             after_revision,
@@ -455,35 +455,39 @@ fn hard_fault_with_primary(primary: Entry) {
     {
         let state = lock_app(&app);
         assert!(
-            state.coordinator().is_faulted(),
+            state.coordinator().unwrap().is_faulted(),
             "硬故障必须把协调器锁进故障态"
         );
         assert_eq!(
-            state.coordinator().last_verdict(),
+            state.coordinator().unwrap().last_verdict(),
             SampleVerdict::MonotonicBackwards {
                 d_mono_ms: MONOTONIC_SETBACK
             }
         );
         assert_eq!(
-            state.coordinator().live().unwrap().state,
+            state.coordinator().unwrap().live().unwrap().state,
             SessionState::Finished,
             "镜像被换成了别的会话就是另一回事了"
         );
 
-        assert_eq!(revision(state.db()), before_revision, "版本一动不动");
         assert_eq!(
-            total_changes(state.db()),
+            revision(state.db().unwrap()),
+            before_revision,
+            "版本一动不动"
+        );
+        assert_eq!(
+            total_changes(state.db().unwrap()),
             before_changes,
             "整个硬故障分支（含三次失败调用）一行都不写"
         );
-        assert_eq!(audit_count(state.db()), 0, "硬故障分支不写审计");
+        assert_eq!(audit_count(state.db().unwrap()), 0, "硬故障分支不写审计");
 
-        let row = session_row(state.db(), &sid);
+        let row = session_row(state.db().unwrap(), &sid);
         assert_eq!(row.state, SessionState::Finished);
         assert!(!row.needs_review, "没有待确认候选被造出来");
         assert_eq!(row.row_version, 1, "结束计时的版本位保持原样");
 
-        let rows = intervals_of(state.db(), &sid);
+        let rows = intervals_of(state.db().unwrap(), &sid);
         assert_eq!(rows.len(), 1, "既没有分割，也没有新的候选段");
         assert_eq!(rows[0].id, interval_id);
         assert_eq!(rows[0].started_at, WALL);
@@ -590,7 +594,7 @@ fn wall_clock_jump_with_primary(primary: Entry) {
     }
     let (sid, open_interval_id) = {
         let state = lock_app(&app);
-        let live = state.coordinator().live().expect("镜像还在");
+        let live = state.coordinator().unwrap().live().expect("镜像还在");
         assert_eq!(live.state, SessionState::Running);
         let open = live.open_interval.clone().expect("running 必有开放区间");
         (live.id.clone(), open.0)
@@ -598,11 +602,11 @@ fn wall_clock_jump_with_primary(primary: Entry) {
 
     let before_revision = {
         let state = lock_app(&app);
-        revision(state.db())
+        revision(state.db().unwrap())
     };
     let before_changes = {
         let state = lock_app(&app);
-        total_changes(state.db())
+        total_changes(state.db().unwrap())
     };
 
     // ② 三个入口各来一次，每次之前都把墙钟拨过阈值。
@@ -615,7 +619,7 @@ fn wall_clock_jump_with_primary(primary: Entry) {
         }
         let call_changes = {
             let state = lock_app(&app);
-            total_changes(state.db())
+            total_changes(state.db().unwrap())
         };
         let result = {
             let mut state = lock_app(&app);
@@ -629,7 +633,7 @@ fn wall_clock_jump_with_primary(primary: Entry) {
         );
         let after_changes = {
             let state = lock_app(&app);
-            total_changes(state.db())
+            total_changes(state.db().unwrap())
         };
         deltas.push(after_changes - call_changes);
     }
@@ -648,7 +652,7 @@ fn wall_clock_jump_with_primary(primary: Entry) {
     // ③ 那笔恢复事务是**可见的**：版本恰好 +1，会话 `recovering`，余段是待确认候选。
     let after_revision = {
         let state = lock_app(&app);
-        revision(state.db())
+        revision(state.db().unwrap())
     };
     assert_eq!(
         after_revision,
@@ -657,7 +661,7 @@ fn wall_clock_jump_with_primary(primary: Entry) {
     );
     let written_total = {
         let state = lock_app(&app);
-        total_changes(state.db()) - before_changes
+        total_changes(state.db().unwrap()) - before_changes
     };
     assert_eq!(
         written_total, deltas[0],
@@ -668,9 +672,9 @@ fn wall_clock_jump_with_primary(primary: Entry) {
         let state = lock_app(&app);
 
         // 审计：恰好一条，形状与 P2 的墙钟异常同源。
-        assert_eq!(audit_count(state.db()), 1, "恰好一条异常审计");
-        assert_eq!(audit_reason(state.db()), "clock jumped");
-        let after = audit_after(state.db());
+        assert_eq!(audit_count(state.db().unwrap()), 1, "恰好一条异常审计");
+        assert_eq!(audit_reason(state.db().unwrap()), "clock jumped");
+        let after = audit_after(state.db().unwrap());
         assert_eq!(
             after["trusted_interval"].as_str(),
             Some(open_interval_id.as_str()),
@@ -696,13 +700,13 @@ fn wall_clock_jump_with_primary(primary: Entry) {
         );
 
         // 会话：进入 recovering 并带待确认标记（版本位 0 → 1）。
-        let row = session_row(state.db(), &sid);
+        let row = session_row(state.db().unwrap(), &sid);
         assert_eq!(row.state, SessionState::Recovering);
         assert!(row.needs_review, "会话带待确认事实");
         assert_eq!(row.row_version, 1);
 
         // 区间：可信前缀 + 待确认候选，两段端点相接、不重叠。
-        let rows = intervals_of(state.db(), &sid);
+        let rows = intervals_of(state.db().unwrap(), &sid);
         assert_eq!(rows.len(), 2, "一段可信前缀 + 一段待确认候选");
         assert_eq!(rows[0].id, open_interval_id);
         assert_eq!(rows[0].started_at, WALL);
@@ -731,11 +735,11 @@ fn wall_clock_jump_with_primary(primary: Entry) {
 
         // 内存镜像跟着事实走（不然快照会继续按异常前的状态出数）。
         assert_eq!(
-            state.coordinator().live().unwrap().state,
+            state.coordinator().unwrap().live().unwrap().state,
             SessionState::Recovering
         );
         assert_eq!(
-            state.coordinator().last_verdict(),
+            state.coordinator().unwrap().last_verdict(),
             SampleVerdict::Jumped {
                 delta_gap_ms: WALL_JUMP
             }
@@ -746,7 +750,7 @@ fn wall_clock_jump_with_primary(primary: Entry) {
     for entry in entries_with_primary(primary) {
         let call_changes = {
             let state = lock_app(&app);
-            total_changes(state.db())
+            total_changes(state.db().unwrap())
         };
         let result = {
             let mut state = lock_app(&app);
@@ -760,13 +764,13 @@ fn wall_clock_jump_with_primary(primary: Entry) {
         );
         let state = lock_app(&app);
         assert_eq!(
-            total_changes(state.db()),
+            total_changes(state.db().unwrap()),
             call_changes,
             "{} 不得为未接受的校正写一行",
             entry.name()
         );
         assert_eq!(
-            revision(state.db()),
+            revision(state.db().unwrap()),
             after_revision,
             "{} 不得为未接受的校正加版本",
             entry.name()

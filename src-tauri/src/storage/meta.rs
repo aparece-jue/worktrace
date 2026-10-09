@@ -70,13 +70,26 @@ pub fn init_meta(tx: &Transaction<'_>) -> Result<Meta, AppError> {
 ///
 /// **调用约定**：只由恢复/替换库的**提交路径**在与 `run_repo::start_run` **同一个事务**里
 /// 调一次；回滚路径不调（原库的 epoch 原样保留）。本函数不自行 begin/commit——事务归调用方。
+///
+/// **影响行数必须是 1**（P6 Task 4b 收掉 4a 评审的 Minor 3）：返回值会被恢复流程当成
+/// **新库身份**去广播（客户端据此重新握手），所以它必须真的落了库。库里没有 `app_meta`
+/// 行时 `UPDATE` 会影响 0 行——那种库不是一份可用的 worktrace 库（`init_meta` 只在建库时
+/// INSERT），照旧返回一个"新 epoch"会让恢复带着一个**没落库的身份**继续往下走。
+/// 这与 [`bump_revision`] 的惯例（不校验影响行数）**刻意不同**：那个只在已初始化的库里调，
+/// 而本函数的候选库来自一份外部文件，正是最需要判一句"它到底是不是我们的库"的地方。
 pub fn rotate_epoch(tx: &Transaction<'_>) -> Result<String, AppError> {
     let epoch = uuid::Uuid::new_v4().to_string();
-    tx.execute(
-        "UPDATE app_meta SET data_epoch = ?1 WHERE singleton = 1",
-        [&epoch],
-    )
-    .map_err(map_sqlite)?;
+    let affected = tx
+        .execute(
+            "UPDATE app_meta SET data_epoch = ?1 WHERE singleton = 1",
+            [&epoch],
+        )
+        .map_err(map_sqlite)?;
+    if affected != 1 {
+        return Err(AppError::Storage {
+            detail: format!("rotate_epoch: expected 1 app_meta row, updated {affected}"),
+        });
+    }
     Ok(epoch)
 }
 

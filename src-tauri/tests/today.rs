@@ -688,7 +688,7 @@ fn an_app_without_any_session_returns_an_empty_view_instead_of_an_error() {
 
     let before = {
         let guard = lock_app(&app);
-        total_changes(guard.db())
+        total_changes(guard.db().unwrap())
     };
 
     let view = {
@@ -737,7 +737,7 @@ fn an_app_without_any_session_returns_an_empty_view_instead_of_an_error() {
     // **只读**：一次 Today 不多写任何一行（也就不会凭空推 revision）。
     let after = {
         let guard = lock_app(&app);
-        total_changes(guard.db())
+        total_changes(guard.db().unwrap())
     };
     assert_eq!(after, before, "Today 是只读查询：不写库、不加 revision");
 }
@@ -759,8 +759,15 @@ fn the_today_list_matches_plan_for_and_keeps_completed_tasks() {
         let mut guard = lock_app(&app);
         let now = guard.now_ms().unwrap();
         let env = WriteEnvelope::for_create(epoch.clone());
-        daily_plan::add_to_plan(guard.db_mut(), env, id, "2026-03-10", "Asia/Shanghai", now)
-            .unwrap();
+        daily_plan::add_to_plan(
+            guard.db_mut().unwrap(),
+            env,
+            id,
+            "2026-03-10",
+            "Asia/Shanghai",
+            now,
+        )
+        .unwrap();
     }
 
     let first = {
@@ -774,7 +781,7 @@ fn the_today_list_matches_plan_for_and_keeps_completed_tasks() {
     let plan = {
         let guard = lock_app(&app);
         daily_plan::plan_for(
-            guard.db(),
+            guard.db().unwrap(),
             DailyPlanQuery {
                 date: "2026-03-10".to_string(),
                 timezone: "Asia/Shanghai".to_string(),
@@ -857,7 +864,7 @@ fn a_pure_read_does_not_advance_revision_but_a_business_write_does() {
         let now = guard.now_ms().unwrap();
         let env = WriteEnvelope::for_create(epoch.clone());
         daily_plan::add_to_plan(
-            guard.db_mut(),
+            guard.db_mut().unwrap(),
             env,
             "t-1",
             "2026-03-10",
@@ -904,6 +911,7 @@ fn the_current_task_and_run_state_come_from_the_same_sample() {
         let mut guard = lock_app(&app);
         let task = guard
             .db()
+            .unwrap()
             .connection()
             .query_row("SELECT row_version FROM task WHERE id = 't-1'", [], |row| {
                 row.get::<_, i64>(0)

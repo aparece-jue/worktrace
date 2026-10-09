@@ -88,7 +88,7 @@ fn backfill_rejects_an_unrepresentable_duration_without_writes() {
     drop(seeded(&fx));
     let running = started(&fx);
     let mut state = lock_app(running.app());
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
     let error = state
         .backfill(
             env_create(running.data_epoch()),
@@ -96,7 +96,7 @@ fn backfill_rejects_an_unrepresentable_duration_without_writes() {
         )
         .expect_err("extreme endpoints must be rejected rather than panic or wrap");
     assert_code(&error, "DOMAIN_ERROR");
-    assert_eq!(world(state.db()), before);
+    assert_eq!(world(state.db().unwrap()), before);
 }
 
 /// 恢复会话的几何：可信前缀 + 已知终点的候选 + 终点未知的开放候选。
@@ -610,7 +610,7 @@ fn backfilling_records_a_finished_session_with_a_trusted_closed_interval() {
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
     let run = running.run_id().to_string();
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
     assert!(
         !state.recovery().requires_recovery(),
         "夹具里没有恢复材料，门禁应当是开的"
@@ -647,7 +647,7 @@ fn backfilling_records_a_finished_session_with_a_trusted_closed_interval() {
     assert_eq!(report.revision, before.revision + 1);
     assert_eq!(report.data_epoch, epoch);
 
-    let db = state.db();
+    let db = state.db().unwrap();
     let session_id = report.session.id.clone();
     let interval_id = report.interval.id.clone();
     assert_eq!(session(db, &session_id).state, "finished");
@@ -671,7 +671,7 @@ fn backfilling_records_a_finished_session_with_a_trusted_closed_interval() {
         0
     );
     assert!(
-        state.coordinator().live().is_none(),
+        state.coordinator().unwrap().live().is_none(),
         "backfill 不做镜像刷新"
     );
     assert_eq!(world(db).sessions, before.sessions + 1);
@@ -688,8 +688,8 @@ fn backfilling_produces_no_task_change_row_and_leaves_the_task_alone() {
     let running = started(&fx);
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
-    let before_task = task(state.db(), "t1");
-    let before = world(state.db());
+    let before_task = task(state.db().unwrap(), "t1");
+    let before = world(state.db().unwrap());
 
     let (report, changed) = state
         .backfill(env_create(&epoch), backfill_request("t1", BF_START, BF_END))
@@ -697,7 +697,7 @@ fn backfilling_produces_no_task_change_row_and_leaves_the_task_alone() {
         .into_parts();
     assert!(changed);
 
-    let db = state.db();
+    let db = state.db().unwrap();
     assert_eq!(
         task(db, "t1"),
         before_task,
@@ -736,17 +736,17 @@ fn backfilling_does_not_take_the_foreground_slot() {
         .backfill(env_create(&epoch), backfill_request("t1", BF_START, BF_END))
         .unwrap()
         .into_parts();
-    assert!(state.coordinator().live().is_none());
+    assert!(state.coordinator().unwrap().live().is_none());
 
-    let task_v = task_version(state.db());
+    let task_v = task_version(state.db().unwrap());
     let outcome = state
         .start(start_request(&epoch, task_v))
         .expect("补录不占前台槽位：紧接着的 start 必须成功");
     assert_eq!(outcome.snapshot.state, Some(SessionState::Running));
-    let live = state.coordinator().live().expect("start 装载镜像");
+    let live = state.coordinator().unwrap().live().expect("start 装载镜像");
     assert_ne!(live.id, report.session.id, "镜像装的是新会话，不是补录那条");
 
-    let db = state.db();
+    let db = state.db().unwrap();
     assert_eq!(
         scalar(
             db,
@@ -771,7 +771,7 @@ fn backfilling_an_overlapping_range_is_rejected_without_any_write() {
     let running = started(&fx);
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
 
     let error = state
         .backfill(
@@ -787,7 +787,7 @@ fn backfilling_an_overlapping_range_is_rejected_without_any_write() {
         "文案要能指出与哪一段重叠：{detail}"
     );
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         before,
         "被拒的补录不得留下半个会话或半条审计"
     );
@@ -814,7 +814,7 @@ fn backfill_refuses_a_future_end_a_negative_range_and_an_unknown_task() {
     let running = started(&fx);
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
 
     let error = state
         .backfill(
@@ -842,7 +842,7 @@ fn backfill_refuses_a_future_end_a_negative_range_and_an_unknown_task() {
     assert_code(&error, "DOMAIN_ERROR");
     assert!(error.detail().unwrap_or_default().contains("找不到"));
 
-    assert_eq!(world(state.db()), before, "三次被拒都是零变化");
+    assert_eq!(world(state.db().unwrap()), before, "三次被拒都是零变化");
     // 三次都通过之后，同样的请求仍然能用（证明拒绝没有留下副作用）。
     state
         .backfill(env_create(&epoch), backfill_request("t1", BF_START, BF_END))
@@ -868,7 +868,7 @@ fn the_audit_records_a_backfill_and_has_no_candidate_keys() {
         .unwrap()
         .into_parts();
 
-    let db = state.db();
+    let db = state.db().unwrap();
     let rows = edits(db, &report.session.id);
     assert_eq!(rows.len(), 1);
     let (change, before, after, reason) = &rows[0];
@@ -907,20 +907,20 @@ fn a_failed_backfill_rolls_back_the_whole_session() {
     let running = started(&fx);
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
 
-    reject_time_edit_writes(state.db());
+    reject_time_edit_writes(state.db().unwrap());
     let error = state
         .backfill(env_create(&epoch), backfill_request("t1", BF_START, BF_END))
         .unwrap_err();
     assert_code(&error, "STORAGE_ERROR");
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         before,
         "会话、区间、审计必须在同一个事务里一起回滚"
     );
 
-    allow_time_edit_writes(state.db());
+    allow_time_edit_writes(state.db().unwrap());
     state
         .backfill(env_create(&epoch), backfill_request("t1", BF_START, BF_END))
         .expect("注入解除之后同一条请求必须成功");
@@ -943,7 +943,7 @@ fn discarding_a_session_voids_every_interval_and_marks_it_discarded() {
     let running = started(&fx);
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
-    let before = session_world(state.db(), "s-rec");
+    let before = session_world(state.db().unwrap(), "s-rec");
     assert_eq!(before.session.state, "recovering");
 
     let (report, changed) = state
@@ -970,7 +970,7 @@ fn discarding_a_session_voids_every_interval_and_marks_it_discarded() {
     );
     assert_eq!(report.interval.voided_at, Some(WALL));
 
-    let db = state.db();
+    let db = state.db().unwrap();
     // 三条区间一条不落。
     for id in ["s-rec-prefix", "s-rec-cand", "s-rec-open"] {
         let facts = interval(db, id);
@@ -1013,14 +1013,14 @@ fn discarding_a_session_does_not_touch_the_task_or_its_change_log() {
     let running = started(&fx);
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
-    let before_task = task(state.db(), "t1");
-    let before = world(state.db());
+    let before_task = task(state.db().unwrap(), "t1");
+    let before = world(state.db().unwrap());
 
     state
         .discard_session(env_update(&epoch, 0), discard_request("s-rec"))
         .unwrap();
 
-    let db = state.db();
+    let db = state.db().unwrap();
     assert_eq!(task(db, "t1"), before_task, "作废不隐式改变任务状态");
     let after = world(db);
     assert_eq!(after.task_change_rows, before.task_change_rows);
@@ -1044,7 +1044,7 @@ fn the_audit_records_a_discard_session_with_voided_at_on_both_sides() {
         .discard_session(env_update(&epoch, 0), discard_request("s-rec"))
         .unwrap();
 
-    let db = state.db();
+    let db = state.db().unwrap();
     let rows = edits(db, "s-rec");
     assert_eq!(rows.len(), 1);
     let (change, before, after, reason) = &rows[0];
@@ -1103,7 +1103,7 @@ fn reconcile_discards_only_uncertain_intervals_while_discard_session_voids_all()
         .discard_session(env_update(&epoch, 0), discard_request("s-all"))
         .unwrap();
 
-    let db = state.db();
+    let db = state.db().unwrap();
     // 对账：可信前缀还在，只是两条候选被作废。
     assert_eq!(interval(db, "s-rec-prefix").voided_at, None);
     assert_eq!(interval(db, "s-rec-cand").voided_at, Some(WALL));
@@ -1138,7 +1138,7 @@ fn discarding_the_last_pending_fact_opens_the_recovery_gate() {
         state.recovery().requires_recovery(),
         "启动时有一条别的 run 的 recovering 会话"
     );
-    let task_v = task_version(state.db());
+    let task_v = task_version(state.db().unwrap());
     assert_code(
         &state.start(start_request(&epoch, task_v)).unwrap_err(),
         "RECOVERY_REQUIRED",
@@ -1153,7 +1153,7 @@ fn discarding_the_last_pending_fact_opens_the_recovery_gate() {
     assert!(scan.unfinished_sessions.is_empty());
     assert!(scan.pending_intervals.is_empty());
     assert!(scan.invariant_faults.is_empty());
-    let task_v = task_version(state.db());
+    let task_v = task_version(state.db().unwrap());
     state
         .start(start_request(&epoch, task_v))
         .expect("门禁解除后 start 必须成功");
@@ -1171,7 +1171,7 @@ fn a_paused_session_with_pending_intervals_can_be_discarded() {
     let running = started(&fx);
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
-    let before = session_world(state.db(), "s-paused");
+    let before = session_world(state.db().unwrap(), "s-paused");
     assert_eq!(before.session.state, "paused");
     assert_eq!(
         before.session.run_id, OLD_RUN,
@@ -1184,7 +1184,7 @@ fn a_paused_session_with_pending_intervals_can_be_discarded() {
         .discard_session(env_update(&epoch, 0), discard_request("s-paused"))
         .expect("paused + 待确认的出口是 discard_session");
 
-    let db = state.db();
+    let db = state.db().unwrap();
     let after = session(db, "s-paused");
     assert_eq!(after.state, "discarded");
     assert_eq!(after.needs_review, 0);
@@ -1209,14 +1209,20 @@ fn discarding_the_running_session_leaves_the_mirror_on_discarded() {
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
 
-    let task_v = task_version(state.db());
+    let task_v = task_version(state.db().unwrap());
     state.start(start_request(&epoch, task_v)).unwrap();
-    let live = state.coordinator().live().expect("start 装载镜像").clone();
+    let live = state
+        .coordinator()
+        .unwrap()
+        .live()
+        .expect("start 装载镜像")
+        .clone();
     assert_eq!(live.state, SessionState::Running);
     let session_id = live.id.clone();
     // 会话的开放区间（作废之后要核对它的起点没被改、终点仍是 NULL）。
     let interval_id: String = state
         .db()
+        .unwrap()
         .connection()
         .query_row(
             "SELECT id FROM work_interval
@@ -1225,7 +1231,7 @@ fn discarding_the_running_session_leaves_the_mirror_on_discarded() {
             |r| r.get(0),
         )
         .unwrap();
-    let open_started_at = interval(state.db(), &interval_id).started_at;
+    let open_started_at = interval(state.db().unwrap(), &interval_id).started_at;
 
     state
         .discard_session(
@@ -1235,7 +1241,7 @@ fn discarding_the_running_session_leaves_the_mirror_on_discarded() {
         .expect("作废运行中的会话");
 
     {
-        let live = state.coordinator().live().expect("镜像还在");
+        let live = state.coordinator().unwrap().live().expect("镜像还在");
         assert_eq!(live.id, session_id);
         assert_eq!(
             live.state,
@@ -1249,7 +1255,7 @@ fn discarding_the_running_session_leaves_the_mirror_on_discarded() {
     assert_eq!(snapshot.active_ms, 0, "不得再按 running 计暂计");
     assert_eq!(snapshot.pending_ms, None, "待确认段已作废");
 
-    let db = state.db();
+    let db = state.db().unwrap();
     let facts = interval(db, &interval_id);
     assert_eq!(facts.started_at, open_started_at);
     assert_eq!(facts.voided_at, Some(WALL));
@@ -1265,7 +1271,7 @@ fn discarding_the_running_session_leaves_the_mirror_on_discarded() {
         ),
         0
     );
-    let task_v = task_version(state.db());
+    let task_v = task_version(state.db().unwrap());
     state
         .start(start_request(&epoch, task_v))
         .expect("作废之后可以开始新计时");
@@ -1289,18 +1295,18 @@ fn discarding_another_session_does_not_clobber_the_live_mirror() {
     let run = running.run_id().to_string();
 
     // 本 run 的 A：协调器镜像的就是它。
-    let task_v = task_version(state.db());
+    let task_v = task_version(state.db().unwrap());
     state.start(start_request(&epoch, task_v)).unwrap();
-    let live_id = state.coordinator().live().unwrap().id.clone();
+    let live_id = state.coordinator().unwrap().live().unwrap().id.clone();
     assert_eq!(
-        state.coordinator().live().unwrap().state,
+        state.coordinator().unwrap().live().unwrap().state,
         SessionState::Running
     );
 
     // 同一个 run 里另一条可作废的 B（本 run 的会话不是门禁材料，所以不挡计时）：
     // 这里手工造它的理由与 Task 2 的同形用例一致——它只需要「一条能被作废的会话」。
     insert_session(
-        state.db(),
+        state.db().unwrap(),
         "s-b",
         &run,
         "FOREGROUND",
@@ -1310,7 +1316,7 @@ fn discarding_another_session_does_not_clobber_the_live_mirror() {
         1,
     );
     insert_interval(
-        state.db(),
+        state.db().unwrap(),
         "s-b-cand",
         "s-b",
         WALL - 2_000,
@@ -1325,13 +1331,13 @@ fn discarding_another_session_does_not_clobber_the_live_mirror() {
         .expect("作废别的会话");
 
     // 命令本身生效了：B 整次作废。
-    let db = state.db();
+    let db = state.db().unwrap();
     assert_eq!(session(db, "s-b").state, "discarded");
     assert_eq!(interval(db, "s-b-cand").voided_at, Some(WALL));
 
     // 而镜像必须原样停在 A 上：既没被抢走，也没被换成已作废的 B。
     {
-        let live = state.coordinator().live().expect("镜像还在");
+        let live = state.coordinator().unwrap().live().expect("镜像还在");
         assert_eq!(live.id, live_id, "作废别的会话不得把 live 换成它");
         assert_eq!(
             live.state,
@@ -1364,7 +1370,7 @@ fn discarding_an_already_discarded_session_changes_nothing() {
     state
         .discard_session(env_update(&epoch, 0), discard_request("s-rec"))
         .unwrap();
-    let after_first = session_world(state.db(), "s-rec");
+    let after_first = session_world(state.db().unwrap(), "s-rec");
 
     let (report, changed) = state
         .discard_session(env_update(&epoch, 1), discard_request("s-rec"))
@@ -1373,7 +1379,7 @@ fn discarding_an_already_discarded_session_changes_nothing() {
     assert!(!changed, "第二次作废没有可改的事实");
     assert_eq!(report.session.state, SessionState::Discarded);
     assert_eq!(
-        session_world(state.db(), "s-rec"),
+        session_world(state.db().unwrap(), "s-rec"),
         after_first,
         "零写入、零版本、零审计"
     );
@@ -1391,20 +1397,20 @@ fn a_failed_discard_rolls_back_every_voided_interval() {
     let running = started(&fx);
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
-    let before = session_world(state.db(), "s-rec");
+    let before = session_world(state.db().unwrap(), "s-rec");
 
-    reject_time_edit_writes(state.db());
+    reject_time_edit_writes(state.db().unwrap());
     let error = state
         .discard_session(env_update(&epoch, 0), discard_request("s-rec"))
         .unwrap_err();
     assert_code(&error, "STORAGE_ERROR");
     assert_eq!(
-        session_world(state.db(), "s-rec"),
+        session_world(state.db().unwrap(), "s-rec"),
         before,
         "三条区间的作废与会话状态都必须回滚"
     );
 
-    allow_time_edit_writes(state.db());
+    allow_time_edit_writes(state.db().unwrap());
     state
         .discard_session(env_update(&epoch, 0), discard_request("s-rec"))
         .expect("注入解除之后必须成功");
@@ -1435,7 +1441,7 @@ fn discard_session_refuses_a_stale_version_an_unknown_session_and_an_empty_sessi
     let running = started(&fx);
     let mut state = lock_app(running.app());
     let epoch = running.data_epoch().to_string();
-    let before = session_world(state.db(), "s-rec");
+    let before = session_world(state.db().unwrap(), "s-rec");
 
     assert_code(
         &state
@@ -1449,14 +1455,14 @@ fn discard_session_refuses_a_stale_version_an_unknown_session_and_an_empty_sessi
             .unwrap_err(),
         "DOMAIN_ERROR",
     );
-    let bare_version = session(state.db(), "s-bare").row_version;
+    let bare_version = session(state.db().unwrap(), "s-bare").row_version;
     let error = state
         .discard_session(env_update(&epoch, bare_version), discard_request("s-bare"))
         .unwrap_err();
     assert_code(&error, "DOMAIN_ERROR");
 
     assert_eq!(
-        session_world(state.db(), "s-rec"),
+        session_world(state.db().unwrap(), "s-rec"),
         before,
         "三次被拒都是零变化"
     );

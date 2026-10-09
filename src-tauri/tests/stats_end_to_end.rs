@@ -674,7 +674,7 @@ fn today_json_and_weekly_report_the_same_intervals_and_the_same_numbers() {
     let mut state = lock_app(running.app());
 
     // ① 库明细（独立 oracle）：10 条区间，含已作废与已丢弃的那两条。
-    let rows = db_intervals(state.db());
+    let rows = db_intervals(state.db().unwrap());
     assert_eq!(
         rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
         vec![

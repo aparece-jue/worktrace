@@ -240,7 +240,7 @@ struct Probe {
 /// 探针取在 App **自己那条连接**上（新连接上 `total_changes()` 恒为 0）。
 fn probe(app: &SharedApp) -> Probe {
     let state = lock_app(app);
-    let conn = state.db().connection();
+    let conn = state.db().unwrap().connection();
     let scalar = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
     Probe {
         revision: scalar("SELECT revision FROM app_meta WHERE singleton = 1"),
@@ -448,6 +448,7 @@ fn shutdown_is_refused_in_maintenance_before_the_sampler_is_stopped() {
     assert_eq!(probe(&app), before, "被拒的退出不得写任何东西");
     let clean_exit_at: Option<i64> = lock_app(&app)
         .db()
+        .unwrap()
         .connection()
         .query_row(
             "SELECT clean_exit_at FROM application_run WHERE id = ?1",

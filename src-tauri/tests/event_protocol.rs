@@ -628,6 +628,7 @@ fn launch(sink: Arc<dyn EventSink>) -> Rig {
 fn task_rows(state: &AppState, title: &str) -> i64 {
     state
         .db()
+        .unwrap()
         .connection()
         .query_row(
             "SELECT COUNT(*) FROM task WHERE title = ?1",
@@ -727,12 +728,12 @@ fn a_lost_notification_converges_through_get_revision_without_rolling_back_the_w
     );
 
     // ④收敛：可见窗口那次「至多每 30 秒」的校验。
-    let changes_before = state.db().connection().total_changes();
+    let changes_before = state.db().unwrap().connection().total_changes();
     let polled = commands::get_revision_impl(&mut state).unwrap();
     assert_eq!(polled.data_epoch, rig.epoch);
     assert_eq!(polled.revision, second.revision, "轮询读回权威版本");
     assert_eq!(
-        state.db().connection().total_changes(),
+        state.db().unwrap().connection().total_changes(),
         changes_before,
         "轮询自己不写库（每 30 秒一次，不能变成一次写入）"
     );

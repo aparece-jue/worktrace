@@ -38,7 +38,9 @@ const WALL: i64 = 1_700_000_000_000;
 /// 两者记进**同一条流**：只记步骤的话，「备份完成 → `migrate` 开始」这个顺序
 /// 就断言不出来（步骤里没有备份这一条，`StartupStep` 也不该为它加变体——
 /// `ALL` 的条数由另一个用例的四重不变量钉着）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// **不是 `Copy`**（Task 4b）：`PreMigrationBackup::Taken` 现在带着产物路径
+/// ——那就是它的用处（"日志说已备份、产物却没了"只能靠路径去查）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ProbeEvent {
     Step(StartupStep),
     Backup(PreMigrationBackup),
@@ -580,7 +582,7 @@ fn an_unfinished_previous_run_closes_the_gate_on_business_timing() {
     assert_eq!(running.recovery().unfinished_sessions, vec!["s-old"]);
 
     let mut state = lock_app(running.app());
-    let before = total_changes(state.db());
+    let before = total_changes(state.db().unwrap());
     let err = state
         .start(StartRequest {
             expected_data_epoch: running.data_epoch().to_string(),
@@ -595,13 +597,14 @@ fn an_unfinished_previous_run_closes_the_gate_on_business_timing() {
 
     assert_eq!(err.code(), "RECOVERY_REQUIRED");
     assert_eq!(
-        total_changes(state.db()),
+        total_changes(state.db().unwrap()),
         before,
         "被门禁拒绝的请求不得写入任何东西（不采样、不建会话、不加 revision）"
     );
     assert_eq!(
         state
             .db()
+            .unwrap()
             .connection()
             .query_row(
                 "SELECT COUNT(*) FROM work_session WHERE run_id <> 'run-old'",
@@ -831,12 +834,18 @@ fn a_database_that_needs_migration_is_backed_up_before_it_is_migrated() {
     };
 
     // 「拿到单实例锁 → 备份完成 → migrate 开始」：四条**相邻**事件，不多不少。
+    // `Taken` 还带着产物路径（Task 4b）——断言时只认变体，路径本身在下一段核对。
+    let taken_path = match &probe.events()[2] {
+        ProbeEvent::Backup(PreMigrationBackup::Taken(path)) => path.clone(),
+        other => panic!("第三条事件应当是带路径的备份完成，实际是 {other:?}"),
+    };
+    let events = probe.events();
     assert_eq!(
-        probe.events()[..4],
+        events[..4],
         [
             ProbeEvent::Step(StartupStep::SingleInstanceChecked),
             ProbeEvent::Step(StartupStep::DatabaseOpened),
-            ProbeEvent::Backup(PreMigrationBackup::Taken),
+            ProbeEvent::Backup(PreMigrationBackup::Taken(taken_path.clone())),
             ProbeEvent::Step(StartupStep::Migrated),
         ],
         "备份必须夹在「打开库」与「迁移」之间"
@@ -856,6 +865,12 @@ fn a_database_that_needs_migration_is_backed_up_before_it_is_migrated() {
 
     // 产物**可独立打开**，并通过完整性与版本校验。
     let artifact = backup_dir.join(&names[0]);
+    // 探针带回来的路径必须**就是**这份产物（Task 4b：原语返回值不再被丢弃，
+    // 「日志说已备份、产物却没了」因此有一条可核对的线索）。
+    assert_eq!(
+        taken_path, artifact,
+        "探针收到的产物路径必须是刚写出的那一份"
+    );
     let backup = Db::open(&artifact).expect("备份产物必须能独立打开");
     let integrity: String = backup
         .connection()

@@ -183,6 +183,7 @@ impl Shell {
 fn scalar(state: &AppState, sql: &str) -> i64 {
     state
         .db()
+        .unwrap()
         .connection()
         .query_row(sql, [], |row| row.get(0))
         .unwrap()
@@ -191,6 +192,7 @@ fn scalar(state: &AppState, sql: &str) -> i64 {
 fn text_of(state: &AppState, sql: &str) -> String {
     state
         .db()
+        .unwrap()
         .connection()
         .query_row(sql, [], |row| row.get(0))
         .unwrap()

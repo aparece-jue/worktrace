@@ -352,7 +352,7 @@ fn a_crashed_open_interval_becomes_a_trusted_prefix_plus_an_unknown_pending_tail
     let mut state = lock_app(running.app());
 
     {
-        let db = state.db();
+        let db = state.db().unwrap();
         // 可信前缀：原区间在最后成功检查点处闭合（id 不变）。
         let prefix = interval(db, "iv-crash");
         assert_eq!(prefix.ended_at, Some(1350), "闭合点 = 检查点的归属时刻");
@@ -396,7 +396,7 @@ fn a_crashed_open_interval_becomes_a_trusted_prefix_plus_an_unknown_pending_tail
 
     // 再扫一次：无字段变化 ⇒ 不加 revision、不写审计、不加版本。
     let before = {
-        let db = state.db();
+        let db = state.db().unwrap();
         (
             revision(db),
             total_changes(db),
@@ -404,7 +404,7 @@ fn a_crashed_open_interval_becomes_a_trusted_prefix_plus_an_unknown_pending_tail
             session(db, "s-crash").row_version,
         )
     };
-    let report = scan_at_startup(state.db_mut(), running.run_id(), WALL).unwrap();
+    let report = scan_at_startup(state.db_mut().unwrap(), running.run_id(), WALL).unwrap();
     assert!(!report.revision_changed, "重复扫描没有变化");
     assert!(report.normalized_sessions.is_empty());
     assert!(report.rebound_sessions.is_empty());
@@ -415,7 +415,7 @@ fn a_crashed_open_interval_becomes_a_trusted_prefix_plus_an_unknown_pending_tail
     );
     assert!(report.faults.is_empty());
 
-    let db = state.db();
+    let db = state.db().unwrap();
     assert_eq!(revision(db), before.0, "无变化不得加 revision");
     assert_eq!(total_changes(db), before.1, "无变化不得写任何行");
     assert_eq!(time_edit_count(db), before.2, "无变化不得写审计");
@@ -435,7 +435,7 @@ fn a_crashed_open_interval_without_a_checkpoint_becomes_one_pending_interval() {
 
     let running = started(&fx);
     let state = lock_app(running.app());
-    let db = state.db();
+    let db = state.db().unwrap();
 
     assert_eq!(
         pending_ids(db, "s-crash"),
@@ -480,7 +480,7 @@ fn the_startup_scan_keeps_the_four_classes_of_old_record_apart() {
 
     let running = started(&fx);
     let state = lock_app(running.app());
-    let db = state.db();
+    let db = state.db().unwrap();
 
     // 第 1 类：只诊断，不写事实、不加版本。
     assert_eq!(
@@ -618,7 +618,7 @@ fn an_old_paused_session_rebound_to_this_run_can_then_be_finished() {
     let mut state = lock_app(running.app());
 
     let version = {
-        let db = state.db();
+        let db = state.db().unwrap();
         let facts = session(db, "s-pause");
         assert_eq!(
             facts.run_id,
@@ -638,7 +638,7 @@ fn an_old_paused_session_rebound_to_this_run_can_then_be_finished() {
         .expect("重绑之后结束原会话不该再撞 StaleRunContext");
     assert_eq!(outcome.revision, 2, "扫描一次 + 结束一次");
 
-    let db = state.db();
+    let db = state.db().unwrap();
     assert_eq!(session(db, "s-pause").state, "finished");
     assert_eq!(session(db, "s-pause").row_version, 2);
     assert_eq!(session(db, "s-pause").ended_at, Some(WALL));
@@ -781,7 +781,7 @@ fn a_running_session_without_an_open_interval_is_diagnosed_without_aborting_the_
 
     let running = started(&fx);
     let state = lock_app(running.app());
-    let db = state.db();
+    let db = state.db().unwrap();
 
     assert_eq!(
         running.recovery().invariant_faults,
@@ -848,7 +848,7 @@ fn an_old_paused_session_with_pending_intervals_is_left_for_the_user() {
     let mut state = lock_app(running.app());
 
     {
-        let db = state.db();
+        let db = state.db().unwrap();
         assert_eq!(
             session(db, "s-suspect"),
             SessionFacts {
@@ -881,7 +881,7 @@ fn an_old_paused_session_with_pending_intervals_is_left_for_the_user() {
     }
 
     // 扫描结论里它归 `NeedsReview`（不是第 4 类）。
-    let report = scan_at_startup(state.db_mut(), running.run_id(), WALL).unwrap();
+    let report = scan_at_startup(state.db_mut().unwrap(), running.run_id(), WALL).unwrap();
     assert!(!report.revision_changed);
     assert!(report.rebound_sessions.is_empty());
     assert_eq!(report.attention.len(), 1);
@@ -896,7 +896,7 @@ fn an_old_paused_session_with_pending_intervals_is_left_for_the_user() {
     assert_eq!(item.intervals[0].duration_ms, None);
 
     // 门禁快照与报告同源：两条只读查询都看得见它。
-    let gate = scan_recovery(state.db().connection(), running.run_id()).unwrap();
+    let gate = scan_recovery(state.db().unwrap().connection(), running.run_id()).unwrap();
     assert_eq!(gate.unfinished_sessions, ["s-suspect"]);
     assert_eq!(gate.pending_intervals, ["iv-suspect"]);
     assert!(gate.invariant_faults.is_empty(), "它不是损坏，只是待确认");

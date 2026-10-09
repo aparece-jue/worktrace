@@ -488,6 +488,7 @@ impl Rig {
 fn revision_of(state: &AppState) -> i64 {
     state
         .db()
+        .unwrap()
         .connection()
         .query_row(
             "SELECT revision FROM app_meta WHERE singleton = 1",
@@ -518,7 +519,7 @@ fn the_replay_switch_emits_the_old_revision_without_writing() {
     .unwrap();
     let current = revision_of(&state);
     assert_eq!(current, 1, "一次成功业务写恰好推进一次 revision");
-    let changes_before = state.db().connection().total_changes();
+    let changes_before = state.db().unwrap().connection().total_changes();
 
     let envelope =
         dev::replay_event_impl(&mut state, rig.running.broadcaster(), current - 1).unwrap();
@@ -538,7 +539,7 @@ fn the_replay_switch_emits_the_old_revision_without_writing() {
         "重播不是业务写：不推进 revision"
     );
     assert_eq!(
-        state.db().connection().total_changes(),
+        state.db().unwrap().connection().total_changes(),
         changes_before,
         "重播不写库"
     );

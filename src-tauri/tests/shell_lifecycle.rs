@@ -432,6 +432,7 @@ fn start_request(rig: &Rig, task_id: &str) -> StartTimerRequest {
 fn revision_of(state: &AppState) -> i64 {
     state
         .db()
+        .unwrap()
         .connection()
         .query_row(
             "SELECT revision FROM app_meta WHERE singleton = 1",
@@ -444,6 +445,7 @@ fn revision_of(state: &AppState) -> i64 {
 fn text_of(state: &AppState, sql: &str) -> String {
     state
         .db()
+        .unwrap()
         .connection()
         .query_row(sql, [], |row| row.get(0))
         .unwrap()
@@ -453,6 +455,7 @@ fn text_of(state: &AppState, sql: &str) -> String {
 fn session_facts(state: &AppState) -> Vec<(String, i64, i64, i64)> {
     let mut statement = state
         .db()
+        .unwrap()
         .connection()
         .prepare(
             "SELECT s.state, COALESCE(s.ended_at, -1),
@@ -574,7 +577,7 @@ fn the_tray_pause_without_a_running_session_writes_nothing() {
 
     // ① 完全没有会话：什么都不做。
     let revision_before = revision_of(&state);
-    let changes_before = state.db().connection().total_changes();
+    let changes_before = state.db().unwrap().connection().total_changes();
     assert_eq!(
         commands::tray_pause_impl(&mut state, rig.running.broadcaster()).unwrap(),
         TrayPause::NothingToPause
@@ -585,7 +588,7 @@ fn the_tray_pause_without_a_running_session_writes_nothing() {
         "没有会话时不能推进 revision"
     );
     assert_eq!(
-        state.db().connection().total_changes(),
+        state.db().unwrap().connection().total_changes(),
         changes_before,
         "没有会话时不能写库"
     );
@@ -611,7 +614,7 @@ fn the_tray_pause_without_a_running_session_writes_nothing() {
     .unwrap();
 
     let revision_after_pause = revision_of(&state);
-    let changes_after_pause = state.db().connection().total_changes();
+    let changes_after_pause = state.db().unwrap().connection().total_changes();
     let events_after_pause = rig.events().len();
 
     assert_eq!(
@@ -620,7 +623,7 @@ fn the_tray_pause_without_a_running_session_writes_nothing() {
     );
     assert_eq!(revision_of(&state), revision_after_pause);
     assert_eq!(
-        state.db().connection().total_changes(),
+        state.db().unwrap().connection().total_changes(),
         changes_after_pause,
         "重复暂停不能有任何写入"
     );

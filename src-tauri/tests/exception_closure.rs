@@ -626,14 +626,14 @@ fn repair_the_scan(db: &Db) {
 /// ②在 `recovering` 里观察一次墙钟异常——只有那个分支会置未接受标记（`coordinator.rs`）。
 fn flag_the_unaccepted_correction(app: &App, state: &mut AppState) -> String {
     let epoch = app.epoch();
-    let version = task_version(state.db(), "t1");
+    let version = task_version(state.db().unwrap(), "t1");
     state.start(start_request(&epoch, "t1", version)).unwrap();
-    let session_id = state.coordinator().live().unwrap().id.clone();
+    let session_id = state.coordinator().unwrap().live().unwrap().id.clone();
 
     app.advance(129_000);
     state.snapshot().unwrap();
     assert_eq!(
-        session_of(state.db(), &session_id).state,
+        session_of(state.db().unwrap(), &session_id).state,
         "recovering",
         "长间隔必须先按异常隔离"
     );
@@ -646,15 +646,18 @@ fn flag_the_unaccepted_correction(app: &App, state: &mut AppState) -> String {
 /// 让一场异常事务在提交前失败：协调器进入故障态，库里零变化。
 fn fault_the_coordinator(app: &App, state: &mut AppState) -> String {
     let epoch = app.epoch();
-    let version = task_version(state.db(), "t1");
+    let version = task_version(state.db().unwrap(), "t1");
     state.start(start_request(&epoch, "t1", version)).unwrap();
-    let session_id = state.coordinator().live().unwrap().id.clone();
+    let session_id = state.coordinator().unwrap().live().unwrap().id.clone();
     app.advance(1_000);
-    reject_time_edit_writes(state.db());
+    reject_time_edit_writes(state.db().unwrap());
     app.advance_wall_only(31_000);
     let error = state.snapshot().unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
-    assert!(state.coordinator().is_faulted(), "异常事务失败必须进故障态");
+    assert!(
+        state.coordinator().unwrap().is_faulted(),
+        "异常事务失败必须进故障态"
+    );
     session_id
 }
 
@@ -676,13 +679,13 @@ fn a_stale_epoch_and_a_stale_version_are_rejected_before_any_sampling() {
     let epoch = app.epoch();
     let mut state = lock_app(app.running.app());
 
-    let version = task_version(state.db(), "t1");
+    let version = task_version(state.db().unwrap(), "t1");
     state.start(start_request(&epoch, "t1", version)).unwrap();
-    let session_id = state.coordinator().live().unwrap().id.clone();
-    let session_version = state.coordinator().live().unwrap().row_version;
+    let session_id = state.coordinator().unwrap().live().unwrap().id.clone();
+    let session_version = state.coordinator().unwrap().live().unwrap().row_version;
 
     // 一次**尚未被观察**的墙钟跳变：谁先采样，谁就得处理它。
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
     app.advance(1_000);
     app.advance_wall_only(31_000);
     let samples_before = app.sample_count();
@@ -692,7 +695,7 @@ fn a_stale_epoch_and_a_stale_version_are_rejected_before_any_sampling() {
         .accept_detected_clock_correction("epoch-of-another-database")
         .unwrap_err();
     assert_code(&error, "DATA_EPOCH_MISMATCH");
-    assert_eq!(world(state.db()), before, "被拒的请求必须零写入");
+    assert_eq!(world(state.db().unwrap()), before, "被拒的请求必须零写入");
     assert_eq!(
         app.sample_count(),
         samples_before,
@@ -709,11 +712,11 @@ fn a_stale_epoch_and_a_stale_version_are_rejected_before_any_sampling() {
         )
         .unwrap_err();
     assert_code(&error, "VERSION_CONFLICT");
-    assert_eq!(world(state.db()), before, "被拒的请求必须零写入");
+    assert_eq!(world(state.db().unwrap()), before, "被拒的请求必须零写入");
 
     // ③ 异常还在：独立采样（周期采样走的就是这条入口）仍然发现并隔离它。
     state.snapshot().unwrap();
-    let after = world(state.db());
+    let after = world(state.db().unwrap());
     assert_eq!(
         after.edits.len(),
         before.edits.len() + 1,
@@ -724,11 +727,11 @@ fn a_stale_epoch_and_a_stale_version_are_rejected_before_any_sampling() {
         before.revision + 1,
         "系统异常事务恰好一次版本"
     );
-    let session = session_of(state.db(), &session_id);
+    let session = session_of(state.db().unwrap(), &session_id);
     assert_eq!(session.state, "recovering");
     assert_eq!(session.needs_review, 1);
     assert_eq!(
-        intervals_of(state.db(), &session_id)[0].duration_ms,
+        intervals_of(state.db().unwrap(), &session_id)[0].duration_ms,
         None,
         "候选时长不是工时"
     );
@@ -750,10 +753,10 @@ fn an_unaccepted_clock_correction_keeps_rejecting_start_and_resume() {
     let mut state = lock_app(app.running.app());
 
     let session_id = flag_the_unaccepted_correction(&app, &mut state);
-    let session_version = session_of(state.db(), &session_id).row_version;
-    let before = world(state.db());
+    let session_version = session_of(state.db().unwrap(), &session_id).row_version;
+    let before = world(state.db().unwrap());
 
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     let error = state
         .start(start_request(&epoch, "t2", t2_version))
         .unwrap_err();
@@ -761,7 +764,7 @@ fn an_unaccepted_clock_correction_keeps_rejecting_start_and_resume() {
 
     // `resume` 也走同一条 `sample_and_detect`：未接受的校正在状态判据之前就挡住它。
     // （请求里的任务/会话必须互相匹配，否则先撞的是「任务与会话不匹配」那条领域规则。）
-    let t1_version = task_version(state.db(), "t1");
+    let t1_version = task_version(state.db().unwrap(), "t1");
     let error = state
         .resume(resume_request(
             &epoch,
@@ -774,7 +777,7 @@ fn an_unaccepted_clock_correction_keeps_rejecting_start_and_resume() {
     assert_code(&error, "RECOVERY_REQUIRED");
 
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         before,
         "两条被拒命令都不得留下任何字段变化"
     );
@@ -796,12 +799,13 @@ fn accepting_the_correction_commits_the_audit_then_clears_the_flag() {
     let mut state = lock_app(app.running.app());
 
     let session_id = flag_the_unaccepted_correction(&app, &mut state);
-    let intervals_before = intervals_of(state.db(), &session_id);
+    let intervals_before = intervals_of(state.db().unwrap(), &session_id);
     let gate_before = state.recovery().clone();
-    let revision_before = revision(state.db());
-    let edits_before = time_edit_repo::edits_of_session(state.db().connection(), &session_id)
-        .unwrap()
-        .len();
+    let revision_before = revision(state.db().unwrap());
+    let edits_before =
+        time_edit_repo::edits_of_session(state.db().unwrap().connection(), &session_id)
+            .unwrap()
+            .len();
     assert_eq!(
         intervals_before.len(),
         1,
@@ -815,7 +819,8 @@ fn accepting_the_correction_commits_the_audit_then_clears_the_flag() {
     assert_eq!(accepted.revision, revision_before + 1, "恰好一次版本");
 
     // 审计：一条不多、一条不少，形状按 §0.3（before = 三参照点，after = 本次样本）。
-    let edits = time_edit_repo::edits_of_session(state.db().connection(), &session_id).unwrap();
+    let edits =
+        time_edit_repo::edits_of_session(state.db().unwrap().connection(), &session_id).unwrap();
     assert_eq!(edits.len(), edits_before + 1);
     let edit = edits.last().unwrap();
     assert_eq!(edit.reason.as_deref(), Some("clock_correction:accepted"));
@@ -841,7 +846,7 @@ fn accepting_the_correction_commits_the_audit_then_clears_the_flag() {
         "审计的 verdict 必须是这一拍观察到的判决"
     );
     assert_eq!(
-        state.coordinator().last_verdict(),
+        state.coordinator().unwrap().last_verdict(),
         SampleVerdict::Drifted {
             cumulative_gap_ms: 31_000
         },
@@ -849,7 +854,10 @@ fn accepting_the_correction_commits_the_audit_then_clears_the_flag() {
     );
 
     // 不自动确认任何可疑工时：区间逐字段与接受之前**完全一样**。
-    assert_eq!(intervals_of(state.db(), &session_id), intervals_before);
+    assert_eq!(
+        intervals_of(state.db().unwrap(), &session_id),
+        intervals_before
+    );
     assert_eq!(state.recovery(), &gate_before, "S4 不改恢复门禁快照");
 
     // 同一命令再来一次：没有待接受的校正 ⇒ 幂等零变化（无审计、无版本）。
@@ -857,7 +865,7 @@ fn accepting_the_correction_commits_the_audit_then_clears_the_flag() {
     assert!(!again.accepted);
     assert_eq!(again.revision, accepted.revision);
     assert_eq!(
-        time_edit_repo::edits_of_session(state.db().connection(), &session_id)
+        time_edit_repo::edits_of_session(state.db().unwrap().connection(), &session_id)
             .unwrap()
             .len(),
         edits_before + 1,
@@ -865,7 +873,7 @@ fn accepting_the_correction_commits_the_audit_then_clears_the_flag() {
     );
 
     // 标记确实清了：计时恢复。
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     state
         .start(start_request(&epoch, "t2", t2_version))
         .expect("接受校正之后 start 必须成功");
@@ -896,7 +904,8 @@ fn accepting_the_correction_observes_the_sample_exactly_once() {
     let accepted = state.accept_detected_clock_correction(&epoch).unwrap();
     assert!(accepted.accepted);
 
-    let edits = time_edit_repo::edits_of_session(state.db().connection(), &session_id).unwrap();
+    let edits =
+        time_edit_repo::edits_of_session(state.db().unwrap().connection(), &session_id).unwrap();
     let edit = edits
         .iter()
         .find(|edit| edit.reason.as_deref() == Some("clock_correction:accepted"))
@@ -908,7 +917,7 @@ fn accepting_the_correction_observes_the_sample_exactly_once() {
     );
     assert_eq!(after_json["sampled_wall_at"], app.wall_now());
     assert_eq!(
-        state.coordinator().last_verdict(),
+        state.coordinator().unwrap().last_verdict(),
         SampleVerdict::Jumped {
             delta_gap_ms: 5_000
         },
@@ -933,14 +942,14 @@ fn a_long_gap_seen_by_the_correction_command_is_not_counted_as_work() {
     let epoch = app.epoch();
     let mut state = lock_app(app.running.app());
 
-    let version = task_version(state.db(), "t1");
+    let version = task_version(state.db().unwrap(), "t1");
     state.start(start_request(&epoch, "t1", version)).unwrap();
-    let session_id = state.coordinator().live().unwrap().id.clone();
-    let open_before = intervals_of(state.db(), &session_id);
+    let session_id = state.coordinator().unwrap().live().unwrap().id.clone();
+    let open_before = intervals_of(state.db().unwrap(), &session_id);
     assert_eq!(open_before.len(), 1);
     assert_eq!(open_before[0].ended_at, None, "起点是一条开放区间");
 
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
     let samples_before = app.sample_count();
     // 睡眠/休眠：两个时钟一起走了 129 秒（长间隔，两钟同步 ⇒ 不是墙钟校正）。
     app.advance(129_000);
@@ -954,17 +963,17 @@ fn a_long_gap_seen_by_the_correction_command_is_not_counted_as_work() {
     );
 
     // 既有异常处理的产物：区间收成待确认段、会话 `recovering`、恰好一次 revision + 一条审计。
-    let after = world(state.db());
+    let after = world(state.db().unwrap());
     assert_eq!(after.revision, before.revision + 1);
     assert_eq!(after.edits.len(), before.edits.len() + 1);
     assert_eq!(
         after.edits.last().unwrap().reason.as_deref(),
         Some("untrusted observation gap")
     );
-    let session = session_of(state.db(), &session_id);
+    let session = session_of(state.db().unwrap(), &session_id);
     assert_eq!(session.state, "recovering");
     assert_eq!(session.needs_review, 1);
-    let intervals = intervals_of(state.db(), &session_id);
+    let intervals = intervals_of(state.db().unwrap(), &session_id);
     assert_eq!(intervals.len(), 1, "没有可信前缀时不另造余段");
     assert_eq!(intervals[0].needs_review, 1);
     assert_eq!(intervals[0].duration_ms, None, "无证据不猜时长");
@@ -1009,15 +1018,15 @@ fn a_long_gap_without_a_live_session_is_reported_without_writing() {
     let epoch = app.epoch();
     let mut state = lock_app(app.running.app());
 
-    assert!(state.coordinator().live().is_none());
-    let before = world(state.db());
+    assert!(state.coordinator().unwrap().live().is_none());
+    let before = world(state.db().unwrap());
     app.advance(129_000);
 
     let error = state.accept_detected_clock_correction(&epoch).unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
-    assert!(!state.coordinator().is_faulted());
+    assert!(!state.coordinator().unwrap().is_faulted());
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         before,
         "没有会话：既有异常处理不写任何事实（与 snapshot/start 同一口径）"
     );
@@ -1041,33 +1050,33 @@ fn a_failed_audit_keeps_the_unaccepted_clock_correction() {
     let mut state = lock_app(app.running.app());
 
     let _session_id = flag_the_unaccepted_correction(&app, &mut state);
-    let before = world(state.db());
-    let revision_before = revision(state.db());
+    let before = world(state.db().unwrap());
+    let revision_before = revision(state.db().unwrap());
 
-    reject_time_edit_writes(state.db());
+    reject_time_edit_writes(state.db().unwrap());
     let error = state.accept_detected_clock_correction(&epoch).unwrap_err();
     assert_code(&error, "STORAGE_ERROR");
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         before,
         "审计失败 ⇒ 整体回滚，零写入零版本"
     );
 
     // 标记没被清：`start` 仍然被同一把闸挡住。
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     let error = state
         .start(start_request(&epoch, "t2", t2_version))
         .unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
-    assert_eq!(world(state.db()), before);
-    assert_eq!(revision(state.db()), revision_before);
+    assert_eq!(world(state.db().unwrap()), before);
+    assert_eq!(revision(state.db().unwrap()), revision_before);
 
     // 排障之后**不需要重做任何东西**：直接再接受一次即可（标记还在）。
-    allow_time_edit_writes(state.db());
+    allow_time_edit_writes(state.db().unwrap());
     let accepted = state.accept_detected_clock_correction(&epoch).unwrap();
     assert!(accepted.accepted);
     assert_eq!(accepted.revision, revision_before + 1);
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     state
         .start(start_request(&epoch, "t2", t2_version))
         .expect("重试成功之后计时必须恢复");
@@ -1088,11 +1097,11 @@ fn reconciling_the_pending_work_does_not_accept_the_clock_correction() {
     let mut state = lock_app(app.running.app());
 
     let session_id = flag_the_unaccepted_correction(&app, &mut state);
-    let pending = intervals_of(state.db(), &session_id);
+    let pending = intervals_of(state.db().unwrap(), &session_id);
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].needs_review, 1);
-    let session_version = session_of(state.db(), &session_id).row_version;
-    let revision_before = revision(state.db());
+    let session_version = session_of(state.db().unwrap(), &session_id).row_version;
+    let revision_before = revision(state.db().unwrap());
 
     // 用户确认了这段可疑工时（reconcile 的活）⇒ 会话收尾成 finished。
     let ranges = vec![(
@@ -1106,12 +1115,15 @@ fn reconciling_the_pending_work_does_not_accept_the_clock_correction() {
             confirm(&session_id, ReconcileTargetState::Finished, &ranges),
         )
         .unwrap();
-    let confirmed = intervals_of(state.db(), &session_id);
+    let confirmed = intervals_of(state.db().unwrap(), &session_id);
     assert_eq!(confirmed[0].needs_review, 0, "reconcile 确认了它");
     assert_eq!(confirmed[0].duration_ms, Some(60_000));
-    assert_eq!(session_of(state.db(), &session_id).state, "finished");
     assert_eq!(
-        revision(state.db()),
+        session_of(state.db().unwrap(), &session_id).state,
+        "finished"
+    );
+    assert_eq!(
+        revision(state.db().unwrap()),
         revision_before + 1,
         "这一步只加 reconcile 自己那一次版本"
     );
@@ -1124,7 +1136,8 @@ fn reconciling_the_pending_work_does_not_accept_the_clock_correction() {
     let accepted = state.accept_detected_clock_correction(&epoch).unwrap();
     assert!(accepted.accepted, "reconcile 不得替用户接受墙钟校正");
     assert_eq!(accepted.revision, revision_before + 2, "接受才加第二次版本");
-    let edits = time_edit_repo::edits_of_session(state.db().connection(), &session_id).unwrap();
+    let edits =
+        time_edit_repo::edits_of_session(state.db().unwrap().connection(), &session_id).unwrap();
     // 两条审计可能落在**同一毫秒**（同一拍的 `now`），所以按 reason 找，不按顺序取 `last()`。
     assert!(
         edits
@@ -1133,7 +1146,7 @@ fn reconciling_the_pending_work_does_not_accept_the_clock_correction() {
         "接受校正必须留下自己那条审计"
     );
 
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     state
         .start(start_request(&epoch, "t2", t2_version))
         .expect("接受之后才放行");
@@ -1151,26 +1164,29 @@ fn a_backwards_monotonic_clock_is_not_accepted_as_a_correction() {
     let mut state = lock_app(app.running.app());
 
     let session_id = flag_the_unaccepted_correction(&app, &mut state);
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
 
     // 单调钟倒退：这一拍读数已失去本 run 的意义（正常平台永不出现）。
     app.advance_mono_only(-5_000);
     let error = state.accept_detected_clock_correction(&epoch).unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
     assert!(
-        state.coordinator().is_faulted(),
+        state.coordinator().unwrap().is_faulted(),
         "硬故障必须锁死协调器，而不是被当校正接受掉"
     );
-    assert_eq!(world(state.db()), before, "被拒的接受零写入");
+    assert_eq!(world(state.db().unwrap()), before, "被拒的接受零写入");
 
     // 未接受标记也没被清：会话与它的待确认事实原样留着（新 run 才安全重建）。
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     let error = state
         .start(start_request(&epoch, "t2", t2_version))
         .unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
-    assert_eq!(world(state.db()), before);
-    assert_eq!(session_of(state.db(), &session_id).state, "recovering");
+    assert_eq!(world(state.db().unwrap()), before);
+    assert_eq!(
+        session_of(state.db().unwrap(), &session_id).state,
+        "recovering"
+    );
 }
 
 /// 上一条用例走的是 `flag == true`：会话已经挂着**待接受的墙钟校正**，于是它连
@@ -1192,11 +1208,11 @@ fn a_backwards_monotonic_clock_writes_nothing_without_an_unaccepted_correction()
     let epoch = app.epoch();
     let mut state = lock_app(app.running.app());
 
-    let t1_version = task_version(state.db(), "t1");
+    let t1_version = task_version(state.db().unwrap(), "t1");
     state
         .start(start_request(&epoch, "t1", t1_version))
         .unwrap();
-    let session_id = state.coordinator().live().unwrap().id.clone();
+    let session_id = state.coordinator().unwrap().live().unwrap().id.clone();
     app.advance(1_000);
 
     // 前置由探针自己证明：没有待接受的校正 ⇒ 本条命令本来返回 `Unchanged`（零变化）。
@@ -1205,20 +1221,23 @@ fn a_backwards_monotonic_clock_writes_nothing_without_an_unaccepted_correction()
         !probe.accepted,
         "前置：这条路上没有待接受的校正（`flag == false`）"
     );
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
 
     // 单调钟倒退：硬故障，必须锁死协调器（正常平台永不出现）。
     app.advance_mono_only(-5_000);
     let error = state.accept_detected_clock_correction(&epoch).unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
-    assert!(state.coordinator().is_faulted(), "硬故障必须锁死协调器");
+    assert!(
+        state.coordinator().unwrap().is_faulted(),
+        "硬故障必须锁死协调器"
+    );
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         before,
         "硬故障零写入：不得先提交一笔恢复事务（分割 / 审计 / 版本 +1）"
     );
     assert_eq!(
-        session_of(state.db(), &session_id).state,
+        session_of(state.db().unwrap(), &session_id).state,
         "running",
         "硬故障不得把会话推成 recovering 或标待确认"
     );
@@ -1239,34 +1258,44 @@ fn a_failed_anomaly_transaction_rolls_everything_back_and_faults_the_coordinator
     let epoch = app.epoch();
     let mut state = lock_app(app.running.app());
 
-    let version = task_version(state.db(), "t1");
+    let version = task_version(state.db().unwrap(), "t1");
     state.start(start_request(&epoch, "t1", version)).unwrap();
-    let session_id = state.coordinator().live().unwrap().id.clone();
+    let session_id = state.coordinator().unwrap().live().unwrap().id.clone();
     app.advance(1_000);
 
-    let before = world(state.db());
-    reject_time_edit_writes(state.db());
+    let before = world(state.db().unwrap());
+    reject_time_edit_writes(state.db().unwrap());
     app.advance_wall_only(31_000);
     let error = state.snapshot().unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
 
-    assert!(state.coordinator().is_faulted(), "提交失败必须进故障态");
+    assert!(
+        state.coordinator().unwrap().is_faulted(),
+        "提交失败必须进故障态"
+    );
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         before,
         "异常事务整体回滚：不留半个分割、不留半条审计、不加版本"
     );
-    assert_eq!(session_of(state.db(), &session_id).state, "running");
+    assert_eq!(
+        session_of(state.db().unwrap(), &session_id).state,
+        "running"
+    );
 
     // 恢复入口仍然可用（否则门禁自己成了死锁），但故障态把业务入口全挡住。
     assert!(state.guard_business_timing().is_ok());
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     let error = state
         .start(start_request(&epoch, "t2", t2_version))
         .unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
     assert_code(&state.snapshot().unwrap_err(), "RECOVERY_REQUIRED");
-    assert_eq!(world(state.db()), before, "故障态下的拒绝同样零写入");
+    assert_eq!(
+        world(state.db().unwrap()),
+        before,
+        "故障态下的拒绝同样零写入"
+    );
 }
 
 /// `docs/validation/pre-p3-closure.md` 第 4 行后半：**S12 用户显式重试成功后重算门禁，
@@ -1285,21 +1314,21 @@ fn retry_recovery_clears_the_fault_only_after_a_successful_commit() {
     let mut state = lock_app(app.running.app());
 
     let session_id = fault_the_coordinator(&app, &mut state);
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
 
     // 故障原因还在 ⇒ 恢复事务仍然提交不了 ⇒ 故障**不清**。
     let error = state.retry_recovery(&epoch).unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
     assert!(
-        state.coordinator().is_faulted(),
+        state.coordinator().unwrap().is_faulted(),
         "重试失败不得清故障（否则坏事实会在下一拍被当成好事实）"
     );
-    assert_eq!(world(state.db()), before, "重试失败同样零写入");
+    assert_eq!(world(state.db().unwrap()), before, "重试失败同样零写入");
 
     // 注入一条**别的 run** 的 `recovering` 会话（带一条待确认区间）：启动时库是干净的，
     // 所以它不在门禁快照里——只有真的重扫过，下面那条「门禁关了」才可能成立。
     insert_session(
-        state.db(),
+        state.db().unwrap(),
         "s-other",
         "t3",
         OLD_RUN,
@@ -1309,7 +1338,7 @@ fn retry_recovery_clears_the_fault_only_after_a_successful_commit() {
         1,
     );
     insert_interval(
-        state.db(),
+        state.db().unwrap(),
         "s-other-pending",
         "s-other",
         WALL - 300_000,
@@ -1324,7 +1353,7 @@ fn retry_recovery_clears_the_fault_only_after_a_successful_commit() {
     );
 
     // 排障之后重试：那笔恢复事务提交一次，故障态清除，门禁按**提交后**的事实重算。
-    allow_time_edit_writes(state.db());
+    allow_time_edit_writes(state.db().unwrap());
     let samples_after_failure = app.sample_count();
     let snapshot = state.retry_recovery(&epoch).unwrap();
     assert_eq!(
@@ -1332,20 +1361,23 @@ fn retry_recovery_clears_the_fault_only_after_a_successful_commit() {
         1,
         "S12 全路径只取一次样本：预检与重扫都不得采样"
     );
-    assert!(!state.coordinator().is_faulted());
+    assert!(!state.coordinator().unwrap().is_faulted());
     assert_eq!(snapshot.session_id.as_deref(), Some(session_id.as_str()));
     assert_eq!(snapshot.state, Some(SessionState::Recovering));
 
-    let after = world(state.db());
+    let after = world(state.db().unwrap());
     assert_eq!(
         after.edits.len(),
         before.edits.len() + 1,
         "恢复事务恰好一条审计"
     );
     assert_eq!(after.revision, before.revision + 1, "恢复事务恰好一次版本");
-    assert_eq!(session_of(state.db(), &session_id).state, "recovering");
     assert_eq!(
-        intervals_of(state.db(), &session_id)[0].duration_ms,
+        session_of(state.db().unwrap(), &session_id).state,
+        "recovering"
+    );
+    assert_eq!(
+        intervals_of(state.db().unwrap(), &session_id)[0].duration_ms,
         None,
         "候选时长不是工时"
     );
@@ -1368,7 +1400,7 @@ fn retry_recovery_clears_the_fault_only_after_a_successful_commit() {
         &state.guard_business_timing().unwrap_err(),
         "RECOVERY_REQUIRED",
     );
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     let error = state
         .start(start_request(&epoch, "t2", t2_version))
         .unwrap_err();
@@ -1378,6 +1410,7 @@ fn retry_recovery_clears_the_fault_only_after_a_successful_commit() {
     // 「故障态下计时仍可用」这条闭环没有被注入的恢复材料挡住。
     state
         .db()
+        .unwrap()
         .connection()
         .execute_batch(
             "DELETE FROM work_interval WHERE session_id = 's-other';
@@ -1401,23 +1434,27 @@ fn a_hard_monotonic_fault_cannot_be_released_by_retry_recovery() {
     let epoch = app.epoch();
     let mut state = lock_app(app.running.app());
 
-    let version = task_version(state.db(), "t1");
+    let version = task_version(state.db().unwrap(), "t1");
     state.start(start_request(&epoch, "t1", version)).unwrap();
     app.advance(1_000);
     app.advance_mono_only(-5_000);
     // 硬故障那一拍仍然会先落一笔系统事务（把开放事实收成待确认），随后才锁死。
     state.snapshot().unwrap();
-    assert!(state.coordinator().is_faulted());
+    assert!(state.coordinator().unwrap().is_faulted());
 
-    let before = world(state.db());
+    let before = world(state.db().unwrap());
     let error = state.retry_recovery(&epoch).unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
     assert!(
-        state.coordinator().is_faulted(),
+        state.coordinator().unwrap().is_faulted(),
         "单调读数已失去本 run 的意义：只能新 run 重建"
     );
-    assert_eq!(world(state.db()), before, "S12 不得用一次重试掩盖硬故障");
-    let t2_version = task_version(state.db(), "t2");
+    assert_eq!(
+        world(state.db().unwrap()),
+        before,
+        "S12 不得用一次重试掩盖硬故障"
+    );
+    let t2_version = task_version(state.db().unwrap(), "t2");
     let error = state
         .start(start_request(&epoch, "t2", t2_version))
         .unwrap_err();
@@ -1445,41 +1482,44 @@ fn retry_recovery_keeps_the_committed_recovery_when_the_rescan_fails() {
     let mut state = lock_app(app.running.app());
 
     let session_id = fault_the_coordinator(&app, &mut state);
-    allow_time_edit_writes(state.db());
-    let revision_before = revision(state.db());
-    break_the_scan(state.db());
+    allow_time_edit_writes(state.db().unwrap());
+    let revision_before = revision(state.db().unwrap());
+    break_the_scan(state.db().unwrap());
 
     let error = state.retry_recovery(&epoch).unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
     assert!(
-        !state.coordinator().is_faulted(),
+        !state.coordinator().unwrap().is_faulted(),
         "协调器那笔恢复事务已经提交：故障态确实清了（不能谎称回滚）"
     );
 
     // 已提交事实保留：恰好一条审计、恰好一次版本、会话事实按那笔事务落地。
-    let committed = world(state.db());
+    let committed = world(state.db().unwrap());
     assert_eq!(committed.edits.len(), 1);
     assert_eq!(committed.revision, revision_before + 1);
-    assert_eq!(session_of(state.db(), &session_id).state, "recovering");
+    assert_eq!(
+        session_of(state.db().unwrap(), &session_id).state,
+        "recovering"
+    );
 
     // 重扫失败 ⇒ S1 的失败标记挡住计时；旧快照原样保留。
     assert_code(
         &state.guard_business_timing().unwrap_err(),
         "RECOVERY_REQUIRED",
     );
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     let error = state
         .start(start_request(&epoch, "t2", t2_version))
         .unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
 
     // 恢复出口：显式重扫成功。重扫不重做任何已提交的用户/系统事务。
-    repair_the_scan(state.db());
-    let after_repair = world(state.db());
+    repair_the_scan(state.db().unwrap());
+    let after_repair = world(state.db().unwrap());
     let scan = state.rescan_recovery().unwrap();
     assert!(!scan.requires_recovery());
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         after_repair,
         "重扫是只读的：既不重复审计，也不重复加版本"
     );
@@ -1489,7 +1529,7 @@ fn retry_recovery_keeps_the_committed_recovery_when_the_rescan_fails() {
         "重扫没有重做那笔恢复事务的审计"
     );
     assert_eq!(after_repair.revision, committed.revision);
-    let t2_version = task_version(state.db(), "t2");
+    let t2_version = task_version(state.db().unwrap(), "t2");
     state
         .start(start_request(&epoch, "t2", t2_version))
         .expect("重扫成功之后门禁必须放开");
@@ -1515,21 +1555,21 @@ fn a_committed_command_survives_a_failed_rescan_without_repeating_its_writes() {
         state.recovery().requires_recovery(),
         "别的 run 的 recovering 会话必须挡住计时"
     );
-    let session_version = session_of(state.db(), "s-old").row_version;
-    let revision_before = revision(state.db());
-    let edits_before = world(state.db()).edits.len();
+    let session_version = session_of(state.db().unwrap(), "s-old").row_version;
+    let revision_before = revision(state.db().unwrap());
+    let edits_before = world(state.db().unwrap()).edits.len();
 
     // 注入「三条扫描查询失败」——用户命令本身仍然能提交（它只读自己那条会话）。
-    break_the_scan(state.db());
+    break_the_scan(state.db().unwrap());
     let error = state
         .discard_session(env(&epoch, session_version), discard_request("s-old"))
         .unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
 
     // 不宣称回滚：那次写是真的。
-    let committed = world(state.db());
-    assert_eq!(session_of(state.db(), "s-old").state, "discarded");
-    let intervals = intervals_of(state.db(), "s-old");
+    let committed = world(state.db().unwrap());
+    assert_eq!(session_of(state.db().unwrap(), "s-old").state, "discarded");
+    let intervals = intervals_of(state.db().unwrap(), "s-old");
     assert!(
         intervals
             .iter()
@@ -1545,7 +1585,7 @@ fn a_committed_command_survives_a_failed_rescan_without_repeating_its_writes() {
         .discard_session(env(&epoch, session_version), discard_request("s-old"))
         .unwrap_err();
     assert_code(&error, "VERSION_CONFLICT");
-    assert_eq!(world(state.db()), committed, "重发不得重复执行");
+    assert_eq!(world(state.db().unwrap()), committed, "重发不得重复执行");
 
     // 扫描失败 ⇒ 旧快照原样保留、计时继续被挡。
     assert!(state.recovery().requires_recovery());
@@ -1553,25 +1593,29 @@ fn a_committed_command_survives_a_failed_rescan_without_repeating_its_writes() {
         &state.guard_business_timing().unwrap_err(),
         "RECOVERY_REQUIRED",
     );
-    let t1_version = task_version(state.db(), "t1");
+    let t1_version = task_version(state.db().unwrap(), "t1");
     let error = state
         .start(start_request(&epoch, "t1", t1_version))
         .unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
 
     // 恢复出口：显式重扫成功 ⇒ 按**提交后**的事实算，门禁放开，计时可用。
-    repair_the_scan(state.db());
-    let after_repair = world(state.db());
+    repair_the_scan(state.db().unwrap());
+    let after_repair = world(state.db().unwrap());
     let scan = state.rescan_recovery().unwrap();
     assert!(!scan.requires_recovery(), "作废过的会话不再挡计时");
-    assert_eq!(world(state.db()), after_repair, "重扫不重复任何写入");
+    assert_eq!(
+        world(state.db().unwrap()),
+        after_repair,
+        "重扫不重复任何写入"
+    );
     assert_eq!(
         after_repair.edits.len(),
         committed.edits.len(),
         "重扫不得重复那条用户事务的审计"
     );
     assert_eq!(after_repair.revision, committed.revision);
-    let t1_version = task_version(state.db(), "t1");
+    let t1_version = task_version(state.db().unwrap(), "t1");
     state
         .start(start_request(&epoch, "t1", t1_version))
         .expect("重扫成功之后门禁必须放开");
@@ -1599,31 +1643,34 @@ fn a_failed_rescan_still_refreshes_the_mirror_of_the_discarded_live_session() {
     let mut state = lock_app(app.running.app());
 
     // 镜像 = 本 run 正在计时的会话：这次作废的正是它。
-    let t1_version = task_version(state.db(), "t1");
+    let t1_version = task_version(state.db().unwrap(), "t1");
     state
         .start(start_request(&epoch, "t1", t1_version))
         .unwrap();
-    let session_id = state.coordinator().live().unwrap().id.clone();
+    let session_id = state.coordinator().unwrap().live().unwrap().id.clone();
     assert_eq!(
-        state.coordinator().live().unwrap().state,
+        state.coordinator().unwrap().live().unwrap().state,
         SessionState::Running,
         "前置：镜像是一条正在计时的会话"
     );
-    let session_version = session_of(state.db(), &session_id).row_version;
-    let revision_before = revision(state.db());
-    let edits_before = world(state.db()).edits.len();
+    let session_version = session_of(state.db().unwrap(), &session_id).row_version;
+    let revision_before = revision(state.db().unwrap());
+    let edits_before = world(state.db().unwrap()).edits.len();
 
     // 注入「三条扫描查询失败」——用户命令本身仍然能提交（它只读自己那条会话）。
-    break_the_scan(state.db());
+    break_the_scan(state.db().unwrap());
     let error = state
         .discard_session(env(&epoch, session_version), discard_request(&session_id))
         .unwrap_err();
     assert_code(&error, "RECOVERY_REQUIRED");
 
     // 已提交事实保留：恰好一条审计、恰好一次版本，会话与全部区间按命令落地。
-    let committed = world(state.db());
-    assert_eq!(session_of(state.db(), &session_id).state, "discarded");
-    let intervals = intervals_of(state.db(), &session_id);
+    let committed = world(state.db().unwrap());
+    assert_eq!(
+        session_of(state.db().unwrap(), &session_id).state,
+        "discarded"
+    );
+    let intervals = intervals_of(state.db().unwrap(), &session_id);
     assert!(
         intervals
             .iter()
@@ -1637,6 +1684,7 @@ fn a_failed_rescan_still_refreshes_the_mirror_of_the_discarded_live_session() {
     // 不说明「内存可以停在旧状态」。
     let live = state
         .coordinator()
+        .unwrap()
         .live()
         .expect("live 不清成 None（与 finish 之后同一口径）");
     assert_eq!(live.id, session_id);
@@ -1647,7 +1695,7 @@ fn a_failed_rescan_still_refreshes_the_mirror_of_the_discarded_live_session() {
     );
     assert_eq!(
         live.row_version,
-        session_of(state.db(), &session_id).row_version,
+        session_of(state.db().unwrap(), &session_id).row_version,
         "镜像的会话版本必须追上已提交的那一行"
     );
     assert!(live.open_interval.is_none(), "作废之后没有开放区间");
@@ -1662,16 +1710,20 @@ fn a_failed_rescan_still_refreshes_the_mirror_of_the_discarded_live_session() {
 
     // 恢复出口：显式重扫成功。重扫只重算门禁，不重做任何已提交的写；刷新过的镜像
     // 也不因为重扫而变回去。
-    repair_the_scan(state.db());
+    repair_the_scan(state.db().unwrap());
     let scan = state.rescan_recovery().unwrap();
     assert!(!scan.requires_recovery(), "作废过的会话不再挡计时");
     assert!(
         state.guard_business_timing().is_ok(),
         "重扫成功必须清掉失败标记"
     );
-    assert_eq!(revision(state.db()), committed.revision, "重扫不加版本");
     assert_eq!(
-        world(state.db()).edits.len(),
+        revision(state.db().unwrap()),
+        committed.revision,
+        "重扫不加版本"
+    );
+    assert_eq!(
+        world(state.db().unwrap()).edits.len(),
         committed.edits.len(),
         "重扫不重复任何审计"
     );
@@ -1700,26 +1752,26 @@ fn a_failed_rescan_still_refreshes_the_mirror_of_the_reconciled_live_session() {
 
     // 镜像 = 本 run 的会话；长间隔先把它按异常隔离成 `recovering`（唯一能走
     // `reconcile` 的状态），这一拍同时把新事实载回镜像。
-    let t1_version = task_version(state.db(), "t1");
+    let t1_version = task_version(state.db().unwrap(), "t1");
     state
         .start(start_request(&epoch, "t1", t1_version))
         .unwrap();
-    let session_id = state.coordinator().live().unwrap().id.clone();
+    let session_id = state.coordinator().unwrap().live().unwrap().id.clone();
     app.advance(129_000);
     state.snapshot().unwrap();
-    let recovering = session_of(state.db(), &session_id);
+    let recovering = session_of(state.db().unwrap(), &session_id);
     assert_eq!(recovering.state, "recovering", "前置：异常已按待确认隔离");
     let session_version = recovering.row_version;
     assert_eq!(
-        state.coordinator().live().unwrap().row_version,
+        state.coordinator().unwrap().live().unwrap().row_version,
         session_version,
         "前置：镜像就是这条 recovering 会话"
     );
-    let revision_before = revision(state.db());
-    let edits_before = world(state.db()).edits.len();
+    let revision_before = revision(state.db().unwrap());
+    let edits_before = world(state.db().unwrap()).edits.len();
 
     // 注入「三条扫描查询失败」——用户命令本身仍然能提交。
-    break_the_scan(state.db());
+    break_the_scan(state.db().unwrap());
     let error = state
         .reconcile(
             env(&epoch, session_version),
@@ -1734,13 +1786,17 @@ fn a_failed_rescan_still_refreshes_the_mirror_of_the_reconciled_live_session() {
     assert_code(&error, "RECOVERY_REQUIRED");
 
     // 已提交事实保留：恰好一条审计、恰好一次版本，会话按命令收尾。
-    let committed = world(state.db());
-    assert_eq!(session_of(state.db(), &session_id).state, "paused");
+    let committed = world(state.db().unwrap());
+    assert_eq!(session_of(state.db().unwrap(), &session_id).state, "paused");
     assert_eq!(committed.edits.len(), edits_before + 1, "恰好一条审计");
     assert_eq!(committed.revision, revision_before + 1, "恰好一次版本");
 
     // **镜像必须跟着已提交事实走**（与作废那条同一口径）。
-    let live = state.coordinator().live().expect("live 不清成 None");
+    let live = state
+        .coordinator()
+        .unwrap()
+        .live()
+        .expect("live 不清成 None");
     assert_eq!(live.id, session_id);
     assert_eq!(
         live.state,
@@ -1749,7 +1805,7 @@ fn a_failed_rescan_still_refreshes_the_mirror_of_the_reconciled_live_session() {
     );
     assert_eq!(
         live.row_version,
-        session_of(state.db(), &session_id).row_version,
+        session_of(state.db().unwrap(), &session_id).row_version,
         "镜像的会话版本必须追上已提交的那一行"
     );
     assert!(
@@ -1763,16 +1819,20 @@ fn a_failed_rescan_still_refreshes_the_mirror_of_the_reconciled_live_session() {
         "RECOVERY_REQUIRED",
     );
 
-    repair_the_scan(state.db());
+    repair_the_scan(state.db().unwrap());
     let scan = state.rescan_recovery().unwrap();
     assert!(!scan.requires_recovery());
     assert!(
         state.guard_business_timing().is_ok(),
         "重扫成功必须清掉失败标记"
     );
-    assert_eq!(revision(state.db()), committed.revision, "重扫不加版本");
     assert_eq!(
-        world(state.db()).edits.len(),
+        revision(state.db().unwrap()),
+        committed.revision,
+        "重扫不加版本"
+    );
+    assert_eq!(
+        world(state.db().unwrap()).edits.len(),
         committed.edits.len(),
         "重扫不重复任何审计"
     );

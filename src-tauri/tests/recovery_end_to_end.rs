@@ -549,24 +549,24 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
 
     // 扫描事务是**整批一次**的版本推进（与用户命令分开计）。
     assert_eq!(
-        revision(state.db()),
+        revision(state.db().unwrap()),
         seeded_revision + 1,
         "扫描事务整批只加一次 revision"
     );
     assert_eq!(
-        world(state.db()).audits.len(),
+        world(state.db().unwrap()).audits.len(),
         2,
         "扫描留下两条审计：归一崩溃段 + 重绑第 4 类"
     );
 
     // 第 2 类：可信前缀闭合、待确认段终点未知；会话 recovering，run_id **仍是旧 run**。
-    let r = read_session(state.db(), "r");
+    let r = read_session(state.db().unwrap(), "r");
     assert_eq!(r.state, "recovering");
     assert_eq!(r.run_id, OLD_RUN, "恢复归属要等 reconcile 才切到本次 run");
     assert_eq!(r.needs_review, 1);
     assert_eq!(r.row_version, 1, "扫描改过一次状态 ⇒ 版本 +1");
 
-    let prefix = read_interval(state.db(), "r-prefix");
+    let prefix = read_interval(state.db().unwrap(), "r-prefix");
     assert_eq!(prefix.ended_at, Some(PREFIX_END), "可信前缀在检查点处闭合");
     assert_eq!(
         prefix.duration_ms,
@@ -578,8 +578,8 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         Some(CHECKPOINT_WALL),
         "检查点记下的挂钟值原样保留（证据不被改写）"
     );
-    let pending_id = pending_interval_id(state.db(), "r");
-    let pending = read_interval(state.db(), &pending_id);
+    let pending_id = pending_interval_id(state.db().unwrap(), "r");
+    let pending = read_interval(state.db().unwrap(), &pending_id);
     assert_eq!(pending.started_at, PREFIX_END);
     assert_eq!(
         pending.ended_at,
@@ -593,7 +593,7 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
     assert_eq!(pending.needs_review, 1);
 
     // 第 4 类：paused 会话保持 paused，run_id 重绑本次 run。
-    let p = read_session(state.db(), "p");
+    let p = read_session(state.db().unwrap(), "p");
     assert_eq!(p.state, "paused");
     assert_eq!(p.run_id, current_run, "第 4 类重绑到本次 run");
 
@@ -606,17 +606,21 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         "第 4 类重绑过的会话不再算「别的 run 的残留」"
     );
     assert_eq!(state.recovery().pending_intervals, vec![pending_id.clone()]);
-    assert_confirmed(state.db(), (PREFIX_END - T0) + (P_END - P_START), 2);
+    assert_confirmed(
+        state.db().unwrap(),
+        (PREFIX_END - T0) + (P_END - P_START),
+        2,
+    );
 
     // ② 门禁关着时 start 被拒，且**逐字段零变化**。
-    let before = world(state.db());
-    let task_v = task_version(state.db());
+    let before = world(state.db().unwrap());
+    let task_v = task_version(state.db().unwrap());
     let err = state
         .start(start_request(&epoch, task_v))
         .expect_err("门禁关着时不得开始新计时");
     assert_code(&err, "RECOVERY_REQUIRED");
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         before,
         "被门禁拒绝的命令不得写入任何东西（不采样、不建会话、不加 revision）"
     );
@@ -640,23 +644,23 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         .into_parts();
     assert!(changed, "对账确认必然是一次真实写入");
     assert_eq!(
-        revision(state.db()),
+        revision(state.db().unwrap()),
         seeded_revision + 2,
         "一条用户命令恰好一次 revision"
     );
     assert_eq!(
         report.revision,
-        revision(state.db()),
+        revision(state.db().unwrap()),
         "报告里的版本是权威值"
     );
 
-    let r = read_session(state.db(), "r");
+    let r = read_session(state.db().unwrap(), "r");
     assert_eq!(r.state, "finished");
     assert_eq!(r.run_id, current_run, "恢复归属在提交时切到本次 run");
     assert_eq!(r.needs_review, 0);
     assert_eq!(r.ended_at, Some(CONFIRMED_END), "用用户给的终点收尾");
 
-    let confirmed_segment = read_interval(state.db(), &pending_id);
+    let confirmed_segment = read_interval(state.db().unwrap(), &pending_id);
     assert_eq!(confirmed_segment.started_at, PREFIX_END);
     assert_eq!(confirmed_segment.ended_at, Some(CONFIRMED_END));
     assert_eq!(
@@ -667,28 +671,40 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
 
     // 崩溃那一段 [T0, CONFIRMED_END) 正好被算一次：20 秒前缀 + 10 秒确认段，
     // 而不是「前缀 + 候选到停机时刻」那种重复计数。
-    assert_confirmed(state.db(), (CONFIRMED_END - T0) + (P_END - P_START), 3);
+    assert_confirmed(
+        state.db().unwrap(),
+        (CONFIRMED_END - T0) + (P_END - P_START),
+        3,
+    );
 
     // ④ 门禁放开，`start` 成功（闭环）。
     assert!(
         !state.recovery().requires_recovery(),
         "对账提交后仍持锁重扫 ⇒ 门禁必须放开"
     );
-    let task_v = task_version(state.db());
+    let task_v = task_version(state.db().unwrap());
     let started_outcome = state
         .start(start_request(&epoch, task_v))
         .expect("门禁放开后 start 必须成功");
-    assert_eq!(revision(state.db()), seeded_revision + 3, "start 恰好 +1");
+    assert_eq!(
+        revision(state.db().unwrap()),
+        seeded_revision + 3,
+        "start 恰好 +1"
+    );
     let s_id = started_outcome
         .snapshot
         .session_id
         .clone()
         .expect("start 之后快照必须指向新会话");
-    let s = read_session(state.db(), &s_id);
+    let s = read_session(state.db().unwrap(), &s_id);
     assert_eq!(s.run_id, current_run);
     assert_eq!(s.state, "running");
     // 新开的开放区间没有时长 ⇒ 已确认数字一点都没变（不会把「正在计时」当成已确认）。
-    assert_confirmed(state.db(), (CONFIRMED_END - T0) + (P_END - P_START), 3);
+    assert_confirmed(
+        state.db().unwrap(),
+        (CONFIRMED_END - T0) + (P_END - P_START),
+        3,
+    );
 
     // ⑤ 结束这个本 run 的会话（0 长度区间：假时钟不走）。
     let finished = state
@@ -703,12 +719,16 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         seeded_revision + 4,
         "finish 恰好 +1（计时命令的版本在 CommandOutcome 里）"
     );
-    assert_eq!(read_session(state.db(), &s_id).state, "finished");
-    assert_confirmed(state.db(), (CONFIRMED_END - T0) + (P_END - P_START), 4);
+    assert_eq!(read_session(state.db().unwrap(), &s_id).state, "finished");
+    assert_confirmed(
+        state.db().unwrap(),
+        (CONFIRMED_END - T0) + (P_END - P_START),
+        4,
+    );
 
     // ⑥ 恢复后的 `resume`：把上一代留下的暂停会话绑到**本次 run**，并开一条新区间。
-    let p = read_session(state.db(), "p");
-    let task_v = task_version(state.db());
+    let p = read_session(state.db().unwrap(), "p");
+    let task_v = task_version(state.db().unwrap());
     let resumed = state
         .resume(ResumeRequest {
             expected_data_epoch: epoch.clone(),
@@ -719,7 +739,7 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         })
         .expect("暂停会话可以继续");
     assert_eq!(resumed.revision, seeded_revision + 5, "resume 恰好 +1");
-    let p = read_session(state.db(), "p");
+    let p = read_session(state.db().unwrap(), "p");
     assert_eq!(p.state, "running");
     assert_eq!(
         p.run_id, current_run,
@@ -731,19 +751,23 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         "快照指向刚继续的会话"
     );
     // 新开的区间与它的检查点都挂在本次 run 上。
-    let p_open = intervals_of(state.db(), "p")
+    let p_open = intervals_of(state.db().unwrap(), "p")
         .into_iter()
         .find(|i| i.ended_at.is_none() && i.voided_at.is_none())
         .expect("resume 必须开一条新区间");
     assert_eq!(p_open.started_at, WALL, "归属时刻来自当前采样");
-    let cp = checkpoint_of(state.db(), &p_open.id).expect("resume 必须写检查点");
+    let cp = checkpoint_of(state.db().unwrap(), &p_open.id).expect("resume 必须写检查点");
     assert_eq!(cp.run_id, current_run, "检查点属于本次 run");
     assert_eq!(cp.attribution_at, WALL);
     // 它还没有时长 ⇒ 已确认数字仍然不变（同一段时间不会被算两遍）。
-    assert_confirmed(state.db(), (CONFIRMED_END - T0) + (P_END - P_START), 4);
+    assert_confirmed(
+        state.db().unwrap(),
+        (CONFIRMED_END - T0) + (P_END - P_START),
+        4,
+    );
 
     // ⑦ 修正可信历史：把可信前缀收短 1 秒（`correct` 只接 finished 会话）。
-    let r = read_session(state.db(), "r");
+    let r = read_session(state.db().unwrap(), "r");
     let (edited, changed) = state
         .correct(
             WriteEnvelope::for_update(&epoch, r.row_version),
@@ -760,8 +784,12 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         .expect("修正可信历史应当成功")
         .into_parts();
     assert!(changed, "重定时必然是一次真实写入");
-    assert_eq!(revision(state.db()), seeded_revision + 6, "correct 恰好 +1");
-    assert_eq!(edited.revision, revision(state.db()));
+    assert_eq!(
+        revision(state.db().unwrap()),
+        seeded_revision + 6,
+        "correct 恰好 +1"
+    );
+    assert_eq!(edited.revision, revision(state.db().unwrap()));
     assert_eq!(edited.interval.ended_at, Some(CORRECT_END));
     assert_eq!(
         edited.interval.duration_ms,
@@ -770,12 +798,12 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
     );
     // 被修正的那一段只剩 19 秒；后一段 10 秒不受影响 ⇒ 总长少 1 秒，且仍不重叠。
     assert_confirmed(
-        state.db(),
+        state.db().unwrap(),
         (CORRECT_END - T0) + (CONFIRMED_END - PREFIX_END) + (P_END - P_START),
         4,
     );
     assert_eq!(
-        read_interval(state.db(), &pending_id).duration_ms,
+        read_interval(state.db().unwrap(), &pending_id).duration_ms,
         Some(CONFIRMED_END - PREFIX_END),
         "修正一段不能动到另一段"
     );
@@ -794,21 +822,24 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         .into_parts();
     assert!(changed, "补录必然是一次真实写入");
     assert_eq!(
-        revision(state.db()),
+        revision(state.db().unwrap()),
         seeded_revision + 7,
         "backfill 恰好 +1"
     );
     let bf_session = backfilled.session.id.clone();
-    assert_eq!(read_session(state.db(), &bf_session).state, "finished");
+    assert_eq!(
+        read_session(state.db().unwrap(), &bf_session).state,
+        "finished"
+    );
     assert_eq!(backfilled.interval.duration_ms, Some(BF_END - BF_START));
     assert_confirmed(
-        state.db(),
+        state.db().unwrap(),
         (CORRECT_END - T0) + (CONFIRMED_END - PREFIX_END) + (P_END - P_START) + (BF_END - BF_START),
         5,
     );
 
     // ⑨ 作废整次：整个崩溃会话的两段区间一起作废，补录与暂停会话的事实不受影响。
-    let r = read_session(state.db(), "r");
+    let r = read_session(state.db().unwrap(), "r");
     let (discarded, changed) = state
         .discard_session(
             WriteEnvelope::for_update(&epoch, r.row_version),
@@ -820,34 +851,38 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         .into_parts();
     assert!(changed, "作废整次必然是一次真实写入");
     assert_eq!(
-        revision(state.db()),
+        revision(state.db().unwrap()),
         seeded_revision + 8,
         "discard_session 恰好 +1"
     );
     assert_eq!(discarded.session.state, SessionState::Discarded);
-    let r = read_session(state.db(), "r");
+    let r = read_session(state.db().unwrap(), "r");
     assert_eq!(r.state, "discarded");
     assert_eq!(r.needs_review, 0);
-    for interval in intervals_of(state.db(), "r") {
+    for interval in intervals_of(state.db().unwrap(), "r") {
         assert_eq!(interval.voided_at, Some(WALL), "{} 应当被作废", interval.id);
         assert_eq!(interval.needs_review, 0, "作废与待确认互斥");
     }
-    let retimed = read_interval(state.db(), "r-prefix");
+    let retimed = read_interval(state.db().unwrap(), "r-prefix");
     assert_eq!(
         (retimed.ended_at, retimed.duration_ms),
         (Some(CORRECT_END), Some(CORRECT_END - T0)),
         "有时长的区间作废后保留原起止（作废不是「没发生过」）"
     );
     // 作废之后它不再进「已确认」数字：只剩补录的 2 秒与两条零长度区间。
-    assert_confirmed(state.db(), (BF_END - BF_START) + (P_END - P_START), 3);
+    assert_confirmed(
+        state.db().unwrap(),
+        (BF_END - BF_START) + (P_END - P_START),
+        3,
+    );
     assert!(
         !state.recovery().requires_recovery(),
         "作废整次提交后重扫 ⇒ 门禁仍然开着"
     );
 
     // ⑩ 幂等：重复作废零写入、零版本、零审计（`time_edit` 一条都不多）。
-    let r = read_session(state.db(), "r");
-    let before = world(state.db());
+    let r = read_session(state.db().unwrap(), "r");
+    let before = world(state.db().unwrap());
     let (_, changed) = state
         .discard_session(
             WriteEnvelope::for_update(&epoch, r.row_version),
@@ -859,7 +894,7 @@ fn a_crash_restart_recovery_and_history_chain_stays_single_counted() {
         .into_parts();
     assert!(!changed, "重复作废的终态没有任何字段要改");
     assert_eq!(
-        world(state.db()),
+        world(state.db().unwrap()),
         before,
         "幂等重复必须逐字段零变化（含 revision 与审计）"
     );
@@ -882,7 +917,7 @@ fn resuming_a_paused_session_of_a_previous_run_rebinds_it_to_the_current_run() {
     let epoch = running.data_epoch().to_string();
     let current_run = running.run_id().to_string();
     let mut state = lock_app(running.app());
-    let revision_after_startup = revision(state.db());
+    let revision_after_startup = revision(state.db().unwrap());
     assert!(
         !state.recovery().requires_recovery(),
         "这个起点没有任何恢复材料"
@@ -893,7 +928,7 @@ fn resuming_a_paused_session_of_a_previous_run_rebinds_it_to_the_current_run() {
     let legacy_start = WALL - 5_000;
     let legacy_end = WALL - 4_000;
     {
-        let conn = state.db().connection();
+        let conn = state.db().unwrap().connection();
         conn.execute(
             "INSERT INTO work_session(id,task_id,run_id,mode,state,timer_kind,started_at,ended_at,row_version)
              VALUES('legacy','t1','run-old','FOREGROUND','paused','stopwatch',?1,?2,0)",
@@ -907,10 +942,10 @@ fn resuming_a_paused_session_of_a_previous_run_rebinds_it_to_the_current_run() {
         )
         .unwrap();
     }
-    let legacy = read_session(state.db(), "legacy");
+    let legacy = read_session(state.db().unwrap(), "legacy");
     assert_eq!(legacy.run_id, OLD_RUN, "现场就是「上一代 run 的暂停会话」");
 
-    let task_v = task_version(state.db());
+    let task_v = task_version(state.db().unwrap());
     let outcome = state
         .resume(ResumeRequest {
             expected_data_epoch: epoch.clone(),
@@ -925,7 +960,7 @@ fn resuming_a_paused_session_of_a_previous_run_rebinds_it_to_the_current_run() {
         revision_after_startup + 1,
         "resume 恰好 +1"
     );
-    let legacy = read_session(state.db(), "legacy");
+    let legacy = read_session(state.db().unwrap(), "legacy");
     assert_eq!(legacy.state, "running");
     assert_eq!(
         legacy.run_id, current_run,
@@ -938,18 +973,18 @@ fn resuming_a_paused_session_of_a_previous_run_rebinds_it_to_the_current_run() {
     );
 
     // 新开的区间与检查点都属于当前 run——否则心跳/结束会撞上跨 run 判据。
-    let open = intervals_of(state.db(), "legacy")
+    let open = intervals_of(state.db().unwrap(), "legacy")
         .into_iter()
         .find(|i| i.ended_at.is_none() && i.voided_at.is_none())
         .expect("resume 必须开一条新区间");
     assert_eq!(open.started_at, WALL);
-    let cp = checkpoint_of(state.db(), &open.id).expect("resume 必须写检查点");
+    let cp = checkpoint_of(state.db().unwrap(), &open.id).expect("resume 必须写检查点");
     assert_eq!(cp.run_id, current_run);
     assert_eq!(cp.attribution_at, WALL);
 
     // 老的那段可信历史原样保留，仍然计入且只计一次（这条用例的库里只有它一段已确认）。
-    let kept = read_interval(state.db(), "legacy-1");
+    let kept = read_interval(state.db().unwrap(), "legacy-1");
     assert_eq!(kept.voided_at, None);
     assert_eq!(kept.duration_ms, Some(legacy_end - legacy_start));
-    assert_confirmed(state.db(), legacy_end - legacy_start, 1);
+    assert_confirmed(state.db().unwrap(), legacy_end - legacy_start, 1);
 }
