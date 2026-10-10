@@ -1,0 +1,38 @@
+{
+  "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+  "fault_sessions": 0,
+  "items": [
+    {
+      "attention": "needs_review",
+      "fault_reason": null,
+      "intervals": [
+        {
+          "duration_ms": null,
+          "ended_at": 1700000000000,
+          "id": "66666666-6666-4666-8666-666666666666",
+          "needs_review": true,
+          "sampled_end_wall_at": 1700000000000,
+          "started_at": 1699996400000
+        },
+        {
+          "duration_ms": null,
+          "ended_at": null,
+          "id": "77777777-7777-4777-8777-777777777777",
+          "needs_review": true,
+          "sampled_end_wall_at": null,
+          "started_at": 1700000000000
+        }
+      ],
+      "is_current_run": false,
+      "run_id": "55555555-5555-4555-8555-555555555555",
+      "session_id": "44444444-4444-4444-8444-444444444444",
+      "session_needs_review": true,
+      "session_row_version": 8,
+      "state": "recovering",
+      "task_id": "11111111-1111-4111-8111-111111111111"
+    }
+  ],
+  "pending_intervals": 2,
+  "pending_sessions": 1,
+  "revision": 20
+}

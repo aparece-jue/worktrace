@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use worktrace_lib::domain::project::ProjectStatus;
-use worktrace_lib::domain::session::{SessionMode, SessionState, TimerKind};
+use worktrace_lib::domain::session::{SessionAttention, SessionMode, SessionState, TimerKind};
 use worktrace_lib::domain::tag::TagKind;
 use worktrace_lib::domain::task::TaskStatus;
 use worktrace_lib::error::{AuthorityKind, ErrorAuthority, ErrorResponse, RecordVersion};
@@ -41,18 +41,21 @@ use worktrace_lib::services::catalog::{
 use worktrace_lib::services::daily_plan::{DailyPlanChange, DailyPlanView};
 use worktrace_lib::services::events::timer_tick_payload;
 use worktrace_lib::services::handshake::RevisionSnapshot;
-use worktrace_lib::services::history::HistoryEditReport;
-use worktrace_lib::services::recovery::ReconcileReport;
+use worktrace_lib::services::history::{HistoryDetail, HistoryEditReport, HistoryView};
+use worktrace_lib::services::recovery::{
+    AttentionOverview, PendingIntervalItem, ReconcileReport, SessionAttentionItem,
+};
 use worktrace_lib::services::stats::{
     CurrentTask, Measure, MeasureColumn, StatsClass, StatsRange, TodayView,
 };
 use worktrace_lib::services::tasks::TaskTransitionReport;
-use worktrace_lib::services::timer::coordinator::CommandOutcome;
+use worktrace_lib::services::timer::coordinator::{ClockCorrectionAccepted, CommandOutcome};
 use worktrace_lib::services::timer::snapshot::TimerSnapshot;
 use worktrace_lib::storage::project_repo::ProjectRow;
 use worktrace_lib::storage::session_repo::{IntervalRow, SessionRow};
 use worktrace_lib::storage::tag_repo::TagRow;
 use worktrace_lib::storage::task_repo::TaskRow;
+use worktrace_lib::storage::time_edit_repo::TimeEdit;
 
 const EPOCH: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 const TASK_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -258,6 +261,114 @@ fn voided_interval_row() -> IntervalRow {
     IntervalRow {
         voided_at: Some(AT + 60_000),
         ..interval_row()
+    }
+}
+
+/// `time_edit` 的一行（P8 Task 2b：历史详情带该会话**全部**审计）。
+///
+/// 样例是一次重定时：`reason` 是可机器过滤的 `correct:*`，用户给的理由住在
+/// `after_json.user_reason` 里（两个 JSON 列都是**字符串**，前端自己按 `change` 键解析）。
+fn time_edit_row() -> TimeEdit {
+    TimeEdit {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+        session_id: SESSION_ID.to_string(),
+        before_json: serde_json::json!({ "change": "correct_retime" }).to_string(),
+        after_json: serde_json::json!({
+            "change": "correct_retime",
+            "user_reason": "手滑多记了半小时",
+        })
+        .to_string(),
+        reason: Some("correct:retime".to_string()),
+        created_at: AT + 120_000,
+    }
+}
+
+/// 一个需要用户处理的会话（`attention_overview` 的列表项，P8 Task 2b）。
+///
+/// 样例是「**别的 run** 留下来的 `recovering` 会话」：`is_current_run` 因此是 `false`，
+/// `attention` 是 `NeedsReview`（另一条分支 `InvariantBroken` 只差这一位与
+/// `fault_reason`），待确认区间两条——零长度候选（端点已知、时长未确认）与终点未知段。
+fn attention_item() -> SessionAttentionItem {
+    SessionAttentionItem {
+        session_id: SESSION_ID.to_string(),
+        task_id: TASK_ID.to_string(),
+        state: SessionState::Recovering,
+        run_id: RUN_ID.to_string(),
+        is_current_run: false,
+        attention: SessionAttention::NeedsReview,
+        intervals: vec![
+            PendingIntervalItem {
+                id: INTERVAL_ID.to_string(),
+                started_at: AT - 3_600_000,
+                // 候选端点不是已确认事实：`ended_at` 已知，`duration_ms` 仍然为空。
+                ended_at: Some(AT),
+                duration_ms: None,
+                sampled_end_wall_at: Some(AT),
+                needs_review: true,
+            },
+            PendingIntervalItem {
+                id: "77777777-7777-4777-8777-777777777777".to_string(),
+                started_at: AT,
+                // 终点未知：只有起点是事实。
+                ended_at: None,
+                duration_ms: None,
+                sampled_end_wall_at: None,
+                needs_review: true,
+            },
+        ],
+        fault_reason: None,
+        session_row_version: 8,
+        session_needs_review: true,
+    }
+}
+
+/// 恢复页的唯一数据源：三个计数 + 列表项（口径见 `services::recovery` 的类型文档）。
+fn attention_overview() -> AttentionOverview {
+    AttentionOverview {
+        items: vec![attention_item()],
+        pending_intervals: 2,
+        pending_sessions: 1,
+        fault_sessions: 0,
+        data_epoch: EPOCH.to_string(),
+        revision: 20,
+    }
+}
+
+/// 历史页的一次读取（P8 Task 2b）：窗口内两条终态会话 + 一条详情。
+///
+/// 三段都刻意有内容：`sessions` 里 `finished` 与 `discarded` 各一条；`selected` 是
+/// 「被修正过的那条」——两条区间（一条正常、一条已作废）与一条审计。前端点
+/// `correct` / `discard_session` 用的版本就是 `selected.session.row_version`。
+fn history_view() -> HistoryView {
+    HistoryView {
+        sessions: vec![
+            session_row(),
+            SessionRow {
+                state: SessionState::Discarded,
+                ended_at: Some(AT + 60_000),
+                row_version: 7,
+                ..session_row()
+            },
+        ],
+        selected: Some(HistoryDetail {
+            // 修正区间事实会把所属会话的版本 +1（区间没有独立版本列）。
+            session: SessionRow {
+                row_version: 6,
+                ..session_row()
+            },
+            intervals: vec![
+                interval_row(),
+                IntervalRow {
+                    // 已作废的一段：软删除之后行还在，只是不再计入任何工时
+                    // （`voided_at` 非空是前端必须处理的另一条分支）。
+                    id: "88888888-8888-4888-8888-888888888888".to_string(),
+                    ..voided_interval_row()
+                },
+            ],
+            edits: vec![time_edit_row()],
+        }),
+        data_epoch: EPOCH.to_string(),
+        revision: 21,
     }
 }
 
@@ -487,6 +598,25 @@ fn cases() -> Vec<(&'static str, serde_json::Value)> {
                 data_epoch: EPOCH.to_string(),
             }),
         ),
+        // ── P8 Task 2b：恢复读取 / 重试与历史读取（命令 6/8/13） ────────────────
+        //
+        // 命令 7 `retry_recovery` 的响应**就是** `TimerSnapshot`（已有两份快照），
+        // 所以这里不重复；三份新快照各钉一个**新**响应类型：
+        //   `clock_correction_accepted`  「接受一次已检测的校正」的结果；
+        //   `attention_overview`          恢复页/待确认栏的唯一数据源；
+        //   `history_view`                历史页的列表 + 可选详情（含审计）。
+        (
+            "clock_correction_accepted",
+            json(&ClockCorrectionAccepted {
+                // `accepted == false` 是「没有待接受的校正」这条**正常**路径
+                // （幂等零变化，不是失败）：两条分支的字段完全相同，只差这一位。
+                accepted: true,
+                data_epoch: EPOCH.to_string(),
+                revision: 22,
+            }),
+        ),
+        ("attention_overview", json(&attention_overview())),
+        ("history_view", json(&history_view())),
     ]
 }
 
@@ -574,8 +704,8 @@ fn every_response_dto_matches_its_committed_snapshot() {
     }
 
     assert!(
-        names.len() >= 21,
-        "快照用例至少要覆盖 21 个响应 DTO，实际 {}：{names:?}",
+        names.len() >= 24,
+        "快照用例至少要覆盖 24 个响应 DTO，实际 {}：{names:?}",
         names.len()
     );
     assert!(

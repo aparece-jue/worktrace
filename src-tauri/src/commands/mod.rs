@@ -31,7 +31,7 @@
 //! 调服务 → 返回响应）。包装只有一行转发。
 //!
 //! 为什么分开：`#[tauri::command]` 生成的包装要 Tauri 运行时才能调，而命令体只需要一个
-//! `&mut AppState`——分开之后 `tests/ipc_commands.rs` 能**逐条**覆盖 30 条命令
+//! `&mut AppState`——分开之后 `tests/ipc_commands.rs` 能**逐条**覆盖 34 条命令
 //! （不需要 `tauri::test`，因此也不需要动 `Cargo.toml`）。一个 `finish_timer` 里误调
 //! `app.pause` 的复制粘贴错误，现在会当场断言失败。
 //!
@@ -112,8 +112,8 @@ use crate::services::bootstrap::{
 use crate::services::error_response::capture_error_response;
 use crate::services::events::{Broadcaster, EventEnvelope};
 use crate::services::timer::coordinator::{
-    parse_session_mode, parse_timer_kind, CommandOutcome, ResumeRequest, SessionRequest,
-    StartRequest,
+    parse_session_mode, parse_timer_kind, ClockCorrectionAccepted, CommandOutcome, ResumeRequest,
+    SessionRequest, StartRequest,
 };
 use crate::services::timer::snapshot::TimerSnapshot;
 use crate::services::{catalog, daily_plan, handshake, history, recovery, stats, tasks};
@@ -473,6 +473,27 @@ pub struct TransitionTaskRequest {
     pub expected_row_version: i64,
     pub target: String,
     pub cause: String,
+}
+
+/// 常规历史的一次读取（命令 13）：半开窗口 `[from, to)` + 分页窗口 + 可选详情。
+///
+/// 四个标量都是**必填**（与其余命令的 epoch/版本同一口径）：`from`/`to` 少的不是
+/// 「全窗口」而是传输层（serde）错误——「不限制范围」在这里是一条不该存在的路径
+/// （历史页永远有一个正在看的范围）。`limit` 的取值域是 `1..=100`、`offset` `>= 0`，
+/// 越界由服务层经 `task_repo::require_page` 拒绝（命令层不复制那条规则）。
+///
+/// `session_id` 省略 / `null` = 只要列表；给了就额外返回那条会话的详情
+/// （session + 全部区间 + 全部审计，含真实 `row_version`）。**`HistoryQuery` 里没有
+/// `total`**：响应形状由 P8 计划钉死为 `{data_epoch, revision, sessions, selected}`，
+/// 翻页按「取满 `limit` 条 ⇒ 还可能有下一页」——不在这里发明第二个形状。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct HistoryQuery {
+    pub expected_data_epoch: String,
+    pub from: i64,
+    pub to: i64,
+    pub limit: i64,
+    pub offset: i64,
+    pub session_id: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1504,6 +1525,182 @@ pub fn transition_task_impl(
         now,
         report,
     ))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 恢复的读取与重试（命令 6/7/8）、历史读取（命令 13）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 这四条都**只做参数解析与转发**，不新增业务逻辑：
+//
+// - 6 `accept_detected_clock_correction`：请求就是**库身份**（照既有
+//   [`EpochRequest`] 的形状；P8 计划表里的名字 `AcceptClockCorrectionRequest` 是服务层
+//   那个类型的名字，它没有 `Deserialize`，命令层不为它另造一份单字段镜像）。响应
+//   [`ClockCorrectionAccepted`] **自带** `data_epoch` / `revision`，`accepted == false`
+//   是「没有待接受的校正」这条**正常**路径（幂等零变化），不是失败。
+//   **它是写命令**（计划文末那张表的共同口径：「业务写命令（1–6）按服务层实际变更决定
+//   版本推进与广播」）：`accepted == true` ⇒ 服务提交了一条审计并恰好 +1 `revision`
+//   ⇒ 命令层按同一位**广播恰好一条** `domain.changed`；`accepted == false` ⇒ 零变化
+//   ⇒ **一条都不发**。`revision` 是跨窗口唯一水位，只推版本不广播会让别的窗口把它读成
+//   「丢了一次通知」（`RevisionGate` 规则④判跳号 ⇒ 白跑一次 `Resync`）。
+// - 7 `retry_recovery`：`&str` 也是 **`expected_data_epoch`**（不是 run_id），请求同样是
+//   [`EpochRequest`]。它**不带 `WriteEnvelope`**（没有用户可编辑对象，判据在协调器里）、
+//   内部已 `guard_writable`；**不保证每次推进 `revision`**、**不强制广播**——恢复事务
+//   可能提交、也可能只是重载/重扫或无变化。返回的是**提交后**的权威快照，命令层不做
+//   任何「顺手刷新」。
+//
+//   ⚠️ **第 7 条不广播是计划明文给的豁免，不是漏写**：那张表的共同口径把命令 1–6 归入
+//   「按实际变更决定版本推进与广播」，第 7 条单独写「**不保证每次写入**；复用 P3 的实际
+//   结果与异常闭环」。而且服务返回的是 [`TimerSnapshot`]——**没有 `changed` 位**，命令层
+//   无从判断这一次到底提交了事务、还是只重载/重扫/无变化，硬发一条就会有假通知，按
+//   `revision` 自比又正是被禁的「读出来再跟自己比」。恢复事务自己那层的闭环（P3 的
+//   结果与异常）已经写清了什么时候推进版本。
+// - 8 `attention_overview`：**只读**，只做三件事——转发请求里的 epoch、从
+//   `AppState::coordinator()` 取 `run_id()`、把两者与 `AppState::db()` 一起交给自由函数
+//   `services::recovery::attention_overview`。**没有 `AppState::attention_overview`
+//   这个包装**（协调器只有 `AppState` 够得着，而这条读路径不需要它做别的事）。
+// - 13 `history_view`：**只读**新服务（`services::history`），同一读事务里校验 epoch、
+//   取分页会话与可选详情；不采样、不写库、不推进 `revision`。`limit`/`offset` 的越界由
+//   服务层经 `task_repo::require_page` 拒绝——命令层不复制那条规则，也不碰 `storage::`
+//   （`scripts/check-layers.ps1` 第 1 条）。
+//
+// 因此：6 **只按 `accepted` 广播**（真布尔驱动，与「仅 `Changed` 才广播」同一条姿势）、
+// 7 按上面那条豁免不广播、8/13 是纯读不广播。
+
+/// 显式接受一次**已检测但未接受**的墙钟校正（命令 6）。
+///
+/// 不自动接受（08 §1）：界面必须在用户点过之后才调它。失败原样交出去——协调器只在审计
+/// **提交之后**清内存标记，命令层不做任何补偿。
+#[tauri::command]
+pub async fn accept_detected_clock_correction(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: EpochRequest,
+) -> Result<ClockCorrectionAccepted, ErrorResponse> {
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(
+        "accept_detected_clock_correction",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| accept_detected_clock_correction_impl(app, &broadcaster, request),
+    )
+    .await
+}
+
+/// [`accept_detected_clock_correction`] 的命令体（IPC 包装只做转发）。
+///
+/// 广播口径见本节标题下的第 6 条：`accepted` 就是「这次到底改没改库」这一位
+/// （服务只在审计提交成功时给它 `true`），所以它直接当 [`announce`] 的 `changed`——
+/// 与写命令族「仅 `Changed` 才广播」同一姿势，不另造判据、不按 `revision` 自比。
+pub fn accept_detected_clock_correction_impl(
+    app: &mut AppState,
+    broadcaster: &Broadcaster,
+    request: EpochRequest,
+) -> Result<ClockCorrectionAccepted, AppError> {
+    // 信封的 `at` 在**写入之前**取（照 `create_project_impl` 的顺序）：提交成功之后再取
+    // 时钟，一旦取不到就会把一次**已经提交**的接受报成失败。这次采样只是读一次原始挂钟
+    // （`Coordinator::wall_ms`），不 `observe`、不推进检测器的 `last`——服务那一次
+    // 「采样 + 恰好观察一次」的口径不受影响。
+    let now = app.now_ms()?;
+    let accepted = app.accept_detected_clock_correction(&request.expected_data_epoch)?;
+    Ok(announce(
+        broadcaster,
+        accepted.accepted,
+        accepted.data_epoch.clone(),
+        accepted.revision,
+        now,
+        accepted,
+    ))
+}
+
+/// 用户显式点「重试」时的恢复重试（命令 7）。**不做定时自动重试**。
+#[tauri::command]
+pub async fn retry_recovery(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: EpochRequest,
+) -> Result<TimerSnapshot, ErrorResponse> {
+    run_command(
+        "retry_recovery",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| retry_recovery_impl(app, request),
+    )
+    .await
+}
+
+/// [`retry_recovery`] 的命令体（IPC 包装只做转发）。
+pub fn retry_recovery_impl(
+    app: &mut AppState,
+    request: EpochRequest,
+) -> Result<TimerSnapshot, AppError> {
+    app.retry_recovery(&request.expected_data_epoch)
+}
+
+/// 全局待确认概览（命令 8）：恢复页与「待确认」栏的唯一数据源。
+#[tauri::command]
+pub async fn attention_overview(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: EpochRequest,
+) -> Result<recovery::AttentionOverview, ErrorResponse> {
+    run_command(
+        "attention_overview",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| attention_overview_impl(app, request),
+    )
+    .await
+}
+
+/// [`attention_overview`] 的命令体（IPC 包装只做转发）。
+///
+/// 三个参数在这里组装：`db` 与 `coordinator` 都是 `AppState` 的 `pub` 访问器，`run_id`
+/// 由协调器给出（服务层够不着它）——这条命令**没有** `AppState` 包装。
+pub fn attention_overview_impl(
+    app: &mut AppState,
+    request: EpochRequest,
+) -> Result<recovery::AttentionOverview, AppError> {
+    let run_id = app.coordinator()?.run_id().to_owned();
+    recovery::attention_overview(app.db()?, &request.expected_data_epoch, &run_id)
+}
+
+/// 常规历史（命令 13）：窗口内的一页终态会话 + 可选详情。
+#[tauri::command]
+pub async fn history_view(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: HistoryQuery,
+) -> Result<history::HistoryView, ErrorResponse> {
+    run_command(
+        "history_view",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| history_view_impl(app, request),
+    )
+    .await
+}
+
+/// [`history_view`] 的命令体（IPC 包装只做转发）。
+pub fn history_view_impl(
+    app: &mut AppState,
+    request: HistoryQuery,
+) -> Result<history::HistoryView, AppError> {
+    history::history_view(
+        app.db()?,
+        &request.expected_data_epoch,
+        history::HistoryViewRequest {
+            from: request.from,
+            to: request.to,
+            limit: request.limit,
+            offset: request.offset,
+            session_id: request.session_id,
+        },
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -228,7 +228,10 @@ pub fn list_tasks_filtered(
 
 /// 分页窗口的输入校验。文案是面向用户的中文（与 `require_active_project` 同一口径）：
 /// 调用方给的是页号与页大小时，「哪一项越界」就是用户唯一能采取行动的信息。
-fn require_page(page: Page) -> Result<(), AppError> {
+///
+/// `pub(crate)`（P8 Task 2b）：[`super::session_repo::history_sessions`] 用同一个窗口
+/// 类型与同一条规则——分页判据只有这一处实现，不复制第二份。
+pub(crate) fn require_page(page: Page) -> Result<(), AppError> {
     if !(1..=100).contains(&page.limit) {
         return Err(AppError::Domain {
             detail: format!("「每页条数」只能是 1 到 100，收到的是 {}。", page.limit),

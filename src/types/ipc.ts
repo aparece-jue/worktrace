@@ -80,6 +80,16 @@ export const SESSION_MODES = [
 export type SessionMode = (typeof SESSION_MODES)[number];
 
 /**
+ * 会话「需要用户处理」的判决（`src-tauri/src/domain/session.rs` 的 `SessionAttention`）。
+ *
+ * 它是**扫描算出来的**、不落库（`work_session` 里没有这一列），取值域只在 Rust 的
+ * `SessionAttention::as_str()` 定义一次。恢复页据它分两块：`needs_review` 走
+ * `reconcile`，`invariant_broken` 只诊断（**禁止自动修复**）；`none` 是「正常」。
+ */
+export const SESSION_ATTENTIONS = ["none", "needs_review", "invariant_broken"] as const;
+export type SessionAttention = (typeof SESSION_ATTENTIONS)[number];
+
+/**
  * 恢复与历史的三个动作词（P8 Task 2a 的五条写命令）。
  *
  * 取值与 Rust 侧命令层的显式 `parse` 逐字一致（`src-tauri/src/commands/mod.rs` 的
@@ -253,8 +263,26 @@ export interface IntervalRow {
   needs_review: boolean;
 }
 
+/**
+ * `time_edit` 的一行：**审计**（P8 Task 2b：历史详情带该会话全部审计）。
+ *
+ * 两个 JSON 列都是**字符串**，不是对象：改动的形状按 `change` 键分叉
+ * （`correct_retime` / `correct_delete` / `backfill` / `reconcile:*` /
+ * `discard_session` / 扫描的异常分割…），前端要自己 `JSON.parse` 之后按键取。
+ * `reason` 是可机器过滤的短标记（`correct:retime`）；用户手写的理由住在
+ * `after_json.user_reason` 里，不在这一列。
+ */
+export interface TimeEdit {
+  id: string;
+  session_id: string;
+  before_json: string;
+  after_json: string;
+  reason: string | null;
+  created_at: number;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// 响应 DTO（21 份快照逐一对上）
+// 响应 DTO（24 份快照逐一对上）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** `get_revision`：只给库身份与版本，不含业务数据。 */
@@ -528,6 +556,109 @@ export interface TaskTransitionReport {
   data_epoch: string;
 }
 
+/**
+ * `accept_detected_clock_correction`（P8 Task 2b，命令 6）：显式接受一次**已检测但
+ * 未接受**的墙钟校正。
+ *
+ * `accepted: false` 是**正常路径**，不是失败：当时没有待接受的校正，库一个字节都没改
+ * （`revision` 就是这次读到的权威值）。`true` 才表示写了一条 `time_edit` 审计并恰好
+ * 推进一次 `revision`。
+ */
+export interface ClockCorrectionAccepted {
+  accepted: boolean;
+  data_epoch: string;
+  revision: number;
+}
+
+/** 一条待确认区间（`attention_overview` 的列表项的子项，P8 Task 2b）。 */
+export interface PendingIntervalItem {
+  id: string;
+  started_at: number;
+  /**
+   * **候选端点**，不是已确认事实：终点未知时为 `null`；已知也不等于可信历史。
+   * 只有 `ended_at === null` 才表示「终点未知」。
+   */
+  ended_at: number | null;
+  /** `null` = **没有已确认时长**（不是 0）⇒ 不得当已确认工时用。 */
+  duration_ms: number | null;
+  sampled_end_wall_at: number | null;
+  /** 恒为 `true`（这个列表就是待确认集合）。 */
+  needs_review: boolean;
+}
+
+/**
+ * 一个需要用户（或诊断）看一眼的会话（`attention_overview` 的列表项）。
+ *
+ * 列表是**三者的并集**：不变量损坏、未作废的待确认区间、**别的 run** 未结束的会话
+ * （`services::recovery::AttentionOverview` 的类型文档是权威口径）。
+ * `is_current_run` 是分组键；`attention === "invariant_broken"` 时 `fault_reason`
+ * 是**诊断文本**（不直接当用户文案）；`session_row_version` 就是拿去
+ * `reconcile` / `discard_session` 的 `expected_row_version`。
+ */
+export interface SessionAttentionItem {
+  session_id: string;
+  task_id: string;
+  state: SessionState;
+  run_id: string;
+  is_current_run: boolean;
+  attention: SessionAttention;
+  intervals: PendingIntervalItem[];
+  fault_reason: string | null;
+  session_row_version: number;
+  session_needs_review: boolean;
+}
+
+/**
+ * `attention_overview`（P8 Task 2b，命令 8）：恢复页与「待确认」栏的**唯一**数据源。
+ *
+ * **纯读**（不推进 `revision`）：`data_epoch` / `revision` 与 `items` 出自同一个读事务。
+ * 不要用 `TimerSnapshot.pending_ms` / `needs_attention()` 顶替它，也不要通过列表是否
+ * 为空推导「计时门禁」——两者不等价（服务层的类型文档写了为什么）。
+ */
+export interface AttentionOverview {
+  items: SessionAttentionItem[];
+  /** 待确认区间总数（含终点未知的零长度候选）。 */
+  pending_intervals: number;
+  /** 有未作废待确认区间的会话数。 */
+  pending_sessions: number;
+  /** 第 1 类（不变量损坏）会话数。 */
+  fault_sessions: number;
+  data_epoch: string;
+  revision: number;
+}
+
+/**
+ * 一个会话的详情（`history_view` 的可选半边，P8 Task 2b）。
+ *
+ * `intervals` 与 `edits` 都是**全部**（含已作废的区间、历次审计）——历史页要能看到
+ * 「这条记录被改过什么」。`session.row_version` 是库里的真实行版本，**版本**可以直接当
+ * `correct` / `discard_session` 的 `expected_row_version`（不要自己加一）；但**这两个动作
+ * 是否合法要看 `session.state`**——详情对**任何状态**的会话都返回，而 `correct` 只接
+ * `finished`、`recovering` 要走 `reconcile`、`running`/`paused` 要先结束会话。
+ * 界面据 `state` 决定入口开不开，别把这句读成「拿到版本就能改」。
+ */
+export interface HistoryDetail {
+  session: SessionRow;
+  intervals: IntervalRow[];
+  edits: TimeEdit[];
+}
+
+/**
+ * `history_view`（P8 Task 2b，命令 13）：常规历史的一页 + 可选的一条详情。
+ *
+ * `sessions` 只含 `finished` / `discarded`（**不依赖** `attention_overview`；正在计时与
+ * `recovering` 的会话在这里看不到，它们归计时区与恢复页），窗口是半开
+ * `[from, to)`、按 `(started_at, id)` 升序。它是**这一页**，不是「窗口内的总数」——
+ * 响应里没有 `total`（形状由计划钉死）：取满 `limit` 条就说明还可能有下一页。
+ * `selected` 是显式指名的那条会话；指名一个不存在的 id 只是 `null`，不是错误。
+ */
+export interface HistoryView {
+  sessions: SessionRow[];
+  selected: HistoryDetail | null;
+  data_epoch: string;
+  revision: number;
+}
+
 /** 一个被请求目标的版本。 */
 export interface RecordVersion {
   kind: AuthorityKind;
@@ -729,7 +860,10 @@ export interface ResumeRequest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 请求 DTO：恢复与历史（P8 Task 2a 的五条写命令）
+// 请求 DTO：恢复与历史（P8 Task 2a 的五条写命令 + Task 2b 的 `history_view`）
+//
+// 命令 6/7/8 的请求就是 {@link EpochRequest}（只带库身份）：服务层的
+// `AcceptClockCorrectionRequest` 没有 `Deserialize`，命令层不为它另造单字段镜像。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -828,4 +962,28 @@ export interface TransitionTaskRequest {
   expected_row_version: number;
   target: TaskStatus;
   cause: TransitionCause;
+}
+
+/**
+ * `history_view`（P8 Task 2b，命令 13）：半开窗口 `[from, to)` + 分页窗口 + 可选详情。
+ *
+ * 前五个标量都是**必填**（与其余命令的 epoch/版本同一口径）：省略 `from`/`to` 不是
+ * 「全窗口」，而是传输层错误——历史页永远有一个正在看的范围。`limit` 只能在
+ * `1..=100`、`offset >= 0`，越界由服务层拒绝（`DOMAIN_ERROR`），**不静默截断**。
+ *
+ * `session_id` 是唯一的**可选**字段（Rust 侧 `Option<String>`）：省略 / `null`
+ * = 只要列表；给了就额外返回那条会话的详情。写法与同文件的 `CorrectRequest.reason?`
+ * 同一姿势。
+ */
+export interface HistoryQuery {
+  expected_data_epoch: string;
+  /** 窗口下界（含），Unix 毫秒。 */
+  from: number;
+  /** 窗口上界（**不含**），Unix 毫秒。 */
+  to: number;
+  /** 每页条数，1..=100。 */
+  limit: number;
+  /** 跳过条数，>= 0。 */
+  offset: number;
+  session_id?: string | null;
 }

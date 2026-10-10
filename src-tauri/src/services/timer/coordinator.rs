@@ -1471,7 +1471,11 @@ pub struct AcceptClockCorrectionRequest {
 ///
 /// `accepted == false` 表示**没有**待接受的校正：幂等零变化，这时 `revision` /
 /// `data_epoch` 是这次读到（或写事务里读回）的权威值，库一个字节都没改。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`（P8 Task 2b）：**它就是命令 6 `accept_detected_clock_correction` 的响应
+/// DTO**（`commands::accept_detected_clock_correction_impl` 原样返回它），所以不在命令层
+/// 另造一份镜像字段表——来由与 [`crate::storage::task_repo::TaskRow`] 逐字相同。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ClockCorrectionAccepted {
     pub accepted: bool,
     pub data_epoch: String,

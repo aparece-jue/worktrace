@@ -195,3 +195,30 @@ pub enum SessionAttention {
     /// 不变量损坏：**禁止自动修复**，需要诊断。不能与普通待确认混为一谈。
     InvariantBroken,
 }
+
+impl SessionAttention {
+    /// IPC/JSON 形状：小写下划线（与 `SessionState` 的落库字符串同一风格）。
+    ///
+    /// 它不是落库枚举（`work_session` 里没有这一列，它由扫描算出来），所以取值
+    /// **只在这一处定义**：前端据它决定「待确认」还是「损坏」两块界面。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::NeedsReview => "needs_review",
+            Self::InvariantBroken => "invariant_broken",
+        }
+    }
+}
+
+/// IPC/JSON 形状：就是 [`SessionAttention::as_str`] 那套小写字符串。
+///
+/// 手写而不是派生，理由与 [`SessionState`] / [`SessionMode`] / [`TimerKind`] 的实现
+/// 逐字相同。P8 Task 2b 起它随 [`AttentionOverview`] 进 IPC 响应
+/// （`attention_overview` 的列表项带 `attention` 这一位）。
+///
+/// [`AttentionOverview`]: crate::services::recovery::AttentionOverview
+impl serde::Serialize for SessionAttention {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}

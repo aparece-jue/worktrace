@@ -1,4 +1,4 @@
-//! P7 Task 1 fix round 1（评审 I6）：**30 条命令体逐条覆盖**。
+//! P7 Task 1 fix round 1（评审 I6）：**34 条命令体逐条覆盖**。
 //!
 //! `#[tauri::command]` 生成的包装（`spawn_blocking` + `State`）要 Tauri 运行时才能调，
 //! 所以本文件调的是 `commands::*_impl`——命令体本身：解析请求 → 调服务 → 返回响应。
@@ -33,14 +33,15 @@ use std::sync::{Arc, Mutex};
 use worktrace_lib::commands::{
     self, ArchiveProjectRequest, BackfillRequest, ClarifyReadyRequest, ConfirmedRangeRequest,
     CorrectRequest, CreateProjectRequest, CreateTagRequest, CreateTaskRequest,
-    DiscardSessionRequest, EpochRequest, ListProjectsRequest, ListTagsRequest, PlanMutationRequest,
-    ReconcileRequest, RenameProjectRequest, SetTaskProjectRequest, StartTimerRequest,
-    TaskTagRequest, TaskTagsRequest, TransitionTaskRequest,
+    DiscardSessionRequest, EpochRequest, HistoryQuery, ListProjectsRequest, ListTagsRequest,
+    PlanMutationRequest, ReconcileRequest, RenameProjectRequest, SetTaskProjectRequest,
+    StartTimerRequest, TaskTagRequest, TaskTagsRequest, TransitionTaskRequest,
 };
-use worktrace_lib::domain::session::{SessionMode, SessionState, TimerKind};
+use worktrace_lib::domain::session::{SessionAttention, SessionMode, SessionState, TimerKind};
 use worktrace_lib::domain::task::TaskStatus;
 use worktrace_lib::error::AppError;
-use worktrace_lib::platform::clock::FakeClock;
+use worktrace_lib::platform::clock::{Clock, ClockSample, FakeClock, SampleError};
+use worktrace_lib::services::backup::begin_restore;
 use worktrace_lib::services::bootstrap::{
     lock_app, startup, AppGuard, AppState, NoProbe, RunningApp, Startup, StartupConfig,
 };
@@ -101,22 +102,40 @@ struct Shell {
     running: Box<RunningApp>,
     sink: Arc<RecordingSink>,
     epoch: String,
+    /// 会走的时钟（P8 Task 2b）。绝大多数用例把它冻在 `WALL` 上；只有需要**注入异常**
+    /// 或造出**有真实时长的会话**的用例才推进它（`FakeClock` 自己不共享，所以包一层
+    /// [`ShellClock`]）。
+    clock: Arc<Mutex<FakeClock>>,
+}
+
+/// 共享的假时钟：`startup` 拿的是 `Box<dyn Clock>`，而用例还要能从外面推进时间。
+struct ShellClock {
+    inner: Arc<Mutex<FakeClock>>,
+}
+
+impl Clock for ShellClock {
+    fn sample(&self) -> Result<ClockSample, SampleError> {
+        self.inner.lock().unwrap().sample()
+    }
 }
 
 fn launch() -> Shell {
     let recorder = Arc::new(RecordingSink::default());
-    let (dir, running) = launch_with(Arc::clone(&recorder) as Arc<dyn EventSink>);
+    let (dir, running, clock) = launch_with(Arc::clone(&recorder) as Arc<dyn EventSink>);
     let epoch = running.data_epoch().to_string();
     Shell {
         _dir: dir,
         running,
         sink: recorder,
         epoch,
+        clock,
     }
 }
 
 /// 起一个真应用，用调用方给的出口（记录型 / 失败型都能起）。
-fn launch_with(sink: Arc<dyn EventSink>) -> (tempfile::TempDir, Box<RunningApp>) {
+fn launch_with(
+    sink: Arc<dyn EventSink>,
+) -> (tempfile::TempDir, Box<RunningApp>, Arc<Mutex<FakeClock>>) {
     let dir = tempfile::tempdir().unwrap();
     let db_path: PathBuf = dir.path().join("worktrace.db");
     let lock_path: PathBuf = dir.path().join("instance.lock");
@@ -159,9 +178,12 @@ fn launch_with(sink: Arc<dyn EventSink>) -> (tempfile::TempDir, Box<RunningApp>)
 
     let mut config = StartupConfig::new(&db_path, &lock_path);
     config.sampling_interval_ms = 3_600_000;
+    let clock = Arc::new(Mutex::new(FakeClock::new(WALL, 0)));
     let running = match startup(
         config,
-        Box::new(FakeClock::new(WALL, 0)),
+        Box::new(ShellClock {
+            inner: Arc::clone(&clock),
+        }),
         sink,
         &NoProbe,
         &|| -> Result<(), AppError> { Ok(()) },
@@ -171,7 +193,7 @@ fn launch_with(sink: Arc<dyn EventSink>) -> (tempfile::TempDir, Box<RunningApp>)
         Startup::Running(running) => running,
         Startup::AlreadyRunning { .. } => panic!("测试进程应当是唯一实例"),
     };
-    (dir, running)
+    (dir, running, clock)
 }
 
 impl Shell {
@@ -183,6 +205,59 @@ impl Shell {
     fn events(&self) -> Vec<EventEnvelope> {
         self.sink.events()
     }
+
+    /// 两个时钟一起走：正常流逝，不触发任何异常判定。
+    fn advance(&self, ms: i64) {
+        self.clock.lock().unwrap().advance_both(ms);
+    }
+
+    /// 只推进挂钟：模拟用户改了系统时间（异常检测的输入）。
+    fn advance_wall_only(&self, ms: i64) {
+        self.clock.lock().unwrap().advance_wall(ms);
+    }
+
+    /// 当前挂钟读数：用它把「窗口边界」写成**精确**的毫秒值（不猜、不四舍五入）。
+    fn wall_now(&self) -> i64 {
+        self.clock.lock().unwrap().wall_ms()
+    }
+}
+
+/// 只带库身份的请求（命令 6/7/8 共用；形状就是 [`EpochRequest`]）。
+fn epoch_request(shell: &Shell) -> EpochRequest {
+    EpochRequest {
+        expected_data_epoch: shell.epoch.clone(),
+    }
+}
+
+/// `time_edit` 里某会话的审计条数（只读断言用）。
+fn edit_count(state: &AppState, session_id: &str) -> i64 {
+    scalar(
+        state,
+        &format!("SELECT COUNT(*) FROM time_edit WHERE session_id = '{session_id}'"),
+    )
+}
+
+/// 让 `time_edit` 的插入失败：命令的写入与审计同一事务 ⇒ 失败必须整体回滚，
+/// 协调器因此进故障态（形状抄 `tests/exception_closure.rs` 的同名夹具）。
+fn reject_time_edit_writes(state: &AppState) {
+    state
+        .db()
+        .unwrap()
+        .connection()
+        .execute_batch(
+            "CREATE TRIGGER reject_time_edit BEFORE INSERT ON time_edit
+             BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END;",
+        )
+        .unwrap();
+}
+
+fn allow_time_edit_writes(state: &AppState) {
+    state
+        .db()
+        .unwrap()
+        .connection()
+        .execute_batch("DROP TRIGGER reject_time_edit;")
+        .unwrap();
 }
 
 fn scalar(state: &AppState, sql: &str) -> i64 {
@@ -2039,6 +2114,657 @@ fn transition_task_impl_moves_the_task_and_ends_its_running_session() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 恢复的读取与重试（命令 6/7/8）、历史读取（命令 13）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 把一个「**已检测但未接受**」的墙钟校正推出来，返回会话 id。
+///
+/// 两步（形状抄 `tests/exception_closure.rs` 的同名夹具）：① 长间隔先让会话按异常隔离成
+/// `recovering`（`Suspended` 不是墙钟校正、不置标记）；② 在 `recovering` 里再观察一次
+/// 挂钟异常——**只有那个分支**会置「未接受」标记。
+fn flag_unaccepted_clock_correction(shell: &Shell, state: &mut AppState) -> String {
+    let started = commands::start_timer_impl(
+        state,
+        shell.running.broadcaster(),
+        start_request(shell, "t1"),
+    )
+    .unwrap();
+    let session_id = started.snapshot.session_id.clone().expect("应当有会话");
+    shell.advance(129_000);
+    commands::timer_snapshot_impl(state).unwrap();
+    assert_eq!(
+        text_of(
+            state,
+            &format!("SELECT state FROM work_session WHERE id = '{session_id}'")
+        ),
+        "recovering",
+        "长间隔必须先按异常隔离"
+    );
+    shell.advance_wall_only(31_000);
+    commands::timer_snapshot_impl(state).unwrap();
+    session_id
+}
+
+/// `accept_detected_clock_correction`（命令 6）：只转发 epoch，服务的三种结果原样透传。
+///
+/// 「没有待接受的校正」是**幂等零变化**这条正常路径（不是失败）；旧 epoch 在只读预检里
+/// 就被拒（不采样、不写）；真有一次已检测的校正时，响应自带权威 `data_epoch`/`revision`，
+/// 审计**恰好**多一条，并**恰好广播一条** `domain.changed`（写命令口径：1–6 按服务层的
+/// 实际变更决定版本推进与广播）——`accepted == false` 的那两次**一条都不许发**。
+#[test]
+fn accept_detected_clock_correction_impl_forwards_the_epoch_and_reports_the_flag() {
+    let shell = launch();
+    let mut state = shell.state();
+
+    // ① 干净库 + 冻结时钟 ⇒ 判决 `Trusted`，没有待接受的校正：零变化 ⇒ **零广播**
+    //    （`revision` 是跨窗口水位，只推版本不广播会把别的窗口逼去白跑一次 Resync）。
+    let revision_before = revision_of(&state);
+    let clean = commands::accept_detected_clock_correction_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        epoch_request(&shell),
+    )
+    .unwrap();
+    assert!(!clean.accepted, "没有检测到校正时 accepted 必须是 false");
+    assert_eq!(clean.data_epoch, shell.epoch, "无操作路径也给权威库身份");
+    assert_eq!(clean.revision, revision_before, "无操作路径不动版本");
+    assert_eq!(revision_of(&state), revision_before, "一个字节都不写");
+    assert_eq!(
+        shell.events().len(),
+        0,
+        "无操作路径不广播：{:?}",
+        shell.events()
+    );
+
+    // ② 旧 epoch ⇒ 预检先拒（`DATA_EPOCH_MISMATCH`），仍然零写入、零广播。
+    let stale = commands::accept_detected_clock_correction_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        EpochRequest {
+            expected_data_epoch: "epoch-of-another-database".to_string(),
+        },
+    )
+    .expect_err("旧 epoch 必须被拒");
+    assert_code(&stale, "DATA_EPOCH_MISMATCH");
+    assert_eq!(revision_of(&state), revision_before);
+    assert_eq!(shell.events().len(), 0, "被拒的命令一条都不发");
+
+    // ③ 已检测但未接受 ⇒ `accepted == true`：审计先提交，版本恰好 +1，标记随后才清，
+    //    并**恰好一条**广播（载荷就是这次响应，信封带同一次提交的 epoch/revision/at）。
+    let session_id = flag_unaccepted_clock_correction(&shell, &mut state);
+    let edits_before = edit_count(&state, &session_id);
+    let revision_before = revision_of(&state);
+    let events_before = shell.events().len();
+    let accepted = commands::accept_detected_clock_correction_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        epoch_request(&shell),
+    )
+    .unwrap();
+    assert!(accepted.accepted, "这一次真的有东西可接受");
+    assert_eq!(accepted.data_epoch, shell.epoch);
+    assert_eq!(
+        accepted.revision,
+        revision_before + 1,
+        "一次接受恰好一次版本"
+    );
+    assert_eq!(edit_count(&state, &session_id), edits_before + 1);
+    assert_eq!(
+        text_of(
+            &state,
+            &format!(
+                "SELECT reason FROM time_edit WHERE session_id = '{session_id}'
+                   ORDER BY created_at DESC, id DESC LIMIT 1"
+            )
+        ),
+        "clock_correction:accepted",
+        "接受写的是审计（不是会话事实）"
+    );
+    let events = shell.events();
+    assert_eq!(
+        events.len(),
+        events_before + 1,
+        "改过库（`accepted == true`）就必须广播恰好一条：{events:?}"
+    );
+    let event = events.last().unwrap();
+    assert_eq!(event.event, "domain.changed");
+    assert_eq!(event.revision, accepted.revision);
+    assert_eq!(event.data_epoch, accepted.data_epoch);
+    assert_eq!(
+        event.payload,
+        serde_json::to_value(&accepted).unwrap(),
+        "载荷就是这次命令的响应 DTO"
+    );
+
+    // ④ 标记已清 ⇒ 又回到幂等零变化：不写第二条审计、不动版本、**不再广播**。
+    let again = commands::accept_detected_clock_correction_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        epoch_request(&shell),
+    )
+    .unwrap();
+    assert!(!again.accepted);
+    assert_eq!(again.revision, accepted.revision);
+    assert_eq!(edit_count(&state, &session_id), edits_before + 1);
+    assert_eq!(
+        shell.events().len(),
+        events_before + 1,
+        "`accepted == false` 一条都不发：{:?}",
+        shell.events()
+    );
+}
+
+/// `retry_recovery`（命令 7）：请求里的 `&str` 是 **epoch**（不是 run_id）；故障没排掉时
+/// 重试**不清故障也不写**；排掉之后那笔恢复事务提交一次、返回**提交后**的权威快照。
+///
+/// 维护态那一半单独钉：**命令体自己**（`AppState::retry_recovery` 的第一行）也过门禁，
+/// 不能只靠包装那一层（`run_command` 的 `guard_writable`）。
+#[test]
+fn retry_recovery_impl_clears_the_fault_only_after_a_successful_commit() {
+    let shell = launch();
+    let mut state = shell.state();
+
+    // ① 旧 epoch ⇒ 只读预检先拒（不进协调器、不采样）。
+    let stale = commands::retry_recovery_impl(
+        &mut state,
+        EpochRequest {
+            expected_data_epoch: "epoch-of-another-database".to_string(),
+        },
+    )
+    .expect_err("旧 epoch 必须被拒");
+    assert_code(&stale, "DATA_EPOCH_MISMATCH");
+
+    // ② 把协调器推进故障态：异常事务在写审计那一步失败（触发器），整笔回滚。
+    let started = commands::start_timer_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        start_request(&shell, "t1"),
+    )
+    .unwrap();
+    let session_id = started.snapshot.session_id.clone().expect("应当有会话");
+    shell.advance(1_000);
+    reject_time_edit_writes(&state);
+    shell.advance_wall_only(31_000);
+    let error = commands::timer_snapshot_impl(&mut state).expect_err("异常事务提交不了必须报错");
+    assert_code(&error, "RECOVERY_REQUIRED");
+    assert!(
+        state.coordinator().unwrap().is_faulted(),
+        "异常事务失败必须进故障态"
+    );
+    let revision_before = revision_of(&state);
+
+    // ③ 故障原因还在 ⇒ 重试仍然失败、**故障不清**、零写入（不前进版本）。
+    let failed = commands::retry_recovery_impl(&mut state, epoch_request(&shell))
+        .expect_err("故障未排掉时重试必须失败");
+    assert_code(&failed, "RECOVERY_REQUIRED");
+    assert!(
+        state.coordinator().unwrap().is_faulted(),
+        "重试失败不得清故障——否则坏事实会在下一拍被当成好事实"
+    );
+    assert_eq!(revision_of(&state), revision_before, "重试失败零写入");
+
+    // ④ 排障之后重试：恢复事务提交一次，故障清除，返回**提交后**的快照。
+    allow_time_edit_writes(&state);
+    let snapshot = commands::retry_recovery_impl(&mut state, epoch_request(&shell)).unwrap();
+    assert!(!state.coordinator().unwrap().is_faulted());
+    assert_eq!(snapshot.data_epoch, shell.epoch);
+    assert_eq!(
+        snapshot.revision,
+        revision_before + 1,
+        "恢复事务恰好一次版本"
+    );
+    assert_eq!(snapshot.session_id.as_deref(), Some(session_id.as_str()));
+    assert_eq!(
+        snapshot.state,
+        Some(SessionState::Recovering),
+        "异常事实被隔离，不是被当成好事实"
+    );
+
+    // ⑤ 再点一次「重试」：没有故障、没有待提交的事务 ⇒ 这条命令**不保证**每次推进
+    //    `revision`（它保证的只是「返回提交后的权威快照」）。冻结时钟下这一拍确实不写。
+    let again = commands::retry_recovery_impl(&mut state, epoch_request(&shell)).unwrap();
+    assert_eq!(again.revision, snapshot.revision, "无变化的一拍不加版本");
+    assert_eq!(again.session_id, snapshot.session_id);
+
+    // ⑥ 维护态 ⇒ `DATA_RESTORE_IN_PROGRESS`：门禁也在**命令体**那一层。
+    let epoch = shell.epoch.clone();
+    drop(state);
+    let runtime = begin_restore(shell.running.app()).expect("进入维护态并取走运行态");
+    let mut state = shell.state();
+    let refused = commands::retry_recovery_impl(
+        &mut state,
+        EpochRequest {
+            expected_data_epoch: epoch,
+        },
+    )
+    .expect_err("维护态必须拒绝");
+    assert_code(&refused, "DATA_RESTORE_IN_PROGRESS");
+    drop(state);
+    drop(runtime);
+}
+
+/// `attention_overview`（命令 8）：**只读**，三个参数由命令体自己组装
+/// （`db` + 请求里的 epoch + **协调器的 run_id**）——服务层够不着协调器，这条命令
+/// 没有 `AppState` 包装。
+#[test]
+fn attention_overview_impl_is_read_only_and_hands_over_the_current_run() {
+    let shell = launch();
+    let mut state = shell.state();
+    let run_id = current_run_id(&mut state);
+
+    // 两条需要用户处理的会话：一条属于**上一个 run**、一条属于**当前 run**。两条都是
+    // 启动扫描归一之后的形状（可信前缀 + 零长度候选 + 终点未知段）。
+    seed_old_run(&state, "run-old", T0);
+    seed_recovering_session(&state, "s-past-run", "run-old");
+    seed_recovering_session(&state, "s-current-run", &run_id);
+
+    let revision_before = revision_of(&state);
+    let events_before = shell.events().len();
+    let overview = commands::attention_overview_impl(&mut state, epoch_request(&shell)).unwrap();
+
+    assert_eq!(overview.data_epoch, shell.epoch);
+    assert_eq!(
+        overview.revision, revision_before,
+        "只读：版本位是这次读看到的"
+    );
+    assert_eq!(revision_of(&state), revision_before, "只读：一个字节都不写");
+    assert_eq!(shell.events().len(), events_before, "只读不广播");
+
+    // 列表口径：两条未结束的会话都在（故障与待确认是**全局事实**，不分 run），每条 2 条
+    // 待确认区间（零长度候选 + 终点未知段）——与 `tests/reconcile.rs` 的既有单测同口径。
+    let mut ids: Vec<&str> = overview
+        .items
+        .iter()
+        .map(|item| item.session_id.as_str())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["s-current-run", "s-past-run"]);
+    assert_eq!(overview.pending_intervals, 4);
+    assert_eq!(overview.pending_sessions, 2);
+    assert_eq!(
+        overview.fault_sessions, 0,
+        "recovering + 待确认是合法形态，不是不变量损坏"
+    );
+
+    // **run_id 真的来自协调器**：传错一个值（例如空串）`is_current_run` 就会反过来，
+    // 所以这条断言是可被打破的——它钉的正是「命令体自己组装三个参数」。
+    let current = overview
+        .items
+        .iter()
+        .find(|item| item.session_id == "s-current-run")
+        .expect("当前 run 的会话要在列表里");
+    assert!(current.is_current_run);
+    assert_eq!(current.attention, SessionAttention::NeedsReview);
+    assert_eq!(current.state, SessionState::Recovering);
+    let past = overview
+        .items
+        .iter()
+        .find(|item| item.session_id == "s-past-run")
+        .expect("别的 run 的会话要在列表里");
+    assert!(!past.is_current_run);
+
+    // 「转发到了同一个函数」：与直接调自由函数的结果逐字段相同。
+    //
+    // ⚠️ **这是回归绊线，不是当前行为的证据**（与 `tests/ipc_snapshots.rs` 里
+    // `the_tick_payload_is_exactly_the_timer_snapshot_json` 同一性质）：两边今天都走
+    // 同一个函数，所以它恒真；谁把命令体改成自己拼 DTO、或换掉三个参数里的任何一个，
+    // 这里立刻红。
+    let direct = worktrace_lib::services::recovery::attention_overview(
+        state.db().unwrap(),
+        &shell.epoch,
+        &run_id,
+    )
+    .unwrap();
+    assert_eq!(overview, direct);
+}
+
+/// 一条**有真实时长**的 `finished` 会话（前台 start → 时钟走 `span_ms` → finish）。
+///
+/// 既有的 [`finished_session`] 把时钟冻在 `WALL` 上：start 紧接着 finish 会得到
+/// **零长度**记录——那是历史窗口的另一个分支（`history_sessions` 的零长度点分支），
+/// 这里要的是普通记录，所以单独一个夹具、不动既有那个。
+fn finished_session_spanning(
+    state: &mut AppState,
+    shell: &Shell,
+    task_id: &str,
+    span_ms: i64,
+) -> (String, String, i64) {
+    // 任务版本是**活的**：`start` 会把 `Ready → Doing`（版本 +1），所以同一个任务
+    // 连续 start 两次不能都拿 `start_request` 里那个写死的 0——读当前值。
+    let task_version = scalar(
+        state,
+        &format!("SELECT row_version FROM task WHERE id = '{task_id}'"),
+    );
+    let mut request = start_request(shell, task_id);
+    request.task_expected_version = task_version;
+    let started = commands::start_timer_impl(state, shell.running.broadcaster(), request).unwrap();
+    let session_id = started.snapshot.session_id.clone().expect("应当有会话");
+    shell.advance(span_ms);
+    let finished = commands::finish_timer_impl(
+        state,
+        shell.running.broadcaster(),
+        SessionRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            session_id: session_id.clone(),
+            session_expected_version: started.snapshot.session_version.unwrap(),
+        },
+    )
+    .unwrap();
+    let interval_id = text_of(
+        state,
+        &format!("SELECT id FROM work_interval WHERE session_id = '{session_id}'"),
+    );
+    (
+        session_id,
+        interval_id,
+        finished.snapshot.session_version.unwrap(),
+    )
+}
+
+/// 一次历史查询（`session_id` 缺省 = 只要列表）。
+fn history_query(
+    shell: &Shell,
+    from: i64,
+    to: i64,
+    limit: i64,
+    offset: i64,
+    session_id: Option<&str>,
+) -> HistoryQuery {
+    HistoryQuery {
+        expected_data_epoch: shell.epoch.clone(),
+        from,
+        to,
+        limit,
+        offset,
+        session_id: session_id.map(str::to_string),
+    }
+}
+
+/// `history_view`（命令 13）：常规历史只覆盖 `finished` / `discarded`，窗口与分页在同一
+/// 读事务里；详情带**全部**区间与审计，`row_version` 就是库里的真实值（可以直接喂给
+/// 下一条 `correct`）。
+#[test]
+fn history_view_impl_pages_the_window_and_returns_a_real_row_version() {
+    let shell = launch();
+    let mut state = shell.state();
+
+    // 三条终态会话，时间上依次排开（时钟会走）：
+    //   s-old  窗口**之前**（只用来钉 `from`/`to` 过滤）；
+    //   s-fin  窗口内的 `finished`；
+    //   s-dis  窗口内的 `discarded`（整次作废）。
+    // 窗口是半开 `[from, to)`：`s-old` 的 `ended_at` 恰好等于 `from`（端点相接不算）。
+    let (s_old, _i_old, _v_old) = finished_session_spanning(&mut state, &shell, "t1", 10_000);
+    let window_from = shell.wall_now();
+    let (s_fin, i_fin, _v_fin) = finished_session_spanning(&mut state, &shell, "t1", 60_000);
+    let fin_end = shell.wall_now();
+    let (s_dis, _i_dis, _v_dis) = finished_session_spanning(&mut state, &shell, "t3", 30_000);
+    let dis_end = shell.wall_now();
+    let dis_version = scalar(
+        &state,
+        &format!("SELECT row_version FROM work_session WHERE id = '{s_dis}'"),
+    );
+    commands::discard_session_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        DiscardSessionRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            session_id: s_dis.clone(),
+            expected_row_version: dis_version,
+        },
+    )
+    .unwrap();
+    let window_to = dis_end + 1;
+
+    // ── 纯读阶段：窗口过滤、分页、两种拒绝，且**版本与事件一个都不动** ────────────
+    let revision_before = revision_of(&state);
+    let events_before = shell.events().len();
+
+    // `to` 是**不含**的上界：窗口 [from, fin_end) 里只有 s-fin（s-dis 的 started_at
+    // 恰好等于 fin_end，而 s-old 的 ended_at 恰好等于 from）。
+    let upper = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, fin_end, 10, 0, None),
+    )
+    .unwrap();
+    assert_eq!(ids_of(&upper), [s_fin.as_str()]);
+    assert_eq!(upper.sessions[0].state, SessionState::Finished);
+
+    // 全窗口：finished 与 discarded **都在**，按 `(started_at, id)` 升序。
+    let window = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 10, 0, None),
+    )
+    .unwrap();
+    assert_eq!(ids_of(&window), [s_fin.as_str(), s_dis.as_str()]);
+    assert_eq!(
+        window.sessions[1].state,
+        SessionState::Discarded,
+        "常规历史覆盖 finished/discarded，不依赖 attention_overview"
+    );
+    assert_eq!(window.data_epoch, shell.epoch);
+    assert_eq!(
+        window.revision, revision_before,
+        "只读：版本位是这次读看到的"
+    );
+    assert!(window.selected.is_none(), "没给 session_id 就不取详情");
+
+    // 分页窗口：`limit`/`offset` 是**这一页**的窗口，不是「总数」。
+    let first_page = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 1, 0, None),
+    )
+    .unwrap();
+    assert_eq!(ids_of(&first_page), [s_fin.as_str()]);
+    let second_page = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 1, 1, None),
+    )
+    .unwrap();
+    assert_eq!(ids_of(&second_page), [s_dis.as_str()]);
+    let past_the_end = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 1, 2, None),
+    )
+    .unwrap();
+    assert!(past_the_end.sessions.is_empty(), "越过后一页就是空页");
+
+    // 分页越界与窗口形状：都在服务层被拒（命令层不复制这两条规则）。
+    let bad_limit = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 0, 0, None),
+    )
+    .expect_err("limit 必须落在 1..=100");
+    assert_code(&bad_limit, "DOMAIN_ERROR");
+    let bad_offset = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 10, -1, None),
+    )
+    .expect_err("offset 不能是负数");
+    assert_code(&bad_offset, "DOMAIN_ERROR");
+    let bad_window = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_to, window_from, 10, 0, None),
+    )
+    .expect_err("from > to 必须被拒");
+    assert_code(&bad_window, "DOMAIN_ERROR");
+
+    // 详情：指名一个不存在的 id **不是错误**（只是 `None`）；指名一条窗口外的会话也
+    // 照样给详情（详情按 id 取，不按窗口过滤）。
+    let unknown = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 10, 0, Some("s-unknown")),
+    )
+    .unwrap();
+    assert!(unknown.selected.is_none());
+    let outside = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 10, 0, Some(&s_old)),
+    )
+    .unwrap();
+    assert_eq!(
+        outside
+            .selected
+            .as_ref()
+            .map(|detail| detail.session.id.as_str()),
+        Some(s_old.as_str())
+    );
+    assert_eq!(
+        ids_of(&outside),
+        [s_fin.as_str(), s_dis.as_str()],
+        "窗口列表不受详情影响（详情是额外的一格，不是筛选）"
+    );
+
+    // 旧 epoch ⇒ `DATA_EPOCH_MISMATCH`；只读阶段的每一次调用都不动版本、不广播。
+    let stale = commands::history_view_impl(
+        &mut state,
+        HistoryQuery {
+            expected_data_epoch: "epoch-of-another-database".to_string(),
+            ..history_query(&shell, window_from, window_to, 10, 0, None)
+        },
+    )
+    .expect_err("旧 epoch 必须被拒");
+    assert_code(&stale, "DATA_EPOCH_MISMATCH");
+    assert_eq!(revision_of(&state), revision_before, "只读阶段零写入");
+    assert_eq!(
+        shell.events().len(),
+        events_before,
+        "读命令不广播 domain.changed"
+    );
+
+    // ── 详情带审计与真实版本 ────────────────────────────────────────────────────
+    // 先给 s-fin 留一条审计（重定时：起止一起改，时长跟着变）。
+    let fin_version = scalar(
+        &state,
+        &format!("SELECT row_version FROM work_session WHERE id = '{s_fin}'"),
+    );
+    commands::correct_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        CorrectRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            session_id: s_fin.clone(),
+            expected_row_version: fin_version,
+            interval_id: i_fin.clone(),
+            action: "retime".to_string(),
+            started_at: Some(window_from),
+            ended_at: Some(fin_end - 5_000),
+            reason: Some("历史页详情用例".to_string()),
+        },
+    )
+    .unwrap();
+    let fin_version_after_retime = scalar(
+        &state,
+        &format!("SELECT row_version FROM work_session WHERE id = '{s_fin}'"),
+    );
+    assert_eq!(
+        fin_version_after_retime,
+        fin_version + 1,
+        "一次真实修正把所属会话的版本 +1（区间没有独立版本列）"
+    );
+
+    let detail = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 10, 0, Some(&s_fin)),
+    )
+    .unwrap();
+    let selected = detail.selected.expect("给了 session_id 就要有详情");
+    assert_eq!(selected.session.id, s_fin);
+    assert_eq!(
+        selected.session.row_version, fin_version_after_retime,
+        "详情里的 row_version 就是库里的真实值（界面直接拿它去 correct）"
+    );
+    assert_eq!(selected.intervals.len(), 1, "详情带该会话**全部**区间");
+    assert_eq!(selected.intervals[0].id, i_fin);
+    assert_eq!(selected.edits.len(), 1, "详情带该会话**全部**审计");
+    assert_eq!(selected.edits[0].reason.as_deref(), Some("correct:retime"));
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&selected.edits[0].after_json).is_ok(),
+        "审计的两个 JSON 列原样交给前端（它自己按 change 键解析）"
+    );
+
+    // 拿**详情里返回的那个版本**直接写下一步：能成功就证明它不是编出来的。
+    commands::correct_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        CorrectRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            session_id: s_fin.clone(),
+            expected_row_version: selected.session.row_version,
+            interval_id: selected.intervals[0].id.clone(),
+            action: "delete".to_string(),
+            started_at: None,
+            ended_at: None,
+            reason: Some("第二次修正：用详情里的真实版本".to_string()),
+        },
+    )
+    .expect("详情里的 row_version 必须可用");
+
+    // 软删除之后**行还在**：详情照样能看到它（`voided_at` 非空），审计变成两条。
+    let after_delete = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 10, 0, Some(&s_fin)),
+    )
+    .unwrap();
+    let selected = after_delete.selected.expect("会话还在");
+    assert_eq!(selected.edits.len(), 2);
+    assert_eq!(
+        selected.intervals.len(),
+        1,
+        "作废是软删除：区间行还在详情里"
+    );
+    assert!(selected.intervals[0].voided_at.is_some());
+
+    // ── 零长度记录也进窗口（半开窗口的「那个点」那一支） ────────────────────────
+    // 统计口径把零长度区间排除在外（「空区间不占时间」），而**记录列表**不能把一条真实
+    // 记录从窗口里藏掉：`start` 紧接着 `finish`（时钟不走）的会话就是零长度的。
+    // 先走 1 秒，把这条挪到上面那个窗口之外，免得它混进那两条列表断言。
+    shell.advance(1_000);
+    let (s_zero, _i_zero, _v_zero) = finished_session_spanning(&mut state, &shell, "t2", 0);
+    let zero_at = shell.wall_now();
+    let at_the_point = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, zero_at, zero_at + 1, 10, 0, None),
+    )
+    .unwrap();
+    assert_eq!(
+        ids_of(&at_the_point),
+        [s_zero.as_str()],
+        "零长度会话按「那个点落在窗口内」算（`from == ended_at` 也在内）"
+    );
+    let after_the_point = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, zero_at + 1, zero_at + 2, 10, 0, None),
+    )
+    .unwrap();
+    assert!(
+        after_the_point.sessions.is_empty(),
+        "半开窗口：点落在 `from` 之前不算"
+    );
+
+    // ── 恢复面不进常规历史 ─────────────────────────────────────────────────────
+    let run_id = current_run_id(&mut state);
+    seed_recovering_session(&state, "s-recovering", &run_id);
+    let listed = commands::history_view_impl(
+        &mut state,
+        history_query(&shell, window_from, window_to, 10, 0, None),
+    )
+    .unwrap();
+    assert_eq!(
+        ids_of(&listed),
+        [s_fin.as_str(), s_dis.as_str()],
+        "recovering 不在常规历史里（它归恢复页）"
+    );
+}
+
+/// 会话列表的 id（断言用；顺序即列表顺序）。
+fn ids_of(view: &worktrace_lib::services::history::HistoryView) -> Vec<&str> {
+    view.sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 计时
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2425,7 +3151,7 @@ fn an_idempotent_write_broadcasts_nothing() {
 #[test]
 fn a_failed_broadcast_keeps_the_command_successful_and_counts_a_diagnostic() {
     let failing = Arc::new(FailingSink::default());
-    let (_dir, running) = launch_with(Arc::clone(&failing) as Arc<dyn EventSink>);
+    let (_dir, running, _clock) = launch_with(Arc::clone(&failing) as Arc<dyn EventSink>);
     let epoch = running.data_epoch().to_string();
     let broadcaster = Arc::clone(running.broadcaster());
     let mut state = lock_app(running.app());

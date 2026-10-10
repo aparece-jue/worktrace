@@ -158,6 +158,11 @@ pub fn run() {
             commands::backfill,
             commands::discard_session,
             commands::transition_task,
+            // 恢复的读取与重试、历史读取（P8 Task 2b；命令 6/7/8/13）
+            commands::accept_detected_clock_correction,
+            commands::retry_recovery,
+            commands::attention_overview,
+            commands::history_view,
             // 计时（P2）
             commands::timer_snapshot,
             commands::timer_tick,

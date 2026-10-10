@@ -1,5 +1,9 @@
 //! 已完成历史的时间修正（P3 Task 3）：`correct`，与手工补录（P3 Task 4）：`backfill`。
 //!
+//! P8 Task 2b 在同一文件里补上历史的**读**半边：[`history_view`]（分页会话 + 可选详情）。
+//! 它是**只读**服务——不采样、不写库、不推进 `revision`、不写审计，与上面两条写命令
+//! 共用同一批仓储读函数（[`session_repo::history_sessions`] 是常规历史唯一的取数入口）。
+//!
 //! # `backfill`：把**已经发生**的人工时间补录成一条终态会话
 //!
 //! 补录不是「补一次计时」：它直接建一条 `finished` 会话与一条**可信闭合**区间
@@ -88,11 +92,12 @@ use crate::domain::session::{SessionMode, SessionState, TimerKind};
 use crate::envelope::WriteEnvelope;
 use crate::error::AppError;
 use crate::storage::db::{map_sqlite, Db};
-use crate::storage::guards::guard_row_version;
+use crate::storage::guards::{guard_epoch, guard_row_version};
+use crate::storage::meta::require_meta;
 use crate::storage::session_repo::{
     self, IntervalRow, NewFinishedSession, SessionRow, SessionStateUpdate,
 };
-use crate::storage::task_repo;
+use crate::storage::task_repo::{self, Page};
 use crate::storage::time_edit_repo::{self, TimeEdit};
 use crate::storage::WriteOutcome;
 
@@ -463,4 +468,131 @@ fn edit_json(
         json["user_reason"] = serde_json::json!(reason);
     }
     json.to_string()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 常规历史：读（P8 Task 2b）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 一次常规历史读取的请求（服务层形状；IPC 的 `HistoryQuery` 由命令层解析后传进来）。
+///
+/// `limit` / `offset` 在这里是裸整数，**由本服务**装进 [`Page`]（命令层不许碰
+/// `storage::`，见 `scripts/check-layers.ps1` 的第 1 条规则）；取值域与越界文案归
+/// [`Page`] / `task_repo::require_page`（分页规则只有一处实现）。`session_id` 是
+/// **可选详情**的键——`None` 表示只要列表。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryViewRequest {
+    /// 半开窗口的下界（含）。
+    pub from: i64,
+    /// 半开窗口的上界（**不含**）。
+    pub to: i64,
+    /// 每页条数（1..=100）。
+    pub limit: i64,
+    /// 跳过条数（>= 0）。
+    pub offset: i64,
+    /// 要展开详情的会话；`None` = 不取详情。
+    pub session_id: Option<String>,
+}
+
+/// 一个会话的**详情**：会话行 + 它**全部**区间 + 它**全部**审计。
+///
+/// 「全部」是有意的：已作废的区间与已删除的审计都留着（软删除），历史页要能看到
+/// 「这条记录被改过什么」。`session.row_version` 就是**库里的真实行版本**，**版本**可以
+/// 直接当 `correct` / `discard_session` 的 `expected_row_version` 用（不要在界面上自己
+/// 加一）；但**这两个动作是否合法要看 `session.state`**——详情对**任何状态**的会话都返回
+/// （这条读路径不判状态），而 `correct` 只接 `finished`（[`require_finished`]），
+/// `recovering` 要走 `reconcile`、`running`/`paused` 要先结束会话。界面据 `state`
+/// 决定入口开不开，别把这句读成「拿到版本就能改」。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HistoryDetail {
+    pub session: SessionRow,
+    /// 该会话的全部区间，按 `(started_at, id)` 升序（含 `voided_at` 非空的）。
+    pub intervals: Vec<IntervalRow>,
+    /// 该会话的全部审计，按 `(created_at, id)` 升序。
+    pub edits: Vec<TimeEdit>,
+}
+
+/// 历史页的一次读取结果（命令 13 的响应 DTO）。
+///
+/// `sessions` 是**窗口内的这一页**（口径见 [`session_repo::history_sessions`]：
+/// 只含 `finished`/`discarded`，半开窗口，按 `(started_at, id)` 升序）。它**不是**
+/// 「窗口内的总数」——契约形状由 P8 计划钉死（`{data_epoch, revision, sessions,
+/// selected}`），所以这里**不另加** `total` 字段；调用方按「取满了 `limit` 条 ⇒ 还
+/// 可能有下一页」翻页（`limit`/`offset` 的越界在服务层就拒绝，不静默截断）。
+///
+/// `selected` 是显式要详情的那个会话；**指名一个不存在的 id 不是错误**，只是
+/// `None`（与 [`crate::services::catalog::list_tasks_filtered`] 里「项目 ID 是直接键，
+/// 指向不存在的项目只意味着那里没有任务」同一口径）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HistoryView {
+    /// 窗口内这一页的终态会话（`finished` / `discarded`）。
+    pub sessions: Vec<SessionRow>,
+    /// 显式指名的那条会话的详情；没给或不存在时为 `None`。
+    pub selected: Option<HistoryDetail>,
+    /// 这次读看到的库身份。
+    pub data_epoch: String,
+    /// 这次读看到的业务版本。读**不**改它。
+    pub revision: i64,
+}
+
+/// 常规历史（命令 13）：窗口内的一页终态会话，外加可选的一条详情。
+///
+/// **纯读**：不开写事务、不加 `revision`、不采样、不写审计。为了「数据与元数据出自
+/// 同一个读事务」，这里显式开一个只读事务，`guard_epoch` 在事务内跑（形状抄
+/// `catalog::list_projects`）。被拒的旧 epoch **零读取、零写入**。
+///
+/// 三条口径：
+/// - **常规历史不看恢复面**：列表只覆盖 `finished` / `discarded`，`recovering` 与正在
+///   计时的会话不在这里（它们归恢复页与计时区）。这里**不调用** `attention_overview`
+///   ——它有自己的读事务，调它会让「两批事实同一个版本」变成靠纪律。
+/// - **窗口形状**由 [`IntervalRange::new`] 校验：`from > to` 报 `NegativeInterval`
+///   （`from == to` 合法，与全项目同一判据）。
+/// - **详情不按窗口过滤**：显式给了 `session_id` 就按 id 取（哪怕它不在窗口里）——
+///   界面是从列表里点的，id 与窗口本就同源；再判一次只会多一个拒绝路径。
+pub fn history_view(
+    db: &Db,
+    expected_data_epoch: &str,
+    req: HistoryViewRequest,
+) -> Result<HistoryView, AppError> {
+    // 范围形状与全项目同一判据；`from == to` 是合法的空窗口。
+    IntervalRange::new(req.from, req.to)?;
+
+    let tx = db
+        .connection()
+        .unchecked_transaction()
+        .map_err(map_sqlite)?;
+    guard_epoch(&tx, expected_data_epoch)?;
+
+    let sessions = session_repo::history_sessions(
+        &tx,
+        req.from,
+        req.to,
+        Page {
+            limit: req.limit,
+            offset: req.offset,
+        },
+    )?;
+    let selected = match req.session_id {
+        Some(session_id) => match session_repo::get_session(&tx, &session_id)? {
+            Some(session) => Some(HistoryDetail {
+                intervals: session_repo::intervals_of_session(&tx, &session_id)?,
+                edits: time_edit_repo::edits_of_session(&tx, &session_id)?,
+                session,
+            }),
+            None => None,
+        },
+        None => None,
+    };
+
+    let meta = require_meta(&tx)?;
+    // 读事务什么都没写：直接结束它（回滚一个只读事务不改变任何事实），
+    // 免得读代码的人以为这里还欠一个 `commit`。
+    drop(tx);
+
+    Ok(HistoryView {
+        sessions,
+        selected,
+        data_epoch: meta.data_epoch,
+        revision: meta.revision,
+    })
 }

@@ -1075,6 +1075,58 @@ pub fn invariant_faults_of_other_runs(
     invariant_faults(conn, Some(current_run_id))
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 常规历史（P8 Task 2b；只读）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **常规历史**的一页：`finished` / `discarded` 会话，按 `(started_at, id)` 升序。
+///
+/// 这是历史页（`history_view`）**唯一**的会话取数入口——与恢复面分开：常规历史
+/// **不依赖** `attention_overview`，也不列 `running`/`paused`/`recovering`
+/// （那三种是「还在变的事实」，归计时区与恢复页）。
+///
+/// **窗口是半开 `[from, to)`**，重叠判据与 [`intervals_overlapping`] 同一套
+/// （不新造第二份）：
+/// - `started_at < to`：半开上界（`started_at == to` 不在窗口里）；
+/// - `ended_at IS NULL`：终点未知 ⇒ 按「延伸到未来」判（与那里同一口径）；
+/// - 否则 `from < ended_at`（端点相接不算）；
+/// - **零长度会话**（`ended_at == started_at`）按 [`intervals_overlapping`] 的
+///   「那个点落在窗口内」那一支判（`from == ended_at` 也算）——与**统计**口径的差别
+///   是有意的：统计里「空区间不占时间」是对的，而**记录列表**不该把一条真实记录
+///   从窗口里藏掉。
+///
+/// 调用方保证 `from <= to`（服务层用 `IntervalRange::new` 校验）。分页规则走
+/// [`super::task_repo::require_page`]（**分页规则只有一处实现**）：越界
+/// （`limit` 不在 `1..=100`、`offset < 0`）在这里就拒绝，**不静默截断**——本函数返回
+/// 的就是「这一页」，调用方按 `limit` 是否取满决定要不要再取下一页。
+///
+/// 纯读：不开事务、不加版本、不写审计。
+pub fn history_sessions(
+    conn: &Connection,
+    from: i64,
+    to: i64,
+    page: super::task_repo::Page,
+) -> Result<Vec<SessionRow>, AppError> {
+    super::task_repo::require_page(page)?;
+    let sql = format!(
+        "{SESSION_SELECT} \
+         WHERE state IN ('finished','discarded') \
+           AND started_at < ?2 \
+           AND (ended_at IS NULL \
+                OR ?1 < ended_at \
+                OR (ended_at = started_at AND ?1 = ended_at)) \
+         ORDER BY started_at, id LIMIT ?3 OFFSET ?4"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(map_sqlite)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![from, to, page.limit, page.offset],
+            read_session,
+        )
+        .map_err(map_sqlite)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+}
+
 /// 诊断码 → 可读原因。未知码是编程错误（查询与映射表必须同步改）。
 ///
 /// `pub(crate)`（P3 Task 1）：恢复扫描在「判据之间不一致」时按第 1 类降级，要复用

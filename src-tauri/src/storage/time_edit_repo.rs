@@ -10,7 +10,11 @@ use crate::error::AppError;
 use super::db::map_sqlite;
 
 /// 一条时间修正审计。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` 的来由与 [`crate::storage::task_repo::TaskRow`] 逐字相同：
+/// `HistoryDetail.edits` 直接装它交给 IPC（P8 Task 2b 的 `history_view`），
+/// 不再在命令层复制一份字段做镜像 DTO。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TimeEdit {
     pub id: String,
     pub session_id: String,

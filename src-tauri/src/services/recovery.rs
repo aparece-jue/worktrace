@@ -110,7 +110,11 @@ pub struct StartupScanReport {
 }
 
 /// 一个需要用户（或诊断）看一眼的会话。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`（P8 Task 2b）：它是 `attention_overview` 这条 IPC 命令响应里的列表项，
+/// 直接装 [`AttentionOverview`] 交给前端，不在命令层复制一份字段做镜像 DTO——
+/// 来由与 [`crate::storage::task_repo::TaskRow`] 逐字相同。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionAttentionItem {
     pub session_id: String,
     pub task_id: String,
@@ -134,7 +138,9 @@ pub struct SessionAttentionItem {
 ///
 /// 字段与 [`IntervalRow`] 同源、同一次读事务，但按展示口径裁过：不带 `session_id`
 /// （父项里已有）与 `voided_at`（待确认集合按定义 `voided_at IS NULL`）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`（P8 Task 2b）：来由与 [`SessionAttentionItem`] 逐字相同。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PendingIntervalItem {
     pub id: String,
     pub started_at: i64,
@@ -169,7 +175,11 @@ pub struct PendingIntervalItem {
 /// **正在计时的会话不进列表**：当前 run 的 `running` 会话在既没有损坏、又没有待确认
 /// 区间时属于计时快照（`TimerSnapshot`），不属于恢复概览——两者在界面上是两块
 /// （P7 计划的「恢复提示与时钟校正」第 1 条）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`（P8 Task 2b）：**它就是命令 8 `attention_overview` 的响应 DTO**
+/// （`commands::attention_overview_impl` 原样返回它），所以不在命令层另造一份镜像
+/// 字段表——与 `stats::TodayView` 同一条口径。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AttentionOverview {
     /// 需要用户处理或诊断的会话（口径见类型文档）。
     pub items: Vec<SessionAttentionItem>,

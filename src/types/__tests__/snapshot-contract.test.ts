@@ -3,7 +3,7 @@
  *
  * ## 为什么需要这一条
  *
- * `src-tauri/tests/ipc_snapshots.rs` 只钉住 **Rust ↔ JSON**：21 份快照与 Rust 类型
+ * `src-tauri/tests/ipc_snapshots.rs` 只钉住 **Rust ↔ JSON**：24 份快照与 Rust 类型
  * 逐字节一致。手写的 `src/types/ipc.ts` 与那些快照之间**没有**机械联系——没有这条
  * 用例，「改了 Rust 类型忘了改前端类型」仍然只能靠人记得（D1 放弃 DTO 生成器之后的
  * 替代承诺就是这两条用例）。
@@ -38,6 +38,7 @@ import {
   RECONCILE_ACTIONS,
   RECONCILE_TARGET_STATES,
   CORRECT_ACTIONS,
+  SESSION_ATTENTIONS,
   SESSION_MODES,
   SESSION_STATES,
   STATS_CLASSES,
@@ -47,21 +48,27 @@ import {
   TRANSITION_CAUSES,
 } from "../ipc";
 import type {
+  AttentionOverview,
+  ClockCorrectionAccepted,
   CommandOutcome,
   CurrentTask,
   DailyPlanChange,
   DailyPlanView,
   ErrorAuthority,
   ErrorResponse,
+  HistoryDetail,
   HistoryEditReport,
+  HistoryView,
   IntervalRow,
   MeasureColumn,
+  PendingIntervalItem,
   ProjectChange,
   ProjectList,
   ProjectRow,
   ReconcileReport,
   RecordVersion,
   RevisionSnapshot,
+  SessionAttentionItem,
   SessionRow,
   StatsRange,
   TagChange,
@@ -73,6 +80,7 @@ import type {
   TaskRow,
   TaskTagsChange,
   TaskTransitionReport,
+  TimeEdit,
   TimerSnapshot,
   TodayView,
 } from "../ipc";
@@ -129,7 +137,7 @@ type Equal<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 type Expect<T extends true> = T;
 
-/** 21 个响应 DTO 的顶层键集合（照抄快照；顺序按字典序，便于与 `Object.keys().sort()` 对读）。 */
+/** 24 个响应 DTO 的顶层键集合（照抄快照；顺序按字典序，便于与 `Object.keys().sort()` 对读）。 */
 const TOP_LEVEL = {
   revision_snapshot: ["data_epoch", "revision"],
   project_list: ["data_epoch", "items", "revision"],
@@ -207,6 +215,18 @@ const TOP_LEVEL = {
     "revision",
     "task",
   ],
+  // P8 Task 2b：恢复读取 / 重试与历史读取（命令 6/8/13）。命令 7 `retry_recovery` 的
+  // 响应**就是** `TimerSnapshot`（已有两份快照），所以这里没有它自己的那一条。
+  clock_correction_accepted: ["accepted", "data_epoch", "revision"],
+  attention_overview: [
+    "data_epoch",
+    "fault_sessions",
+    "items",
+    "pending_intervals",
+    "pending_sessions",
+    "revision",
+  ],
+  history_view: ["data_epoch", "revision", "selected", "sessions"],
 } as const;
 
 /** 嵌套对象（行类型与错误上下文）的键集合。 */
@@ -278,6 +298,39 @@ const INTERVAL_ROW_KEYS = [
   "started_at",
   "voided_at",
 ] as const;
+/** `time_edit` 的一行（P8 Task 2b：历史详情带审计）。两个 JSON 列是**字符串**。 */
+const TIME_EDIT_KEYS = [
+  "after_json",
+  "before_json",
+  "created_at",
+  "id",
+  "reason",
+  "session_id",
+] as const;
+/** `attention_overview` 的列表项（P8 Task 2b）。`attention` 是 `SessionAttention`。 */
+const SESSION_ATTENTION_ITEM_KEYS = [
+  "attention",
+  "fault_reason",
+  "intervals",
+  "is_current_run",
+  "run_id",
+  "session_id",
+  "session_needs_review",
+  "session_row_version",
+  "state",
+  "task_id",
+] as const;
+/** 一条待确认区间（列表项的子项）：没有 `session_id` / `voided_at`（父项与集合口径）。 */
+const PENDING_INTERVAL_ITEM_KEYS = [
+  "duration_ms",
+  "ended_at",
+  "id",
+  "needs_review",
+  "sampled_end_wall_at",
+  "started_at",
+] as const;
+/** `history_view.selected`：会话 + **全部**区间 + **全部**审计。 */
+const HISTORY_DETAIL_KEYS = ["edits", "intervals", "session"] as const;
 
 /**
  * 编译期：声明的键集合**恰好**是 TS 接口的键集合（多一个、少一个、改个名都不行）。
@@ -307,6 +360,12 @@ export type TopLevelKeyChecks = [
   Expect<Equal<(typeof TOP_LEVEL)["backfill_report"][number], keyof HistoryEditReport>>,
   Expect<Equal<(typeof TOP_LEVEL)["discard_session_report"][number], keyof HistoryEditReport>>,
   Expect<Equal<(typeof TOP_LEVEL)["task_transition_report"][number], keyof TaskTransitionReport>>,
+  // P8 Task 2b：三个新响应类型（命令 7 复用 `TimerSnapshot`，不另登记一份）。
+  Expect<
+    Equal<(typeof TOP_LEVEL)["clock_correction_accepted"][number], keyof ClockCorrectionAccepted>
+  >,
+  Expect<Equal<(typeof TOP_LEVEL)["attention_overview"][number], keyof AttentionOverview>>,
+  Expect<Equal<(typeof TOP_LEVEL)["history_view"][number], keyof HistoryView>>,
 ];
 
 /** 编译期：嵌套对象的键集合断言（与上面同一形状）。 */
@@ -321,6 +380,11 @@ export type NestedKeyChecks = [
   Expect<Equal<(typeof CURRENT_TASK_KEYS)[number], keyof CurrentTask>>,
   Expect<Equal<(typeof SESSION_ROW_KEYS)[number], keyof SessionRow>>,
   Expect<Equal<(typeof INTERVAL_ROW_KEYS)[number], keyof IntervalRow>>,
+  // P8 Task 2b：审计行、恢复列表项（含子项）与历史详情。
+  Expect<Equal<(typeof TIME_EDIT_KEYS)[number], keyof TimeEdit>>,
+  Expect<Equal<(typeof SESSION_ATTENTION_ITEM_KEYS)[number], keyof SessionAttentionItem>>,
+  Expect<Equal<(typeof PENDING_INTERVAL_ITEM_KEYS)[number], keyof PendingIntervalItem>>,
+  Expect<Equal<(typeof HISTORY_DETAIL_KEYS)[number], keyof HistoryDetail>>,
 ];
 
 /** 嵌套对象的运行期比对表：`where` 是点分路径，`[]` 表示取数组第一项。 */
@@ -354,6 +418,14 @@ const NESTED: ReadonlyArray<{ where: string; keys: readonly string[] }> = [
   { where: "discard_session_report.session", keys: SESSION_ROW_KEYS },
   { where: "discard_session_report.interval", keys: INTERVAL_ROW_KEYS },
   { where: "task_transition_report.task", keys: TASK_ROW_KEYS },
+  // ── P8 Task 2b：恢复读取与历史读取（命令 8/13） ────────────────────────────
+  { where: "attention_overview.items[]", keys: SESSION_ATTENTION_ITEM_KEYS },
+  { where: "attention_overview.items[].intervals[]", keys: PENDING_INTERVAL_ITEM_KEYS },
+  { where: "history_view.sessions[]", keys: SESSION_ROW_KEYS },
+  { where: "history_view.selected", keys: HISTORY_DETAIL_KEYS },
+  { where: "history_view.selected.session", keys: SESSION_ROW_KEYS },
+  { where: "history_view.selected.intervals[]", keys: INTERVAL_ROW_KEYS },
+  { where: "history_view.selected.edits[]", keys: TIME_EDIT_KEYS },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -399,6 +471,9 @@ describe("快照契约", () => {
       { field: "state", domain: SESSION_STATES, label: "SessionState" },
       // P8 Task 2a 起会话行进快照 ⇒ `mode` 首次出现，取值域必须一起登记。
       { field: "mode", domain: SESSION_MODES, label: "SessionMode" },
+      // P8 Task 2b 起恢复列表项进快照 ⇒ `attention` 首次出现（它不落库，取值域只在
+      // Rust 的 `SessionAttention::as_str()` 定义一次）。
+      { field: "attention", domain: SESSION_ATTENTIONS, label: "SessionAttention" },
       { field: "class", domain: STATS_CLASSES, label: "StatsClass" },
       { field: "measure", domain: MEASURES, label: "Measure" },
       { field: "timer_kind", domain: TIMER_KINDS, label: "TimerKind" },
