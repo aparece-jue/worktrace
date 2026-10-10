@@ -10,11 +10,11 @@
  * 2. **导出失败上屏 Rust 的 message**，且屏幕上**不**留成功路径、也不打开位置；
  * 3. **能力不可用要明确**：不在 Tauri 运行时里 ⇒ "打开所在位置"**先就禁用** + 一句说明，
  *    点它也不会去打插件（不是"点了才报错"）；在 Tauri 里但 ACL 没登记 ⇒ 插件给的原因上屏
- *    并把入口锁成禁用（不静默）；
+ *    允许重试（不静默）；
  * 4. **备份成功给路径与大小**，且**版本没变不是失败**（备份不改业务事实）；
  * 5. **恢复的二次确认是硬前置**：点「恢复」只打开确认框（零命令），确认后才带
  *    `confirmed: true` 与逐字的 `backup_path`；取消 ⇒ 零命令、零错误提示；
- * 6. **恢复成功按新 `data_epoch` 重新握手**（再读一次 `get_revision`）并按新身份重读，
+ * 6. **恢复成功立即采用新 `data_epoch`**（不等待在途握手）并按新身份重读，
  *    旧库的产物从屏上消失；
  * 7. **恢复失败上屏 Rust 的 message**，不走"成功 ⇒ 重新握手"那条路（不伪装成功）；
  * 8. **维护态**：`DATA_RESTORE_IN_PROGRESS` 的文案上屏 + 三个入口按 `code` 禁用；
@@ -221,7 +221,7 @@ describe("数据页：导出（F-018）", () => {
     expect(backend.commands).not.toContain("plugin:opener|reveal_item_in_dir");
   });
 
-  it("能力未登记（Tauri 里被 ACL 拒）：插件给的原因上屏并把入口锁成禁用，不静默", async () => {
+  it("打开位置失败显示原因，允许修复后重试", async () => {
     // 反向验证：把 `catch` 里的 `setRevealError` 删掉 ⇒ 静默失败，那句 message 断言红。
     stubTauriRuntime();
     backend = createBackend();
@@ -234,7 +234,11 @@ describe("数据页：导出（F-018）", () => {
     await waitFor(() => expect(backend.count("plugin:opener|reveal_item_in_dir")).toBe(1));
 
     await waitFor(() => expect(screen.getByTestId("data-reveal-note").textContent).toBe(denied));
-    expect((screen.getByTestId("data-export-reveal") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("data-export-reveal") as HTMLButtonElement).disabled).toBe(false);
+    delete backend.fail["plugin:opener|reveal_item_in_dir"];
+    fireEvent.click(screen.getByTestId("data-export-reveal"));
+    await waitFor(() => expect(backend.count("plugin:opener|reveal_item_in_dir")).toBe(2));
+    await waitFor(() => expect(screen.queryByTestId("data-reveal-note")).toBeNull());
   });
 });
 
@@ -291,7 +295,7 @@ describe("数据页：备份与恢复（F-019）", () => {
     });
   });
 
-  it("恢复成功：按新 data_epoch 重新握手、旧库的产物不残留", async () => {
+  it("恢复成功：立即采用新 data_epoch、旧库的产物不残留", async () => {
     // 反向验证：把 `domainState.rehandshake()` 删掉 ⇒ 下面 `get_revision` 计数与新身份
     // 那两句红；把 epoch 变化的清理 effect 删掉 ⇒ 旧路径残留那句红。
     stubTauriRuntime();
@@ -306,8 +310,9 @@ describe("数据页：备份与恢复（F-019）", () => {
     await restoreWithConfirm();
     await waitFor(() => expect(backend.count("restore")).toBe(1));
 
-    // ① 用**新** data_epoch 重新握手：再读一次 get_revision
-    await waitFor(() => expect(backend.count("get_revision")).toBeGreaterThan(greetings));
+    // ① 立即采用恢复回执身份，不再发一次 get_revision
+    await waitFor(() => expect(domainState.getView().dataEpoch).toBe(RESTORE_EPOCH));
+    expect(backend.count("get_revision")).toBe(greetings);
     // ② 页面按新身份重读（不是拿旧展示继续显示）
     await waitFor(() =>
       expect(lastRequest("stats_today")).toEqual({

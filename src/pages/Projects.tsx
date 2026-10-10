@@ -1,3 +1,4 @@
+import { domainState } from "../state/domainState";
 /**
  * 项目页（P7 Task 5）：F-004 的创建、改名、归档，以及项目详情里的任务列表与
  * 「新增第一条行动」。
@@ -131,7 +132,7 @@ export function Projects() {
     try {
       const result = await listProjects({ expected_data_epoch: epoch, status: null });
       // 判据：比**本视图**已上屏的那一份旧（epoch 变了也算）⇒ 丢弃，不覆盖新列表。
-      if (projectsWatermark.isStale(result, epoch)) return;
+      if (projectsWatermark.isStale(result, epoch, domainState.getView().dataEpoch)) return;
       projectsWatermark.applied(result);
       // M1：成功上屏就把**这条查询**上一次的失败提示清掉（别的槽位不受影响）。
       setProjectsError(null);
@@ -153,7 +154,7 @@ export function Projects() {
         offset: 0,
         expected_data_epoch: epoch,
       });
-      if (detailWatermark.isStale(result, epoch)) return;
+      if (detailWatermark.isStale(result, epoch, domainState.getView().dataEpoch)) return;
       if (asked !== selectedRef.current) return;
       detailWatermark.applied(result);
       setDetailError(null);

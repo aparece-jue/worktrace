@@ -181,6 +181,16 @@ afterEach(async () => {
 });
 
 describe("历史页：一页常规历史", () => {
+  it("补录任务候选失败可见且可重试，不抹掉已加载的历史", async () => {
+    backend = createBackend();
+    backend.fail["list_tasks"] = failure({ code: "STORAGE_ERROR", message: "候选暂不可读" });
+    await mountHistory();
+    expect(await screen.findByText("候选暂不可读")).toBeTruthy();
+    delete backend.fail["list_tasks"];
+    fireEvent.click(screen.getByText("重试任务候选"));
+    await waitFor(() => expect(screen.queryByText("候选暂不可读")).toBeNull());
+    expect(backend.count("list_tasks")).toBe(2);
+  });
   it("读查询：半开窗口 + 分页窗口，不指名时不带 session_id；列表与口径说明都上屏", async () => {
     // 反向验证：把 `session_id: null` 也塞进请求（而不是省略）⇒ 那句 `in` 断言红；
     // 把 `from` 换成"最近 N 天"、或把 `limit` 写错 ⇒ 逐字段断言红。

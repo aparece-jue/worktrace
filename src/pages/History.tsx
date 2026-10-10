@@ -1,3 +1,4 @@
+import { domainState } from "../state/domainState";
 /**
  * 历史页（P8 Task 2c）：F-017 修正与补录。
  *
@@ -244,17 +245,20 @@ export function History() {
   /** 满足条件的任务**总数**（`list_tasks` 的 `total`）：把"没列全"说清楚，而不是静默截断。 */
   const [taskTotal, setTaskTotal] = useState(0);
   const [taskLoading, setTaskLoading] = useState(false);
+  const [taskError, setTaskError] = useState<string | null>(null);
   const [backfillTask, setBackfillTask] = useState<string | null>(null);
   const [backfillStart, setBackfillStart] = useState("");
   const [backfillEnd, setBackfillEnd] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [maintenance, setMaintenance] = useState(false);
 
   /**
    * **本视图这一次读**的水位。`useState(createViewWatermark)` 只借它拿一个稳定实例
    * （工厂只跑一次），它本身不是会变的状态、也不触发重渲染。
    */
   const [watermark] = useState(createViewWatermark);
+  const [taskWatermark] = useState(createViewWatermark);
 
   /** 读一页历史（带可选详情）。查询失败**只提示、不刷新**（会自触发重拉）。 */
   const load = useCallback(async (): Promise<void> => {
@@ -270,12 +274,14 @@ export function History() {
         ...(selectedId === null ? {} : { session_id: selectedId }),
       });
       // 换过库、或比已经上屏的那一份旧 ⇒ 丢弃，不覆盖新状态。
-      if (watermark.isStale(found, epoch)) return;
+      if (watermark.isStale(found, epoch, domainState.getView().dataEpoch)) return;
       // 「收到」≠「用上」：真的上屏之后才推进本视图水位。
       watermark.applied(found);
+      setMaintenance(false);
       setView(found);
       setError(null);
     } catch (cause) {
+      setMaintenance(toIpcError(cause).code === "DATA_RESTORE_IN_PROGRESS");
       setError(toIpcError(cause).message);
     }
   }, [epoch, watermark, offset, selectedId]);
@@ -309,15 +315,18 @@ export function History() {
           offset,
           expected_data_epoch: epoch,
         });
+        if (taskWatermark.isStale(found, epoch, domainState.getView().dataEpoch)) return;
+        taskWatermark.applied(found);
+        setTaskError(null);
         setTaskTotal(found.total);
         setTasks((current) => (offset === 0 ? found.tasks : [...current, ...found.tasks]));
-      } catch {
-        // 辅助数据：失败静默保留上一次拿到的候选（首次就是空），不报错、不清屏。
+      } catch (cause) {
+        if (domainState.getView().dataEpoch === epoch) setTaskError(toIpcError(cause).message);
       } finally {
         setTaskLoading(false);
       }
     },
-    [epoch],
+    [epoch, taskWatermark],
   );
 
   // 补录的任务下拉：挂载与每次缓存失效时重取**第一页**（用户已经加载的后续页随之作废）。
@@ -334,6 +343,7 @@ export function History() {
 
   /** 写命令失败的统一收尾（文案与行为都由 `commandError` 决定）。 */
   function fail(cause: unknown): void {
+    if (toIpcError(cause).code === "DATA_RESTORE_IN_PROGRESS") setMaintenance(true);
     setError(reportCommandError(cause));
   }
 
@@ -400,7 +410,7 @@ export function History() {
     }
   }
 
-  const disabled = epoch === null || busy;
+  const disabled = epoch === null || busy || maintenance;
   const sessions = view?.sessions ?? [];
   const canPrev = offset > 0;
   // 没有 `total`（形状钉死）：取满一页就说明**可能**还有下一页。
@@ -431,7 +441,7 @@ export function History() {
               {sessions.map((session) => (
                 <li key={session.id} className="history-item" data-testid={`history-row-${session.id}`}>
                   <Space size="middle" wrap>
-                    <span className="history-task">{session.task_id}</span>
+                    <span className="history-task">{tasks.find((task) => task.id === session.task_id)?.title ?? `任务 ${session.task_id}`}</span>
                     <Tag data-testid={`history-state-${session.id}`}>
                       {SESSION_STATE_TEXT[session.state]}
                     </Tag>
@@ -513,7 +523,7 @@ export function History() {
                   <Tag data-testid="history-detail-state">
                     {SESSION_STATE_TEXT[detail.session.state]}
                   </Tag>
-                  <Typography.Text type="secondary">{`任务 ${detail.session.task_id}`}</Typography.Text>
+                  <Typography.Text type="secondary">{tasks.find((task) => task.id === detail.session.task_id)?.title ?? `任务 ${detail.session.task_id}`}</Typography.Text>
                   <Typography.Text type="secondary" data-testid="history-detail-range">
                     {`${formatLocalMinute(detail.session.started_at)} → ${
                       detail.session.ended_at === null
@@ -651,6 +661,7 @@ export function History() {
             >
               补录
             </Button>
+            {taskError ? <><ErrorNotice message={taskError} /><Button disabled={taskLoading} onClick={() => void loadTasks(0)}>重试任务候选</Button></> : null}
             <Typography.Text type="secondary">时间格式 YYYY-MM-DD HH:MM</Typography.Text>
           </Space>
         </Flex>

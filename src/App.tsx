@@ -1,3 +1,4 @@
+import { installNativeVisibility } from "./nativeVisibility";
 /**
  * 应用外壳（P7 Task 1b 建立，Task 3 把收件箱/计时接进来，Task 5 再接入项目/任务，
  * P8 Task 1b 接入第 5 块页面「今日」，P8 Task 2c 接入第 6、7 块「恢复」「历史」，
@@ -190,6 +191,15 @@ export default function App() {
       alive = false;
       if (unlisten !== null) void unlisten();
     };
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    let off: (() => void) | undefined;
+    void installNativeVisibility().then((dispose) => {
+      if (alive) off = dispose; else dispose();
+    }).catch((error) => console.warn("窗口可见性监听失败", error));
+    return () => { alive = false; off?.(); };
   }, []);
 
   return (

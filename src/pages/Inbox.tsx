@@ -1,3 +1,4 @@
+import { domainState } from "../state/domainState";
 /**
  * 收件箱页（P7 Task 3）：F-001 快速捕获 + F-002 任务理清。
  *
@@ -316,8 +317,8 @@ export function Inbox() {
         }),
         listSelectableProjects({ expected_data_epoch: epoch }),
       ]);
-      if (watermark.isStale(found, epoch)) return;
-      if (watermark.isStale(selectable, epoch)) return;
+      if (watermark.isStale(found, epoch, domainState.getView().dataEpoch)) return;
+      if (watermark.isStale(selectable, epoch, domainState.getView().dataEpoch)) return;
       // 「收到」≠「用上」：真的上屏之后才推进本视图水位（只前进，取两条里较新的那一版）。
       watermark.applied(found);
       watermark.applied(selectable);

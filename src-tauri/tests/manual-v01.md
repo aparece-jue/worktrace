@@ -254,7 +254,7 @@ FAIL: run pnpm build first. A missing dist/ is an error, not a pass.
    - [ ] 任务变 `Blocked`；**如果有正在跑的会话，它被暂停**（回执里点名那条会话）
    - [ ] `revision` +1（**恰好一次**：不是"改状态一条 + 停会话一条"）
 3. 在**正在计时**的那条任务上找「开始」：
-   - [ ] 入口**不在**（再点必败：Rust 的 `require_no_running_foreground`）
+   - [ ] 入口**禁用**（再点必败：Rust 的 `require_no_running_foreground`；前端按运行中的任务快照禁用）
 4. **非法跃迁**（服务端必须拒绝，而不是前端拦住）：
    - 在 `Done` 行上构造一次非法目标（例如先让它 `Done`，再用 DevTools 直接 `invoke`
      `transition_task` 传 `target: "Clarifying"`）：

@@ -184,3 +184,24 @@ pub fn spawn_activation_watcher<R: Runtime>(
         eprintln!("[worktrace] activation watcher failed to start: {error}");
     }
 }
+
+/// A native dialog remains visible even when every WebView is closed.
+pub fn show_exit_failure(message: &str) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = "Worktrace 退出失败".encode_utf16().chain(Some(0)).collect();
+        // Both UTF-16 buffers are terminated and remain alive until the blocking dialog returns.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    eprintln!("Worktrace: {message}");
+}

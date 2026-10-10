@@ -1162,3 +1162,29 @@ it("新身份快照应用后，丢弃较早发起的迟到握手", async () => {
   await pending;
   expect(state.getView()).toBe(current);
 });
+
+it("native minimization stops verification and restoring checks immediately", async () => {
+  vi.useFakeTimers();
+  const h = harness();
+  await h.state.start();
+  const before = h.calls.getRevision;
+  h.state.setWindowVisible(false);
+  await vi.advanceTimersByTimeAsync(VERIFY_INTERVAL_MS * 2);
+  expect(h.calls.getRevision).toBe(before);
+  h.state.setWindowVisible(true);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(h.calls.getRevision).toBe(before + 1);
+  await h.state.stop();
+});
+
+it("a restore response invalidates old displays immediately without waiting for verify", async () => {
+  const h = harness();
+  await h.state.start();
+  const before = h.state.getView().invalidated;
+  h.queueSample(sample({ data_epoch: "restored-epoch", revision: 0 }));
+  await h.state.acceptRestore(identity("restored-epoch", 0));
+  expect(h.state.getView().dataEpoch).toBe("restored-epoch");
+  expect(h.state.getView().invalidated).toBe(before + 1);
+  expect(h.state.getView().timer?.data_epoch).toBe("restored-epoch");
+  await h.state.stop();
+});

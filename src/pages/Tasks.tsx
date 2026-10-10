@@ -1,3 +1,4 @@
+import { domainState } from "../state/domainState";
 /**
  * 任务列表页（P7 Task 5）：F-002 的轻量 GTD 列表 + F-005 的情境筛选。
  *
@@ -30,7 +31,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Empty, Flex, Pagination, Segmented, Select, Space, Tag, Typography } from "antd";
 
-import { listSelectableProjects, listTags, listTasks, toIpcError } from "../ipc";
+import { listSelectableProjects, listTags, listTasks, transitionTask, toIpcError } from "../ipc";
+import { Button } from "antd";
 import { ErrorNotice } from "../components/ErrorNotice";
 import { createViewWatermark } from "../components/viewWatermark";
 import { useDataEpoch, useInvalidation } from "../state/hooks";
@@ -93,6 +95,7 @@ export function Tasks() {
    * 擦掉——实测过：`list_tags` 成功上屏会把 `list_tasks` 刚写上的失败提示清掉。
    */
   const [listError, setListError] = useState<string | null>(null);
+  const [acting, setActing] = useState(false);
   const [optionsError, setOptionsError] = useState<string | null>(null);
   /** 要上屏的那条：主列表那条优先（它是这一页的主体），其次是筛选选项那条。 */
   const error = listError ?? optionsError;
@@ -148,8 +151,8 @@ export function Tasks() {
         listTags({ expected_data_epoch: epoch, kind: "Context" }),
         listSelectableProjects({ expected_data_epoch: epoch }),
       ]);
-      if (optionsWatermark.isStale(tags, epoch)) return;
-      if (optionsWatermark.isStale(selectable, epoch)) return;
+      if (optionsWatermark.isStale(tags, epoch, domainState.getView().dataEpoch)) return;
+      if (optionsWatermark.isStale(selectable, epoch, domainState.getView().dataEpoch)) return;
       optionsWatermark.applied(tags);
       optionsWatermark.applied(selectable);
       // M1：成功上屏就把**这条查询**上一次的失败提示清掉（另一条的提示不受影响）。
@@ -175,7 +178,7 @@ export function Tasks() {
         expected_data_epoch: epoch,
       });
       // 判据②：比**本视图**已上屏的那一份旧（epoch 变了也算），不比到达顺序。
-      if (listWatermark.isStale(result, epoch)) return;
+      if (listWatermark.isStale(result, epoch, domainState.getView().dataEpoch)) return;
       // 判据①：这条响应回答的是不是现在这个问题。
       if (asked !== questionRef.current) return;
       // M4：页码越界（总数变小，这一页已经不存在了）⇒ 夹回最后一页再查一次。
@@ -304,6 +307,13 @@ export function Tasks() {
             <li key={task.id} className="task-item" data-testid={`task-${task.id}`}>
               <span className="task-title">{task.title}</span>
               <Tag className="task-status">{task.status}</Tag>
+              {(task.status === "Blocked" || task.status === "Waiting") && epoch !== null ? <Button disabled={acting} data-testid={`ready-${task.id}`} onClick={() => {
+                setActing(true);
+                void transitionTask({ expected_data_epoch: epoch, task_id: task.id,
+                  expected_row_version: task.row_version, target: "Ready", cause: "user" })
+                  .then(() => load()).catch((cause) => setListError(toIpcError(cause).message))
+                  .finally(() => setActing(false));
+              }}>恢复为可执行</Button> : null}
             </li>
           ))}
         </ul>

@@ -1,3 +1,4 @@
+import { domainState } from "../state/domainState";
 /**
  * 恢复页（P8 Task 2c）：F-015 恢复确认。
  *
@@ -346,7 +347,7 @@ export function Recovery() {
     try {
       const found = await attentionOverview({ expected_data_epoch: epoch });
       // 换过库、或比已经上屏的那一份旧 ⇒ 丢弃，不覆盖新状态。
-      if (watermark.isStale(found, epoch)) return;
+      if (watermark.isStale(found, epoch, domainState.getView().dataEpoch)) return;
       // 「收到」≠「用上」：真的上屏之后才推进本视图水位。
       watermark.applied(found);
       setOverview(found);

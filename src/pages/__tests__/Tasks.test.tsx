@@ -125,6 +125,21 @@ afterEach(async () => {
 });
 
 describe("任务页：三个列表与筛选", () => {
+  it("等待任务可恢复为 Ready，携带库身份和行版本并刷新列表", async () => {
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-wait", status: "Waiting", row_version: 7 })];
+    await mountTasks();
+    fireEvent.click(screen.getByText("等待中"));
+    fireEvent.click(await screen.findByTestId("ready-t-wait"));
+    await waitFor(() => expect(backend.count("transition_task")).toBe(1));
+    expect(lastRequest("transition_task")).toEqual({
+      expected_data_epoch: EPOCH, task_id: "t-wait", expected_row_version: 7,
+      target: "Ready", cause: "user",
+    });
+    await waitFor(() => expect(screen.queryByTestId("ready-t-wait")).toBeNull());
+    expect(backend.count("list_tasks")).toBeGreaterThanOrEqual(3);
+    expect(backend.tasks[0].status).toBe("Ready");
+  });
   it("三个列表各查各的状态：Waiting 与 Blocked 不合并成一条查询", async () => {
     // 反向验证：把 Waiting/Blocked 合成一个选项（`statuses: ["Waiting","Blocked"]`），
     // 或把状态写死成 "Ready"，下面三次请求断言里的任意一条立刻红。

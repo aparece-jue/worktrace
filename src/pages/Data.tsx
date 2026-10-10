@@ -38,10 +38,10 @@
  * 界面回到可再次触发的状态。**将来若引入保存对话框，用户取消走的就是这一档**——它不是
  * `AppError`，不该被上屏成失败。
  *
- * ## 恢复之后：重新握手，旧展示一律作废
+ * ## 恢复之后：立即切换库身份，旧展示一律作废
  *
- * `restore` 成功返回的是**新 `data_epoch`**：旧库的展示不属于新库 ⇒ 页面走既有的握手入口
- * `domainState.rehandshake()`（再读一次 `get_revision`；换库会被闸门判成整体失效 ⇒ 失效
+ * `restore` 成功返回的是**新 `data_epoch`**：旧库的展示不属于新库 ⇒ 页面立即采用恢复回执
+ * `domainState.acceptRestore(restored)`（立即采用恢复返回的库身份，旧请求作废 ⇒ 失效
  * 计数 +1 ⇒ 本页按新 epoch 重读），并把已上屏的样本与产物清掉（回落到重新加载态）。
  * 失败（含回滚也失败）按 Rust 的 `message` 上屏，**不伪装成功**："正在恢复"只由
  * `DATA_RESTORE_IN_PROGRESS` 这个码表达；恢复失败卡住时上屏的是它自己的原因
@@ -63,7 +63,7 @@
  *
  * - **不在**（浏览器里跑前端）⇒ "打开所在位置"先就**禁用**并给出一句说明，点击也不会去打
  *   插件（`reveal` 第一句就返回）；产物路径照常显示、可复制；
- * - **在** Tauri 里但 ACL 没登记 ⇒ 调用当场被拒，页面把插件给的原因上屏并把按钮**锁成禁用**
+ * - **在** Tauri 里但 ACL 没登记 ⇒ 调用当场被拒，页面把插件给的原因上屏允许修复原因后重试
  *   （同一句话里带上原因）。
  *
  * 两条路都不静默。导出/备份**本身**不依赖这条能力，所以它们不受它影响。
@@ -194,7 +194,7 @@ export function Data() {
         expected_data_epoch: epoch,
       });
       // 换过库、或比已经上屏的那一份旧 ⇒ 丢弃，不覆盖新状态。
-      if (watermark.isStale(sample, epoch)) return;
+      if (watermark.isStale(sample, epoch, domainState.getView().dataEpoch)) return;
       // 「收到」≠「用上」：真的上屏之后才推进本视图水位。
       watermark.applied(sample);
       setView(sample);
@@ -225,21 +225,22 @@ export function Data() {
 
   /**
    * "打开所在位置"能不能用（**先验**判定，见文件头）：不在 Tauri 运行时里就没有这条能力；
-   * 插件被拒过一次之后同样锁成禁用（原因进 `revealError`）。
+   * 插件失败显示原因，并保留重试入口。
    */
-  const canReveal = isTauri() && revealError === null;
+  const canReveal = isTauri();
 
   /**
    * 给出可打开的位置（导出/备份成功后自动调一次；按钮用来再打开一次）。
    *
    * 不可用**先就返回**——不试一次再说（"点了才报错"正是要避免的形状）。插件失败**不是**
    * 业务命令失败（六码契约管的是 Rust 命令），所以不走 `reportCommandError`：把插件给的
-   * 原因上屏并把入口锁成禁用，不静默。
+   * 原因上屏，保留重试入口，不静默。
    */
   async function reveal(path: string): Promise<void> {
     if (!canReveal) return;
     try {
       await revealItemInDir(path);
+      setRevealError(null);
     } catch (cause) {
       setRevealError(toIpcError(cause).message);
     }
@@ -314,17 +315,17 @@ export function Data() {
     setInfo(null);
     setBusy(true);
     try {
-      await restore({
+      const restored = await restore({
         backup_path: restorePath.trim(),
         expected_data_epoch: epoch,
         confirmed: true,
       });
       setRestorePath("");
       setError(null);
-      setInfo("恢复完成，已按新库重新握手。");
-      // 成功 = 换了库：走既有握手入口（`get_revision` → 闸门判未知 epoch → 整体失效）。
+      setInfo("恢复完成，已切换到新库并刷新。");
+      // 成功 = 换了库：立即采用恢复回执，不等待在途握手。
       // 旧展示由上面那个 effect 作废；失败走 `fail()`，**不**走这一支（不伪装成功）。
-      await domainState.rehandshake();
+      await domainState.acceptRestore(restored);
     } catch (cause) {
       fail(cause);
     } finally {
@@ -354,7 +355,7 @@ export function Data() {
           正在恢复：导出、备份与恢复暂时不可用（写类命令都会被拒），库身份一变即自动解禁。
         </Typography.Text>
       ) : null}
-      {canReveal ? null : (
+      {canReveal && revealError === null ? null : (
         <Typography.Text type="warning" data-testid="data-reveal-note">
           {revealError ??
             "当前环境没有「打开所在位置」的能力：产物路径仍会显示、可复制，但不能在文件管理器里打开。"}

@@ -70,3 +70,12 @@ describe("视图水位：只回答「这条响应是不是比我上屏过的那�
     expect(watermark.isStale(stamp(EPOCH, 9), EPOCH)).toBe(false);
   });
 });
+
+it("rejects an old request after the authoritative epoch changes, including before new data is rendered", () => {
+  const watermark = createViewWatermark();
+  watermark.applied(stamp(EPOCH, 8));
+  expect(watermark.isStale(stamp(EPOCH, 9), EPOCH, OTHER_EPOCH)).toBe(true);
+  expect(watermark.isStale(stamp(OTHER_EPOCH, 0), OTHER_EPOCH, OTHER_EPOCH)).toBe(false);
+  watermark.applied(stamp(OTHER_EPOCH, 0));
+  expect(watermark.isStale(stamp(EPOCH, 99), EPOCH, OTHER_EPOCH)).toBe(true);
+});

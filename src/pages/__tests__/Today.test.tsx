@@ -335,7 +335,7 @@ describe("今日页：F-010 五项", () => {
 });
 
 describe("今日页：候选下拉与五项互不牵连", () => {
-  it("候选查询失败不拖累五项：主数据照常上屏，候选区降级为空且不报错", async () => {
+  it("候选查询失败不拖累五项：主数据照常上屏，候选区降级为空且提示失败", async () => {
     // 反向验证（fix round 1 / Important-1）：把候选查询放回与 `statsToday` 同一个
     // `Promise.all` + 同一个错误态 ⇒ 这里 `list_tasks` 一失败 `setView` 就永不执行，
     // 五项一个都不渲染（页面只剩 `today-loading`），下面五句一起红。
@@ -357,7 +357,7 @@ describe("今日页：候选下拉与五项互不牵连", () => {
     // 候选区降级：下拉里没有可选项；错误提示**不**属于这一次失败（它只跟五项那条查询走）
     openSelect("today-candidate");
     expect(screen.queryByTitle("候选中")).toBeNull();
-    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("候选读失败");
   });
 });
 

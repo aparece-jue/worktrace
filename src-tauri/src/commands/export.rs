@@ -1,5 +1,6 @@
 //! 导出与备份 / 恢复（P8 Task 3a：命令 9/10/11）的请求与响应 DTO、落盘辅助与命令体；`#[tauri::command]` 包装留在 `super`。
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::domain::error::DomainError;
@@ -250,7 +251,15 @@ fn write_export(dir: &Path, file_name: &str, text: &str) -> Result<(PathBuf, u64
     }
     let staged = dir.join(format!("{file_name}.partial"));
     let bytes = text.as_bytes();
-    if let Err(error) = std::fs::write(&staged, bytes) {
+    // Only clean up a temporary file owned by this attempt.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .map_err(|error| export_io("create the staged artifact", error))?;
+    let written = file.write_all(bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(error) = written {
         let _ = std::fs::remove_file(&staged);
         return Err(export_io("write the artifact", error));
     }

@@ -1557,6 +1557,10 @@ pub fn spawn_tray_quit(app: &AppHandle) {
                     diagnostic(&error),
                     error.code()
                 );
+                crate::platform::window::show_exit_failure(&format!(
+                    "{}\n详细原因已记录在 Worktrace 诊断日志。",
+                    error.message()
+                ));
                 if refusal {
                     // 维护态：拒绝退出（见上面的文档）。判定按第六个码
                     // `DATA_RESTORE_IN_PROGRESS`（[`is_maintenance_refusal`]）。

@@ -39,7 +39,7 @@ import type { VersionStamp } from "../ipc";
 /** 一个视图自己的水位。 */
 export interface ViewWatermark {
   /** 这条响应是不是"比本视图已上屏的那份更旧"（含换 epoch）。 */
-  isStale(stamp: VersionStamp, requestEpoch: string): boolean;
+  isStale(stamp: VersionStamp, requestEpoch: string, currentEpoch?: string | null): boolean;
   /** 记下**已经上屏**的一份响应（只前进：同版/更旧不动它）。 */
   applied(stamp: VersionStamp): void;
 }
@@ -48,9 +48,9 @@ export function createViewWatermark(): ViewWatermark {
   let held: VersionStamp | null = null;
 
   return {
-    isStale(stamp, requestEpoch) {
+    isStale(stamp, requestEpoch, currentEpoch = requestEpoch) {
       // 换 epoch：这条响应回答的不是我们现在问的那个世界（闸门规则①的意思）。
-      if (stamp.data_epoch !== requestEpoch) return true;
+      if (stamp.data_epoch !== requestEpoch || currentEpoch !== requestEpoch) return true;
       if (held === null || held.data_epoch !== stamp.data_epoch) return false;
       return stamp.revision < held.revision;
     },

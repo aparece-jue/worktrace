@@ -1,3 +1,4 @@
+import { domainState } from "../state/domainState";
 /**
  * 今日页（P8 Task 1b）：F-010 的五项。
  *
@@ -169,12 +170,14 @@ export function Today() {
    * （工厂只跑一次），它本身不是会变的状态、也不触发重渲染。
    */
   const [watermark] = useState(createViewWatermark);
+  const [candidateWatermark] = useState(createViewWatermark);
+  const [candidateError, setCandidateError] = useState<string | null>(null);
 
   /**
    * 重拉：`stats_today`（五项）与 `list_tasks`（候选下拉）**两条互不牵连**的查询。
    *
    * 五项那条是本页的交付物，失败就上屏提示；候选那条是辅助数据，独立发起、独立收尾
-   * （失败静默保留上一次的候选），所以它慢、它失败都不影响五项（fix round 1 / Important-1：
+   * （失败保留上一次的候选并显示重试入口），所以它慢、它失败都不影响五项（fix round 1 / Important-1：
    * 原先两条绑在同一个 `Promise.all` + 同一个错误态上，`list_tasks` 一失败五项就一个都不渲染）。
    *
    * 判旧只有**一把**水位，按 `stats_today` 的戳判（`date` / `range` / 三组工时 / `revision`
@@ -194,12 +197,19 @@ export function Today() {
       offset: 0,
       expected_data_epoch: epoch,
     })
-      .then((selectable) => setCandidates(selectable.tasks))
-      .catch(() => undefined);
+      .then((selectable) => {
+        if (candidateWatermark.isStale(selectable, epoch, domainState.getView().dataEpoch)) return;
+        candidateWatermark.applied(selectable);
+        setCandidates(selectable.tasks);
+        setCandidateError(null);
+      })
+      .catch((cause) => {
+        if (domainState.getView().dataEpoch === epoch) setCandidateError(toIpcError(cause).message);
+      });
     try {
       const today = await statsToday({ timezone: localTimezone(), expected_data_epoch: epoch });
       // 换过库、或比已经上屏的那一份旧 ⇒ 丢弃，不覆盖新状态。
-      if (watermark.isStale(today, epoch)) return;
+      if (watermark.isStale(today, epoch, domainState.getView().dataEpoch)) return;
       // 「收到」≠「用上」：真的上屏之后才推进本视图水位。
       watermark.applied(today);
       setView(today);
@@ -208,7 +218,7 @@ export function Today() {
     } catch (cause) {
       setError(toIpcError(cause).message);
     }
-  }, [epoch, watermark]);
+  }, [epoch, watermark, candidateWatermark]);
 
   // 事件只作缓存失效：`invalidated` 一变就重拉（挂载时也跑一次）。
   useEffect(() => {
@@ -282,6 +292,7 @@ export function Today() {
 
   return (
     <Flex vertical gap={16}>
+      {candidateError ? <><ErrorNotice message={candidateError} /><Button onClick={() => void load()}>重试候选加载</Button></> : null}
       <Typography.Title level={5} style={{ margin: 0 }}>
         今日
       </Typography.Title>

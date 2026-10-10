@@ -119,6 +119,9 @@ export interface DomainState {
    * 非幂等命令）。它不会重发那条命令，也不改水位以外的任何状态。
    */
   rehandshake(): Promise<void>;
+  /** Apply the authoritative restore response immediately, invalidating old in-flight reads. */
+  acceptRestore(stamp: RevisionSnapshot): Promise<void>;
+  setWindowVisible(visible: boolean): void;
   /**
    * 推一次缓存失效并取一份新的计时快照（闸门规则④/§5 规则 5 的那个动作）。
    *
@@ -303,8 +306,9 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
   }
 
   /** 可见性：隐藏窗口不轮询，显示前校验（00 §5 规则 4）。 */
+  let nativeVisible = true;
   function isVisible(): boolean {
-    return typeof document === "undefined" || document.visibilityState !== "hidden";
+    return nativeVisible && (typeof document === "undefined" || document.visibilityState !== "hidden");
   }
 
   /**
@@ -612,6 +616,15 @@ export function createDomainState(deps: DomainDeps = IPC_DEPS): DomainState {
     },
 
     rehandshake: verify,
+    setWindowVisible: (visible) => {
+      nativeVisible = visible;
+      if (live && isVisible()) { void verify(); startPolling(); }
+      else stopPolling();
+    },
+    acceptRestore: async (stamp) => {
+      applyStamp(stamp);
+      if (live) await pullTimerSample(generation);
+    },
 
     refresh: resync,
 
