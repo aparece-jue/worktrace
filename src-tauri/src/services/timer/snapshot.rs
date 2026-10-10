@@ -31,7 +31,7 @@ pub struct TimerSnapshot {
     ///
     /// **快照为什么必须带任务身份**：`resume_timer` 要 `task_id` +
     /// `task_expected_version`（[`super::coordinator::ResumeRequest`]），而「这个会话属于哪个
-    /// 任务」在 24 条命令里**没有第二条读路径**——`TaskRow` 不带会话，`list_tasks` 也不按会话
+    /// 任务」在既有命令里**没有第二条读路径**——`TaskRow` 不带会话，`list_tasks` 也不按会话
     /// 筛，托盘只做 `pause`。于是冷启动（重开窗口，F-009 的正常路径）或托盘暂停之后，
     /// 本窗口不是这条会话的发起方，只有快照能给出任务身份；没有它，「继续」按钮的请求
     /// **根本构造不出来**。
@@ -47,7 +47,7 @@ pub struct TimerSnapshot {
     pub task_row_version: Option<i64>,
     /// 任务标题（`task.title`）；无会话时为 `None`。
     ///
-    /// **为什么标题也要进契约**：24 条命令里没有「按 id 取任务」的读路径
+    /// **为什么标题也要进契约**：既有命令里没有「按 id 取任务」的读路径
     /// （`list_tasks` 只按 status / project / context 筛，`TaskRow` 不带会话），
     /// 所以冷启动（重开窗口）或托盘暂停之后，计时页与状态栏的「当前任务」**没有第二个
     /// 来源**——只补 `task_id` / `task_row_version` 的话，界面只能永久显示占位文案。

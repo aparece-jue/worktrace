@@ -125,7 +125,7 @@ fn timer_snapshot_active() -> TimerSnapshot {
         session_version: Some(4),
         task_id: Some(TASK_ID.to_string()),
         task_row_version: Some(3),
-        // 与 `task_row().title` 同一句话：它是**界面唯一的标题来源**（24 条命令里没有
+        // 与 `task_row().title` 同一句话：它是**界面唯一的标题来源**（既有命令里没有
         // 「按 id 取任务」的读路径），所以样例值取任务行那一份，不另编一个。
         task_title: Some("写 P7 Task 1 的报告".to_string()),
         tick_seq: 42,

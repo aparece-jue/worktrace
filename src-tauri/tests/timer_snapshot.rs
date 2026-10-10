@@ -489,7 +489,7 @@ fn tick_seq_keeps_counting_across_sessions_within_a_run() {
 // 快照的任务身份与标题（P7 Task 3 的契约补口）
 //
 // 缺口：`resume_timer` 要 `task_id` + `task_expected_version`，而「这条暂停的会话属于
-// 哪个任务」原本**没有**任何读路径——`TaskRow` 不带会话、24 条命令里没有 session→task
+// 哪个任务」原本**没有**任何读路径——`TaskRow` 不带会话、既有命令里没有 session→task
 // 的查询、托盘只做 `pause`。于是重开窗口（F-009 的正常路径）或托盘暂停之后，前端
 // **构造不出**「继续」按钮的请求。标题同理没有第二个来源（没有「按 id 取任务」的读路径），
 // 不随快照下发就只能永久显示占位文案。下面五条把这条缝钉住。

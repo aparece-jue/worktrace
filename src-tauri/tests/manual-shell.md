@@ -92,11 +92,13 @@ P3 落地前这三类都只能靠换库绕开。）**绕开**：换一个**新�
          **什么都不发生**——`revision` 不变、没有第二条 `domain.changed`；日志里**只有**这一行
          `[worktrace] tray: 没有正在计时（或已被判为待恢复）的会话，完成未执行` →
          现象：
-         > ⚠️ **不要**期待这一行 `event=tray.finish.refused code=RECOVERY_REQUIRED`：它只在
-         > 协调器被判**故障**（`Coordinator::refuse_if_faulted`，硬单调钟故障 / 恢复事务失败）
-         > 时才出现，而 `recovering` 走的是"快照照常返回、只是没有 `running` 会话"这一支。
-         > 构造故障态要注入硬故障，**本步骤不构造**——那一条判据今天**不可观察**（登记在案，
-         > 不当作本步骤的通过条件）。
+         > ⚠️ **不要**期待这一行 `event=tray.finish.refused code=RECOVERY_REQUIRED`：本步骤里
+         > `recovering` 走的是"快照照常返回、只是没有 `running` 会话"这一支 ⇒ 走
+         > `TrayFinish::NothingToFinish`，压根到不了拒绝臂。这个码有两个来源——协调器被判
+         > **故障**（`Coordinator::refuse_if_faulted`，硬单调钟故障 / 恢复事务失败）**或**
+         > 服务层闸门拒绝该任务（`services::tasks::require_completable`：这条任务还有
+         > `recovering` 会话 / `needs_review` 区间）——两者都要另一套夹具，**本步骤不构造**：
+         > 那一条判据今天**不可观察**（登记在案，不当作本步骤的通过条件）。
 8. **怎么算不通过**：可点项不是恰好五项或次序不对；仍有禁用项或旧 id；**没有计时**时点「暂停」
    却让 `revision` **+1**、或让 `work_session` 多出一行；重复点「暂停」出现第二条
    `domain.changed`；完成之后 `status` 不是 `Done`、会话没结束、或一次点出**两条**

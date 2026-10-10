@@ -24,8 +24,8 @@
 //!
 //! 这一层是**组合根**，Task 4 的三处接线都在这里，且都只是接线：
 //!
-//! - **托盘**：[`platform::tray::build`] 装配菜单（F-011 的五项：当前任务、暂停、完成、
-//!   快速捕获、退出；「完成」自 P8 Task 2d 起不再是禁用占位项），
+//! - **托盘**：[`platform::tray::build`] 装配菜单（F-011 的五项：当前任务、暂停、快速捕获、
+//!   完成、退出；「完成」自 P8 Task 2d 起不再是禁用占位项），
 //!   动作交给 [`on_tray_action`]；后者把服务动作转给 `commands::` 那一侧的命令体
 //!   （与 IPC 同一批入口），窗口动作转给 [`platform::window`]。托盘里没有业务判断，
 //!   `platform` 也不反向引用上层（分层门禁第六条）。
@@ -282,7 +282,7 @@ fn setup(app: &mut tauri::App, alive: &Arc<AtomicBool>) -> Result<(), Box<dyn st
             // 单实例锁。交给 Tauri 托管，生命周期就等于进程。
             app.manage(*running);
 
-            // 托盘（F-011）：四项 + 「完成」预留项。菜单点到的动作交给
+            // 托盘（F-011）：五项，全部可点（「完成」自 P8 Task 2d 起在原位启用）。菜单点到的动作交给
             // `on_tray_action`，由它调 `commands::` 那一侧的命令体。
             tray::build(&handle, on_tray_action)?;
 

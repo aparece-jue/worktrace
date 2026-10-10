@@ -42,6 +42,7 @@ import { addToPlan, listTasks, removeFromPlan, statsToday, toIpcError } from "..
 import { ErrorNotice } from "../components/ErrorNotice";
 import { reportCommandError } from "../components/commandError";
 import { formatDuration } from "../components/duration";
+import { formatLocalMinute } from "../components/localTime";
 import { createViewWatermark } from "../components/viewWatermark";
 import { useDataEpoch, useInvalidation } from "../state/hooks";
 import {
@@ -98,14 +99,6 @@ function localTimezone(): string {
 function formatMs(ms: number | null): string {
   if (ms === null) return "—";
   return ms === 0 ? "0" : formatDuration(ms);
-}
-
-/** 本地时间的 `YYYY-MM-DD HH:MM`（只用来把 `range` 的两个端点标成人看得懂的区间）。 */
-function formatLocal(ms: number): string {
-  const at = new Date(ms);
-  const pad = (value: number): string => String(value).padStart(2, "0");
-  const date = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
-  return `${date} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
 }
 
 /** 取一组里某个 measure 的列；契约保证四项齐全，缺列按"未给数"处理（不猜、不补）。 */
@@ -312,7 +305,7 @@ export function Today() {
             </Typography.Text>
             <Typography.Text type="secondary">区间（半开）</Typography.Text>
             <Typography.Text type="secondary" data-testid="today-range">
-              {`[${formatLocal(view.range.from)}, ${formatLocal(view.range.to)})`}
+              {`[${formatLocalMinute(view.range.from)}, ${formatLocalMinute(view.range.to)})`}
             </Typography.Text>
           </Space>
 

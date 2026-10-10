@@ -41,7 +41,7 @@
 //! # 请求形状：枚举一律是字符串
 //!
 //! `mode` / `timer_kind` / `statuses` 在 IPC 里都是**字符串**，命令体显式过
-//! [`parse_session_mode`] / [`parse_timer_kind`] / `TaskStatus::parse`
+//! [`crate::services::timer::coordinator::parse_session_mode`] / [`crate::services::timer::coordinator::parse_timer_kind`] / `TaskStatus::parse`
 //! （后者在 `services::catalog::TaskQueryRequest` 的 `TryFrom` 里），**不依赖 serde
 //! 的枚举反序列化**：后者的失败拿不到 `ErrorResponse.code`，会退化成 Tauri 的
 //! 反序列化错误（00 §4 只认那六个码）。
@@ -58,7 +58,7 @@
 //!   `Unchanged`（改同名、重复打标、重复加入计划）不广播——没有 revision 变化就没有
 //!   缓存要失效；
 //! - **载荷就是该命令的响应 DTO**，不另造形状；
-//! - **响应形状不变**：不加 `{changed, value}` 信封（那会改 15 份快照，而且计划没写），
+//! - **响应形状不变**：不加 `{changed, value}` 信封（那会改掉每一份响应快照，而且计划没写），
 //!   这一位只用于「要不要广播」这个内部判断；
 //! - **失败只记诊断**：`Broadcaster::emit` 不返回错误，命令照常成功、已提交业务不回滚。
 //!
@@ -102,30 +102,106 @@
 //! **都已接线**（P8 Task 1/2/3a，业务命令 37 条）：P3/P5/P6 只交付服务层入口，IPC 包装
 //! 在这里。维护态的新错误码 `DATA_RESTORE_IN_PROGRESS` 与四处联动**已落地**
 //! （P6 Task 4a），被拒响应的形状见 [`maintenance_response`]。
+//!
+//! # 文件布局（P8 收口批次拆分）
+//!
+//! 请求 DTO 与命令体按域拆在子模块里（`projects` / `tags` / `tasks` /
+//! `daily_plan` / `stats` / `recovery` / `export` / `timer` / `handshake`），
+//! 本文件只留执行骨架、`#[tauri::command]` 包装（`lib.rs` 的注册表逐条指向
+//! 它们）与托盘入口。`pub use` 把各域的命令体与请求 DTO 原样再导出 ⇒
+//! `commands::x_impl` / `commands::XxxRequest` 这些路径一处未变。
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, State};
 
 use crate::domain::error::DomainError;
-use crate::domain::task::{TaskStatus, TransitionCause};
-use crate::envelope::WriteEnvelope;
+use crate::domain::task::TaskStatus;
 use crate::error::{AppError, AuthorityKind, AuthorityTarget, ErrorResponse};
-use crate::platform::clock::Clock;
 use crate::services::bootstrap::{
-    holds_app_lock, is_maintenance_refusal, lock_app, AppState, ExitReport, RunningApp, SharedApp,
+    is_maintenance_refusal, lock_app, AppState, ExitReport, RunningApp, SharedApp,
 };
 use crate::services::error_response::capture_error_response;
 use crate::services::events::{Broadcaster, EventEnvelope};
 use crate::services::timer::coordinator::{
-    parse_session_mode, parse_timer_kind, ClockCorrectionAccepted, CommandOutcome, ResumeRequest,
-    SessionRequest, StartRequest,
+    ClockCorrectionAccepted, CommandOutcome, ResumeRequest, SessionRequest,
 };
 use crate::services::timer::snapshot::TimerSnapshot;
-use crate::services::{
-    backup, catalog, daily_plan, export, handshake, history, recovery, stats, tasks,
-};
+use crate::services::{catalog, history};
+
+mod daily_plan;
+mod export;
+mod handshake;
+mod projects;
+mod recovery;
+mod stats;
+mod tags;
+mod tasks;
+mod timer;
+
+pub use daily_plan::add_to_plan_impl;
+pub use daily_plan::plan_for_impl;
+pub use daily_plan::remove_from_plan_impl;
+pub use daily_plan::PlanMutationRequest;
+pub use export::backup_impl;
+pub use export::export_data_impl;
+pub use export::restore_impl;
+pub use export::BackupRequest;
+pub use export::BackupResult;
+pub use export::ExportRequest;
+pub use export::ExportResult;
+pub use export::RestoreRequest;
+pub use export::RestoreResult;
+pub use handshake::get_revision_impl;
+pub use projects::archive_project_impl;
+pub use projects::create_project_impl;
+pub use projects::list_projects_impl;
+pub use projects::list_selectable_projects_impl;
+pub use projects::rename_project_impl;
+pub use projects::ArchiveProjectRequest;
+pub use projects::CreateProjectRequest;
+pub use projects::ListProjectsRequest;
+pub use projects::RenameProjectRequest;
+pub use recovery::accept_detected_clock_correction_impl;
+pub use recovery::attention_overview_impl;
+pub use recovery::backfill_impl;
+pub use recovery::correct_impl;
+pub use recovery::discard_session_impl;
+pub use recovery::history_view_impl;
+pub use recovery::reconcile_impl;
+pub use recovery::retry_recovery_impl;
+pub use recovery::transition_task_impl;
+pub use recovery::BackfillRequest;
+pub use recovery::ConfirmedRangeRequest;
+pub use recovery::CorrectRequest;
+pub use recovery::DiscardSessionRequest;
+pub use recovery::HistoryQuery;
+pub use recovery::ReconcileRequest;
+pub use recovery::TransitionTaskRequest;
+pub use stats::stats_today_impl;
+pub use tags::create_tag_impl;
+pub use tags::list_tags_impl;
+pub use tags::tag_task_impl;
+pub use tags::tags_of_task_impl;
+pub use tags::untag_task_impl;
+pub use tags::CreateTagRequest;
+pub use tags::ListTagsRequest;
+pub use tags::TaskTagRequest;
+pub use tags::TaskTagsRequest;
+pub use tasks::clarify_ready_impl;
+pub use tasks::create_task_impl;
+pub use tasks::list_tasks_impl;
+pub use tasks::set_task_project_impl;
+pub use tasks::ClarifyReadyRequest;
+pub use tasks::CreateTaskRequest;
+pub use tasks::SetTaskProjectRequest;
+pub use timer::finish_timer_impl;
+pub use timer::pause_timer_impl;
+pub use timer::resume_timer_impl;
+pub use timer::start_timer_impl;
+pub use timer::timer_snapshot_impl;
+pub use timer::timer_tick_impl;
+pub use timer::StartTimerRequest;
 
 /// 实验器材（P7 Task 6a）：四条 dev 命令，**只在 debug 构建编译**。
 #[cfg(debug_assertions)]
@@ -281,333 +357,6 @@ pub struct EpochRequest {
     pub expected_data_epoch: String,
 }
 
-/// 项目列表请求（F-004）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ListProjectsRequest {
-    pub expected_data_epoch: String,
-    /// `active` / `archived` / `done`（**读路径**取值域，含 V0.1 不写的 `done`）；
-    /// `null` / 省略 = 不限制状态，归档与历史都在里面。
-    pub status: Option<String>,
-}
-
-/// 新建项目（F-004）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct CreateProjectRequest {
-    pub expected_data_epoch: String,
-    pub name: String,
-}
-
-/// 重命名项目（F-004）。改既有对象 ⇒ 必须带项目版本。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct RenameProjectRequest {
-    pub expected_data_epoch: String,
-    pub project_id: String,
-    pub expected_row_version: i64,
-    pub name: String,
-}
-
-/// 归档项目（F-004）。归档不删任务、不动历史。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ArchiveProjectRequest {
-    pub expected_data_epoch: String,
-    pub project_id: String,
-    pub expected_row_version: i64,
-}
-
-/// 标签列表请求（F-005）。`kind` 省略 = 全部四类。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ListTagsRequest {
-    pub expected_data_epoch: String,
-    /// `Domain` / `Activity` / `Context` / `Report`（大小写敏感）。
-    pub kind: Option<String>,
-}
-
-/// 新建标签（F-005）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct CreateTagRequest {
-    pub expected_data_epoch: String,
-    pub kind: String,
-    pub name: String,
-    /// V0.1 没有层级：非空值一律被服务拒绝（`services::catalog::create_tag`）。
-    pub parent_id: Option<String>,
-}
-
-/// 打标 / 去标（F-005）：一次一个标签、一个任务。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct TaskTagRequest {
-    pub expected_data_epoch: String,
-    pub task_id: String,
-    pub tag_id: String,
-}
-
-/// 某个任务身上的标签（纯读）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct TaskTagsRequest {
-    pub expected_data_epoch: String,
-    pub task_id: String,
-}
-
-/// 捕获一个任务（F-002 的 Inbox 入口）。新建 ⇒ 只需 epoch。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct CreateTaskRequest {
-    pub expected_data_epoch: String,
-    pub title: String,
-    pub project_id: Option<String>,
-}
-
-/// 理清为待办（F-002）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ClarifyReadyRequest {
-    pub expected_data_epoch: String,
-    pub task_id: String,
-    pub expected_row_version: i64,
-}
-
-/// 改任务的归属（F-002）。`project` 是二值：`{"bind":"<id>"}` / `"clear"`。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct SetTaskProjectRequest {
-    pub expected_data_epoch: String,
-    pub task_id: String,
-    pub expected_row_version: i64,
-    pub project: catalog::ProjectTarget,
-}
-
-/// 今日计划的加入 / 移除（F-010）。日期与时区都是**原始输入**，
-/// 由 `services::daily_plan` 的唯一入口校验与规范化。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PlanMutationRequest {
-    pub expected_data_epoch: String,
-    pub task_id: String,
-    pub date: String,
-    pub timezone: String,
-}
-
-/// 开始计时（F-003 的 start）。
-///
-/// `mode` / `timer_kind` 是字符串（见模块头）；`expected_interval_ms` 省略时按
-/// 本进程的采样节拍取值——它只用于识别挂起，不是「多久记一次工时」。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct StartTimerRequest {
-    pub expected_data_epoch: String,
-    pub task_id: String,
-    pub task_expected_version: i64,
-    pub mode: String,
-    pub timer_kind: String,
-    /// 倒计时必须有正预算；正计时必须没有（`services::timer` 会拒绝相反的组合）。
-    pub target_duration_ms: Option<i64>,
-    #[serde(default = "default_expected_interval_ms")]
-    pub expected_interval_ms: i64,
-}
-
-/// 对账（确认 / 丢弃不确定区间）。`expected_row_version` 是**会话**版本。
-///
-/// `action` / `target_state` 是字符串（见模块头）：`confirm` / `discard_uncertain`
-/// 与 `paused` / `finished`。`ranges` 只在 `confirm` 时携带内容，且必须**恰好覆盖**
-/// 该会话的全部待确认区间；`discard_uncertain` 必须给空列表（作废集合由服务从库里取，
-/// 不由客户端指认一条）。两条动作都是本命令，**作废整次**是 [`DiscardSessionRequest`]。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ReconcileRequest {
-    pub expected_data_epoch: String,
-    pub session_id: String,
-    pub expected_row_version: i64,
-    pub action: String,
-    pub target_state: String,
-    pub ranges: Vec<ConfirmedRangeRequest>,
-}
-
-/// [`ReconcileRequest::ranges`] 的一项：用户确认的一段区间。
-///
-/// 起止都是**用户给定的值**（与 `services::recovery::ConfirmedRange` 逐字段相同），
-/// 不是候选端点推导出来的——候选端点只是展示材料。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ConfirmedRangeRequest {
-    pub interval_id: String,
-    pub started_at: i64,
-    pub ended_at: i64,
-}
-
-/// 历史修正（重定时 / 软删除）。`expected_row_version` 是**所属会话**的版本，**必填**。
-///
-/// `action` 是字符串：`retime` 必须带 `started_at` + `ended_at`（时长由服务算），
-/// `delete` 不用它们。三个可选字段（`started_at` / `ended_at` / `reason`）都可以**省略**
-/// ——省略等价于 `null`。`reason` 是用户给的理由，落在审计里。
-///
-/// **版本位必填**：它与其他四条命令、以及 `expected_data_epoch` 同一口径——必填标量
-/// 少了就是传输层（serde）错误，**不是**一条「我不知道版本」的可用调用路径。
-/// 服务层那条「缺少记录版本，无法安全地修正这段历史。」守卫因此从命令层不可达；
-/// 它在服务层被 `tests/correct.rs` 的两条用例覆盖（既有的一条用 `for_create` 信封，
-/// P8 Task 2a 修复轮补的一条额外钉住「是哪一条拒绝」的文案）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct CorrectRequest {
-    pub expected_data_epoch: String,
-    pub session_id: String,
-    pub expected_row_version: i64,
-    pub interval_id: String,
-    pub action: String,
-    pub started_at: Option<i64>,
-    pub ended_at: Option<i64>,
-    pub reason: Option<String>,
-}
-
-/// 手工补录一段**已经发生**的人工时间（新建 ⇒ 只需 epoch）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct BackfillRequest {
-    pub expected_data_epoch: String,
-    pub task_id: String,
-    pub started_at: i64,
-    pub ended_at: i64,
-}
-
-/// 作废整次会话。`expected_row_version` 是**会话**版本。
-///
-/// 它与 [`ReconcileRequest`] 的 `discard_uncertain` 是**两条命令、两个语义**：
-/// 这里作废该会话的全部区间并把会话推成 `discarded`（无状态前置），那边只丢
-/// 待确认区间、保留可信前缀。界面上也不许合并成一个「丢弃」按钮。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct DiscardSessionRequest {
-    pub expected_data_epoch: String,
-    pub session_id: String,
-    pub expected_row_version: i64,
-}
-
-/// 任务状态跃迁。`expected_row_version` 是**任务**版本。
-///
-/// `target` / `cause` 是字符串：`target` 是落库用的状态名（`Done` / `Blocked` /
-/// `Ready` …，与 `TaskStatus::as_str()` 逐字一致），`cause` 是 `user` / `reopen`
-/// （`reopen` 是终结态回 `Ready` 的唯一合法原因）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct TransitionTaskRequest {
-    pub expected_data_epoch: String,
-    pub task_id: String,
-    pub expected_row_version: i64,
-    pub target: String,
-    pub cause: String,
-}
-
-/// 常规历史的一次读取（命令 13）：半开窗口 `[from, to)` + 分页窗口 + 可选详情。
-///
-/// 前五个标量都是**必填**（与其余命令的 epoch/版本同一口径）：`from`/`to` 少的不是
-/// 「全窗口」而是传输层（serde）错误——「不限制范围」在这里是一条不该存在的路径
-/// （历史页永远有一个正在看的范围）。`limit` 的取值域是 `1..=100`、`offset` `>= 0`，
-/// 越界由服务层经 `task_repo::require_page` 拒绝（命令层不复制那条规则）。
-///
-/// `session_id` 省略 / `null` = 只要列表；给了就额外返回那条会话的详情
-/// （session + 全部区间 + 全部审计，含真实 `row_version`）。**`HistoryQuery` 里没有
-/// `total`**：响应形状由 P8 计划钉死为 `{data_epoch, revision, sessions, selected}`，
-/// 翻页按「取满 `limit` 条 ⇒ 还可能有下一页」——不在这里发明第二个形状。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct HistoryQuery {
-    pub expected_data_epoch: String,
-    pub from: i64,
-    pub to: i64,
-    pub limit: i64,
-    pub offset: i64,
-    pub session_id: Option<String>,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 导出与备份 / 恢复的请求与响应 DTO（P8 Task 3a：命令 9/10/11）
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// 导出请求（命令 9）：按 `format` 判别该带哪些标量。
-///
-/// **判别式，不是"都能传"**：`json` 要 `from`/`to`（半开范围）；`markdown` 只要可选的
-/// `anchor`（这一周里的**任一刻**，周界由服务算）。不适用却传了 ⇒ 命令体**显式拒绝**
-/// （不是"忽略它"）：忽略会让调用方以为自己指定了范围，而服务用的是另一套口径
-/// （计划「2026-10-08 第三轮契约收口」的导出 DTO 条：不接受同时传不适用字段的含糊请求）。
-///
-/// `from` / `to` / `anchor` 都是 `Option`：必填与否**取决于判别式**，而 serde 表达不了
-/// "当 format=json 时必填"——那条规则落在 [`parse_export_request`] 上（拒绝原因可读，
-/// 且是 `DOMAIN_ERROR` 而不是传输层的反序列化错误）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct ExportRequest {
-    /// `json`（范围明细）或 `markdown`（自然周回顾）。
-    pub format: String,
-    /// 用户时区（原始输入，归一在服务那一条唯一入口上）。
-    pub timezone: String,
-    pub expected_data_epoch: String,
-    /// `json` 必填：范围起点（含）。
-    pub from: Option<i64>,
-    /// `json` 必填：范围终点（**不含**）。
-    pub to: Option<i64>,
-    /// `markdown` 可选：这一周里的任一刻；省略 = 同一次样本的归属终点（"本周"）。
-    pub anchor: Option<i64>,
-}
-
-/// 备份请求（命令 10）。只带库身份：它不修改任何业务事实，没有可校验的实体版本。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct BackupRequest {
-    pub expected_data_epoch: String,
-}
-
-/// 恢复请求（命令 11）：全项目唯一的危险操作。
-///
-/// `confirmed` 是**命令层再校验一次**的二次确认位——界面上的二次确认是硬前置，但
-/// 不能只靠界面。缺它（反序列化失败）或为 `false` 都拒绝，且**不产生任何副作用**。
-/// `expected_data_epoch` 是**进维护态之前**的身份守卫：拿旧展示来点恢复 ⇒
-/// `DATA_EPOCH_MISMATCH`，此时进程状态与磁盘一个字节都没变。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct RestoreRequest {
-    /// 待恢复的备份产物路径（用户从备份目录里挑的那一份）。
-    pub backup_path: String,
-    pub expected_data_epoch: String,
-    pub confirmed: bool,
-}
-
-/// 一次导出的结果（命令 9）：**真实存在的绝对路径** + 与内容同一份数据的版本信封。
-///
-/// 来由（P8 Task 3a）：P5 只产出内容（`ExportJson` / `ExportMarkdown` 是服务层类型、
-/// 没有 serde），**落盘与 IPC 归 P8**（P5 计划把落盘订正给 P8）。`data_epoch` /
-/// `revision` **直接取自这一次生成结果**——不在写文件之后重新查询（计划第三轮契约
-/// 收口：那样报的是"响应时刻"的版本，与文件里的数字就不再同源）。
-///
-/// 落盘本身**不推进业务 `revision`**、不广播 `domain.changed`：写文件不是业务事实。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ExportResult {
-    /// 落盘后的**绝对**路径（界面据此 `revealItemInDir`，也可复制给用户）。
-    pub path: String,
-    /// 写进文件的字节数（UTF-8 长度，与文件大小逐字节相符）。
-    pub bytes: u64,
-    pub data_epoch: String,
-    pub revision: i64,
-}
-
-/// 一次备份的结果（命令 10）。
-///
-/// 来由：备份产生一份库副本、**不修改业务事实** ⇒ **不加 `revision`**、不广播
-/// `domain.changed`（计划第 10 条）。信封里的两个值就是这次备份时刻的权威身份与版本，
-/// 与写命令的"提交后读回"同一口径——只是这里没有提交，所以它们是**产物落地之后**
-/// 读回来的同一个值（判据：备份命令里没有 `bump_revision`）。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BackupResult {
-    /// 备份产物的**绝对**路径（`VACUUM INTO` 出来的单文件快照）。
-    pub path: String,
-    /// 产物大小（字节）。
-    pub bytes: u64,
-    pub data_epoch: String,
-    pub revision: i64,
-}
-
-/// 一次恢复的结果（命令 11）。
-///
-/// 来由：`revision` **必须在恢复的锁内冻结**（勘察 §1-B6 / 决策 3）。`RestoreOutcome`
-/// 原先不带它，P8 扩了返回材料：`services::backup::Identity` 在**两步重扫之后、
-/// `install_runtime` 之前**、仍持同一把锁时读回 `meta.revision`，提交与回滚两条路径
-/// 各自把它放进 outcome。**不得**换库放锁之后再读一次拼上去——那样 `data_epoch` 与
-/// `revision` 就不是同一个时刻的两个字段了。
-///
-/// `applied` 在成功时恒为 `true`：服务把"没换成"当 `Err` 交回（回滚成功也报原始
-/// `Err(cause)`），所以**没有可达的正常 `false`**。这里照抄 `outcome.committed` 而不是
-/// 写死 `true`——写死会把"服务将来改形状"的风险藏起来。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct RestoreResult {
-    /// 恢复之后的 `data_epoch`（提交路径 = 全新值）：前端据此**重新握手**，旧展示必须丢。
-    pub data_epoch: String,
-    /// 与 [`RestoreResult::data_epoch`] 同一时刻（锁内同一次读）的权威版本。
-    pub revision: i64,
-    pub applied: bool,
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 握手
 // ─────────────────────────────────────────────────────────────────────────────
@@ -620,7 +369,7 @@ pub struct RestoreResult {
 pub async fn get_revision(
     window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
-) -> Result<handshake::RevisionSnapshot, ErrorResponse> {
+) -> Result<crate::services::handshake::RevisionSnapshot, ErrorResponse> {
     run_command(
         "get_revision",
         window.label(),
@@ -629,11 +378,6 @@ pub async fn get_revision(
         get_revision_impl,
     )
     .await
-}
-
-/// [`get_revision`] 的命令体（IPC 包装只做转发）。
-pub fn get_revision_impl(app: &mut AppState) -> Result<handshake::RevisionSnapshot, AppError> {
-    handshake::get_revision(app.db()?)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -657,19 +401,6 @@ pub async fn list_projects(
     .await
 }
 
-/// [`list_projects`] 的命令体（IPC 包装只做转发）。
-pub fn list_projects_impl(
-    app: &mut AppState,
-    request: ListProjectsRequest,
-) -> Result<catalog::ProjectList, AppError> {
-    let status = match request.status.as_deref() {
-        // 读路径：`done` 是库里合法的值，这里必须读得懂（写路径才拒绝它）。
-        Some(raw) => Some(catalog::parse_project_status_read(raw)?),
-        None => None,
-    };
-    catalog::list_projects(app.db()?, &request.expected_data_epoch, status)
-}
-
 /// 新建任务时可选的项目：**只列 active**（F-004）。归档/done 从这里消失，
 /// 但它们的历史仍在完整列表里。
 #[tauri::command]
@@ -688,14 +419,6 @@ pub async fn list_selectable_projects(
     .await
 }
 
-/// [`list_selectable_projects`] 的命令体（IPC 包装只做转发）。
-pub fn list_selectable_projects_impl(
-    app: &mut AppState,
-    request: EpochRequest,
-) -> Result<catalog::ProjectList, AppError> {
-    catalog::list_selectable_projects(app.db()?, &request.expected_data_epoch)
-}
-
 /// 新建项目。同名项目允许存在（schema 没有唯一索引，F-004 也没要求）。
 #[tauri::command]
 pub async fn create_project(
@@ -712,26 +435,6 @@ pub async fn create_project(
         move |app| create_project_impl(app, &broadcaster, request),
     )
     .await
-}
-
-/// [`create_project`] 的命令体（IPC 包装只做转发）。
-pub fn create_project_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: CreateProjectRequest,
-) -> Result<catalog::ProjectChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let (change, changed) =
-        catalog::create_project(app.db_mut()?, env, &request.name, now)?.into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
 }
 
 /// 重命名项目。改成同名 ⇒ 幂等：不写库、不加 `revision`，返回当前行。
@@ -753,27 +456,6 @@ pub async fn rename_project(
     .await
 }
 
-/// [`rename_project`] 的命令体（IPC 包装只做转发）。
-pub fn rename_project_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: RenameProjectRequest,
-) -> Result<catalog::ProjectChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let (change, changed) =
-        catalog::rename_project(app.db_mut()?, env, &request.project_id, &request.name, now)?
-            .into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
-}
-
 /// 归档项目（F-004）。已归档 ⇒ 幂等。
 #[tauri::command]
 pub async fn archive_project(
@@ -791,26 +473,6 @@ pub async fn archive_project(
         move |app| archive_project_impl(app, &broadcaster, request),
     )
     .await
-}
-
-/// [`archive_project`] 的命令体（IPC 包装只做转发）。
-pub fn archive_project_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: ArchiveProjectRequest,
-) -> Result<catalog::ProjectChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let (change, changed) =
-        catalog::archive_project(app.db_mut()?, env, &request.project_id, now)?.into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -834,18 +496,6 @@ pub async fn list_tags(
     .await
 }
 
-/// [`list_tags`] 的命令体（IPC 包装只做转发）。
-pub fn list_tags_impl(
-    app: &mut AppState,
-    request: ListTagsRequest,
-) -> Result<catalog::TagList, AppError> {
-    let kind = match request.kind.as_deref() {
-        Some(raw) => Some(catalog::parse_tag_kind(raw)?),
-        None => None,
-    };
-    catalog::list_tags(app.db()?, &request.expected_data_epoch, kind)
-}
-
 /// 新建标签。
 #[tauri::command]
 pub async fn create_tag(
@@ -864,33 +514,6 @@ pub async fn create_tag(
     .await
 }
 
-/// [`create_tag`] 的命令体（IPC 包装只做转发）。
-pub fn create_tag_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: CreateTagRequest,
-) -> Result<catalog::TagChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let (change, changed) = catalog::create_tag(
-        app.db_mut()?,
-        env,
-        &request.kind,
-        &request.name,
-        request.parent_id.as_deref(),
-        now,
-    )?
-    .into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
-}
-
 /// 某个任务身上的标签。写路径（打标/去标）不用它——它们在同一个写事务里读回集合。
 #[tauri::command]
 pub async fn tags_of_task(
@@ -906,14 +529,6 @@ pub async fn tags_of_task(
         move |app| tags_of_task_impl(app, request),
     )
     .await
-}
-
-/// [`tags_of_task`] 的命令体（IPC 包装只做转发）。
-pub fn tags_of_task_impl(
-    app: &mut AppState,
-    request: TaskTagsRequest,
-) -> Result<catalog::TagList, AppError> {
-    catalog::tags_of_task(app.db()?, &request.expected_data_epoch, &request.task_id)
 }
 
 /// 打标：把**一个**标签加到**一个**任务上。
@@ -937,26 +552,6 @@ pub async fn tag_task(
     .await
 }
 
-/// [`tag_task`] 的命令体（IPC 包装只做转发）。
-pub fn tag_task_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: TaskTagRequest,
-) -> Result<catalog::TaskTagsChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let (change, changed) =
-        catalog::tag_task(app.db_mut()?, env, &request.task_id, &request.tag_id, now)?.into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
-}
-
 /// 去标。口径与 [`tag_task`] 完全对称，包括「本来就不在集合里 ⇒ 幂等」。
 #[tauri::command]
 pub async fn untag_task(
@@ -973,27 +568,6 @@ pub async fn untag_task(
         untag_task_impl(app, &broadcaster, request)
     })
     .await
-}
-
-/// [`untag_task`] 的命令体（IPC 包装只做转发）。
-pub fn untag_task_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: TaskTagRequest,
-) -> Result<catalog::TaskTagsChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let (change, changed) =
-        catalog::untag_task(app.db_mut()?, env, &request.task_id, &request.tag_id, now)?
-            .into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1020,15 +594,6 @@ pub async fn list_tasks(
     .await
 }
 
-/// [`list_tasks`] 的命令体（IPC 包装只做转发）。
-pub fn list_tasks_impl(
-    app: &mut AppState,
-    request: catalog::TaskQueryRequest,
-) -> Result<catalog::TaskQueryResult, AppError> {
-    let query = catalog::TaskQuery::try_from(request)?;
-    catalog::list_tasks_filtered(app.db()?, query)
-}
-
 /// 捕获一个任务（F-002 的 Inbox 入口）。空标题被服务拒绝。
 #[tauri::command]
 pub async fn create_task(
@@ -1045,32 +610,6 @@ pub async fn create_task(
         move |app| create_task_impl(app, &broadcaster, request),
     )
     .await
-}
-
-/// [`create_task`] 的命令体（IPC 包装只做转发）。
-pub fn create_task_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: CreateTaskRequest,
-) -> Result<catalog::TaskChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let (change, changed) = catalog::create_task(
-        app.db_mut()?,
-        env,
-        &request.title,
-        request.project_id.as_deref(),
-        now,
-    )?
-    .into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
 }
 
 /// 理清为待办（F-002）。只接受没有在计时的 `Inbox` / `Clarifying`（P3 的状态编排
@@ -1093,27 +632,6 @@ pub async fn clarify_ready(
     .await
 }
 
-/// [`clarify_ready`] 的命令体（IPC 包装只做转发）。
-pub fn clarify_ready_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: ClarifyReadyRequest,
-) -> Result<catalog::TaskChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let change = catalog::clarify_ready(app.db_mut()?, env, &request.task_id, now)?;
-    // `services::catalog::clarify_ready` 没有 `Unchanged` 分支：它只在真的跃迁时成功，
-    // 所以这一次业务写必然改了库。
-    Ok(announce(
-        broadcaster,
-        true,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
-}
-
 /// 改任务的归属（绑定到 active 项目 / 解除关联）。同值 ⇒ 幂等。
 #[tauri::command]
 pub async fn set_task_project(
@@ -1133,27 +651,6 @@ pub async fn set_task_project(
     .await
 }
 
-/// [`set_task_project`] 的命令体（IPC 包装只做转发）。
-pub fn set_task_project_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: SetTaskProjectRequest,
-) -> Result<catalog::TaskProjectChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let (change, changed) =
-        catalog::set_task_project(app.db_mut()?, env, &request.task_id, request.project, now)?
-            .into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 今日计划（F-010 的「今日选择」半边）
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1163,21 +660,13 @@ pub fn set_task_project_impl(
 pub async fn plan_for(
     window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
-    request: daily_plan::DailyPlanQuery,
-) -> Result<daily_plan::DailyPlanView, ErrorResponse> {
+    request: crate::services::daily_plan::DailyPlanQuery,
+) -> Result<crate::services::daily_plan::DailyPlanView, ErrorResponse> {
     let targets = Vec::new();
     run_command("plan_for", window.label(), &state, targets, move |app| {
         plan_for_impl(app, request)
     })
     .await
-}
-
-/// [`plan_for`] 的命令体（IPC 包装只做转发）。
-pub fn plan_for_impl(
-    app: &mut AppState,
-    request: daily_plan::DailyPlanQuery,
-) -> Result<daily_plan::DailyPlanView, AppError> {
-    daily_plan::plan_for(app.db()?, request)
 }
 
 /// 把一个任务加入今日计划。重复加入 ⇒ 幂等。
@@ -1186,7 +675,7 @@ pub async fn add_to_plan(
     window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: PlanMutationRequest,
-) -> Result<daily_plan::DailyPlanChange, ErrorResponse> {
+) -> Result<crate::services::daily_plan::DailyPlanChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     let broadcaster = Arc::clone(state.broadcaster());
     run_command("add_to_plan", window.label(), &state, targets, move |app| {
@@ -1195,40 +684,13 @@ pub async fn add_to_plan(
     .await
 }
 
-/// [`add_to_plan`] 的命令体（IPC 包装只做转发）。
-pub fn add_to_plan_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: PlanMutationRequest,
-) -> Result<daily_plan::DailyPlanChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let (change, changed) = daily_plan::add_to_plan(
-        app.db_mut()?,
-        env,
-        &request.task_id,
-        &request.date,
-        &request.timezone,
-        now,
-    )?
-    .into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
-}
-
 /// 把一个任务从今日计划里移除。口径与 [`add_to_plan`] 对称。
 #[tauri::command]
 pub async fn remove_from_plan(
     window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: PlanMutationRequest,
-) -> Result<daily_plan::DailyPlanChange, ErrorResponse> {
+) -> Result<crate::services::daily_plan::DailyPlanChange, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     let broadcaster = Arc::clone(state.broadcaster());
     run_command(
@@ -1241,40 +703,13 @@ pub async fn remove_from_plan(
     .await
 }
 
-/// [`remove_from_plan`] 的命令体（IPC 包装只做转发）。
-pub fn remove_from_plan_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: PlanMutationRequest,
-) -> Result<daily_plan::DailyPlanChange, AppError> {
-    let now = app.now_ms()?;
-    let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let (change, changed) = daily_plan::remove_from_plan(
-        app.db_mut()?,
-        env,
-        &request.task_id,
-        &request.date,
-        &request.timezone,
-        now,
-    )?
-    .into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        change.data_epoch.clone(),
-        change.revision,
-        now,
-        change,
-    ))
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 统计（F-010 的「今日工时」半边）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Today 聚合（F-010 的五项）：今日选择列表、当前任务、已确认 / 运行暂计 / 待确认三组。
 ///
-/// 收的是服务层的 IPC 请求 DTO（[`stats::TodayQuery`]，**不另造请求形状**）：
+/// 收的是服务层的 IPC 请求 DTO（[`crate::services::stats::TodayQuery`]，**不另造请求形状**）：
 /// 它**不带日期**——「今天」由服务从**同一次样本的归属终点**算，所以 `date` / `range` /
 /// `as_of` 三者天然同源；想看别的日子用范围报表。`timezone` 是原始输入，归一在
 /// [`stats::today`] 那一条唯一入口上（与日界、存储键同一套），命令层只转发。
@@ -1285,8 +720,8 @@ pub fn remove_from_plan_impl(
 pub async fn stats_today(
     window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
-    request: stats::TodayQuery,
-) -> Result<stats::TodayView, ErrorResponse> {
+    request: crate::services::stats::TodayQuery,
+) -> Result<crate::services::stats::TodayView, ErrorResponse> {
     run_command(
         "stats_today",
         window.label(),
@@ -1295,14 +730,6 @@ pub async fn stats_today(
         move |app| stats_today_impl(app, request),
     )
     .await
-}
-
-/// [`stats_today`] 的命令体（IPC 包装只做转发）。
-pub fn stats_today_impl(
-    app: &mut AppState,
-    request: stats::TodayQuery,
-) -> Result<stats::TodayView, AppError> {
-    app.stats_today(&request)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1336,87 +763,6 @@ fn unknown_enum_value(field: &'static str, value: &str) -> AppError {
     .into()
 }
 
-/// `reconcile` 的动作字符串（模块头：字符串枚举显式解析，不靠 serde）。
-fn parse_reconcile_action(raw: &str) -> Result<recovery::ReconcileAction, AppError> {
-    match raw.trim() {
-        "confirm" => Ok(recovery::ReconcileAction::Confirm),
-        "discard_uncertain" => Ok(recovery::ReconcileAction::DiscardUncertain),
-        "" => Err(DomainError::EmptyText {
-            field: "对账动作"
-        }
-        .into()),
-        other => Err(unknown_enum_value("对账动作", other)),
-    }
-}
-
-/// 对账之后会话停在哪个状态。取值域只有 `paused` / `finished` 两个
-/// （`running` / `recovering` / `discarded` 都不是「对账后的状态」）。
-fn parse_reconcile_target_state(raw: &str) -> Result<recovery::ReconcileTargetState, AppError> {
-    match raw.trim() {
-        "paused" => Ok(recovery::ReconcileTargetState::Paused),
-        "finished" => Ok(recovery::ReconcileTargetState::Finished),
-        "" => Err(DomainError::EmptyText {
-            field: "对账后的会话状态",
-        }
-        .into()),
-        other => Err(unknown_enum_value("对账后的会话状态", other)),
-    }
-}
-
-/// `correct` 的动作（字符串 + 可选起止 → 服务枚举）。
-///
-/// `retime` 的两个时刻由**请求**给（服务的 `CorrectAction::Retime` 必带它们）；
-/// 少一个就是构造不出请求，落在 `DOMAIN_ERROR` 上。`delete` 不带时刻。
-fn parse_correct_action(request: &CorrectRequest) -> Result<history::CorrectAction, AppError> {
-    match request.action.trim() {
-        "retime" => match (request.started_at, request.ended_at) {
-            (Some(started_at), Some(ended_at)) => Ok(history::CorrectAction::Retime {
-                started_at,
-                ended_at,
-            }),
-            _ => Err(AppError::Domain {
-                detail: "重定时必须同时给出开始与结束时刻。".into(),
-            }),
-        },
-        "delete" => Ok(history::CorrectAction::Delete),
-        "" => Err(DomainError::EmptyText {
-            field: "修正动作"
-        }
-        .into()),
-        other => Err(unknown_enum_value("修正动作", other)),
-    }
-}
-
-/// 任务状态目标。**就是落库用的状态名**（`TaskStatus::as_str()`），
-/// 与 `parse_session_mode` 同形：空白 ⇒ `EmptyText`，取值域外 ⇒ `UnknownEnumValue`。
-///
-/// 取值域里含 V0.1 不写的 `Scheduled`：这里**不**自己加「可写性」判断——
-/// 那条规则在服务层（`TaskStatus::is_writable_in_v01` 与跃迁表），命令层不重复。
-fn parse_task_target(raw: &str) -> Result<TaskStatus, AppError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(DomainError::EmptyText {
-            field: "任务状态"
-        }
-        .into());
-    }
-    TaskStatus::parse(trimmed).ok_or_else(|| unknown_enum_value("任务状态", raw))
-}
-
-/// 跃迁原因。`TransitionCause` 在 domain 里没有 `parse`/`as_str`（它从不落库、
-/// 也不进任何快照），所以 IPC 的字符串形状在这里一次定死：`user` / `reopen`。
-fn parse_transition_cause(raw: &str) -> Result<TransitionCause, AppError> {
-    match raw.trim() {
-        "user" => Ok(TransitionCause::User),
-        "reopen" => Ok(TransitionCause::Reopen),
-        "" => Err(DomainError::EmptyText {
-            field: "跃迁原因"
-        }
-        .into()),
-        other => Err(unknown_enum_value("跃迁原因", other)),
-    }
-}
-
 /// 对账：一次处理该会话的**全部**待确认区间（确认或丢弃）。
 ///
 /// 只接 `recovering`（R6）：非 `recovering` 一律拒绝——包括「已经确认过、想再确认一次」，
@@ -1426,49 +772,13 @@ pub async fn reconcile(
     window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: ReconcileRequest,
-) -> Result<recovery::ReconcileReport, ErrorResponse> {
+) -> Result<crate::services::recovery::ReconcileReport, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Session, &request.session_id)];
     let broadcaster = Arc::clone(state.broadcaster());
     run_command("reconcile", window.label(), &state, targets, move |app| {
         reconcile_impl(app, &broadcaster, request)
     })
     .await
-}
-
-/// [`reconcile`] 的命令体（IPC 包装只做转发）。
-pub fn reconcile_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: ReconcileRequest,
-) -> Result<recovery::ReconcileReport, AppError> {
-    // 先解析（可能拒绝，且不该为一次坏请求取时钟样本），再取信封与时钟。
-    let action = parse_reconcile_action(&request.action)?;
-    let target_state = parse_reconcile_target_state(&request.target_state)?;
-    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let req = recovery::ReconcileRequest {
-        session_id: request.session_id,
-        action,
-        target_state,
-        ranges: request
-            .ranges
-            .into_iter()
-            .map(|range| recovery::ConfirmedRange {
-                interval_id: range.interval_id,
-                started_at: range.started_at,
-                ended_at: range.ended_at,
-            })
-            .collect(),
-    };
-    let now = app.now_ms()?;
-    let (report, changed) = app.reconcile(env, req)?.into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        report.data_epoch.clone(),
-        report.revision,
-        now,
-        report,
-    ))
 }
 
 /// 历史修正：重定时 / 软删除一条可信区间。只对 `finished` 会话开放。
@@ -1486,33 +796,6 @@ pub async fn correct(
     .await
 }
 
-/// [`correct`] 的命令体（IPC 包装只做转发）。
-pub fn correct_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: CorrectRequest,
-) -> Result<history::HistoryEditReport, AppError> {
-    let action = parse_correct_action(&request)?;
-    // 改既有对象 ⇒ `for_update` 这条规范构造点（版本位必填，见请求 DTO）。
-    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let req = history::CorrectRequest {
-        session_id: request.session_id,
-        interval_id: request.interval_id,
-        action,
-        reason: request.reason,
-    };
-    let now = app.now_ms()?;
-    let (report, changed) = app.correct(env, req)?.into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        report.data_epoch.clone(),
-        report.revision,
-        now,
-        report,
-    ))
-}
-
 /// 手工补录一段已经发生的人工时间。**独立入口**：不启动计时、不伪造完成事件。
 #[tauri::command]
 pub async fn backfill(
@@ -1526,31 +809,6 @@ pub async fn backfill(
         backfill_impl(app, &broadcaster, request)
     })
     .await
-}
-
-/// [`backfill`] 的命令体（IPC 包装只做转发）。
-pub fn backfill_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: BackfillRequest,
-) -> Result<history::HistoryEditReport, AppError> {
-    // 补录**新建**一条 `finished` 会话：没有可校验的行版本 ⇒ `for_create`。
-    let env = WriteEnvelope::for_create(request.expected_data_epoch);
-    let req = history::BackfillRequest {
-        task_id: request.task_id,
-        started_at: request.started_at,
-        ended_at: request.ended_at,
-    };
-    let now = app.now_ms()?;
-    let (report, changed) = app.backfill(env, req)?.into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        report.data_epoch.clone(),
-        report.revision,
-        now,
-        report,
-    ))
 }
 
 /// 作废整次会话（二次确认是界面的硬前置；命令层只转发）。
@@ -1572,35 +830,13 @@ pub async fn discard_session(
     .await
 }
 
-/// [`discard_session`] 的命令体（IPC 包装只做转发）。
-pub fn discard_session_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: DiscardSessionRequest,
-) -> Result<history::HistoryEditReport, AppError> {
-    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let req = recovery::DiscardSessionRequest {
-        session_id: request.session_id,
-    };
-    let now = app.now_ms()?;
-    let (report, changed) = app.discard_session(env, req)?.into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        report.data_epoch.clone(),
-        report.revision,
-        now,
-        report,
-    ))
-}
-
 /// 任务状态跃迁：同一事务里联动该任务的会话（结束 / 暂停），并广播一次。
 #[tauri::command]
 pub async fn transition_task(
     window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: TransitionTaskRequest,
-) -> Result<tasks::TaskTransitionReport, ErrorResponse> {
+) -> Result<crate::services::tasks::TaskTransitionReport, ErrorResponse> {
     let targets = vec![target(AuthorityKind::Task, &request.task_id)];
     let broadcaster = Arc::clone(state.broadcaster());
     run_command(
@@ -1611,32 +847,6 @@ pub async fn transition_task(
         move |app| transition_task_impl(app, &broadcaster, request),
     )
     .await
-}
-
-/// [`transition_task`] 的命令体（IPC 包装只做转发）。
-pub fn transition_task_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: TransitionTaskRequest,
-) -> Result<tasks::TaskTransitionReport, AppError> {
-    let target = parse_task_target(&request.target)?;
-    let cause = parse_transition_cause(&request.cause)?;
-    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
-    let req = tasks::TransitionTaskRequest {
-        task_id: request.task_id,
-        target,
-        cause,
-    };
-    let now = app.now_ms()?;
-    let (report, changed) = app.transition_task(env, req)?.into_parts();
-    Ok(announce(
-        broadcaster,
-        changed,
-        report.data_epoch.clone(),
-        report.revision,
-        now,
-        report,
-    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1700,32 +910,6 @@ pub async fn accept_detected_clock_correction(
     .await
 }
 
-/// [`accept_detected_clock_correction`] 的命令体（IPC 包装只做转发）。
-///
-/// 广播口径见本节标题下的第 6 条：`accepted` 就是「这次到底改没改库」这一位
-/// （服务只在审计提交成功时给它 `true`），所以它直接当 [`announce`] 的 `changed`——
-/// 与写命令族「仅 `Changed` 才广播」同一姿势，不另造判据、不按 `revision` 自比。
-pub fn accept_detected_clock_correction_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: EpochRequest,
-) -> Result<ClockCorrectionAccepted, AppError> {
-    // 信封的 `at` 在**写入之前**取（照 `create_project_impl` 的顺序）：提交成功之后再取
-    // 时钟，一旦取不到就会把一次**已经提交**的接受报成失败。这次采样只是读一次原始挂钟
-    // （`Coordinator::wall_ms`），不 `observe`、不推进检测器的 `last`——服务那一次
-    // 「采样 + 恰好观察一次」的口径不受影响。
-    let now = app.now_ms()?;
-    let accepted = app.accept_detected_clock_correction(&request.expected_data_epoch)?;
-    Ok(announce(
-        broadcaster,
-        accepted.accepted,
-        accepted.data_epoch.clone(),
-        accepted.revision,
-        now,
-        accepted,
-    ))
-}
-
 /// 用户显式点「重试」时的恢复重试（命令 7）。**不做定时自动重试**。
 #[tauri::command]
 pub async fn retry_recovery(
@@ -1743,21 +927,13 @@ pub async fn retry_recovery(
     .await
 }
 
-/// [`retry_recovery`] 的命令体（IPC 包装只做转发）。
-pub fn retry_recovery_impl(
-    app: &mut AppState,
-    request: EpochRequest,
-) -> Result<TimerSnapshot, AppError> {
-    app.retry_recovery(&request.expected_data_epoch)
-}
-
 /// 全局待确认概览（命令 8）：恢复页与「待确认」栏的唯一数据源。
 #[tauri::command]
 pub async fn attention_overview(
     window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
     request: EpochRequest,
-) -> Result<recovery::AttentionOverview, ErrorResponse> {
+) -> Result<crate::services::recovery::AttentionOverview, ErrorResponse> {
     run_command(
         "attention_overview",
         window.label(),
@@ -1766,18 +942,6 @@ pub async fn attention_overview(
         move |app| attention_overview_impl(app, request),
     )
     .await
-}
-
-/// [`attention_overview`] 的命令体（IPC 包装只做转发）。
-///
-/// 三个参数在这里组装：`db` 与 `coordinator` 都是 `AppState` 的 `pub` 访问器，`run_id`
-/// 由协调器给出（服务层够不着它）——这条命令**没有** `AppState` 包装。
-pub fn attention_overview_impl(
-    app: &mut AppState,
-    request: EpochRequest,
-) -> Result<recovery::AttentionOverview, AppError> {
-    let run_id = app.coordinator()?.run_id().to_owned();
-    recovery::attention_overview(app.db()?, &request.expected_data_epoch, &run_id)
 }
 
 /// 常规历史（命令 13）：窗口内的一页终态会话 + 可选详情。
@@ -1795,24 +959,6 @@ pub async fn history_view(
         move |app| history_view_impl(app, request),
     )
     .await
-}
-
-/// [`history_view`] 的命令体（IPC 包装只做转发）。
-pub fn history_view_impl(
-    app: &mut AppState,
-    request: HistoryQuery,
-) -> Result<history::HistoryView, AppError> {
-    history::history_view(
-        app.db()?,
-        &request.expected_data_epoch,
-        history::HistoryViewRequest {
-            from: request.from,
-            to: request.to,
-            limit: request.limit,
-            offset: request.offset,
-            session_id: request.session_id,
-        },
-    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1838,184 +984,6 @@ pub fn history_view_impl(
 // `confirmed: false` 就是它在服务端的落点（拒绝且零副作用）。**将来若引入保存对话框，
 // 用户取消走的就是这一档**——不是 `AppError`。
 
-/// 读一次权威身份，并且**只接受请求带来的期望值**（命令 9/10/11 共用）。
-///
-/// 与 `storage::guards::guard_epoch` **同一判据**（都读同一行 `app_meta` 再比期望值）；
-/// 区别只是**命令层不得引用 `storage::`**（`scripts/check-layers.ps1` 第 1 条），所以走
-/// 公开的握手入口。判据没有被削弱：比的是**请求带来的**期望值，不是"读出来再跟自己比"。
-///
-/// 调用方必须在同一个临界区里用它：拿到锁之后读到的身份，才配得上"这次操作的身份"。
-fn require_epoch(
-    app: &AppState,
-    expected_data_epoch: &str,
-) -> Result<handshake::RevisionSnapshot, AppError> {
-    let authority = handshake::get_revision(app.db()?)?;
-    if authority.data_epoch != expected_data_epoch {
-        return Err(AppError::DataEpochMismatch);
-    }
-    Ok(authority)
-}
-
-/// 一次导出请求**解析之后**的形状：判别式 + 该形状真正要用的标量。
-///
-/// 把"判别式"与"标量"绑在一个枚举里，命令体就不必再 `unwrap` 一次可选字段——
-/// 校验与取值只有一处（`parse_export_request`），也不会有"校验过了但取错分支"的缝。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExportRequestShape {
-    /// 范围明细（`[from, to)`）。
-    Json { from: i64, to: i64 },
-    /// 自然周回顾（`anchor` = 这一周里的任一刻；`None` = 本周）。
-    Markdown { anchor: Option<i64> },
-}
-
-/// 解析导出的 `format` 与它该带的标量（字符串枚举显式解析，见模块头）。
-///
-/// 不适用却传了的字段**拒绝**而不是忽略（计划第三轮契约收口）。
-fn parse_export_request(request: &ExportRequest) -> Result<ExportRequestShape, AppError> {
-    let shape = match request.format.trim() {
-        "json" => {
-            let (Some(from), Some(to)) = (request.from, request.to) else {
-                return Err(AppError::Domain {
-                    detail: "JSON 导出必须同时给出 from 与 to（半开范围）。".into(),
-                });
-            };
-            if request.anchor.is_some() {
-                return Err(AppError::Domain {
-                    detail: "JSON 导出不接受 anchor（那是 Markdown 周回顾的参数）。".into(),
-                });
-            }
-            ExportRequestShape::Json { from, to }
-        }
-        "markdown" => {
-            if request.from.is_some() || request.to.is_some() {
-                return Err(AppError::Domain {
-                    detail: "Markdown 周回顾不接受 from/to：周界由服务按 anchor 算，\
-                             不能用任意范围冒充自然周。"
-                        .into(),
-                });
-            }
-            ExportRequestShape::Markdown {
-                anchor: request.anchor,
-            }
-        }
-        "" => {
-            return Err(DomainError::EmptyText {
-                field: "导出格式"
-            }
-            .into())
-        }
-        other => return Err(unknown_enum_value("导出格式", other)),
-    };
-    Ok(shape)
-}
-
-/// 导出产物的目录名（生产缺省：`<app_data_dir>/exports`，与备份同在一个应用数据目录下）。
-const EXPORT_DIR_NAME: &str = "exports";
-
-/// 备份阶段标记：`backup_consistent` 的失败 `detail` 前缀。用户手动备份与"迁移前备份"
-/// 分开，日志里一眼看得出是哪一次失败。
-const USER_BACKUP_STAGE: &str = "user backup";
-
-/// 导出产物的落盘目录（**只算路径**，不创建）。
-///
-/// `dir_override` 与 `services::backup::backup_consistent` 的同名参数同一姿势：生产传
-/// `None`（走 [`crate::platform::paths::app_data_dir`]），测试注入临时目录——**绝不写
-/// 真实的 `%APPDATA%`**（`tests/startup_order.rs` 与 `tests/backup_restore.rs` 都立过
-/// 这条规矩，环境变量那条路还要求串行执行、会把并行测试拖成互相干扰）。
-fn export_dir(dir_override: Option<&Path>) -> Result<PathBuf, AppError> {
-    match dir_override {
-        Some(dir) => Ok(dir.to_path_buf()),
-        None => Ok(crate::platform::paths::app_data_dir()
-            .map_err(|error| export_io("resolve the app data directory", error))?
-            .join(EXPORT_DIR_NAME)),
-    }
-}
-
-/// 导出产物的文件名：`worktrace-export-<形状>-<Unix 毫秒>.<扩展名>`。
-///
-/// 时间戳来自**同一条时钟接缝**（`AppState::now_ms`），与备份产物命名同一口径。名字的
-/// 粒度是**毫秒**，所以同一毫秒内的两次同形状导出会撞成同一个名字——**这是"重名"，
-/// 不是"同一份产物"**：两次 JSON 导出可以问的是**不同的范围**（内容就不同），
-/// 两次周回顾也可以问不同的周。所以撞名时**拒绝覆盖**（见 [`write_export`]），
-/// 与 `services::backup::backup_consistent` 的"同名即拒绝、不覆盖"同一口径。
-///
-/// 取舍（fix round 1，评审 Minor-4）：走 IPC 时每次导出都是一次独立往返，
-/// 落进同一毫秒**实际不可达**；而"静默覆盖"的代价是把用户可能正开着的那份文件换成
-/// 内容不同的另一份。真要支持批量导出，正确的改法是名字里加序号/UUID，
-/// **不是**退回静默覆盖。
-fn export_file_name(shape: ExportRequestShape, at_ms: i64) -> String {
-    match shape {
-        ExportRequestShape::Json { .. } => format!("worktrace-export-json-{at_ms}.json"),
-        ExportRequestShape::Markdown { .. } => {
-            format!("worktrace-export-weekly-{at_ms}.md")
-        }
-    }
-}
-
-/// 把内容写进导出目录，返回**绝对**路径与写出的字节数。
-///
-/// 两条不变量（fix round 1 的 Minor-3 / Minor-4）：
-///
-/// 1. **不留半份产物**：先写同目录的 `<名字>.partial`、写成功后再改名为正式名
-///    （同卷改名）。磁盘满 / 写一半失败 ⇒ `exports/` 里**不会**出现一个名字正常、
-///    内容截断的文件（用户不会以为它是一份完整导出）；失败时顺手清掉临时文件
-///    （best-effort：删不掉也不改变"这次导出失败"这个结论）。
-/// 2. **不覆盖已有产物**：同名产物已经存在 ⇒ 拒绝（与 `backup_consistent` 同一口径），
-///    而不是把内容换成另一份（见 [`export_file_name`] 的取舍说明）。
-fn write_export(dir: &Path, file_name: &str, text: &str) -> Result<(PathBuf, u64), AppError> {
-    std::fs::create_dir_all(dir)
-        .map_err(|error| export_io("create the export directory", error))?;
-    let path = dir.join(file_name);
-    if path.exists() {
-        return Err(AppError::Storage {
-            detail: format!("export: artifact already exists: {}", path.display()),
-        });
-    }
-    let staged = dir.join(format!("{file_name}.partial"));
-    let bytes = text.as_bytes();
-    if let Err(error) = std::fs::write(&staged, bytes) {
-        let _ = std::fs::remove_file(&staged);
-        return Err(export_io("write the artifact", error));
-    }
-    if let Err(error) = std::fs::rename(&staged, &path) {
-        let _ = std::fs::remove_file(&staged);
-        return Err(export_io("publish the artifact", error));
-    }
-    Ok((absolute_path(path)?, bytes.len() as u64))
-}
-
-/// 落盘失败的统一形状：`code` 是 `STORAGE_ERROR`，`detail` 是**内部诊断**（任务 3 的
-/// 「落盘的失败路径」条：目标目录不可写 / 磁盘满 / 路径过长都走这条，用户看到的是
-/// `AppError::message()` 那句固定文案，不是这里拼的英文）。
-fn export_io(stage: &str, error: std::io::Error) -> AppError {
-    AppError::Storage {
-        detail: format!("export: {stage}: {error}"),
-    }
-}
-
-/// 响应里给的是**绝对**路径（`revealItemInDir` 与"复制路径"都要求它）。
-///
-/// 生产缺省路径本来就是绝对的（`app_data_dir()` 由 `%APPDATA%` / `$XDG_DATA_HOME` 推出）；
-/// 这里只为**注入的相对目录**兜底：拼上当前目录，而不是报错。
-fn absolute_path(path: PathBuf) -> Result<PathBuf, AppError> {
-    if path.is_absolute() {
-        return Ok(path);
-    }
-    let cwd =
-        std::env::current_dir().map_err(|error| export_io("resolve an absolute path", error))?;
-    Ok(cwd.join(path))
-}
-
-/// 路径 → 响应里的字符串。不是合法 UTF-8 就拒绝：界面拿它去开文件管理器，
-/// 半个路径比一条明确的错误更糟。
-fn path_to_string(path: &Path) -> Result<String, AppError> {
-    path.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| AppError::Storage {
-            detail: format!("path is not valid UTF-8: {}", path.display()),
-        })
-}
-
 /// 导出（F-018，命令 9）：调 P5 的生成函数拿内容 → 写进 `<app_data_dir>/exports/` →
 /// 返回**真实存在的绝对路径**。
 ///
@@ -2028,7 +996,7 @@ fn path_to_string(path: &Path) -> Result<String, AppError> {
 /// 时钟（文件名那一次 `now_ms` 只用于命名）。编号 `revision` 与 `data_epoch` 从**本次
 /// 生成结果**里取。
 ///
-/// `dir_override` 见 [`export_dir`]：生产 IPC 传 `None`，用例注入临时目录。
+/// `dir_override` 见 [`export::export_dir`]：生产 IPC 传 `None`，用例注入临时目录。
 #[tauri::command]
 pub async fn export_data(
     window: tauri::WebviewWindow,
@@ -2043,50 +1011,6 @@ pub async fn export_data(
         move |app| export_data_impl(app, request, None),
     )
     .await
-}
-
-/// [`export_data`] 的命令体（IPC 包装只做转发）。
-pub fn export_data_impl(
-    app: &mut AppState,
-    request: ExportRequest,
-    dir_override: Option<&Path>,
-) -> Result<ExportResult, AppError> {
-    let shape = parse_export_request(&request)?;
-    // 文件名里的时间戳：在**生成之前**取一次（失败就不该留下半份产物），
-    // 走与业务写同一条时钟接缝（`AppState::now_ms` → 协调器 → `Clock`）。
-    let at_ms = app.now_ms()?;
-    let (text, data_epoch, revision) = match shape {
-        ExportRequestShape::Json { from, to } => {
-            let query = stats::StatsRangeQuery {
-                from,
-                to,
-                timezone: request.timezone,
-                expected_data_epoch: request.expected_data_epoch,
-            };
-            let export = app.export_json(&query)?;
-            (export.text, export.data_epoch, export.revision)
-        }
-        ExportRequestShape::Markdown { anchor } => {
-            let query = export::WeeklyQuery {
-                timezone: request.timezone,
-                anchor,
-                expected_data_epoch: request.expected_data_epoch,
-            };
-            let export = app.export_weekly_markdown(&query)?;
-            (export.text, export.data_epoch, export.revision)
-        }
-    };
-    let (path, bytes) = write_export(
-        &export_dir(dir_override)?,
-        &export_file_name(shape, at_ms),
-        &text,
-    )?;
-    Ok(ExportResult {
-        path: path_to_string(&path)?,
-        bytes,
-        data_epoch,
-        revision,
-    })
 }
 
 /// 备份（F-019 的备份半边，命令 10）：在**同一条连接**上 `VACUUM INTO` 一份库副本。
@@ -2120,48 +1044,6 @@ pub async fn backup(
     .await
 }
 
-/// [`backup`] 的命令体（IPC 包装只做转发 + 凑一只同源钟）。
-///
-/// `dir_override` 与 [`export_data_impl`] 同一姿势：生产 `None`，用例注入临时目录。
-pub fn backup_impl(
-    app: &mut AppState,
-    clock: &(dyn Clock + Send),
-    request: BackupRequest,
-    dir_override: Option<&Path>,
-) -> Result<BackupResult, AppError> {
-    // 维护态门禁：命令体**自己**也要挡一次。`run_command` 那一层也挡（取锁之后第一句），
-    // 但用例直接调命令体，且"备份在维护态被拒"是计划第 10 行点名的判据。
-    app.guard_writable()?;
-    // 身份守卫：过期请求**在产出任何东西之前**被拒（不留下半份产物）。
-    // 信封是写命令的共同形状，只是 `backup_consistent` 是六参原语、不收它——校验因此
-    // 在这里用握手入口做，判据与 `guard_epoch` 同源（见 [`require_epoch`]）。
-    let envelope = WriteEnvelope::for_create(request.expected_data_epoch);
-    require_epoch(app, &envelope.expected_data_epoch)?;
-    let artifact = backup::backup_consistent(
-        dir_override,
-        app.db()?.connection(),
-        backup::current_version(app.db()?.connection())?,
-        clock,
-        USER_BACKUP_STAGE,
-        app.diagnostics(),
-    )?;
-    // 响应里的身份与版本在**产物落地之后**读回：备份不改业务事实，所以它们与上面那次
-    // 守卫读到的相同；这样写是为了让"响应里的值 = 响应时刻库里的值"成为结构性事实，
-    // 而不是"因为没人写所以碰巧相等"。
-    let authority = require_epoch(app, &envelope.expected_data_epoch)?;
-    let bytes = std::fs::metadata(&artifact)
-        .map_err(|error| AppError::Storage {
-            detail: format!("{USER_BACKUP_STAGE}: stat the artifact: {error}"),
-        })?
-        .len();
-    Ok(BackupResult {
-        path: path_to_string(&artifact)?,
-        bytes,
-        data_epoch: authority.data_epoch,
-        revision: authority.revision,
-    })
-}
-
 /// 恢复（F-019 的危险半边，命令 11）：**全项目唯一不进 `run_command` 的命令**。
 ///
 /// 为什么不进（三条理由，任何一条都够）：
@@ -2193,61 +1075,6 @@ pub async fn restore(
         restore_impl(app, &broadcaster, &clock, request)
     })
     .await
-}
-
-/// [`restore`] 的命令体：二次确认 → 身份守卫 → **一次调用体内**走完三段。
-///
-/// 收 `&SharedApp` / `&Broadcaster` / `&ClockSource`（不是 `&mut AppState`）：三段各自
-/// 取锁、中间那段不持锁，命令体自己不持有任何借用——这正是"不进 `run_command`"在类型
-/// 上的样子。返回的 `revision` 来自 [`backup::RestoreOutcome::revision`]，即**锁内冻结**
-/// 的那个值（见 [`RestoreResult`]）。
-pub fn restore_impl(
-    app: &SharedApp,
-    broadcaster: &Broadcaster,
-    clock: &backup::ClockSource,
-    request: RestoreRequest,
-) -> Result<RestoreResult, AppError> {
-    // ⓪ **持锁调用 ⇒ 立刻拒绝**，判据与 `restore_from_backup` 第一句**同源**
-    //    （`holds_app_lock`），但位置必须在这里：下面 ② 的身份守卫要 `lock_app`，
-    //    而错误接线（把恢复塞回 `run_command` 的闭包）正持着那把非重入 `Mutex`——
-    //    没有这一句，现象是**静默死锁**（服务入口那句要到 ① 段才跑得到，太晚）。
-    //    有了它，"接线错误"是**红**：明确的 `STORAGE_ERROR`，什么都不碰。
-    if holds_app_lock(app) {
-        return Err(AppError::Storage {
-            detail: "恢复流程必须在锁外开始（命令体自己按段取锁），不要在持有串行边界的线程上调用"
-                .to_string(),
-        });
-    }
-    // ① 二次确认：命令层**再校验一次**。拒绝时一个字都不写：不进维护态、不碰文件、
-    //    连库都不读（`confirmed: false` 与"文件不存在"是两件事，先答前一件）。
-    if !request.confirmed {
-        return Err(AppError::Domain {
-            detail: "恢复会替换当前数据库，需要明确的二次确认（confirmed 必须为 true）。".into(),
-        });
-    }
-    // ② 身份守卫：在**进维护态之前**（失败时进程状态与磁盘一个字节都没变）。
-    //    这一小段自己取锁、随即释放——不能把 guard 带进 ③：`restore_from_backup` 的
-    //    第一句就是"持锁调用 ⇒ 拒绝"，带进去会**红**（这正是我们要的行为，不是要绕过的）。
-    {
-        let state = lock_app(app);
-        require_epoch(&state, &request.expected_data_epoch)?;
-    }
-    // ③ 三段流程必须在**这一次调用体内**：服务入口自己把它们连起来，命令层不得拆成
-    //    多次 IPC（P6 验收 §6 第一条）。
-    let outcome = backup::restore_from_backup(
-        app,
-        broadcaster,
-        Path::new(&request.backup_path),
-        None,
-        clock,
-    )?;
-    // `applied` 照抄 `outcome.committed`：服务把"没换成"当 `Err` 交回（回滚成功也报原始
-    // 原因），所以能走到这里就恒为 `true`。
-    Ok(RestoreResult {
-        data_epoch: outcome.data_epoch,
-        revision: outcome.revision,
-        applied: outcome.committed,
-    })
 }
 
 /// `restore` 专用的执行骨架：把 [`SharedApp`] 交给命令体，**由命令体自己按段取锁**。
@@ -2351,11 +1178,6 @@ pub async fn timer_snapshot(
     .await
 }
 
-/// [`timer_snapshot`] 的命令体（IPC 包装只做转发）。
-pub fn timer_snapshot_impl(app: &mut AppState) -> Result<TimerSnapshot, AppError> {
-    app.snapshot()
-}
-
 /// 推进一步：与快照同形，另外让 `tick_seq` 前进一步（前端据此丢弃旧 tick）。
 #[tauri::command]
 pub async fn timer_tick(
@@ -2370,11 +1192,6 @@ pub async fn timer_tick(
         timer_tick_impl,
     )
     .await
-}
-
-/// [`timer_tick`] 的命令体（IPC 包装只做转发）。
-pub fn timer_tick_impl(app: &mut AppState) -> Result<TimerSnapshot, AppError> {
-    app.tick()
 }
 
 /// 开始计时。开始新计时要过恢复门禁（有别的 run 的未闭合/待确认记录 ⇒
@@ -2393,34 +1210,6 @@ pub async fn start_timer(
     .await
 }
 
-/// [`start_timer`] 的命令体（IPC 包装只做转发）。
-pub fn start_timer_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: StartTimerRequest,
-) -> Result<CommandOutcome, AppError> {
-    let req = StartRequest {
-        expected_data_epoch: request.expected_data_epoch,
-        task_id: request.task_id.clone(),
-        task_expected_version: request.task_expected_version,
-        mode: parse_session_mode(&request.mode)?,
-        timer_kind: parse_timer_kind(&request.timer_kind)?,
-        target_duration_ms: request.target_duration_ms,
-        expected_interval_ms: request.expected_interval_ms,
-    };
-    // 计时命令没有「幂等重复」这一支：能走到这里就说明这次状态跃迁真的提交了
-    // （被拒的命令在服务层就返回错误，不会广播）。
-    let outcome = app.start(req)?;
-    Ok(announce(
-        broadcaster,
-        true,
-        outcome.snapshot.data_epoch.clone(),
-        outcome.revision,
-        outcome.snapshot.as_of,
-        outcome,
-    ))
-}
-
 /// 暂停（会话与会话版本由快照给出）。暂停值冻结，不在前端算。
 #[tauri::command]
 pub async fn pause_timer(
@@ -2434,25 +1223,6 @@ pub async fn pause_timer(
         pause_timer_impl(app, &broadcaster, request)
     })
     .await
-}
-
-/// [`pause_timer`] 的命令体（IPC 包装只做转发）。
-pub fn pause_timer_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: SessionRequest,
-) -> Result<CommandOutcome, AppError> {
-    // 计时命令没有「幂等重复」这一支：能走到这里就说明这次状态跃迁真的提交了
-    // （被拒的命令在服务层就返回错误，不会广播）。
-    let outcome = app.pause(request)?;
-    Ok(announce(
-        broadcaster,
-        true,
-        outcome.snapshot.data_epoch.clone(),
-        outcome.revision,
-        outcome.snapshot.as_of,
-        outcome,
-    ))
 }
 
 /// 继续计时。**两份版本**：任务与会话各自有自己的并发版本。
@@ -2477,25 +1247,6 @@ pub async fn resume_timer(
     .await
 }
 
-/// [`resume_timer`] 的命令体（IPC 包装只做转发）。
-pub fn resume_timer_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: ResumeRequest,
-) -> Result<CommandOutcome, AppError> {
-    // 计时命令没有「幂等重复」这一支：能走到这里就说明这次状态跃迁真的提交了
-    // （被拒的命令在服务层就返回错误，不会广播）。
-    let outcome = app.resume(request)?;
-    Ok(announce(
-        broadcaster,
-        true,
-        outcome.snapshot.data_epoch.clone(),
-        outcome.revision,
-        outcome.snapshot.as_of,
-        outcome,
-    ))
-}
-
 /// 结束计时。到点只提示、不自动完成（F-003 的完整联动归 P8）。
 #[tauri::command]
 pub async fn finish_timer(
@@ -2513,25 +1264,6 @@ pub async fn finish_timer(
         move |app| finish_timer_impl(app, &broadcaster, request),
     )
     .await
-}
-
-/// [`finish_timer`] 的命令体（IPC 包装只做转发）。
-pub fn finish_timer_impl(
-    app: &mut AppState,
-    broadcaster: &Broadcaster,
-    request: SessionRequest,
-) -> Result<CommandOutcome, AppError> {
-    // 计时命令没有「幂等重复」这一支：能走到这里就说明这次状态跃迁真的提交了
-    // （被拒的命令在服务层就返回错误，不会广播）。
-    let outcome = app.finish(request)?;
-    Ok(announce(
-        broadcaster,
-        true,
-        outcome.snapshot.data_epoch.clone(),
-        outcome.revision,
-        outcome.snapshot.as_of,
-        outcome,
-    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2606,7 +1338,7 @@ pub enum TrayFinish {
     /// 那笔写与托盘意图无关，是协调器自己那条闭环（幂等分支零写入）。
     NothingToFinish,
     /// 复用 [`transition_task_impl`] 把当前计时中的任务推到了 `Done`。
-    Finished(Box<tasks::TaskTransitionReport>),
+    Finished(Box<crate::services::tasks::TaskTransitionReport>),
 }
 
 /// 托盘「完成」：把**当前正在计时的那条任务**推到 `Done`（P8 Task 2d；命令 5 的第二个消费方）。

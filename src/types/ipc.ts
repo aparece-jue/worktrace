@@ -5,7 +5,7 @@
  *
  * - 请求形状：`src-tauri/src/commands/mod.rs` 的请求 DTO（每条命令只收一个
  *   `request` 参数，字段名就是那些结构体的 snake_case 字段名）；
- * - 响应形状：仓库根 `src/types/__snapshots__/*.json`（21 份，由
+ * - 响应形状：仓库根 `src/types/__snapshots__/*.json`（27 份，由
  *   `src-tauri/tests/ipc_snapshots.rs` 与 Rust 类型**逐字节**比对）。
  *
  * 手写镜像与快照之间靠一条用例保持机械联系
@@ -436,7 +436,7 @@ export interface TimerSnapshot {
    * 当前会话所属的任务；无会话时为 `null`。
    *
    * `resume_timer` 要 `task_id` + `task_expected_version`，而「这条会话属于哪个任务」
-   * 没有第二条读路径（`TaskRow` 不带会话、24 条命令里没有 session→task 的查询）——
+   * 没有第二条读路径（`TaskRow` 不带会话、既有命令里没有 session→task 的查询）——
    * 冷启动（重开窗口）或托盘暂停之后，只有快照能给出任务身份。
    */
   task_id: string | null;
@@ -449,7 +449,7 @@ export interface TimerSnapshot {
   /**
    * 任务标题（`task.title`）；无会话时为 `null`。
    *
-   * **这是界面唯一的标题来源**：24 条命令里没有「按 id 取任务」的读路径（`list_tasks`
+   * **这是界面唯一的标题来源**：既有命令里没有「按 id 取任务」的读路径（`list_tasks`
    * 只按 status / project / context 筛），所以冷启动或托盘暂停之后，计时页与状态栏的
    * 「当前任务」只能从这里取。与 `task_row_version` 同一时机：Rust 侧**每次采样重读**，
    * 暂停期间改标题下一拍就跟着变。

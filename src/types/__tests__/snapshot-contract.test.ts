@@ -447,7 +447,7 @@ const NESTED: ReadonlyArray<{ where: string; keys: readonly string[] }> = [
 
 describe("快照契约", () => {
   it("快照集合与登记表逐份对上（多一份、少一份都红 —— 新增快照必须在 TOP_LEVEL 登记）", () => {
-    // 精确集合比对，不是"至少 15 份"：`>=` 挡不住"第 16 份快照谁也没碰"——
+    // 精确集合比对，不是"至少若干份"：`>=` 挡不住"多出来的那一份快照谁也没碰"——
     // 契约文件加了、登记表没加，那条断言照样绿（评审 I2）。
     expect(Object.keys(SNAPSHOTS).sort()).toEqual(Object.keys(TOP_LEVEL).sort());
   });

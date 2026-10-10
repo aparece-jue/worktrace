@@ -9,7 +9,7 @@
  *
  * `resume_timer` 要 `task_id` + `task_expected_version`（`services/timer/coordinator.rs`
  * 的 `resume` 用它做任务的版本守卫，并可能 `Ready → Doing`），而「这条会话属于哪个任务」
- * **只有快照一个来源**：24 条命令里没有「会话 → 任务」的读路径（`list_tasks` 只按
+ * **只有快照一个来源**：既有命令里没有「会话 → 任务」的读路径（`list_tasks` 只按
  * status / project / context 筛、`TaskRow` 不带会话、托盘只做 `pause`）。契约因此把
  * `task_id` / `task_row_version` / `task_title` 一起下发（`build()` 每次采样重读任务行）。
  *

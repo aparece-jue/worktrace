@@ -729,7 +729,7 @@ pub struct CurrentTask {
     /// 当前会话。暂停中的会话**也是**当前会话，只是没有开放区间。
     pub session_id: String,
     pub task_id: String,
-    /// 任务标题。只有 id 的话界面渲染不出「当前任务」：24 条命令里没有「按 id 取任务」
+    /// 任务标题。只有 id 的话界面渲染不出「当前任务」：既有命令里没有「按 id 取任务」
     /// 的读路径，而当前任务未必在今天的列表里。
     pub task_title: String,
     pub state: SessionState,

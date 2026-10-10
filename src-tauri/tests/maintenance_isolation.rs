@@ -419,6 +419,14 @@ fn maintenance_and_exit_intent_refuse_each_other_in_both_directions() {
 /// 判据是行为性的：维护态下 `shutdown` 被拒之后**采样线程仍在跑**（`ticks` 还在涨）、
 /// 退出事务一行没写。若顺序反了（先 `stop()` 再发现维护态），`stop()` 不可逆 ⇒
 /// 采样永久停、退出事务没跑、进程只能强杀。
+///
+/// **参考探针取在 `begin()` 之后**（收口批次修 flaky）：本用例的采样节拍是 10ms，
+/// 而"取探针"与"进维护态"之间那条缝里采样线程**合法地**会落一整拍——它可能在探针
+/// 释放锁之后、`begin_maintenance` 取到锁之前完成一次采样（写 `interval_checkpoint`、
+/// 推进 `total_changes()`）。探针取在 `begin` **之前**时，下面那句逐字段相等就会被这一次
+/// **合法**写入打红：断言与它自己的前提打架（间歇性红，不是被测路径的问题）。
+/// 维护态一置位，采样就**整拍跳过**（`AppState::sampling_allowed`，取锁后第一句），
+/// 此后除"退出"自身以外没有任何合法写入 ⇒ 这个参考点才真的不动。
 #[test]
 fn shutdown_is_refused_in_maintenance_before_the_sampler_is_stopped() {
     let fx = fixture();
@@ -428,10 +436,10 @@ fn shutdown_is_refused_in_maintenance_before_the_sampler_is_stopped() {
 
     wait_for_ticks(&running, 2);
     start_session(&app, &epoch);
-    let before = probe(&app);
-    assert_eq!(before.running, 1, "夹具里应当有一个正在跑的会话");
 
     begin(&app, WALL);
+    let before = probe(&app);
+    assert_eq!(before.running, 1, "夹具里应当有一个正在跑的会话");
     let ticks_before = running.sampling_ticks();
 
     let error = running.shutdown().expect_err("维护态下必须拒绝退出");

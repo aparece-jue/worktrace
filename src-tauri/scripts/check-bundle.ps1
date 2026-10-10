@@ -9,7 +9,9 @@
 #      purpose (Ruling P8-5, from docs/validation/p7-acceptance.md 6.4 item 16):
 #      release-only breakage - #[cfg(debug_assertions)] guards, panic = "abort",
 #      warnings that exist only in release - is exactly what a *release* gate is
-#      for. Cost: about 93 s, paid only before a release.
+#      for. The P8-5 estimate was "about 93 s" (a cold run); measured on this
+#      machine it is 0.5-21 s once the dependencies are built. Either way it is
+#      paid only before a release.
 #
 # Judgement rules that are easy to get wrong:
 #   * A MISSING (or empty) dist/ is a FAILURE, exit 1. "Nothing to check" must
@@ -59,7 +61,7 @@ if (-not (Test-Path -LiteralPath $distDir -PathType Container)) {
     exit 1
 }
 
-$bundleFiles = @(Get-ChildItem -LiteralPath $distDir -Recurse -File)
+$bundleFiles = @(Get-ChildItem -LiteralPath $distDir -Recurse -File -Force)
 if ($bundleFiles.Count -eq 0) {
     Write-Host ("FAIL: bundle directory is empty: {0}" -f $distDir)
     Write-Host 'FAIL: run pnpm build again. An empty dist/ is an error, not a pass.'
@@ -82,7 +84,11 @@ Write-Host '=== 1. scan the bundle for DockviewDemo / dockview markers ==='
 $hits = @()
 foreach ($file in $bundleFiles) {
     $text = [IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)
-    $rel = $file.FullName.Substring($repoRoot.Length).TrimStart('\')
+    # String.Replace, never Substring(Length): $repoRoot doubles as a filesystem
+    # path and as a string prefix, and the two disagree under a UNC root ->
+    # Substring throws (startIndex). Replace is pure string work, and if it ever
+    # misses, the label degrades to an absolute path instead of failing the gate.
+    $rel = $file.FullName.Replace($distDir, 'dist')
     foreach ($marker in $markers) {
         $found = [regex]::Matches($text, [regex]::Escape($marker), [Text.RegularExpressions.RegexOptions]::IgnoreCase)
         if ($found.Count -eq 0) { continue }
