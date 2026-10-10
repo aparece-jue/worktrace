@@ -3,7 +3,9 @@
  *
  * 断言口径（总纲 §5 第 8 条）：这里只断言**展示与转发**——状态合法性、事务边界都在 Rust。
  * 两条真正属于前端的判据也在这里钉住：① 空白输入不发命令；② 什么状态下**不出现**入口
- * （`start` 是一条命令，前端不自己拆两步）。
+ * （`start` 是一条命令，前端不自己拆两步）。P8 Task 2d 补的 F-003 跃迁入口照同一条口径：
+ * 断的是"入口按 `allowed_targets` 开合"「请求逐字正确」「成功后重拉」「失败不乐观改列表」
+ * 与"回执说出哪条会话被动了"，**不断**服务端会不会拒绝某个跃迁。
  *
  * 假后端（`fakeBackend.ts`）用官方的 `mockIPC` 挡住 IPC 边界，事件走本地替身；
  * 页面读的是**真实的** `domainState` 单例，所以"页面自己不开订阅"这件事也顺带被钉住。
@@ -41,6 +43,7 @@ import { EVENT_DOMAIN_CHANGED, type TaskQueryResult } from "../../types/ipc";
 import {
   AT,
   EPOCH,
+  SESSION,
   createBackend,
   failure,
   project,
@@ -71,6 +74,20 @@ async function changed(revision: number): Promise<void> {
       payload: {},
     });
   });
+}
+
+/**
+ * 一行上的**按钮文案**，按出现顺序。
+ *
+ * 去掉 antd 自动插在**两个汉字之间**的那个空格（`取消` 的 DOM 文本是 `取 消`，
+ * `Button` 的 `autoInsertSpace`；P7 的「开始」也一样）。只去汉字之间的空格：`置为 Ready`
+ * 里那个空格是文案本身的一部分，不能动——断的是"这一行出现了哪几个入口"，
+ * 不是 antd 的排版细节。
+ */
+function buttonLabels(row: HTMLElement): string[] {
+  return within(row)
+    .getAllByRole("button")
+    .map((button) => (button.textContent ?? "").replace(/(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])/g, ""));
 }
 
 /** 在捕获输入框里敲一句话并回车。 */
@@ -258,9 +275,10 @@ describe("收件箱：F-002 任务理清", () => {
     await waitFor(() => expect(within(screen.getByTestId("task-t-1")).getByText("Ready")).not.toBeNull());
   });
 
-  it("非法跃迁不产生请求：Blocked/Done 上没有入口，也一条写命令都不发", async () => {
-    // 反向验证：把 `canClarify`/`canStart` 改成 `return true`（前端过滤放行）⇒
-    // 两个 queryAllByRole 断言红；若再实现成"点了直接发命令"，最后那条 `toEqual([])` 也红。
+  it("入口按跃迁表开合：Blocked 只剩「取消」、Done 只剩「重开」，点行本身不发命令", async () => {
+    // 反向验证：把 `canCancel` 改成 `return true`（Done 行多出「取消」）或把 `canFinish`
+    // 改成 `return true`（Blocked 行多出「完成」）⇒ 两条按钮清单断言红；若实现成
+    // "点了直接发命令"，最后那条 `toEqual([])` 也红。
     backend = createBackend();
     backend.tasks = [
       task({ id: "t-blocked", title: "被阻塞", status: "Blocked" }),
@@ -270,8 +288,9 @@ describe("收件箱：F-002 任务理清", () => {
 
     const blocked = await screen.findByTestId("task-t-blocked");
     const done = screen.getByTestId("task-t-done");
-    expect(within(blocked).queryAllByRole("button")).toEqual([]);
-    expect(within(done).queryAllByRole("button")).toEqual([]);
+    // `allowed_targets`：`Blocked | Waiting => [Ready, Cancelled]`、`Done | Cancelled => [Ready]`。
+    expect(buttonLabels(blocked)).toEqual(["取消"]);
+    expect(buttonLabels(done)).toEqual(["重开"]);
     // 状态照常展示（"捕获 / 理清 Ready / 开始计时"三处里的第一处）
     expect(within(blocked).getByText("Blocked")).not.toBeNull();
 
@@ -313,6 +332,180 @@ describe("收件箱：F-002 任务理清", () => {
 
     expect((await screen.findByRole("alert")).textContent).toBe("任务已被别处改动，请刷新后重试。");
     await waitFor(() => expect(backend.count("list_tasks")).toBe(before + 1));
+  });
+});
+
+describe("收件箱：F-003 状态跃迁（P8 Task 2d）", () => {
+  it("完成：请求逐字正确、回执说出被结束的会话、当场重拉列表（不投递任何事件）", async () => {
+    // 反向验证：`expected_row_version` 换成别的值、`cause` 换成 "reopen" ⇒ 逐字断言红；
+    // 删掉成功后的 `afterWrite()`（且本用例不投递 `domain.changed`）⇒ 状态标签停在 Doing，
+    // 那条 `getByText("Done")` 超时红；把 `transitionNotice` 改成不含会话 id 的文案 ⇒
+    // 回执断言红——"这次动作碰了哪条会话"就没人说了。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-9", title: "写周报", status: "Doing", row_version: 7 })];
+    backend.snapshot = runningSnapshot({ task_id: "t-9" });
+    await mountInbox();
+
+    const row = await screen.findByTestId("task-t-9");
+    const before = backend.count("list_tasks");
+    fireEvent.click(within(row).getByTestId("finish-t-9"));
+
+    await waitFor(() => expect(backend.count("transition_task")).toBe(1));
+    expect(backend.requests.find((entry) => entry.command === "transition_task")?.request).toEqual({
+      expected_data_epoch: EPOCH,
+      task_id: "t-9",
+      expected_row_version: 7,
+      target: "Done",
+      cause: "user",
+    });
+    // 回执：这条任务正在计时 ⇒ 完成在同一个事务里结束了它那条会话（名单来自**响应**）
+    const notice = await screen.findByTestId("transition-notice");
+    expect(notice.textContent).toContain("置为 Done");
+    expect(notice.textContent).toContain(`结束会话 ${SESSION}`);
+    // 重拉：这里一条事件都没投递，列表上必须已经是服务端的新事实
+    await waitFor(() => expect(backend.count("list_tasks")).toBe(before + 1));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("task-t-9")).getByText("Done")).not.toBeNull(),
+    );
+  });
+
+  it("阻塞/等待：Ready 行两个入口都在，点了只发一条命令，回执说会话被暂停", async () => {
+    // 反向验证：把「等待中」按钮的 `target` 写成 "Blocked" ⇒ 逐字断言红；回执里没有
+    // `paused_sessions` 也会红（暂停与结束是两个不同的联动事实，不能混着说）。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-5", title: "被卡住", status: "Ready", row_version: 2 })];
+    backend.snapshot = runningSnapshot({ task_id: "t-5" });
+    await mountInbox();
+
+    const row = await screen.findByTestId("task-t-5");
+    expect(within(row).getByTestId("wait-t-5")).not.toBeNull();
+    fireEvent.click(within(row).getByTestId("block-t-5"));
+
+    await waitFor(() => expect(backend.count("transition_task")).toBe(1));
+    expect(backend.requests.find((entry) => entry.command === "transition_task")?.request).toEqual({
+      expected_data_epoch: EPOCH,
+      task_id: "t-5",
+      expected_row_version: 2,
+      target: "Blocked",
+      cause: "user",
+    });
+    expect((await screen.findByTestId("transition-notice")).textContent).toContain(
+      `暂停会话 ${SESSION}`,
+    );
+  });
+
+  it("重开：终结态回 Ready 带的是 cause \"reopen\"（不是 \"user\"），且不谎报会话联动", async () => {
+    // 反向验证：把 reopen 那个按钮的 `cause` 改成 "user" ⇒ 逐字断言红——同一个请求在服务层
+    // 会被 `ReopenMustBeExplicit` 拒绝（`domain/task.rs`），界面必须给唯一合法的那个原因。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-3", title: "已完成的任务", status: "Done", row_version: 4 })];
+    await mountInbox();
+
+    const row = await screen.findByTestId("task-t-3");
+    fireEvent.click(within(row).getByTestId("reopen-t-3"));
+
+    await waitFor(() => expect(backend.count("transition_task")).toBe(1));
+    expect(backend.requests.find((entry) => entry.command === "transition_task")?.request).toEqual({
+      expected_data_epoch: EPOCH,
+      task_id: "t-3",
+      expected_row_version: 4,
+      target: "Ready",
+      cause: "reopen",
+    });
+    expect((await screen.findByTestId("transition-notice")).textContent).toContain(
+      "没有会话被结束或暂停",
+    );
+  });
+
+  it("五个入口逐状态照 `allowed_targets` 开合（同一行换个 status，入口就不同）", async () => {
+    // 反向验证：`canFinish` 改成 `return true` ⇒ Inbox 行多出「完成」而红；`canCancel` 改成
+    // `status !== "Cancelled"` ⇒ Done/Cancelled 行多出「取消」而红；`canBlock` 去掉
+    // `Scheduled` 之外的判断（改成 `return true`）⇒ Waiting 行多出两个而红。
+    backend = createBackend();
+    backend.tasks = [
+      task({ id: "t-inbox", title: "刚捕获", status: "Inbox" }),
+      task({ id: "t-doing", title: "在做", status: "Doing" }),
+      task({ id: "t-waiting", title: "等人", status: "Waiting" }),
+      task({ id: "t-cancelled", title: "已取消", status: "Cancelled" }),
+    ];
+    await mountInbox();
+    await screen.findByTestId("task-t-inbox");
+
+    const labels = (id: string): string[] => buttonLabels(screen.getByTestId(`task-${id}`));
+
+    // Inbox：`allowed_targets` = [Clarifying, Ready, Cancelled] ⇒ 跃迁入口只有「取消」
+    // （另外两个是 P7 就有的「置为 Ready」与「开始」）。
+    expect(labels("t-inbox")).toEqual(["置为 Ready", "开始", "取消"]);
+    // Doing：完成 / 取消 / 阻塞 / 等待中（`Ready` 只是"已经在做"的另一种说法，不给入口）
+    expect(labels("t-doing")).toEqual(["开始", "完成", "取消", "阻塞", "等待中"]);
+    // Waiting：出口只有 Ready 与 Cancelled ⇒ 跃迁入口只剩「取消」
+    expect(labels("t-waiting")).toEqual(["取消"]);
+    // Cancelled：只能 reopen
+    expect(labels("t-cancelled")).toEqual(["重开"]);
+  });
+
+  it("失败：上屏的就是 Rust 的 message，且**不**乐观改列表", async () => {
+    // 反向验证：catch 里换成自己拼的文案 ⇒ 那句断言红；在 `await` 之前先本地把状态改成
+    // Done（乐观更新）⇒ 状态标签断言红——屏幕上必须仍是服务端给的最后一份事实。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-9", title: "写周报", status: "Doing", row_version: 7 })];
+    backend.fail.transition_task = failure({
+      code: "DOMAIN_ERROR",
+      message: "这条任务已经被完成了。",
+    });
+    await mountInbox();
+
+    const row = await screen.findByTestId("task-t-9");
+    const before = backend.count("list_tasks");
+    fireEvent.click(within(row).getByTestId("finish-t-9"));
+
+    expect((await screen.findByRole("alert")).textContent).toBe("这条任务已经被完成了。");
+    // 失败不重发、也不重拉（重拉是**成功**之后的动作；冲突刷新走 `reportCommandError`
+    // 的 VERSION_CONFLICT 那一支，那条在 F-002 的用例里已钉）。
+    expect(backend.count("transition_task")).toBe(1);
+    expect(backend.count("list_tasks")).toBe(before);
+    expect(within(screen.getByTestId("task-t-9")).getByText("Doing")).not.toBeNull();
+  });
+
+  it("上一条回执不留到下一次动作：跃迁后捕获成功，回执从屏幕上消失", async () => {
+    // 反向验证（fix round 1，评审 Minor-1）：删掉 `clearNotices()` ⇒ 捕获之后上一条回执仍
+    // 挂在屏幕上 ⇒ 最后那条 `queryByTestId(...)` 为 null 的断言红。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-9", title: "写周报", status: "Doing", row_version: 7 })];
+    backend.snapshot = runningSnapshot({ task_id: "t-9" });
+    await mountInbox();
+
+    const row = await screen.findByTestId("task-t-9");
+    fireEvent.click(within(row).getByTestId("finish-t-9"));
+    expect((await screen.findByTestId("transition-notice")).textContent).toContain("置为 Done");
+
+    capture("另一条");
+    await waitFor(() => expect(backend.count("create_task")).toBe(1));
+    await waitFor(() => expect(screen.queryByTestId("transition-notice")).toBeNull());
+  });
+
+  it("跃迁之后那条命令**失败**：屏幕上只有失败提示，不叠着上一条回执", async () => {
+    // 反向验证：把清回执只放在 `afterWrite()` 里（评审给的那一行）⇒ **失败**路径根本不会
+    // 调用它，这里会数到两条 alert（成功回执 + 失败提示）而红——所以清在命令开头
+    // （理由见 `clearNotices` 的注释）。
+    backend = createBackend();
+    backend.tasks = [task({ id: "t-9", title: "写周报", status: "Doing", row_version: 7 })];
+    backend.snapshot = runningSnapshot({ task_id: "t-9" });
+    await mountInbox();
+
+    const row = await screen.findByTestId("task-t-9");
+    fireEvent.click(within(row).getByTestId("finish-t-9"));
+    expect((await screen.findByTestId("transition-notice")).textContent).toContain("结束会话");
+
+    backend.fail.create_task = failure({ code: "DOMAIN_ERROR", message: "标题太长。" });
+    capture("另一条");
+
+    await waitFor(() => {
+      const alerts = screen.queryAllByRole("alert");
+      expect(alerts.length).toBe(1);
+      expect(alerts[0].textContent).toBe("标题太长。");
+    });
+    expect(screen.queryByTestId("transition-notice")).toBeNull();
   });
 });
 

@@ -24,7 +24,8 @@
 //!
 //! 这一层是**组合根**，Task 4 的三处接线都在这里，且都只是接线：
 //!
-//! - **托盘**：[`platform::tray::build`] 装配菜单（F-011 的四项 + 「完成」预留项），
+//! - **托盘**：[`platform::tray::build`] 装配菜单（F-011 的五项：当前任务、暂停、完成、
+//!   快速捕获、退出；「完成」自 P8 Task 2d 起不再是禁用占位项），
 //!   动作交给 [`on_tray_action`]；后者把服务动作转给 `commands::` 那一侧的命令体
 //!   （与 IPC 同一批入口），窗口动作转给 [`platform::window`]。托盘里没有业务判断，
 //!   `platform` 也不反向引用上层（分层门禁第六条）。
@@ -352,6 +353,8 @@ pub enum TrayDispatch {
     Window,
     /// 复用 `commands::tray_pause_impl`（内部就是 `pause_timer_impl`）。
     Pause,
+    /// 复用 `commands::tray_finish_impl`（内部就是 `transition_task_impl`，P8 Task 2d）。
+    Finish,
     /// 复用 `commands::tray_quit_impl`（内部就是 Task 0 的显式退出入口）。
     Quit,
 }
@@ -359,11 +362,12 @@ pub enum TrayDispatch {
 /// 动作 → 去向。**只有这一处**决定托盘动作往哪走。
 ///
 /// 注意它只分类、不执行：真正落到命令体上的映射在 `commands::`（`tray_pause_impl` /
-/// `tray_quit_impl`），所以托盘与 IPC 走的是同一批入口。
+/// `tray_finish_impl` / `tray_quit_impl`），所以托盘与 IPC 走的是同一批入口。
 pub fn tray_dispatch(action: TrayAction) -> TrayDispatch {
     match action {
         TrayAction::CurrentTask | TrayAction::QuickCapture => TrayDispatch::Window,
         TrayAction::Pause => TrayDispatch::Pause,
+        TrayAction::Finish => TrayDispatch::Finish,
         TrayAction::Quit => TrayDispatch::Quit,
     }
 }
@@ -371,7 +375,7 @@ pub fn tray_dispatch(action: TrayAction) -> TrayDispatch {
 /// 托盘动作 → 入口（Task 4 的接线点）：按 [`tray_dispatch`] 分派。
 ///
 /// - **窗口动作**（当前任务 / 快速捕获）：抬起主窗（已关则重建）；
-/// - **服务动作**（暂停 / 退出）：交给 `commands::` 那一侧——与 IPC 同一批入口，
+/// - **服务动作**（暂停 / 完成 / 退出）：交给 `commands::` 那一侧——与 IPC 同一批入口，
 ///   托盘不另写业务逻辑。
 fn on_tray_action(app: &AppHandle, action: TrayAction) {
     match tray_dispatch(action) {
@@ -382,6 +386,7 @@ fn on_tray_action(app: &AppHandle, action: TrayAction) {
             Err(error) => eprintln!("[worktrace] tray: {} failed: {error}", action.menu_id()),
         },
         TrayDispatch::Pause => commands::spawn_tray_pause(app),
+        TrayDispatch::Finish => commands::spawn_tray_finish(app),
         TrayDispatch::Quit => commands::spawn_tray_quit(app),
     }
 }

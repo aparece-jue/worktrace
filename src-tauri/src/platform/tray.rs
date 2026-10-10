@@ -6,18 +6,23 @@
 //! `commands`（这一层在最底下，只做 OS 适配），而 F-011 又要求「托盘动作与界面动作
 //! 走同一批命令」。两件事同时成立的办法是把**「点到了什么」与「点了之后干什么」分开**：
 //!
-//! - 本模块给出 [`TrayAction`]（四个动作）、[`MENU_ITEMS`]（菜单的静态描述）与
+//! - 本模块给出 [`TrayAction`]（五个动作）、[`MENU_ITEMS`]（菜单的静态描述）与
 //!   [`build`]（装配图标 + 菜单 + 事件回调）：**没有一行业务判断**；
 //! - 「动作 → 命令体/服务入口」的映射留在 `commands::` 那一侧（`tray_pause_impl` /
-//!   `tray_quit_impl`，前者复用 `pause_timer` 的命令体、后者复用 Task 0 的显式退出入口），
+//!   `tray_finish_impl` / `tray_quit_impl`，前两者分别复用 `pause_timer_impl` 与
+//!   `transition_task_impl` 的命令体、后者复用 Task 0 的显式退出入口），
 //!   由组合根 `lib.rs` 把两者接上。
 //!
-//! ## 四项 + 一个预留项（R4 裁决）
+//! ## 五项（P8 Task 2d 起，「完成」不再是预留项）
 //!
-//! P7 实际提供**四项**：当前任务、暂停、快速捕获、退出。**「完成」是预留项**——
-//! P3 的 `transition_task` 服务入口接入后由 P8 启用。P7 用一个**禁用项**占位
-//! （[`MENU_ITEMS`] 里 `action: None`）：菜单里看得见，点了不会有任何动作，
-//! 也不存在「前端先 finish 再改状态」那条错路（P7 不开放尚未存在的动作）。
+//! P7 提供**四项**（当前任务、暂停、快速捕获、退出），「完成」是**预留项**——P7 用一个
+//! **禁用项**占位（[`MENU_ITEMS`] 里 `action: None`）：菜单里看得见、点了不会有任何动作，
+//! 因为那时 `transition_task` 还不存在，开了就是"一条通往尚未存在服务的路径"。
+//!
+//! P8 Task 2d 把它接上：命令 5 的服务入口与命令体都在，托盘「完成」走
+//! `commands::tray_finish_impl`（**复用 `transition_task_impl`**，托盘不另写业务逻辑）。
+//! 于是菜单里五项全部可点（`action: None` 这条机制保留——它是"预留下一个动作"的通用形状，
+//! 今天没有第二个预留项）。
 //! 显示 HUD 的托盘项属 V0.1b，本计划不加。
 //!
 //! ## 图标
@@ -45,6 +50,8 @@ pub enum TrayAction {
     CurrentTask,
     /// 暂停：暂停当前**运行中**的会话。
     Pause,
+    /// 完成：把**当前正在计时的那条任务**推到 `Done`（P8 Task 2d 启用，P7 是禁用占位项）。
+    Finish,
     /// 快速捕获：把用户带到捕获输入上（F-001）。
     QuickCapture,
     /// 退出：走显式退出入口（Task 0），不是杀进程。
@@ -53,10 +60,14 @@ pub enum TrayAction {
 
 impl TrayAction {
     /// 全部动作。菜单里每一个动作都应当恰好出现一次（用例钉住）。
-    pub const ALL: [TrayAction; 4] = [
+    ///
+    /// 次序与 [`MENU_ITEMS`] 一致；`Finish` 留在 P7 给那个预留项排的位置上
+    /// （fix round 1，评审 Minor-2：本任务只把动作接上，**不重排**菜单）。
+    pub const ALL: [TrayAction; 5] = [
         TrayAction::CurrentTask,
         TrayAction::Pause,
         TrayAction::QuickCapture,
+        TrayAction::Finish,
         TrayAction::Quit,
     ];
 
@@ -65,6 +76,9 @@ impl TrayAction {
         match self {
             TrayAction::CurrentTask => "tray.current_task",
             TrayAction::Pause => "tray.pause",
+            // P7 那个占位项的 id 是 `tray.finish_reserved`（`_reserved` 说的就是"还没有动作"）：
+            // 动作存在之后它不再预留，id 跟着动作名走（`menu_id` 是唯一来源）。
+            TrayAction::Finish => "tray.finish",
             TrayAction::QuickCapture => "tray.quick_capture",
             TrayAction::Quit => "tray.quit",
         }
@@ -74,6 +88,7 @@ impl TrayAction {
 /// 一条菜单项的静态描述。
 ///
 /// `action: None` 表示**预留项**：菜单里出现且**禁用**，点了没有动作。
+/// （P8 Task 2d 起没有这种行——「完成」已接上动作；这条机制留着给下一个预留动作。）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuItemSpec {
     pub id: &'static str,
@@ -81,7 +96,7 @@ pub struct MenuItemSpec {
     pub action: Option<TrayAction>,
 }
 
-/// P7 的托盘菜单：**四项 + 一个预留项**。
+/// 托盘菜单：**五项**，全部可点（P8 Task 2d 起）。
 ///
 /// 顺序就是显示顺序（退出在最后）。这份表**就是**菜单本身——[`build`] 逐条照它装配，
 /// 所以用例钉住这张表就等于钉住了真实菜单（不再有第二份手抄的菜单定义）。
@@ -101,11 +116,12 @@ pub const MENU_ITEMS: [MenuItemSpec; 5] = [
         label: "快速捕获",
         action: Some(TrayAction::QuickCapture),
     },
-    // 预留项：P3 的 transition_task 接入后由 P8 启用（见模块头「四项 + 一个预留项」）。
+    // P7 那个禁用占位项「完成（P8 启用）」**原位**启用（位置不变，见 `TrayAction::ALL`；
+    // 只有 id 从 `tray.finish_reserved` 改成 `tray.finish`，见 `TrayAction::menu_id`）。
     MenuItemSpec {
-        id: "tray.finish_reserved",
-        label: "完成（P8 启用）",
-        action: None,
+        id: TrayAction::Finish.menu_id(),
+        label: "完成",
+        action: Some(TrayAction::Finish),
     },
     MenuItemSpec {
         id: TrayAction::Quit.menu_id(),
@@ -114,7 +130,7 @@ pub const MENU_ITEMS: [MenuItemSpec; 5] = [
     },
 ];
 
-/// 菜单项 id → 动作。预留项与未知 id 都返回 `None`（点了什么也不做）。
+/// 菜单项 id → 动作。未知 id 返回 `None`（点了什么也不做）。
 pub fn action_for(menu_id: &str) -> Option<TrayAction> {
     MENU_ITEMS
         .iter()
@@ -125,7 +141,7 @@ pub fn action_for(menu_id: &str) -> Option<TrayAction> {
 /// 装配托盘：图标 + 菜单 + 事件回调。
 ///
 /// `on_action` 是菜单事件唯一的出口——本模块把它收到的 [`TrayAction`] 原样交出去，
-/// 不判断当前该不该暂停、也不碰任何状态（那些都在 `commands::` 那侧的命令体里）。
+/// 不判断当前该不该暂停/完成、也不碰任何状态（那些都在 `commands::` 那侧的命令体里）。
 ///
 /// 图标注册进应用后由 Tauri 托管（`build` 内部登记到资源表），所以调用方不必保存返回值。
 pub fn build<R: Runtime>(
@@ -139,7 +155,8 @@ pub fn build<R: Runtime>(
             Some(_) => {
                 menu = menu.text(item.id, item.label);
             }
-            // 预留项：禁用项。P7 不提供它的动作，所以它点了也不会走到 `on_action`。
+            // 预留项：禁用项。它没有动作，所以点了也不会走到 `on_action`
+            // （P8 Task 2d 起菜单里没有这种行，机制留着）。
             None => {
                 let disabled = MenuItemBuilder::with_id(item.id, item.label)
                     .enabled(false)

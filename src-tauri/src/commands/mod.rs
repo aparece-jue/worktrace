@@ -65,22 +65,23 @@
 //! 计时命令（`start`/`pause`/`resume`/`finish`）没有「幂等重复」这一支：能走到广播
 //! 就说明这次状态跃迁真的提交了，所以它们的 `changed` 恒为真。
 //!
-//! # 托盘动作（P7 Task 4）
+//! # 托盘动作（P7 Task 4，P8 Task 2d 补「完成」）
 //!
 //! 托盘菜单点到的动作走**与 IPC 相同的命令体**：暂停 = [`tray_pause_impl`]（内部就是
-//! [`pause_timer_impl`]），退出 = [`tray_quit_impl`]（内部就是 Task 0 的显式退出入口
+//! [`pause_timer_impl`]），完成 = [`tray_finish_impl`]（内部就是 [`transition_task_impl`]，
+//! 目标 `Done`、原因 `user`），退出 = [`tray_quit_impl`]（内部就是 Task 0 的显式退出入口
 //! `RunningApp::shutdown`）。菜单本身的装配在 `platform::tray`（那一层不碰业务），
-//! 组合根 `lib.rs` 把动作接到这两个入口上。
+//! 组合根 `lib.rs` 把动作接到这三个入口上。
 //!
 //! 与 IPC 的一点差别：托盘**没有响应通道**，所以 `spawn_tray_*` 在阻塞线程里执行完
 //! 只把结果写进诊断。串行边界与 IPC 完全相同——同一把
 //! `Mutex<AppState>`、同样不在 UI 回调里开事务。
 //!
 //! **托盘绕过 [`run_command`]**（P6 Task 2a，计划 fix round 4 的 C-2）：所以
-//! `guard_writable` 挡不住它们，两条路径各自判维护态——暂停在
-//! [`tray_pause_impl`] 取锁之后先过门禁（拒绝即返回，不写任何东西）；退出走
-//! `RunningApp::shutdown` 里的 `AppState::begin_exit`（维护态下拒绝，
-//! **采样线程仍在跑**、进程也不退出）。两条拒绝都落到正式诊断日志
+//! `guard_writable` 挡不住它们，三条路径各自判维护态——暂停与完成在
+//! [`tray_pause_impl`] / [`tray_finish_impl`] 取锁之后先过门禁（拒绝即返回，不写任何东西）；
+//! 退出走 `RunningApp::shutdown` 里的 `AppState::begin_exit`（维护态下拒绝，
+//! **采样线程仍在跑**、进程也不退出）。拒绝都落到正式诊断日志
 //! （release 的 Windows 子系统没有控制台，`eprintln!` 没人看得见）。
 //!
 //! # dev 注入开关（P7 Task 6a，**只在 debug 构建存在**）
@@ -2593,6 +2594,77 @@ pub fn tray_pause_impl(
     .map(|outcome| TrayPause::Paused(Box::new(outcome)))
 }
 
+/// 托盘「完成」的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrayFinish {
+    /// 没有**正在计时**的会话（无会话 / 会话已暂停 / 会话已是 `recovering`）：这次托盘动作
+    /// 什么都没做——不跃迁任务、不结束或暂停任何会话、不广播。
+    ///
+    /// ⚠️ 措辞是"**托盘没有发起写**"，**不是**"这条路径零写入"（fix round 1，评审 Minor-4）：
+    /// 走到这里之前那句 `app.snapshot()` 在采样判出异常时会**先提交一笔独立的系统恢复事务**
+    /// （`Coordinator::snapshot` 写明"所以这次查询确实写了库，调用方不能宣称「查询全程只读」"）。
+    /// 那笔写与托盘意图无关，是协调器自己那条闭环（幂等分支零写入）。
+    NothingToFinish,
+    /// 复用 [`transition_task_impl`] 把当前计时中的任务推到了 `Done`。
+    Finished(Box<tasks::TaskTransitionReport>),
+}
+
+/// 托盘「完成」：把**当前正在计时的那条任务**推到 `Done`（P8 Task 2d；命令 5 的第二个消费方）。
+///
+/// 「哪条任务」只有快照一个来源（`task_id` + `task_row_version`）：托盘不在界面上，
+/// 拿不到任何"行上的版本"，而 `transition_task` 的版本守卫要的正是这两个字段
+/// ——与 [`tray_pause_impl`] 取会话 id/版本是同一姿势。
+///
+/// 判据与联动全在 [`transition_task_impl`] → `services::tasks::transition_task`：
+/// 完成会在**同一个事务**里结束这条任务全部 `running`/`paused` 会话，并在有 `recovering`
+/// 会话、`needs_review` 或待确认区间时**整体拒绝**（`RECOVERY_REQUIRED`）。
+/// 托盘**不另写业务逻辑**，也不在这条入口之外自己再广播一次（`transition_task_impl`
+/// 已按 `Changed` 广播）。
+///
+/// 边界——两条都是"什么都不做"，不是"造一个假动作"：
+/// - **没有正在计时**（无会话 / 会话已暂停 / 上一次异常已把会话置成 `recovering`）⇒
+///   [`TrayFinish::NothingToFinish`]。`is_running` 只看 `running`，与 [`tray_pause_impl`]
+///   同一条判据：暂停中的会话由界面接手（那一页看得见状态与「继续」）。
+///   **协调器已被判故障**时不是这一支：那时 `app.snapshot()` 自己返回 `RECOVERY_REQUIRED`
+///   （`Coordinator::refuse_if_faulted`），走下面的拒绝臂、落 `tray.finish.refused`；
+/// - 快照没带全任务身份（`task_id` / `task_row_version` 缺一）⇒ 同样什么都不做：
+///   **不猜**一条任务、也不编一个版本去撞服务端的守卫。
+///
+/// 版本冲突 / 领域拒绝 / 维护态拒绝都原样交回调用方：托盘**没有界面回执通道**
+/// （已知限制，登记在 `spawn_tray_finish` 的诊断里）。
+pub fn tray_finish_impl(
+    app: &mut AppState,
+    broadcaster: &Broadcaster,
+) -> Result<TrayFinish, AppError> {
+    // 托盘**绕过 `run_command`**（见模块头）：维护态自己判，而且必须在**取锁之后**判。
+    app.guard_writable()?;
+
+    let snapshot = app.snapshot()?;
+    if !snapshot.is_running() {
+        return Ok(TrayFinish::NothingToFinish);
+    }
+    let (Some(task_id), Some(task_row_version)) =
+        (snapshot.task_id.clone(), snapshot.task_row_version)
+    else {
+        return Ok(TrayFinish::NothingToFinish);
+    };
+
+    transition_task_impl(
+        app,
+        broadcaster,
+        TransitionTaskRequest {
+            expected_data_epoch: snapshot.data_epoch,
+            task_id,
+            expected_row_version: task_row_version,
+            // 两个字符串按命令层自己的取值域给：`target` 就是落库用的状态名
+            // （`TaskStatus::as_str`），`cause` 与 `parse_transition_cause` 的字面量一致。
+            target: TaskStatus::Done.as_str().to_string(),
+            cause: "user".to_string(),
+        },
+    )
+    .map(|report| TrayFinish::Finished(Box::new(report)))
+}
+
 /// 托盘「退出」：**复用 Task 0 的显式退出入口**（[`RunningApp::shutdown`]）。
 ///
 /// 顺序与语义全在那一条入口里（先停定时器，再一个事务结束 `running`/`paused`、
@@ -2648,6 +2720,51 @@ pub fn spawn_tray_pause(app: &AppHandle) {
                     .record("tray.pause.refused", &tray_diagnostic(&error));
                 eprintln!(
                     "[worktrace] tray: 暂停失败：{}（{}）",
+                    diagnostic(&error),
+                    error.code()
+                )
+            }
+        }
+    });
+}
+
+/// 托盘「完成」：在**阻塞线程**上、**串行边界内**执行（与 [`spawn_tray_pause`] 同一条骨架）。
+///
+/// 三种结果各有诊断：做了（带上提交后的任务标题、revision 与两个联动名单的条数）、
+/// 没有正在计时的会话（什么都没做）、被拒（版本冲突 / 领域拒绝 / 维护态 / 协调器已判故障）。
+/// 后两种是托盘的**已知限制**：它没有响应通道，界面不会弹任何东西——用户看到的是
+/// "没反应"，真相在诊断里；界面的下一次重拉读到的仍是库里的权威状态。
+pub fn spawn_tray_finish(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (shared, broadcaster) = {
+            let running = handle.state::<RunningApp>();
+            (Arc::clone(running.app()), Arc::clone(running.broadcaster()))
+        };
+        let mut state = lock_app(&shared);
+        match tray_finish_impl(&mut state, &broadcaster) {
+            Ok(TrayFinish::Finished(report)) => println!(
+                "[worktrace] tray: 完成「{}」（revision {}，结束会话 {}，暂停会话 {}）",
+                report.task.title,
+                report.revision,
+                report.ended_sessions.len(),
+                report.paused_sessions.len()
+            ),
+            Ok(TrayFinish::NothingToFinish) => {
+                // 措辞按**实际语义**（fix round 1，评审 Minor-4）：可能是"根本没有会话"、
+                // "会话已暂停"，也可能是"会话已被判为 recovering、等恢复处理"——三种都归
+                // `is_running()` 这一条判据，也都不归托盘这条路径管。
+                println!("[worktrace] tray: 没有正在计时（或已被判为待恢复）的会话，完成未执行")
+            }
+            Err(error) => {
+                // 落盘诊断：release 的 Windows 子系统没有控制台，`eprintln!` 没人看得见
+                // （维护态拒绝必须留下痕迹）。事件名说清"这次托盘完成被拒"，
+                // 具体码在 `tray_diagnostic` 的 `code=` 里。
+                state
+                    .diagnostics()
+                    .record("tray.finish.refused", &tray_diagnostic(&error));
+                eprintln!(
+                    "[worktrace] tray: 完成失败：{}（{}）",
                     diagnostic(&error),
                     error.code()
                 )

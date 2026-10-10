@@ -1,7 +1,7 @@
 /**
  * 页面用例的**假后端**（P7 Task 3 建立，Task 5 扩到项目/标签/筛选查询，P8 Task 1b 扩到
- * 今日页，P8 Task 2c 扩到恢复页与历史页，P8 Task 3b 扩到数据页）：按 `src/types/ipc.ts`
- * 的契约形状回应命令。
+ * 今日页，P8 Task 2c 扩到恢复页与历史页，P8 Task 3b 扩到数据页，P8 Task 2d 扩到收件箱
+ * 跃迁）：按 `src/types/ipc.ts` 的契约形状回应命令。
  *
  * 它不是业务实现，只是一个可脚本化的替身——**业务规则仍在 Rust**，所以默认行为尽量
  * 贴近真实服务（`create_task` 回一个新任务、`clarify_ready` 把状态改成 Ready 并 +1 版本、
@@ -32,6 +32,15 @@
  * 这条判据的支点就在这里）。`applied` 恒为 `true`：服务把"没换成"当 `Err` 交回，
  * 能拿到响应就等于成功（见 `RestoreResult` 的契约注释），所以替身**不造** `applied: false`
  * 那条不存在的路径。
+ *
+ * ⚠️ 跃迁那条（P8 Task 2d）做三件真事、其余只回形状：**版本守卫**（`expected_row_version`
+ * 不对 ⇒ `VERSION_CONFLICT`，与 `storage::guards::guard_row_version` 同一个码）、把任务行
+ * 改到目标状态并 +1 版本（页面"重拉即见新状态"的支点）、按 `snapshot` 夹具推**联动名单**
+ * （那条会话属于这条任务时：完成/取消 ⇒ `ended_sessions`，阻塞/等待 ⇒ `paused_sessions`，
+ * 回执照它上屏）。**"哪些状态允许跃迁"「终结态只能 reopen」「完成前有 recovering 就整体
+ * 拒绝」这些判据都在 Rust**（`domain/task.rs` 的 `allowed_targets`、`services/tasks.rs` 的
+ * `require_completable`），替身不重实现——用例要断"界面按状态开合入口"，断的是页面的
+ * 谓词，不是替身会不会拒绝。
  */
 
 import { mockIPC } from "@tauri-apps/api/mocks";
@@ -59,9 +68,11 @@ import {
   type TagList,
   type TagRow,
   type TaskRow,
+  type TaskTransitionReport,
   type TimeEdit,
   type TimerSnapshot,
   type TodayView,
+  type TransitionTaskRequest,
 } from "../../types/ipc";
 
 export const EPOCH = "epoch-a";
@@ -609,6 +620,38 @@ export function createBackend(): Backend {
         const changed = task({ ...before, status: "Ready", row_version: (before?.row_version ?? 0) + 1 });
         backend.tasks = backend.tasks.map((row) => (row.id === changed.id ? changed : row));
         return { task: changed, revision: 6, data_epoch: backend.epoch };
+      }
+      case "transition_task": {
+        // 见模块头：版本守卫 + 改任务行 +1 版本是真事，联动名单从 `snapshot` 夹具推。
+        const req = request as TransitionTaskRequest;
+        const before = backend.tasks.find((row) => row.id === req.task_id);
+        if (before === undefined) {
+          throw failure({ code: "DOMAIN_ERROR", message: "任务不存在。" });
+        }
+        if (before.row_version !== req.expected_row_version) {
+          throw failure({ code: "VERSION_CONFLICT", message: "任务已被别处改动，请刷新后重试。" });
+        }
+        // 这条任务**正在计时**（`snapshot` 夹具指向它）⇒ 完成/取消结束那条会话、
+        // 阻塞/等待暂停它；没有会话就两个名单都空（回执会说"没有会话被结束或暂停"）。
+        const live = backend.snapshot.task_id === req.task_id ? backend.snapshot.session_id : null;
+        const ended =
+          live !== null && (req.target === "Done" || req.target === "Cancelled") ? [live] : [];
+        const paused =
+          live !== null && (req.target === "Blocked" || req.target === "Waiting") ? [live] : [];
+        const changed = task({
+          ...before,
+          status: req.target,
+          row_version: before.row_version + 1,
+        });
+        backend.tasks = backend.tasks.map((row) => (row.id === changed.id ? changed : row));
+        backend.revision += 1;
+        return {
+          task: changed,
+          ended_sessions: ended,
+          paused_sessions: paused,
+          revision: backend.revision,
+          data_epoch: backend.epoch,
+        } satisfies TaskTransitionReport;
       }
       case "stats_today":
         // 五项与 `data_epoch` / `revision` 同源：假后端统一给这两个字段，用例改

@@ -3,7 +3,7 @@
 //! 计划里的测试口径是「托盘动作与界面动作调用同一命令；关窗不触发退出；重开窗口触发
 //! 快照。**其余必须人工验收**」。所以这个文件钉的是**能用 Rust 断言的那半边**：
 //!
-//! - 托盘菜单的描述与动作映射（四项 + 一个预留项）；
+//! - 托盘菜单的描述与动作映射（P8 Task 2d 起**五项、全部可点**：「完成」不再是禁用占位项）；
 //! - 「关掉全部窗口不退出」的决策（`RunEvent::ExitRequested` 的两个分支）；
 //! - 唤醒请求的接收决策（抬起 / 重建 / 什么都不做）；
 //! - 主窗 label 与 `tauri.conf.json` / `capabilities/default.json` 的一致性
@@ -11,7 +11,8 @@
 //! - 实验窗口 `sync-lab`（Task 6a）同样这一条：**不是静态窗口**、配置与主窗同源
 //!   （只改 label）、且登记进权限名单；
 //! - 托盘的「暂停」「退出」落在**与 IPC 相同的**命令体/服务入口上（用效果相等与
-//!   显式退出的库内证据断言）。
+//!   显式退出的库内证据断言），「完成」同样（P8 Task 2d：与 IPC 的 `transition_task_impl`
+//!   效果逐项相等；没有正在计时的任务时**零写入**）。
 //!
 //! **真实托盘图标/菜单交互、关掉全部窗口后仍然计时**在集成测试里不可能成立：
 //! 测试进程里没有事件循环，也就没有窗口与托盘（`tauri::test` 的 mock 运行时本轮
@@ -21,7 +22,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use worktrace_lib::commands::{self, StartTimerRequest, TrayPause};
+use worktrace_lib::commands::{
+    self, StartTimerRequest, TransitionTaskRequest, TrayFinish, TrayPause,
+};
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
 use worktrace_lib::platform::sync_lab;
@@ -45,11 +48,11 @@ fn item(id: &str) -> &'static MenuItemSpec {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 菜单：四项 + 一个预留项（F-011 / R4 裁决）
+// 菜单：五项，全部可点（F-011；P8 Task 2d 起「完成」不再预留）
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn the_menu_offers_exactly_the_four_p7_actions() {
+fn the_menu_offers_exactly_the_five_actions() {
     let clickable: Vec<&str> = tray::MENU_ITEMS
         .iter()
         .filter(|item| item.action.is_some())
@@ -61,9 +64,11 @@ fn the_menu_offers_exactly_the_four_p7_actions() {
             TrayAction::CurrentTask.menu_id(),
             TrayAction::Pause.menu_id(),
             TrayAction::QuickCapture.menu_id(),
+            TrayAction::Finish.menu_id(),
             TrayAction::Quit.menu_id(),
         ],
-        "P7 实际提供四项：当前任务、暂停、快速捕获、退出（退出在最后）"
+        "五项，次序是 P7 那份菜单的次序（「完成」就在它当年占位的位置上，不重排）：\
+         当前任务、暂停、快速捕获、完成、退出（退出在最后）"
     );
 
     let labels: Vec<&str> = tray::MENU_ITEMS
@@ -73,37 +78,53 @@ fn the_menu_offers_exactly_the_four_p7_actions() {
         .collect();
     assert_eq!(
         labels,
-        vec!["当前任务", "暂停", "快速捕获", "退出"],
-        "菜单文案是面向用户的中文，不写模块名"
+        vec!["当前任务", "暂停", "快速捕获", "完成", "退出"],
+        "菜单文案是面向用户的中文，不写模块名；「完成」不再带「（P8 启用）」"
     );
 }
 
+/// 「完成」从**禁用占位项**变成**真实动作**（P8 Task 2d）。
+///
+/// 三件事一起钉住：① 它现在有动作（P7 的 `action: None` 必须消失）；② 它的 id 随动作名走
+/// ——`tray.finish_reserved` 的 `_reserved` 说的就是"还没有动作"，接上之后不再预留；
+/// ③ 菜单里**不再有**任何禁用项（P7 登记的"点了没反应"那一项已闭合）。
 #[test]
-fn finish_is_reserved_and_disabled_without_an_action() {
-    let reserved: Vec<&str> = tray::MENU_ITEMS
+fn finish_is_a_real_action_and_no_row_is_left_disabled() {
+    assert_eq!(
+        tray::action_for(TrayAction::Finish.menu_id()),
+        Some(TrayAction::Finish),
+        "菜单 id 必须映射回「完成」动作（`action_for` 是菜单事件的唯一入口）"
+    );
+    assert_eq!(
+        TrayAction::Finish.menu_id(),
+        "tray.finish",
+        "id 是动作的稳定名字：不再是 P7 那个 `tray.finish_reserved`"
+    );
+    assert!(
+        item(TrayAction::Finish.menu_id()).label.contains("完成"),
+        "这一项就是「完成」"
+    );
+
+    let disabled: Vec<&str> = tray::MENU_ITEMS
         .iter()
         .filter(|item| item.action.is_none())
         .map(|item| item.id)
         .collect();
     assert_eq!(
-        reserved,
-        vec!["tray.finish_reserved"],
-        "有且只有「完成」是预留项：P3 的 transition_task 接入后由 P8 启用"
-    );
-    assert!(
-        item("tray.finish_reserved").label.contains("完成"),
-        "预留项就是「完成」，只是 P7 不给它动作"
+        disabled,
+        Vec::<&str>::new(),
+        "五项全部可点：P7 的「完成（P8 启用）」禁用项已经启用，没有第二个预留项"
     );
     assert_eq!(
         tray::action_for("tray.finish_reserved"),
         None,
-        "点了预留项必须什么都不发生（菜单里它是禁用项，这里再钉一次）"
+        "旧 id 不再对应任何动作（菜单里也没有它了）——留着它就是第二个名字"
     );
 }
 
 #[test]
-fn every_menu_row_is_an_action_or_the_reserved_item() {
-    assert_eq!(tray::MENU_ITEMS.len(), 5, "四项 + 一个预留项");
+fn every_menu_row_is_an_action() {
+    assert_eq!(tray::MENU_ITEMS.len(), 5, "五项");
     for action in TrayAction::ALL {
         assert_eq!(
             tray::MENU_ITEMS
@@ -160,12 +181,17 @@ fn each_tray_action_is_dispatched_to_its_own_entry() {
         "暂停 → commands::tray_pause_impl（→ pause_timer_impl）"
     );
     assert_eq!(
+        tray_dispatch(TrayAction::Finish),
+        TrayDispatch::Finish,
+        "完成 → commands::tray_finish_impl（→ transition_task_impl，P8 Task 2d）"
+    );
+    assert_eq!(
         tray_dispatch(TrayAction::Quit),
         TrayDispatch::Quit,
         "退出 → commands::tray_quit_impl（→ 显式退出入口）"
     );
 
-    // 服务动作恰好两个，而且顺序固定：新增第四条动作时这里会提醒补路由。
+    // 服务动作恰好三个，而且顺序固定：新增动作时这里会提醒补路由。
     let service: Vec<TrayDispatch> = TrayAction::ALL
         .iter()
         .map(|action| tray_dispatch(*action))
@@ -173,8 +199,12 @@ fn each_tray_action_is_dispatched_to_its_own_entry() {
         .collect();
     assert_eq!(
         service,
-        vec![TrayDispatch::Pause, TrayDispatch::Quit],
-        "只有暂停与退出是服务动作（其余只碰窗口）"
+        vec![
+            TrayDispatch::Pause,
+            TrayDispatch::Finish,
+            TrayDispatch::Quit
+        ],
+        "只有暂停、完成与退出是服务动作（其余只碰窗口）"
     );
 }
 
@@ -451,6 +481,21 @@ fn text_of(state: &AppState, sql: &str) -> String {
         .unwrap()
 }
 
+/// 库里那条任务行的两个事实（状态 / `row_version`）：托盘「完成」写没写、写成什么样，
+/// 都回到行上看。
+fn task_facts(state: &AppState) -> (String, i64) {
+    state
+        .db()
+        .unwrap()
+        .connection()
+        .query_row(
+            "SELECT status, row_version FROM task WHERE id = 't1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
 /// 库里会话的四个事实（状态 / `ended_at` / 区间时长 / 待确认）。
 fn session_facts(state: &AppState) -> Vec<(String, i64, i64, i64)> {
     let mut statement = state
@@ -631,6 +676,222 @@ fn the_tray_pause_without_a_running_session_writes_nothing() {
         text_of(&state, "SELECT state FROM work_session"),
         "paused",
         "已经暂停的会话不该被再动一次"
+    );
+    drop(state);
+    assert_eq!(
+        rig.events().len(),
+        events_after_pause,
+        "无事可做 ⇒ 不广播（不空转制造通知）"
+    );
+}
+
+/// 托盘「完成」必须落在 **IPC 的 `transition_task_impl`** 上（P8 Task 2d）：两条路径各起
+/// 一个真应用、都先 `start_timer`，然后一条走 `tray_finish_impl`、一条走
+/// `transition_task_impl`（请求用**快照**里的同一组字段，与托盘那条入口逐字同源）。
+/// 效果逐项相等才算「同一批入口」——这是"托盘不另写业务逻辑"唯一能机器化的证据。
+///
+/// 反向验证：把 `tray_finish_impl` 改成自己开事务改状态（或改成先 `finish_timer` 再改
+/// 状态），库里那条会话的四个事实与广播条数立刻对不上 IPC 那一侧。
+#[test]
+fn the_tray_finish_lands_on_the_same_command_body_as_the_ipc_one() {
+    let tray_rig = launch();
+    let ipc_rig = launch();
+
+    let tray_report = {
+        let mut state = tray_rig.state();
+        commands::start_timer_impl(
+            &mut state,
+            tray_rig.running.broadcaster(),
+            start_request(&tray_rig, "t1"),
+        )
+        .unwrap();
+        let revision_before = revision_of(&state);
+        // 会话 id 是随机 uuid（两条夹具各起一个库）⇒ 这里先记下**本夹具**那条，
+        // 稍后核"结束的正是它自己那条"，而不是拿两个 uuid 互比。
+        let session = commands::timer_snapshot_impl(&mut state)
+            .unwrap()
+            .session_id
+            .expect("有会话");
+
+        let finished = commands::tray_finish_impl(&mut state, tray_rig.running.broadcaster())
+            .expect("有正在计时的任务时托盘完成必须成功");
+        let TrayFinish::Finished(report) = finished else {
+            panic!("正在计时 ⇒ 托盘完成不能是「无事可做」");
+        };
+        assert_eq!(
+            report.revision,
+            revision_before + 1,
+            "完成是一次成功业务写 ⇒ 恰好推进一次 revision"
+        );
+        (report, session)
+    };
+    let (tray_report, tray_session) = tray_report;
+
+    let (ipc_report, ipc_session) = {
+        let mut state = ipc_rig.state();
+        commands::start_timer_impl(
+            &mut state,
+            ipc_rig.running.broadcaster(),
+            start_request(&ipc_rig, "t1"),
+        )
+        .unwrap();
+
+        // 与 `tray_finish_impl` 同源：任务身份与版本取自**快照**（托盘拿不到别的东西），
+        // 目标与原因按命令层的取值域给。
+        let snapshot = commands::timer_snapshot_impl(&mut state).unwrap();
+        let session = snapshot.session_id.clone().expect("有会话");
+        let report = commands::transition_task_impl(
+            &mut state,
+            ipc_rig.running.broadcaster(),
+            TransitionTaskRequest {
+                expected_data_epoch: snapshot.data_epoch.clone(),
+                task_id: snapshot.task_id.clone().expect("有会话就有任务"),
+                expected_row_version: snapshot.task_row_version.expect("有会话就有任务版本"),
+                target: "Done".to_string(),
+                cause: "user".to_string(),
+            },
+        )
+        .unwrap();
+        (report, session)
+    };
+
+    // ① 响应：状态、版本、两个联动名单、revision 逐项相同。
+    assert_eq!(tray_report.task.status.as_str(), "Done");
+    assert_eq!(tray_report.task.status, ipc_report.task.status);
+    assert_eq!(tray_report.task.row_version, ipc_report.task.row_version);
+    // 会话 id 是随机 uuid，**不比**那两个字符串：比的是"各自结束了**自己那条**会话"
+    // 这条事实（名单长度相同、库内事实在 ② 逐项相同）——paused 名单两边都是空，可以直接比。
+    assert_eq!(
+        tray_report.ended_sessions,
+        vec![tray_session],
+        "托盘完成结束的是它自己那条会话"
+    );
+    assert_eq!(
+        ipc_report.ended_sessions,
+        vec![ipc_session],
+        "IPC 完成结束的是它自己那条会话"
+    );
+    assert_eq!(
+        tray_report.ended_sessions.len(),
+        ipc_report.ended_sessions.len(),
+        "两条路径结束的会话条数相同"
+    );
+    assert_eq!(
+        tray_report.paused_sessions, ipc_report.paused_sessions,
+        "完成不动 paused 名单（它结束会话，不暂停）"
+    );
+    assert_eq!(tray_report.revision, ipc_report.revision);
+    assert!(tray_report.paused_sessions.is_empty());
+
+    // ② 库里的行：任务行与会话的四个事实逐项相同。
+    assert_eq!(
+        task_facts(&tray_rig.state()),
+        task_facts(&ipc_rig.state()),
+        "托盘完成与 IPC 完成必须落下同一条任务行"
+    );
+    assert_eq!(task_facts(&tray_rig.state()).0, "Done");
+    assert_eq!(
+        session_facts(&tray_rig.state()),
+        session_facts(&ipc_rig.state()),
+        "托盘完成与 IPC 完成必须落下同一组会话事实（这才是「同一命令」）"
+    );
+    assert_eq!(
+        session_facts(&tray_rig.state())[0].0,
+        "finished",
+        "完成不是暂停：会话进 finished，`ended_at` 落上"
+    );
+
+    // ③ 广播：同样一条 `domain.changed`、同一个 revision（`transition_task_impl` 已按
+    //    `Changed` 广播，托盘**不再自己广播一次**——多一条这里就红）。
+    let tray_events = tray_rig.events();
+    let ipc_events = ipc_rig.events();
+    assert_eq!(tray_events.len(), ipc_events.len());
+    assert_eq!(tray_events.len(), 2, "start 一条 + 完成一条");
+    let (tray_last, ipc_last) = (tray_events.last().unwrap(), ipc_events.last().unwrap());
+    assert_eq!(tray_last.event, ipc_last.event);
+    assert_eq!(tray_last.revision, ipc_last.revision);
+    assert_eq!(tray_last.data_epoch, tray_rig.epoch);
+    assert_eq!(ipc_last.data_epoch, ipc_rig.epoch);
+    assert_eq!(
+        tray_last.event,
+        worktrace_lib::services::events::EVENT_DOMAIN_CHANGED
+    );
+}
+
+/// 没有**正在计时**的任务时，托盘「完成」不产生任何写（P8 Task 2d 的边界）：
+/// 零广播、零 revision 变化、`total_changes` 不动，而且**不造**一条假任务、也不编一个
+/// 版本去撞服务端的守卫——库里的行原样不动。
+#[test]
+fn the_tray_finish_without_a_running_timer_writes_nothing() {
+    let rig = launch();
+    let mut state = rig.state();
+
+    // ① 完全没有会话（冷启动）：什么都不做。
+    let revision_before = revision_of(&state);
+    let changes_before = state.db().unwrap().connection().total_changes();
+    assert_eq!(
+        commands::tray_finish_impl(&mut state, rig.running.broadcaster()).unwrap(),
+        TrayFinish::NothingToFinish
+    );
+    assert_eq!(
+        revision_of(&state),
+        revision_before,
+        "没有正在计时时不能推进 revision"
+    );
+    assert_eq!(
+        state.db().unwrap().connection().total_changes(),
+        changes_before,
+        "没有正在计时时不能写库"
+    );
+    assert_eq!(
+        task_facts(&state).0,
+        "Ready",
+        "不造一个假任务：没有会话可归属，任务行原样停在 Ready"
+    );
+    assert!(rig.events().is_empty(), "没有业务写就不该有 domain.changed");
+
+    // ② 会话已经暂停：**暂停不是「正在计时」**（判据与托盘暂停同一条 `is_running`）。
+    commands::start_timer_impl(
+        &mut state,
+        rig.running.broadcaster(),
+        start_request(&rig, "t1"),
+    )
+    .unwrap();
+    let snapshot = commands::timer_snapshot_impl(&mut state).unwrap();
+    commands::pause_timer_impl(
+        &mut state,
+        rig.running.broadcaster(),
+        SessionRequest {
+            expected_data_epoch: snapshot.data_epoch.clone(),
+            session_id: snapshot.session_id.clone().expect("有会话"),
+            session_expected_version: snapshot.session_version.expect("有会话版本"),
+        },
+    )
+    .unwrap();
+
+    let revision_after_pause = revision_of(&state);
+    let changes_after_pause = state.db().unwrap().connection().total_changes();
+    let events_after_pause = rig.events().len();
+
+    assert_eq!(
+        commands::tray_finish_impl(&mut state, rig.running.broadcaster()).unwrap(),
+        TrayFinish::NothingToFinish
+    );
+    assert_eq!(revision_of(&state), revision_after_pause);
+    assert_eq!(
+        state.db().unwrap().connection().total_changes(),
+        changes_after_pause,
+        "暂停中的任务不归托盘「完成」管：一个字节都不写"
+    );
+    assert_eq!(
+        task_facts(&state).0,
+        "Doing",
+        "任务状态不变（start_timer 把 Ready 推到了 Doing）"
+    );
+    assert_eq!(
+        session_facts(&state)[0].0,
+        "paused",
+        "暂停的会话不该被托盘完成顺手结束"
     );
     drop(state);
     assert_eq!(

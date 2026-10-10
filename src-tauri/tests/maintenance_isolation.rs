@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use worktrace_lib::commands::{tray_pause_impl, TrayPause};
+use worktrace_lib::commands::{tray_finish_impl, tray_pause_impl, TrayFinish, TrayPause};
 use worktrace_lib::domain::session::{SessionMode, TimerKind};
 use worktrace_lib::error::AppError;
 use worktrace_lib::platform::clock::FakeClock;
@@ -610,6 +610,49 @@ fn tray_pause_is_refused_in_maintenance_and_writes_nothing() {
     let after = probe(&app);
     assert_eq!(after.running, 0, "会话不再 running");
     assert!(after.revision > before.revision, "暂停是一次业务写");
+}
+
+/// 托盘「完成」（P8 Task 2d 新增的第二个绕过 `run_command` 的托盘入口）同样自己判维护态：
+/// 维护态下拒绝且库零写入；维护态结束之后同一条路径真的把当前计时中的任务推到 `Done`
+/// （正控）。
+///
+/// 反向验证：去掉 `tray_finish_impl` 取锁之后那句 `guard_writable()`，这里拿到的**不是**
+/// 拒绝而是 `Finished(...)`——实测（`.dsh_tmp/p8t2d-sabA.txt`）那次调用**在恢复进行中
+/// 提交了**：任务进 `Done`、会话被结束、`revision` 推到 2。也就是说托盘这条路径的维护态
+/// 判据只有这一句（`write_tx` 自己**不**拒绝维护态），拆掉它 Red 的就是这张库内快照。
+#[test]
+fn tray_finish_is_refused_in_maintenance_and_writes_nothing() {
+    let fx = fixture();
+    let running = started(&fx, IDLE_INTERVAL_MS, false);
+    let app = app_of(&running);
+    let epoch = running.data_epoch().to_string();
+
+    start_session(&app, &epoch);
+    let before = probe(&app);
+    assert_eq!(before.running, 1);
+
+    begin(&app, WALL);
+    let error = {
+        let mut state = lock_app(&app);
+        tray_finish_impl(&mut state, running.broadcaster()).expect_err("维护态必须拒绝托盘完成")
+    };
+    assert_maintenance_refusal(&error);
+    assert_eq!(probe(&app), before, "被拒的托盘完成不得写任何东西");
+
+    // 正控：维护态结束之后，同一条路径真的完成了当前计时中的任务。
+    end(&app);
+    let outcome = {
+        let mut state = lock_app(&app);
+        tray_finish_impl(&mut state, running.broadcaster()).expect("维护结束后托盘完成应当生效")
+    };
+    let TrayFinish::Finished(report) = outcome else {
+        panic!("有正在计时的任务 ⇒ 托盘完成不能是「无事可做」：{outcome:?}");
+    };
+    assert_eq!(report.task.status.as_str(), "Done");
+    assert_eq!(report.ended_sessions.len(), 1, "那条正在跑的会话被结束");
+    let after = probe(&app);
+    assert_eq!(after.running, 0, "完成结束了那条 running 会话");
+    assert!(after.revision > before.revision, "完成是一次业务写");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
