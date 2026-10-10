@@ -15,7 +15,11 @@ use super::db::map_sqlite;
 use super::guards::guard_row_version;
 
 /// `work_session` 的一行。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` 的来由与 [`crate::storage::task_repo::TaskRow`] 逐字相同：
+/// `ReconcileReport.session` / `HistoryEditReport.session` 直接装它交给 IPC
+/// （P8 Task 2a 的恢复与历史写命令），不再在命令层复制一份字段做镜像 DTO。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionRow {
     pub id: String,
     pub task_id: String,
@@ -31,7 +35,11 @@ pub struct SessionRow {
 }
 
 /// `work_interval` 的一行。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize` 的来由与 [`crate::storage::task_repo::TaskRow`] 逐字相同：
+/// `ReconcileReport.intervals` / `HistoryEditReport.interval` 直接装它交给 IPC
+/// （P8 Task 2a 的恢复与历史写命令），不再在命令层复制一份字段做镜像 DTO。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct IntervalRow {
     pub id: String,
     pub session_id: String,

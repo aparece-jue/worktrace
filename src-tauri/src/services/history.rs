@@ -119,7 +119,13 @@ pub struct CorrectRequest {
 }
 
 /// 一次修正的结果：会话（版本已 +1）+ 被修正的那条区间（修正后的权威行）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`（P8 Task 2a）：它是 `correct` / `backfill` / `discard_session` 三条
+/// IPC 命令共用的响应 DTO（`commands::*_impl` 原样返回它，并把它当
+/// `domain.changed` 的载荷），所以不在命令层另造一份镜像字段表——与
+/// `stats::TodayView` 同一条口径。它也因此把 `SessionRow` / `IntervalRow`
+/// 带进了 IPC 契约。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HistoryEditReport {
     pub session: SessionRow,
     pub interval: IntervalRow,

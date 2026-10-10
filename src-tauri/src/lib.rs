@@ -152,6 +152,12 @@ pub fn run() {
             commands::remove_from_plan,
             // 统计（F-010 的「今日工时」半边）
             commands::stats_today,
+            // 恢复与历史（P3 的服务层入口，P8 接线）
+            commands::reconcile,
+            commands::correct,
+            commands::backfill,
+            commands::discard_session,
+            commands::transition_task,
             // 计时（P2）
             commands::timer_snapshot,
             commands::timer_tick,

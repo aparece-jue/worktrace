@@ -434,7 +434,12 @@ pub struct ReconcileRequest {
 }
 
 /// 一次对账的结果：会话 + 该会话**全部**区间（不只是被处理的那几条）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`（P8 Task 2a）：它就是 `reconcile` 这条 IPC 命令的响应 DTO
+/// （`commands::reconcile_impl` 原样返回它，并把它当 `domain.changed` 的载荷），
+/// 所以不在命令层另造一份镜像字段表——与 `stats::TodayView` 同一条口径。
+/// 它也因此把 `SessionRow` / `IntervalRow` 带进了 IPC 契约。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ReconcileReport {
     pub session: SessionRow,
     pub intervals: Vec<IntervalRow>,

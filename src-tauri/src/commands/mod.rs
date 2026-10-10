@@ -31,7 +31,7 @@
 //! 调服务 → 返回响应）。包装只有一行转发。
 //!
 //! 为什么分开：`#[tauri::command]` 生成的包装要 Tauri 运行时才能调，而命令体只需要一个
-//! `&mut AppState`——分开之后 `tests/ipc_commands.rs` 能**逐条**覆盖 25 条命令
+//! `&mut AppState`——分开之后 `tests/ipc_commands.rs` 能**逐条**覆盖 30 条命令
 //! （不需要 `tauri::test`，因此也不需要动 `Cargo.toml`）。一个 `finish_timer` 里误调
 //! `app.pause` 的复制粘贴错误，现在会当场断言失败。
 //!
@@ -102,6 +102,8 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, State};
 
+use crate::domain::error::DomainError;
+use crate::domain::task::{TaskStatus, TransitionCause};
 use crate::envelope::WriteEnvelope;
 use crate::error::{AppError, AuthorityKind, AuthorityTarget, ErrorResponse};
 use crate::services::bootstrap::{
@@ -114,7 +116,7 @@ use crate::services::timer::coordinator::{
     StartRequest,
 };
 use crate::services::timer::snapshot::TimerSnapshot;
-use crate::services::{catalog, daily_plan, handshake, stats};
+use crate::services::{catalog, daily_plan, handshake, history, recovery, stats, tasks};
 
 /// 实验器材（P7 Task 6a）：四条 dev 命令，**只在 debug 构建编译**。
 #[cfg(debug_assertions)]
@@ -386,6 +388,91 @@ pub struct StartTimerRequest {
     pub target_duration_ms: Option<i64>,
     #[serde(default = "default_expected_interval_ms")]
     pub expected_interval_ms: i64,
+}
+
+/// 对账（确认 / 丢弃不确定区间）。`expected_row_version` 是**会话**版本。
+///
+/// `action` / `target_state` 是字符串（见模块头）：`confirm` / `discard_uncertain`
+/// 与 `paused` / `finished`。`ranges` 只在 `confirm` 时携带内容，且必须**恰好覆盖**
+/// 该会话的全部待确认区间；`discard_uncertain` 必须给空列表（作废集合由服务从库里取，
+/// 不由客户端指认一条）。两条动作都是本命令，**作废整次**是 [`DiscardSessionRequest`]。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ReconcileRequest {
+    pub expected_data_epoch: String,
+    pub session_id: String,
+    pub expected_row_version: i64,
+    pub action: String,
+    pub target_state: String,
+    pub ranges: Vec<ConfirmedRangeRequest>,
+}
+
+/// [`ReconcileRequest::ranges`] 的一项：用户确认的一段区间。
+///
+/// 起止都是**用户给定的值**（与 `services::recovery::ConfirmedRange` 逐字段相同），
+/// 不是候选端点推导出来的——候选端点只是展示材料。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ConfirmedRangeRequest {
+    pub interval_id: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+}
+
+/// 历史修正（重定时 / 软删除）。`expected_row_version` 是**所属会话**的版本，**必填**。
+///
+/// `action` 是字符串：`retime` 必须带 `started_at` + `ended_at`（时长由服务算），
+/// `delete` 不用它们。三个可选字段（`started_at` / `ended_at` / `reason`）都可以**省略**
+/// ——省略等价于 `null`。`reason` 是用户给的理由，落在审计里。
+///
+/// **版本位必填**：它与其他四条命令、以及 `expected_data_epoch` 同一口径——必填标量
+/// 少了就是传输层（serde）错误，**不是**一条「我不知道版本」的可用调用路径。
+/// 服务层那条「缺少记录版本，无法安全地修正这段历史。」守卫因此从命令层不可达；
+/// 它在服务层被 `tests/correct.rs` 的两条用例覆盖（既有的一条用 `for_create` 信封，
+/// P8 Task 2a 修复轮补的一条额外钉住「是哪一条拒绝」的文案）。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CorrectRequest {
+    pub expected_data_epoch: String,
+    pub session_id: String,
+    pub expected_row_version: i64,
+    pub interval_id: String,
+    pub action: String,
+    pub started_at: Option<i64>,
+    pub ended_at: Option<i64>,
+    pub reason: Option<String>,
+}
+
+/// 手工补录一段**已经发生**的人工时间（新建 ⇒ 只需 epoch）。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BackfillRequest {
+    pub expected_data_epoch: String,
+    pub task_id: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+}
+
+/// 作废整次会话。`expected_row_version` 是**会话**版本。
+///
+/// 它与 [`ReconcileRequest`] 的 `discard_uncertain` 是**两条命令、两个语义**：
+/// 这里作废该会话的全部区间并把会话推成 `discarded`（无状态前置），那边只丢
+/// 待确认区间、保留可信前缀。界面上也不许合并成一个「丢弃」按钮。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DiscardSessionRequest {
+    pub expected_data_epoch: String,
+    pub session_id: String,
+    pub expected_row_version: i64,
+}
+
+/// 任务状态跃迁。`expected_row_version` 是**任务**版本。
+///
+/// `target` / `cause` 是字符串：`target` 是落库用的状态名（`Done` / `Blocked` /
+/// `Ready` …，与 `TaskStatus::as_str()` 逐字一致），`cause` 是 `user` / `reopen`
+/// （`reopen` 是终结态回 `Ready` 的唯一合法原因）。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TransitionTaskRequest {
+    pub expected_data_epoch: String,
+    pub task_id: String,
+    pub expected_row_version: i64,
+    pub target: String,
+    pub cause: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1083,6 +1170,340 @@ pub fn stats_today_impl(
     request: stats::TodayQuery,
 ) -> Result<stats::TodayView, AppError> {
     app.stats_today(&request)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 恢复与历史（P3 的服务层入口，P8 的 IPC）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 五条**写**命令：对账、修正、补录、作废整次、任务跃迁。服务层与 `AppState` 入口由
+// P3 交付（P3 计划「边界」：P3 不新增 `#[tauri::command]`），这里只接线。共同口径：
+//
+// - 服务返回的是 [`crate::storage::WriteOutcome`]（`Changed` / `Unchanged`），命令体
+//   `into_parts()` 解它，**只有 `Changed` 才广播** `domain.changed`——与 `create_task`
+//   一族同一条姿势。响应形状**不加** `{changed, value}` 信封（模块头）。
+// - 响应用服务层的报告类型本身（`ReconcileReport` / `HistoryEditReport` /
+//   `TaskTransitionReport`），它们自带 `data_epoch` / `revision`，页面据此判旧；
+//   不在命令层复制一份字段做镜像 DTO。
+// - 转发**不带 `run_id`**：`AppState::reconcile` 等方法内部自己取（协调器只有它够得着）。
+// - `correct` 只对 `finished` 会话开放、`discard_session` 与
+//   `reconcile(discard_uncertain)` 是两条不同命令、`backfill` 不启动计时——这些都是
+//   **服务层**的判据，命令层不重复实现、也不放宽（界面据会话 `state` 禁用入口）。
+// - 命令体里的 `now` **只用于广播信封的 `at`**：这三份报告都没有时刻字段，而写事务
+//   自己的时钟样本在服务层（`AppState::reconcile` 等方法内部取）。两次采样走同一条
+//   时钟接缝（`AppState::now_ms` → 协调器），不引入第二个时间源。
+
+/// 「这个值不在取值域里」。与 `services::timer::coordinator` 里那份同形：
+/// `field` 面向用户、`value` 原样回显，错误码落在 `DOMAIN_ERROR` 上。
+fn unknown_enum_value(field: &'static str, value: &str) -> AppError {
+    DomainError::UnknownEnumValue {
+        field,
+        value: value.to_string(),
+    }
+    .into()
+}
+
+/// `reconcile` 的动作字符串（模块头：字符串枚举显式解析，不靠 serde）。
+fn parse_reconcile_action(raw: &str) -> Result<recovery::ReconcileAction, AppError> {
+    match raw.trim() {
+        "confirm" => Ok(recovery::ReconcileAction::Confirm),
+        "discard_uncertain" => Ok(recovery::ReconcileAction::DiscardUncertain),
+        "" => Err(DomainError::EmptyText {
+            field: "对账动作"
+        }
+        .into()),
+        other => Err(unknown_enum_value("对账动作", other)),
+    }
+}
+
+/// 对账之后会话停在哪个状态。取值域只有 `paused` / `finished` 两个
+/// （`running` / `recovering` / `discarded` 都不是「对账后的状态」）。
+fn parse_reconcile_target_state(raw: &str) -> Result<recovery::ReconcileTargetState, AppError> {
+    match raw.trim() {
+        "paused" => Ok(recovery::ReconcileTargetState::Paused),
+        "finished" => Ok(recovery::ReconcileTargetState::Finished),
+        "" => Err(DomainError::EmptyText {
+            field: "对账后的会话状态",
+        }
+        .into()),
+        other => Err(unknown_enum_value("对账后的会话状态", other)),
+    }
+}
+
+/// `correct` 的动作（字符串 + 可选起止 → 服务枚举）。
+///
+/// `retime` 的两个时刻由**请求**给（服务的 `CorrectAction::Retime` 必带它们）；
+/// 少一个就是构造不出请求，落在 `DOMAIN_ERROR` 上。`delete` 不带时刻。
+fn parse_correct_action(request: &CorrectRequest) -> Result<history::CorrectAction, AppError> {
+    match request.action.trim() {
+        "retime" => match (request.started_at, request.ended_at) {
+            (Some(started_at), Some(ended_at)) => Ok(history::CorrectAction::Retime {
+                started_at,
+                ended_at,
+            }),
+            _ => Err(AppError::Domain {
+                detail: "重定时必须同时给出开始与结束时刻。".into(),
+            }),
+        },
+        "delete" => Ok(history::CorrectAction::Delete),
+        "" => Err(DomainError::EmptyText {
+            field: "修正动作"
+        }
+        .into()),
+        other => Err(unknown_enum_value("修正动作", other)),
+    }
+}
+
+/// 任务状态目标。**就是落库用的状态名**（`TaskStatus::as_str()`），
+/// 与 `parse_session_mode` 同形：空白 ⇒ `EmptyText`，取值域外 ⇒ `UnknownEnumValue`。
+///
+/// 取值域里含 V0.1 不写的 `Scheduled`：这里**不**自己加「可写性」判断——
+/// 那条规则在服务层（`TaskStatus::is_writable_in_v01` 与跃迁表），命令层不重复。
+fn parse_task_target(raw: &str) -> Result<TaskStatus, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(DomainError::EmptyText {
+            field: "任务状态"
+        }
+        .into());
+    }
+    TaskStatus::parse(trimmed).ok_or_else(|| unknown_enum_value("任务状态", raw))
+}
+
+/// 跃迁原因。`TransitionCause` 在 domain 里没有 `parse`/`as_str`（它从不落库、
+/// 也不进任何快照），所以 IPC 的字符串形状在这里一次定死：`user` / `reopen`。
+fn parse_transition_cause(raw: &str) -> Result<TransitionCause, AppError> {
+    match raw.trim() {
+        "user" => Ok(TransitionCause::User),
+        "reopen" => Ok(TransitionCause::Reopen),
+        "" => Err(DomainError::EmptyText {
+            field: "跃迁原因"
+        }
+        .into()),
+        other => Err(unknown_enum_value("跃迁原因", other)),
+    }
+}
+
+/// 对账：一次处理该会话的**全部**待确认区间（确认或丢弃）。
+///
+/// 只接 `recovering`（R6）：非 `recovering` 一律拒绝——包括「已经确认过、想再确认一次」，
+/// 所以这条命令**没有 `Unchanged` 这一支**（拒绝而不是当成又一笔写，见服务层文档）。
+#[tauri::command]
+pub async fn reconcile(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: ReconcileRequest,
+) -> Result<recovery::ReconcileReport, ErrorResponse> {
+    let targets = vec![target(AuthorityKind::Session, &request.session_id)];
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command("reconcile", window.label(), &state, targets, move |app| {
+        reconcile_impl(app, &broadcaster, request)
+    })
+    .await
+}
+
+/// [`reconcile`] 的命令体（IPC 包装只做转发）。
+pub fn reconcile_impl(
+    app: &mut AppState,
+    broadcaster: &Broadcaster,
+    request: ReconcileRequest,
+) -> Result<recovery::ReconcileReport, AppError> {
+    // 先解析（可能拒绝，且不该为一次坏请求取时钟样本），再取信封与时钟。
+    let action = parse_reconcile_action(&request.action)?;
+    let target_state = parse_reconcile_target_state(&request.target_state)?;
+    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
+    let req = recovery::ReconcileRequest {
+        session_id: request.session_id,
+        action,
+        target_state,
+        ranges: request
+            .ranges
+            .into_iter()
+            .map(|range| recovery::ConfirmedRange {
+                interval_id: range.interval_id,
+                started_at: range.started_at,
+                ended_at: range.ended_at,
+            })
+            .collect(),
+    };
+    let now = app.now_ms()?;
+    let (report, changed) = app.reconcile(env, req)?.into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        report.data_epoch.clone(),
+        report.revision,
+        now,
+        report,
+    ))
+}
+
+/// 历史修正：重定时 / 软删除一条可信区间。只对 `finished` 会话开放。
+#[tauri::command]
+pub async fn correct(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: CorrectRequest,
+) -> Result<history::HistoryEditReport, ErrorResponse> {
+    let targets = vec![target(AuthorityKind::Session, &request.session_id)];
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command("correct", window.label(), &state, targets, move |app| {
+        correct_impl(app, &broadcaster, request)
+    })
+    .await
+}
+
+/// [`correct`] 的命令体（IPC 包装只做转发）。
+pub fn correct_impl(
+    app: &mut AppState,
+    broadcaster: &Broadcaster,
+    request: CorrectRequest,
+) -> Result<history::HistoryEditReport, AppError> {
+    let action = parse_correct_action(&request)?;
+    // 改既有对象 ⇒ `for_update` 这条规范构造点（版本位必填，见请求 DTO）。
+    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
+    let req = history::CorrectRequest {
+        session_id: request.session_id,
+        interval_id: request.interval_id,
+        action,
+        reason: request.reason,
+    };
+    let now = app.now_ms()?;
+    let (report, changed) = app.correct(env, req)?.into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        report.data_epoch.clone(),
+        report.revision,
+        now,
+        report,
+    ))
+}
+
+/// 手工补录一段已经发生的人工时间。**独立入口**：不启动计时、不伪造完成事件。
+#[tauri::command]
+pub async fn backfill(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: BackfillRequest,
+) -> Result<history::HistoryEditReport, ErrorResponse> {
+    let targets = vec![target(AuthorityKind::Task, &request.task_id)];
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command("backfill", window.label(), &state, targets, move |app| {
+        backfill_impl(app, &broadcaster, request)
+    })
+    .await
+}
+
+/// [`backfill`] 的命令体（IPC 包装只做转发）。
+pub fn backfill_impl(
+    app: &mut AppState,
+    broadcaster: &Broadcaster,
+    request: BackfillRequest,
+) -> Result<history::HistoryEditReport, AppError> {
+    // 补录**新建**一条 `finished` 会话：没有可校验的行版本 ⇒ `for_create`。
+    let env = WriteEnvelope::for_create(request.expected_data_epoch);
+    let req = history::BackfillRequest {
+        task_id: request.task_id,
+        started_at: request.started_at,
+        ended_at: request.ended_at,
+    };
+    let now = app.now_ms()?;
+    let (report, changed) = app.backfill(env, req)?.into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        report.data_epoch.clone(),
+        report.revision,
+        now,
+        report,
+    ))
+}
+
+/// 作废整次会话（二次确认是界面的硬前置；命令层只转发）。
+#[tauri::command]
+pub async fn discard_session(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: DiscardSessionRequest,
+) -> Result<history::HistoryEditReport, ErrorResponse> {
+    let targets = vec![target(AuthorityKind::Session, &request.session_id)];
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(
+        "discard_session",
+        window.label(),
+        &state,
+        targets,
+        move |app| discard_session_impl(app, &broadcaster, request),
+    )
+    .await
+}
+
+/// [`discard_session`] 的命令体（IPC 包装只做转发）。
+pub fn discard_session_impl(
+    app: &mut AppState,
+    broadcaster: &Broadcaster,
+    request: DiscardSessionRequest,
+) -> Result<history::HistoryEditReport, AppError> {
+    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
+    let req = recovery::DiscardSessionRequest {
+        session_id: request.session_id,
+    };
+    let now = app.now_ms()?;
+    let (report, changed) = app.discard_session(env, req)?.into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        report.data_epoch.clone(),
+        report.revision,
+        now,
+        report,
+    ))
+}
+
+/// 任务状态跃迁：同一事务里联动该任务的会话（结束 / 暂停），并广播一次。
+#[tauri::command]
+pub async fn transition_task(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: TransitionTaskRequest,
+) -> Result<tasks::TaskTransitionReport, ErrorResponse> {
+    let targets = vec![target(AuthorityKind::Task, &request.task_id)];
+    let broadcaster = Arc::clone(state.broadcaster());
+    run_command(
+        "transition_task",
+        window.label(),
+        &state,
+        targets,
+        move |app| transition_task_impl(app, &broadcaster, request),
+    )
+    .await
+}
+
+/// [`transition_task`] 的命令体（IPC 包装只做转发）。
+pub fn transition_task_impl(
+    app: &mut AppState,
+    broadcaster: &Broadcaster,
+    request: TransitionTaskRequest,
+) -> Result<tasks::TaskTransitionReport, AppError> {
+    let target = parse_task_target(&request.target)?;
+    let cause = parse_transition_cause(&request.cause)?;
+    let env = WriteEnvelope::for_update(request.expected_data_epoch, request.expected_row_version);
+    let req = tasks::TransitionTaskRequest {
+        task_id: request.task_id,
+        target,
+        cause,
+    };
+    let now = app.now_ms()?;
+    let (report, changed) = app.transition_task(env, req)?.into_parts();
+    Ok(announce(
+        broadcaster,
+        changed,
+        report.data_epoch.clone(),
+        report.revision,
+        now,
+        report,
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

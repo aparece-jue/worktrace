@@ -30,7 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use worktrace_lib::domain::project::ProjectStatus;
-use worktrace_lib::domain::session::{SessionState, TimerKind};
+use worktrace_lib::domain::session::{SessionMode, SessionState, TimerKind};
 use worktrace_lib::domain::tag::TagKind;
 use worktrace_lib::domain::task::TaskStatus;
 use worktrace_lib::error::{AuthorityKind, ErrorAuthority, ErrorResponse, RecordVersion};
@@ -41,12 +41,16 @@ use worktrace_lib::services::catalog::{
 use worktrace_lib::services::daily_plan::{DailyPlanChange, DailyPlanView};
 use worktrace_lib::services::events::timer_tick_payload;
 use worktrace_lib::services::handshake::RevisionSnapshot;
+use worktrace_lib::services::history::HistoryEditReport;
+use worktrace_lib::services::recovery::ReconcileReport;
 use worktrace_lib::services::stats::{
     CurrentTask, Measure, MeasureColumn, StatsClass, StatsRange, TodayView,
 };
+use worktrace_lib::services::tasks::TaskTransitionReport;
 use worktrace_lib::services::timer::coordinator::CommandOutcome;
 use worktrace_lib::services::timer::snapshot::TimerSnapshot;
 use worktrace_lib::storage::project_repo::ProjectRow;
+use worktrace_lib::storage::session_repo::{IntervalRow, SessionRow};
 use worktrace_lib::storage::tag_repo::TagRow;
 use worktrace_lib::storage::task_repo::TaskRow;
 
@@ -56,6 +60,7 @@ const PROJECT_ID: &str = "22222222-2222-4222-8222-222222222222";
 const TAG_ID: &str = "33333333-3333-4333-8333-333333333333";
 const SESSION_ID: &str = "44444444-4444-4444-8444-444444444444";
 const RUN_ID: &str = "55555555-5555-4555-8555-555555555555";
+const INTERVAL_ID: &str = "66666666-6666-4666-8666-666666666666";
 const AT: i64 = 1_700_000_000_000;
 /// Today 样例的查询时区，以及 `AT` 在它里面的**真实**半开日界
 /// （上海 2023-11-15 00:00 +08:00 → 次日零点）：`date` / `range` / `as_of` 三者自洽。
@@ -209,6 +214,53 @@ fn today_view() -> TodayView {
     }
 }
 
+/// `work_session` 的一行（P8 Task 2a：恢复与历史的报告里直接装它交给 IPC）。
+///
+/// 样例是**一条已经结束的前台会话**：`state` / `mode` / `timer_kind` 三个枚举字段
+/// 在这里首次进入快照，前端必须按落库字符串取值。
+fn session_row() -> SessionRow {
+    SessionRow {
+        id: SESSION_ID.to_string(),
+        task_id: TASK_ID.to_string(),
+        run_id: RUN_ID.to_string(),
+        mode: SessionMode::Foreground,
+        state: SessionState::Finished,
+        timer_kind: TimerKind::Stopwatch,
+        // 正计时没有预算；倒计时才有（`ck_timer_budget`）。
+        target_duration_ms: None,
+        started_at: AT - 3_600_000,
+        ended_at: Some(AT),
+        needs_review: false,
+        row_version: 5,
+    }
+}
+
+/// `work_interval` 的一行（确认过、未作废）。
+///
+/// `sampled_end_wall_at` 为 `None`：**手工补录与用户确认都没有采样点**
+/// （只有机器采样闭合的段才有），所以「`None`」是正常分支而不是缺失。
+fn interval_row() -> IntervalRow {
+    IntervalRow {
+        id: INTERVAL_ID.to_string(),
+        session_id: SESSION_ID.to_string(),
+        started_at: AT - 3_600_000,
+        ended_at: Some(AT),
+        voided_at: None,
+        duration_ms: Some(3_600_000),
+        sampled_end_wall_at: None,
+        needs_review: false,
+    }
+}
+
+/// 被作废的一段：`voided_at` 非空是前端必须处理的**另一条分支**
+/// （「整次作废」之后区间行仍在，只是不再计入任何工时）。
+fn voided_interval_row() -> IntervalRow {
+    IntervalRow {
+        voided_at: Some(AT + 60_000),
+        ..interval_row()
+    }
+}
+
 fn cases() -> Vec<(&'static str, serde_json::Value)> {
     vec![
         (
@@ -335,6 +387,106 @@ fn cases() -> Vec<(&'static str, serde_json::Value)> {
                 requires_handshake: false,
             }),
         ),
+        // ── 恢复与历史（P8 Task 2a 的五条写命令） ──────────────────────────────
+        //
+        // 五条命令只有**三个**响应类型：`correct` / `backfill` / `discard_session`
+        // 共用 `HistoryEditReport`。三条各出一份快照，是因为它们钉的是**不同分支**
+        // ——照 `timer_snapshot` / `timer_snapshot_idle` 同一先例：
+        //   `reconcile_report`        确认后的会话（`sampled_end_wall_at` 有值 / 零长度候选）；
+        //   `correct_report`          重定时后的区间（时长跟着起止一起变）；
+        //   `backfill_report`         新建的会话与区间（版本从 0 开始、没有采样点）；
+        //   `discard_session_report`  作废整次（会话 `discarded`、区间 `voided_at` 非空）。
+        (
+            "reconcile_report",
+            json(&ReconcileReport {
+                session: SessionRow {
+                    // 对账之后 `run_id` 已经切到本次 run、会话级待确认标记清假。
+                    run_id: RUN_ID.to_string(),
+                    needs_review: false,
+                    ..session_row()
+                },
+                intervals: vec![
+                    IntervalRow {
+                        id: "77777777-7777-4777-8777-777777777777".to_string(),
+                        // 机器采样闭合的可信前缀：这一条才有采样点。
+                        sampled_end_wall_at: Some(AT - 3_500_000),
+                        ..interval_row()
+                    },
+                    // 零长度候选被确认成零长度事实：`duration_ms = 0`，不是 `null`。
+                    IntervalRow {
+                        id: "88888888-8888-4888-8888-888888888888".to_string(),
+                        started_at: AT,
+                        ended_at: Some(AT),
+                        duration_ms: Some(0),
+                        ..interval_row()
+                    },
+                ],
+                revision: 15,
+                data_epoch: EPOCH.to_string(),
+            }),
+        ),
+        (
+            "correct_report",
+            json(&HistoryEditReport {
+                // 修正区间事实会把所属会话的版本 +1（区间没有独立版本列）。
+                session: SessionRow {
+                    row_version: 6,
+                    ..session_row()
+                },
+                interval: IntervalRow {
+                    started_at: AT - 3_600_000,
+                    ended_at: Some(AT - 60_000),
+                    duration_ms: Some(3_540_000),
+                    ..interval_row()
+                },
+                revision: 16,
+                data_epoch: EPOCH.to_string(),
+            }),
+        ),
+        (
+            "backfill_report",
+            json(&HistoryEditReport {
+                // 新建：会话版本从 0 开始，`run_id` 是补录时的 run。
+                session: SessionRow {
+                    needs_review: false,
+                    row_version: 0,
+                    ..session_row()
+                },
+                interval: interval_row(),
+                revision: 17,
+                data_epoch: EPOCH.to_string(),
+            }),
+        ),
+        (
+            "discard_session_report",
+            json(&HistoryEditReport {
+                session: SessionRow {
+                    // 整次作废：终态 `discarded`，终点的口径与 `finish` 的 `finished` 同级。
+                    state: SessionState::Discarded,
+                    ended_at: Some(AT + 60_000),
+                    row_version: 7,
+                    ..session_row()
+                },
+                interval: voided_interval_row(),
+                revision: 18,
+                data_epoch: EPOCH.to_string(),
+            }),
+        ),
+        (
+            "task_transition_report",
+            json(&TaskTransitionReport {
+                // 完成：任务行是提交后的样子，两个名单是同事务的联动事实。
+                task: TaskRow {
+                    status: TaskStatus::Done,
+                    row_version: 6,
+                    ..task_row()
+                },
+                ended_sessions: vec![SESSION_ID.to_string()],
+                paused_sessions: vec!["99999999-9999-4999-8999-999999999999".to_string()],
+                revision: 19,
+                data_epoch: EPOCH.to_string(),
+            }),
+        ),
     ]
 }
 
@@ -422,8 +574,8 @@ fn every_response_dto_matches_its_committed_snapshot() {
     }
 
     assert!(
-        names.len() >= 15,
-        "快照用例至少要覆盖 15 个响应 DTO，实际 {}：{names:?}",
+        names.len() >= 21,
+        "快照用例至少要覆盖 21 个响应 DTO，实际 {}：{names:?}",
         names.len()
     );
     assert!(

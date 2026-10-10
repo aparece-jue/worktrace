@@ -3,7 +3,7 @@
  *
  * ## 为什么需要这一条
  *
- * `src-tauri/tests/ipc_snapshots.rs` 只钉住 **Rust ↔ JSON**：15 份快照与 Rust 类型
+ * `src-tauri/tests/ipc_snapshots.rs` 只钉住 **Rust ↔ JSON**：21 份快照与 Rust 类型
  * 逐字节一致。手写的 `src/types/ipc.ts` 与那些快照之间**没有**机械联系——没有这条
  * 用例，「改了 Rust 类型忘了改前端类型」仍然只能靠人记得（D1 放弃 DTO 生成器之后的
  * 替代承诺就是这两条用例）。
@@ -35,11 +35,16 @@ import {
   ERROR_CODES,
   MEASURES,
   PROJECT_STATUSES,
+  RECONCILE_ACTIONS,
+  RECONCILE_TARGET_STATES,
+  CORRECT_ACTIONS,
+  SESSION_MODES,
   SESSION_STATES,
   STATS_CLASSES,
   TAG_KINDS,
   TASK_STATUSES,
   TIMER_KINDS,
+  TRANSITION_CAUSES,
 } from "../ipc";
 import type {
   CommandOutcome,
@@ -48,12 +53,16 @@ import type {
   DailyPlanView,
   ErrorAuthority,
   ErrorResponse,
+  HistoryEditReport,
+  IntervalRow,
   MeasureColumn,
   ProjectChange,
   ProjectList,
   ProjectRow,
+  ReconcileReport,
   RecordVersion,
   RevisionSnapshot,
+  SessionRow,
   StatsRange,
   TagChange,
   TagList,
@@ -63,6 +72,7 @@ import type {
   TaskQueryResult,
   TaskRow,
   TaskTagsChange,
+  TaskTransitionReport,
   TimerSnapshot,
   TodayView,
 } from "../ipc";
@@ -119,7 +129,7 @@ type Equal<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 type Expect<T extends true> = T;
 
-/** 15 个响应 DTO 的顶层键集合（照抄快照；顺序按字典序，便于与 `Object.keys().sort()` 对读）。 */
+/** 21 个响应 DTO 的顶层键集合（照抄快照；顺序按字典序，便于与 `Object.keys().sort()` 对读）。 */
 const TOP_LEVEL = {
   revision_snapshot: ["data_epoch", "revision"],
   project_list: ["data_epoch", "items", "revision"],
@@ -183,6 +193,20 @@ const TOP_LEVEL = {
   task_tags_change: ["data_epoch", "revision", "tags"],
   daily_plan_change: ["data_epoch", "revision", "tasks"],
   error_response: ["authority", "code", "message", "requires_handshake"],
+  // P8 Task 2a：恢复与历史的五条写命令。**只有三个响应类型**——`correct` /
+  // `backfill` / `discard_session` 共用 `HistoryEditReport`，三条各一份快照是因为
+  // 它们钉的是不同分支（照 `timer_snapshot` / `timer_snapshot_idle` 的先例）。
+  reconcile_report: ["data_epoch", "intervals", "revision", "session"],
+  correct_report: ["data_epoch", "interval", "revision", "session"],
+  backfill_report: ["data_epoch", "interval", "revision", "session"],
+  discard_session_report: ["data_epoch", "interval", "revision", "session"],
+  task_transition_report: [
+    "data_epoch",
+    "ended_sessions",
+    "paused_sessions",
+    "revision",
+    "task",
+  ],
 } as const;
 
 /** 嵌套对象（行类型与错误上下文）的键集合。 */
@@ -229,6 +253,31 @@ const MEASURE_COLUMN_KEYS = [
 ] as const;
 const STATS_RANGE_KEYS = ["from", "to"] as const;
 const CURRENT_TASK_KEYS = ["session_id", "state", "task_id", "task_title"] as const;
+/** `work_session` 的一行（P8 Task 2a：恢复与历史的报告里直接装它）。 */
+const SESSION_ROW_KEYS = [
+  "ended_at",
+  "id",
+  "mode",
+  "needs_review",
+  "row_version",
+  "run_id",
+  "started_at",
+  "state",
+  "target_duration_ms",
+  "task_id",
+  "timer_kind",
+] as const;
+/** `work_interval` 的一行。四个 `null` 分支各有含义，一个都不能少。 */
+const INTERVAL_ROW_KEYS = [
+  "duration_ms",
+  "ended_at",
+  "id",
+  "needs_review",
+  "sampled_end_wall_at",
+  "session_id",
+  "started_at",
+  "voided_at",
+] as const;
 
 /**
  * 编译期：声明的键集合**恰好**是 TS 接口的键集合（多一个、少一个、改个名都不行）。
@@ -252,6 +301,12 @@ export type TopLevelKeyChecks = [
   Expect<Equal<(typeof TOP_LEVEL)["task_tags_change"][number], keyof TaskTagsChange>>,
   Expect<Equal<(typeof TOP_LEVEL)["daily_plan_change"][number], keyof DailyPlanChange>>,
   Expect<Equal<(typeof TOP_LEVEL)["error_response"][number], keyof ErrorResponse>>,
+  Expect<Equal<(typeof TOP_LEVEL)["reconcile_report"][number], keyof ReconcileReport>>,
+  // 三条命令共用 `HistoryEditReport`：三份快照各自与**同一个** TS 类型对上。
+  Expect<Equal<(typeof TOP_LEVEL)["correct_report"][number], keyof HistoryEditReport>>,
+  Expect<Equal<(typeof TOP_LEVEL)["backfill_report"][number], keyof HistoryEditReport>>,
+  Expect<Equal<(typeof TOP_LEVEL)["discard_session_report"][number], keyof HistoryEditReport>>,
+  Expect<Equal<(typeof TOP_LEVEL)["task_transition_report"][number], keyof TaskTransitionReport>>,
 ];
 
 /** 编译期：嵌套对象的键集合断言（与上面同一形状）。 */
@@ -264,6 +319,8 @@ export type NestedKeyChecks = [
   Expect<Equal<(typeof MEASURE_COLUMN_KEYS)[number], keyof MeasureColumn>>,
   Expect<Equal<(typeof STATS_RANGE_KEYS)[number], keyof StatsRange>>,
   Expect<Equal<(typeof CURRENT_TASK_KEYS)[number], keyof CurrentTask>>,
+  Expect<Equal<(typeof SESSION_ROW_KEYS)[number], keyof SessionRow>>,
+  Expect<Equal<(typeof INTERVAL_ROW_KEYS)[number], keyof IntervalRow>>,
 ];
 
 /** 嵌套对象的运行期比对表：`where` 是点分路径，`[]` 表示取数组第一项。 */
@@ -287,6 +344,16 @@ const NESTED: ReadonlyArray<{ where: string; keys: readonly string[] }> = [
   { where: "daily_plan_change.tasks[]", keys: TASK_ROW_KEYS },
   { where: "error_response.authority", keys: ERROR_AUTHORITY_KEYS },
   { where: "error_response.authority.records[]", keys: RECORD_VERSION_KEYS },
+  // ── P8 Task 2a：恢复与历史（三条命令共用 `HistoryEditReport`） ──────────────
+  { where: "reconcile_report.session", keys: SESSION_ROW_KEYS },
+  { where: "reconcile_report.intervals[]", keys: INTERVAL_ROW_KEYS },
+  { where: "correct_report.session", keys: SESSION_ROW_KEYS },
+  { where: "correct_report.interval", keys: INTERVAL_ROW_KEYS },
+  { where: "backfill_report.session", keys: SESSION_ROW_KEYS },
+  { where: "backfill_report.interval", keys: INTERVAL_ROW_KEYS },
+  { where: "discard_session_report.session", keys: SESSION_ROW_KEYS },
+  { where: "discard_session_report.interval", keys: INTERVAL_ROW_KEYS },
+  { where: "task_transition_report.task", keys: TASK_ROW_KEYS },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -330,6 +397,8 @@ describe("快照契约", () => {
       { field: "status", domain: [...TASK_STATUSES, ...PROJECT_STATUSES], label: "TaskStatus | ProjectStatus" },
       { field: "kind", domain: [...TAG_KINDS, ...AUTHORITY_KINDS], label: "TagKind | AuthorityKind" },
       { field: "state", domain: SESSION_STATES, label: "SessionState" },
+      // P8 Task 2a 起会话行进快照 ⇒ `mode` 首次出现，取值域必须一起登记。
+      { field: "mode", domain: SESSION_MODES, label: "SessionMode" },
       { field: "class", domain: STATS_CLASSES, label: "StatsClass" },
       { field: "measure", domain: MEASURES, label: "Measure" },
       { field: "timer_kind", domain: TIMER_KINDS, label: "TimerKind" },
@@ -351,6 +420,31 @@ describe("快照契约", () => {
       }
     }
     expect(failures, failures.join("\n")).toEqual([]);
+  });
+
+  /**
+   * P8 Task 2a 的四个**请求**动作词（`reconcile` / `reconcile.target_state` /
+   * `correct` / `transition_task.cause`）。
+   *
+   * ⚠️ **这半是手抄的对读，不是生成器**：请求形状没有快照（快照只覆盖响应），
+   * 所以它挡的是「顺手改了 `ipc.ts` 的取值域」这一类改动，**挡不住** Rust 与 TS 的
+   * 漂移。权威在 `src-tauri/src/commands/mod.rs` 的四个 `parse_*`（显式解析，不走
+   * serde 的枚举反序列化）；那边逐词的成功/失败用例在
+   * `src-tauri/tests/ipc_commands.rs`（`confirm`、`discard_uncertain`、`retime`、
+   * 以及 `user` / `reopen` 在终结态回 `Ready` 上的区别）。
+   */
+  it("写命令的四个动作词与 Rust 的显式 parse 对读（手抄的一半，理由见注释）", () => {
+    expect({
+      reconcile_action: [...RECONCILE_ACTIONS],
+      reconcile_target_state: [...RECONCILE_TARGET_STATES],
+      correct_action: [...CORRECT_ACTIONS],
+      transition_cause: [...TRANSITION_CAUSES],
+    }).toEqual({
+      reconcile_action: ["confirm", "discard_uncertain"],
+      reconcile_target_state: ["paused", "finished"],
+      correct_action: ["retime", "delete"],
+      transition_cause: ["user", "reopen"],
+    });
   });
 });
 

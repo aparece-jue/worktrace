@@ -67,7 +67,11 @@ pub struct TransitionTaskRequest {
 ///
 /// 两个会话名单是**联动事实**（谁被结束了、谁被暂停了），不是「建议」：
 /// 它们与 `task` 出自同一个写事务。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`（P8 Task 2a）：它就是 `transition_task` 这条 IPC 命令的响应 DTO
+/// （`commands::transition_task_impl` 原样返回它，并把它当 `domain.changed` 的
+/// 载荷），所以不在命令层另造一份镜像字段表——与 `stats::TodayView` 同一条口径。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TaskTransitionReport {
     /// 任务行**提交后**的样子（含新 `row_version`）。
     pub task: TaskRow,

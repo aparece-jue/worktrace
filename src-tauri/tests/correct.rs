@@ -11,7 +11,9 @@
 //! 不加 `revision`、不加 `row_version`）· 被拒时**逐字段**比对（状态、版本、起止、时长、
 //! `needs_review`、`voided_at`、`revision`、`time_edit`/`task_change` 行数）·
 //! 并发保护用**所属会话版本**（换一条区间的旧版本请求也拒绝）·
-//! 提交后只刷新**正镜像**的那条会话。
+//! 提交后只刷新**正镜像**的那条会话 ·
+//! **缺版本位 ⇒ 领域拒绝且零写入**（既有用例已覆盖；P8 Task 2a 修复轮补的一条
+//! 额外钉住「是哪一条拒绝」的文案——IPC 侧类型收紧之后这条路从命令层不可达）。
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -24,7 +26,7 @@ use worktrace_lib::services::bootstrap::{
     lock_app, startup, NoProbe, RunningApp, Startup, StartupConfig,
 };
 use worktrace_lib::services::events::{EventEnvelope, EventSink};
-use worktrace_lib::services::history::{CorrectAction, CorrectRequest};
+use worktrace_lib::services::history::{self, CorrectAction, CorrectRequest};
 use worktrace_lib::services::timer::coordinator::{SessionRequest, StartRequest};
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
@@ -348,6 +350,17 @@ fn revision(db: &Db) -> i64 {
     scalar(db, "SELECT revision FROM app_meta WHERE singleton = 1")
 }
 
+/// 权威库身份（`app_meta.data_epoch`）：不经 `AppState` 也读得到，缺版本用例要用它。
+fn data_epoch(db: &Db) -> String {
+    db.connection()
+        .query_row(
+            "SELECT data_epoch FROM app_meta WHERE singleton = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
 /// 某会话的全部审计行：`(change, before_json, after_json, reason)`。
 fn edits(
     db: &Db,
@@ -444,6 +457,54 @@ fn assert_code(error: &AppError, code: &str) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 重定时：一次改三件（起止 + 时长）
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 缺版本位（P8 Task 2a 修复轮：这条守卫的覆盖从 IPC 下沉到这里）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **`env.expected_row_version` 为 `None` ⇒ 领域拒绝，且在**任何写入之前**。
+///
+/// 口径：IPC 的请求 DTO 把版本位收紧成必填 `i64`（与其他四条写命令、以及
+/// `expected_data_epoch` 同一口径），所以这条路从命令层不可达；守卫本身仍必须被钉住
+/// ——它是「不许在没有版本的情况下改历史」这条规则在服务层的唯一落点。
+///
+/// 与既有的 `missing_version_or_a_stale_epoch_or_version_is_rejected_without_writing`
+/// 有重叠（那条用 `for_create` 信封，只断言错误码与零变化）；本用例补的是**「是哪一条
+/// 拒绝」**：文案必须是「缺少记录版本」，不是别的域错误。
+///
+/// 断言三件：错误码是 `DOMAIN_ERROR`、文案就是那句中文、库里**逐字段零变化**
+/// （含 `revision` 与两种审计的行数）。epoch 传**真实值**：万一守卫被拿掉，
+/// 这条命令会真的写进去（而不是撞上 epoch 守卫后恰好也报错），用例因此在
+/// `expect_err` 处立刻红（实测：临时把守卫换成 `unwrap_or(0)` ⇒ 本用例与既有那条
+/// 一起变红）。
+#[test]
+fn a_missing_row_version_is_rejected_before_any_write() {
+    let fx = fixture();
+    let mut db = seeded(&fx);
+    finished_fixture(&db);
+    let before = facts(&db, "s1");
+
+    let env_without_version = WriteEnvelope {
+        expected_data_epoch: data_epoch(&db),
+        expected_row_version: None,
+    };
+    let error = history::correct(
+        &mut db,
+        env_without_version,
+        retime("s1", "s1-b", B_START, WALL - 1_000),
+        WALL,
+    )
+    .expect_err("缺版本位必须被拒绝");
+
+    assert_code(&error, "DOMAIN_ERROR");
+    assert!(
+        error
+            .detail()
+            .is_some_and(|detail| detail.contains("缺少记录版本")),
+        "必须是「缺少记录版本」那条守卫，不是别的域错误：{error:?}"
+    );
+    assert_eq!(facts(&db, "s1"), before, "零写入、零版本变化、零审计");
+}
 
 /// `Retime` 同时改 `started_at`/`ended_at`/`duration_ms`，并且**不动**会话的
 /// `ended_at`、**不动** `task_change`（完成时刻不因修正区间而移动）。

@@ -135,9 +135,12 @@ fn the_dev_commands_are_registered_only_under_the_debug_guard() {
         ungated.iter().all(|path| !path.contains("commands::dev::")),
         "不带守卫的注册项就是发布构建的 handler 列表，里面一个 dev 命令都不许有：{ungated:?}"
     );
+    // 业务命令的条数：**改注册表就要改这个数**。它挡的是「注册项被删/被改写法」——
+    // 只写 `>= 1` 之类的下限，从 `lib.rs` 删掉一条业务命令就不会红（P8 Task 2a 起：
+    // 25 → 30，含恢复与历史的五条写命令）。
     assert!(
-        ungated.len() >= 24,
-        "24 条业务命令不带守卫（发布构建里也在）：只有 {} 条被解析出来，注册表是不是被改了写法？",
+        ungated.len() >= 30,
+        "30 条业务命令不带守卫（发布构建里也在）：只有 {} 条被解析出来，注册表是不是被改了写法？",
         ungated.len()
     );
 }

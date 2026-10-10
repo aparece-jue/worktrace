@@ -98,6 +98,17 @@ impl SessionMode {
     }
 }
 
+/// IPC/JSON 形状：**就是落库用的那套大写字符串**（[`SessionMode::as_str`]）。
+///
+/// 手写而不是派生，理由与 [`SessionState`] / [`TimerKind`] 的实现逐字相同。
+/// P8 Task 2a 起它随 [`crate::storage::session_repo::SessionRow`] 进 IPC 响应
+/// （恢复与历史写命令的报告里带会话行）。
+impl serde::Serialize for SessionMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// 计时类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimerKind {

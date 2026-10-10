@@ -5,7 +5,7 @@
  *
  * - 请求形状：`src-tauri/src/commands/mod.rs` 的请求 DTO（每条命令只收一个
  *   `request` 参数，字段名就是那些结构体的 snake_case 字段名）；
- * - 响应形状：仓库根 `src/types/__snapshots__/*.json`（15 份，由
+ * - 响应形状：仓库根 `src/types/__snapshots__/*.json`（21 份，由
  *   `src-tauri/tests/ipc_snapshots.rs` 与 Rust 类型**逐字节**比对）。
  *
  * 手写镜像与快照之间靠一条用例保持机械联系
@@ -78,6 +78,36 @@ export const SESSION_MODES = [
   "WAITING",
 ] as const;
 export type SessionMode = (typeof SESSION_MODES)[number];
+
+/**
+ * 恢复与历史的三个动作词（P8 Task 2a 的五条写命令）。
+ *
+ * 取值与 Rust 侧命令层的显式 `parse` 逐字一致（`src-tauri/src/commands/mod.rs` 的
+ * `parse_reconcile_action` / `parse_reconcile_target_state` / `parse_correct_action` /
+ * `parse_transition_cause`）——那边**不**用 serde 的枚举反序列化，所以取值域写错
+ * 得到的是稳定错误码 `DOMAIN_ERROR`，不是 Tauri 的反序列化错误。
+ *
+ * 大小写不统一是**故意的**：`reconcile` 的两个词与审计里的
+ * `reconcile:confirm` / `reconcile:discard_uncertain` 同词（小写），
+ * 而 `target` 就是落库用的 `TaskStatus` 名（首字母大写）。
+ */
+export const RECONCILE_ACTIONS = ["confirm", "discard_uncertain"] as const;
+export type ReconcileAction = (typeof RECONCILE_ACTIONS)[number];
+
+/** 对账之后会话停在哪个状态。**只有两个**（`running`/`recovering`/`discarded` 都不是）。 */
+export const RECONCILE_TARGET_STATES = ["paused", "finished"] as const;
+export type ReconcileTargetState = (typeof RECONCILE_TARGET_STATES)[number];
+
+/** 历史修正的动作。`retime` 必须带起止，`delete` 是软删除（作废，不 `DELETE`）。 */
+export const CORRECT_ACTIONS = ["retime", "delete"] as const;
+export type CorrectAction = (typeof CORRECT_ACTIONS)[number];
+
+/**
+ * 任务跃迁的原因。`reopen` 是终结态（`Done`/`Cancelled`）回到 `Ready` 的**唯一**
+ * 合法原因：同一个「回 `Ready`」请求，`cause: "user"` 会被服务拒绝，`"reopen"` 才通过。
+ */
+export const TRANSITION_CAUSES = ["user", "reopen"] as const;
+export type TransitionCause = (typeof TRANSITION_CAUSES)[number];
 
 /**
  * 统计口径里的**三类分列**（`src-tauri/src/services/stats.rs` 的 `StatsClass`）。**小写**。
@@ -179,8 +209,52 @@ export interface TaskRow {
   updated_at: number;
 }
 
+/**
+ * `work_session` 的一行（P8 Task 2a：恢复与历史的报告里直接装它）。
+ *
+ * 三个枚举字段都是**落库字符串**：`mode`（`FOREGROUND`…）、`state`（`running`…）、
+ * `timer_kind`（`stopwatch`/`countdown`）。
+ */
+export interface SessionRow {
+  id: string;
+  task_id: string;
+  /** 本次进程运行代次；对账之后会切到**当前** run（原始归属留在审计里）。 */
+  run_id: string;
+  mode: SessionMode;
+  state: SessionState;
+  timer_kind: TimerKind;
+  /** 正计时恒为 `null`；倒计时才有正预算。 */
+  target_duration_ms: number | null;
+  started_at: number;
+  ended_at: number | null;
+  /** 会话级「待确认」标记；对账收尾会把它清假。 */
+  needs_review: boolean;
+  row_version: number;
+}
+
+/**
+ * `work_interval` 的一行。
+ *
+ * 四个 `null` 分支各有含义，**不要**合并处理：
+ * - `ended_at: null` = 终点未知（正在计时，或候选端点未定）；
+ * - `duration_ms: null` = **没有已确认时长**（不是 0）；
+ * - `voided_at` 非空 = 已作废（整次作废之后行还在，只是不计入任何工时）；
+ * - `sampled_end_wall_at: null` 是**正常**分支：手工补录与用户确认都没有采样点，
+ *   只有机器采样闭合的段才有。
+ */
+export interface IntervalRow {
+  id: string;
+  session_id: string;
+  started_at: number;
+  ended_at: number | null;
+  voided_at: number | null;
+  duration_ms: number | null;
+  sampled_end_wall_at: number | null;
+  needs_review: boolean;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// 响应 DTO（15 份快照逐一对上）
+// 响应 DTO（21 份快照逐一对上）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** `get_revision`：只给库身份与版本，不含业务数据。 */
@@ -413,6 +487,47 @@ export interface DailyPlanChange {
   data_epoch: string;
 }
 
+/**
+ * `reconcile`（P8 Task 2a）：会话 + 该会话**全部**区间（不只是被处理的那几条）。
+ *
+ * `intervals` 里既有刚确认的段，也可能有更早被作废的段——「作废」是软删除，
+ * 行还在（判「这段算不算工时」看 `voided_at` 与 `duration_ms`，不看它是否在列表里）。
+ */
+export interface ReconcileReport {
+  session: SessionRow;
+  intervals: IntervalRow[];
+  revision: number;
+  data_epoch: string;
+}
+
+/**
+ * `correct` / `backfill` / `discard_session`（P8 Task 2a）：三条命令**共用一个形状**。
+ *
+ * 差别在语义与字段分支上，不在形状上：`correct` 返回被重定时/软删除的那条区间，
+ * `backfill` 返回新建的会话与区间，`discard_session` 返回被作废的第一条区间
+ * （`voided_at` 非空、会话 `discarded`）。
+ */
+export interface HistoryEditReport {
+  session: SessionRow;
+  interval: IntervalRow;
+  revision: number;
+  data_epoch: string;
+}
+
+/**
+ * `transition_task`（P8 Task 2a）：任务行 + **同事务**的两个联动名单。
+ *
+ * 两个名单是**已经发生的事实**（谁被结束了、谁被暂停了），不是建议：
+ * 空数组表示这次跃迁没有联动任何会话（例如已经是目标状态的幂等请求）。
+ */
+export interface TaskTransitionReport {
+  task: TaskRow;
+  ended_sessions: string[];
+  paused_sessions: string[];
+  revision: number;
+  data_epoch: string;
+}
+
 /** 一个被请求目标的版本。 */
 export interface RecordVersion {
   kind: AuthorityKind;
@@ -611,4 +726,106 @@ export interface ResumeRequest {
   task_expected_version: number;
   session_id: string;
   session_expected_version: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 请求 DTO：恢复与历史（P8 Task 2a 的五条写命令）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `ranges` 的一项：用户确认的一段区间。
+ *
+ * 起止是**用户给定的值**（不是候选端点推导出来的），`ended_at === started_at`
+ * 的零长度是合法的（那表示「这一段确实没花时间」）。
+ */
+export interface ConfirmedRangeRequest {
+  interval_id: string;
+  started_at: number;
+  ended_at: number;
+}
+
+/**
+ * `reconcile`：确认或丢弃**该会话全部**待确认区间。`expected_row_version` 是会话版本。
+ *
+ * - `action: "confirm"` ⇒ `ranges` 必须**恰好覆盖**该会话的全部待确认区间
+ *   （缺一条、多一条、指向别的会话/别的区间都整条拒绝；待确认集合为空时必须是空数组）；
+ * - `action: "discard_uncertain"` ⇒ `ranges` 必须是空数组（作废哪些区间由服务从库里取）。
+ *
+ * 「作废整次」**不是**这条命令，是 {@link DiscardSessionRequest}：两个动作在界面上也不许
+ * 合并成一个「丢弃」按钮。
+ */
+export interface ReconcileRequest {
+  expected_data_epoch: string;
+  session_id: string;
+  expected_row_version: number;
+  action: ReconcileAction;
+  target_state: ReconcileTargetState;
+  ranges: ConfirmedRangeRequest[];
+}
+
+/**
+ * `correct`：重定时 / 软删除一条可信区间。只对 `state === "finished"` 的会话开放
+ * （界面据会话 `state` 禁用入口，服务层也会拒）。
+ *
+ * `expected_row_version` 是**所属会话**的版本（区间没有独立版本列），**必填**：
+ * 与其他四条写命令、以及 `expected_data_epoch` 同一口径——必填标量少了就是传输层
+ * （serde）错误。**不要**为了凑过校验随便填一个数：服务拿这个版本做乐观并发校验，
+ * 填错只会得到 `VERSION_CONFLICT`（刷新后重取真值）。
+ *
+ * `started_at` / `ended_at` / `reason` 三个键**可以省略**（Rust 侧是 `Option`，serde
+ * 对缺键的 `Option` 一律填 `None`，省略因此等价于传 `null`）。
+ */
+export interface CorrectRequest {
+  expected_data_epoch: string;
+  session_id: string;
+  expected_row_version: number;
+  interval_id: string;
+  action: CorrectAction;
+  /** 只有 `retime` 用（那时必填）；`delete` 省略或传 `null`。 */
+  started_at?: number | null;
+  /** 只有 `retime` 用（那时必填）；`delete` 省略或传 `null`。 */
+  ended_at?: number | null;
+  /** 用户给的理由（落审计）；省略或 `null` = 没写理由。 */
+  reason?: string | null;
+}
+
+/**
+ * `backfill`：把一段**已经发生**的人工时间补录成一条 `finished` 会话。
+ *
+ * **独立入口**：不启动计时、不伪造完成事件。新建 ⇒ 只带 epoch（没有可校验的行版本）。
+ * 固定字段（服务层写死）：`mode = FOREGROUND`、`timer_kind = stopwatch`、
+ * `target_duration_ms = null`，`run_id` 取当前 run。
+ */
+export interface BackfillRequest {
+  expected_data_epoch: string;
+  task_id: string;
+  started_at: number;
+  ended_at: number;
+}
+
+/**
+ * `discard_session`：作废整次（**全部**区间软作废 + 会话 `discarded`）。
+ *
+ * 无状态前置：`running` / `paused` / `recovering` / `finished` 都能作废；已经作废过的
+ * 重复提交是幂等的（零写入、不加版本）。它与 {@link ReconcileRequest} 的
+ * `discard_uncertain` **语义不同**（那条只丢待确认区间、保留可信前缀）。
+ */
+export interface DiscardSessionRequest {
+  expected_data_epoch: string;
+  session_id: string;
+  expected_row_version: number;
+}
+
+/**
+ * `transition_task`：任务跃迁 + 同事务联动它的会话（完成/取消结束，阻塞/等待暂停）。
+ *
+ * `target` 是落库用的状态名（`"Done"` / `"Blocked"` / `"Ready"`…，大小写敏感）；
+ * 终结态回 `Ready` 必须带 `cause: "reopen"`。
+ */
+export interface TransitionTaskRequest {
+  expected_data_epoch: string;
+  task_id: string;
+  expected_row_version: number;
+  target: TaskStatus;
+  cause: TransitionCause;
 }
