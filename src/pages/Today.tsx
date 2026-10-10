@@ -37,6 +37,7 @@ import { domainState } from "../state/domainState";
  */
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useDayBoundaryRefresh } from "../components/useDayBoundaryRefresh";
 import { Button, Card, Empty, Flex, Select, Space, Tag, Typography } from "antd";
 
 import { addToPlan, listTasks, removeFromPlan, statsToday, toIpcError } from "../ipc";
@@ -224,6 +225,8 @@ export function Today() {
   useEffect(() => {
     void load();
   }, [load, invalidated]);
+
+  useDayBoundaryRefresh(view?.range.to, load);
 
   /** 一次成功的命令之后当场重拉一次：不赌 `domain.changed` 到得比响应早。 */
   async function afterWrite(): Promise<void> {

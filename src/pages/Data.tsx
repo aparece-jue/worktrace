@@ -76,6 +76,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useDayBoundaryRefresh } from "../components/useDayBoundaryRefresh";
 import { Button, Card, Flex, Input, Popconfirm, Radio, Space, Typography } from "antd";
 
 import { isTauri } from "@tauri-apps/api/core";
@@ -208,6 +209,8 @@ export function Data() {
   useEffect(() => {
     void load();
   }, [load, invalidated]);
+
+  useDayBoundaryRefresh(view?.range.to, load);
 
   /**
    * 库身份一变（恢复之后的新库、维护结束后的新 epoch）⇒ **旧展示一律作废**：样本与产物

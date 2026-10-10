@@ -17,7 +17,7 @@
  * 反向验证写在每条用例里（"改坏什么会让它红"）。
  */
 
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   act,
   cleanup,
@@ -159,12 +159,17 @@ function populatedView(overrides: Partial<TodayView> = {}): TodayView {
 }
 
 beforeAll(installJsdomBridges);
+// Keep the wall clock inside the backend fixture day; boundary expiry has its own tests.
+beforeEach(() => {
+  vi.spyOn(Date, "now").mockReturnValue(todayView().range.from + 3_600_000);
+});
 
 afterEach(async () => {
   cleanup();
   await domainState.stop();
   events.reset();
   clearMocks();
+  vi.restoreAllMocks();
 });
 
 describe("今日页：F-010 五项", () => {
