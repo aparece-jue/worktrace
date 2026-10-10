@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check:bundle": "pnpm build && powershell -NoProfile -ExecutionPolicy Bypass -File src-tauri/scripts/check-bundle.ps1"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
