@@ -1,13 +1,13 @@
 /**
  * 应用外壳（P7 Task 1b 建立，Task 3 把收件箱/计时接进来，Task 5 再接入项目/任务，
- * P8 Task 1b 接入第 5 块页面「今日」，P8 Task 2c 接入第 6、7 块「恢复」「历史」）：
- * **固定布局 + 七块页面 + 状态栏**。
+ * P8 Task 1b 接入第 5 块页面「今日」，P8 Task 2c 接入第 6、7 块「恢复」「历史」，
+ * P8 Task 3b 接入第 8 块「数据」）：**固定布局 + 八块页面 + 状态栏**。
  *
  * 外壳只负责四件事，别的一概不做（00 §6：前端不含业务规则）：
  *
  * 1. `data-region="nav"`：常驻导航区——**不引路由**（离线取不到 `react-router`），
- *    七块页面用一次 `useState` 切换；
- * 2. `data-region="page"`：页面挂载区（收件箱 / 项目 / 任务 / 计时 / 今日 / 恢复 / 历史）；
+ *    八块页面用一次 `useState` 切换；
+ * 2. `data-region="page"`：页面挂载区（收件箱 / 项目 / 任务 / 计时 / 今日 / 恢复 / 历史 / 数据）；
  * 3. `data-region="status"`：状态栏，读镜像的握手状态与计时展示值；
  * 4. **本上下文唯一那个订阅入口的启动接线**：挂载时 `domainState.start()`
  *    （Task 2 的 `startEventSession` 语义：先订阅并暂存 → 握手 → 取计时快照 → 按序交付），
@@ -18,7 +18,8 @@
  *
  * 页面顺序照 GTD 的动线排：捕获（收件箱）→ 项目 → 任务 → 计时；「今日」（F-010 的五项）
  * 收在末尾——它是**日报视图**，不是动线的起点，**默认页仍是收件箱**；恢复与历史挂在
- * 最后，它们是**事后动线**（先处理待确认，再修正/补录）。
+ * 最后，它们是**事后动线**（先处理待确认，再修正/补录）；「数据」（F-018 导出 / F-019
+ * 备份与恢复）是**出口**，收在最后——它只往外给东西，不参与动线。
  *
  * 「切页」除了导航点击，还有一个**页面外部**的触发口：`src/state/pageRequest.ts`。
  * 今天的消费者是命令失败的降级路径——`RECOVERY_REQUIRED` 要把用户导到恢复页而不是只弹
@@ -43,6 +44,7 @@ import { Layout, Menu, Typography } from "antd";
 import "./App.css";
 import { ErrorNotice } from "./components/ErrorNotice";
 import { formatDuration } from "./components/duration";
+import { Data } from "./pages/Data";
 import { History } from "./pages/History";
 import { Inbox } from "./pages/Inbox";
 import { Projects } from "./pages/Projects";
@@ -64,12 +66,13 @@ const PAGES: Array<{ key: PageKey; label: string }> = [
   { key: "today", label: "今日" },
   { key: "recovery", label: "恢复" },
   { key: "history", label: "历史" },
+  { key: "data", label: "数据" },
 ];
 
 /**
  * 页面挂载区：固定布局 + 一次 `useState` 切换，不引路由（R-04）。
  *
- * 用 `switch` 而不是嵌套三元：七块页面写成一串三元已经读不出分支了。
+ * 用 `switch` 而不是嵌套三元：八块页面写成一串三元已经读不出分支了。
  */
 function PageView({ page }: { page: PageKey }) {
   switch (page) {
@@ -87,6 +90,8 @@ function PageView({ page }: { page: PageKey }) {
       return <Recovery />;
     case "history":
       return <History />;
+    case "data":
+      return <Data />;
   }
 }
 

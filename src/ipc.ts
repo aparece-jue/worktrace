@@ -1,5 +1,5 @@
 /**
- * IPC 客户端（P7 Task 1b）：**34 条命令**的转发、错误规范化、迟到响应丢弃与事件订阅。
+ * IPC 客户端（P7 Task 1b）：**37 条命令**的转发、错误规范化、迟到响应丢弃与事件订阅。
  *
  * 这一层**不含业务规则**（00 §6）：它只做转发、形状转换与协议原语。
  * 状态判断（合法性、统计口径、恢复分流）全在 Rust；镜像与接纳策略是 Task 2 的
@@ -25,6 +25,8 @@ import type {
   ArchiveProjectRequest,
   AttentionOverview,
   BackfillRequest,
+  BackupRequest,
+  BackupResult,
   ClarifyReadyRequest,
   ClockCorrectionAccepted,
   CommandOutcome,
@@ -40,6 +42,8 @@ import type {
   ErrorAuthority,
   ErrorResponse,
   EventEnvelope,
+  ExportRequest,
+  ExportResult,
   HistoryEditReport,
   HistoryQuery,
   HistoryView,
@@ -52,6 +56,8 @@ import type {
   ReconcileRequest,
   RenameProjectRequest,
   ResumeRequest,
+  RestoreRequest,
+  RestoreResult,
   RevisionSnapshot,
   SessionRequest,
   SetTaskProjectRequest,
@@ -166,7 +172,7 @@ export function toIpcError(cause: unknown): IpcError {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 转发（34 条，命令名与参数形状逐个对应 commands/mod.rs）
+// 转发（37 条，命令名与参数形状逐个对应 commands/mod.rs）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -354,6 +360,42 @@ export function attentionOverview(request: EpochRequest): Promise<AttentionOverv
  */
 export function historyView(request: HistoryQuery): Promise<HistoryView> {
   return call<HistoryView>("history_view", request);
+}
+
+/**
+ * `export_data`（P8 Task 3a 的命令 9）：生成内容 + **落盘**，交回真实存在的绝对路径。
+ *
+ * 请求是**判别式**（`format`）：`json` 要 `from` / `to`（半开范围），`markdown` 只认
+ * 可选的 `anchor`。不适用却传了 ⇒ 命令层拒绝（`DOMAIN_ERROR`），不是忽略——所以调用方
+ * 按 `format` 构造对象时**不要**把不适用的键塞进去（类型上它们可选，规则只有 Rust 有）。
+ *
+ * 落盘**不推进业务 `revision`**、不广播 `domain.changed`：导出是文件系统副作用，
+ * 响应里的 `data_epoch` / `revision` 就是这份文件里那份数据的版本。
+ */
+export function exportData(request: ExportRequest): Promise<ExportResult> {
+  return call<ExportResult>("export_data", request);
+}
+
+/**
+ * `backup`（命令 10）：产出一份库副本（`VACUUM INTO`）。
+ *
+ * 同样**不改业务事实** ⇒ 响应里的 `data_epoch` / `revision` 是备份时刻的权威值，
+ * 调用方**不要**拿"版本没变"当失败判据。
+ */
+export function backup(request: BackupRequest): Promise<BackupResult> {
+  return call<BackupResult>("backup", request);
+}
+
+/**
+ * `restore`（命令 11）：**全项目唯一的危险操作**（会用备份覆盖当前库）。
+ *
+ * `confirmed` 是命令层**再校验一次**的二次确认位（界面上的确认是硬前置，但不能只靠界面）；
+ * `expected_data_epoch` 是进维护态**之前**的身份守卫——拿旧展示来点恢复会拿到
+ * `DATA_EPOCH_MISMATCH`，那时进程状态与磁盘一个字节都没变。成功返回**新 `data_epoch`**
+ * ⇒ 调用方必须据此重新握手（见 `domainState.rehandshake()`），旧展示不得残留。
+ */
+export function restore(request: RestoreRequest): Promise<RestoreResult> {
+  return call<RestoreResult>("restore", request);
 }
 
 /** `timer_snapshot`：查询命令（自己取一次采样），不是纯读。 */

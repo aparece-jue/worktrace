@@ -1,6 +1,7 @@
 /**
  * 页面用例的**假后端**（P7 Task 3 建立，Task 5 扩到项目/标签/筛选查询，P8 Task 1b 扩到
- * 今日页，P8 Task 2c 扩到恢复页与历史页）：按 `src/types/ipc.ts` 的契约形状回应命令。
+ * 今日页，P8 Task 2c 扩到恢复页与历史页，P8 Task 3b 扩到数据页）：按 `src/types/ipc.ts`
+ * 的契约形状回应命令。
  *
  * 它不是业务实现，只是一个可脚本化的替身——**业务规则仍在 Rust**，所以默认行为尽量
  * 贴近真实服务（`create_task` 回一个新任务、`clarify_ready` 把状态改成 Ready 并 +1 版本、
@@ -24,6 +25,13 @@
  *   `history.rs`），替身重实现一遍就等于把服务端的规则抄成第二份。要断"作废掉的那条
  *   从列表里消失了"，用 `attention` / `history` 夹具在写回之后换一份**新夹具**表达
  *   （与今日页用 `backend.view = …` 造新版同一姿势）。
+ *
+ * ⚠️ 数据页那三条（P8 Task 3b）只回**形状正确**的东西：`export_data` / `backup` 的产物
+ * **不落盘**（替身不碰文件系统），路径来自 `exportPath` / `backupPath` 夹具；`restore`
+ * 只做一件真事——把库身份换成 `restoreEpoch`（"恢复成功 ⇒ 前端必须据新 epoch 重新握手"
+ * 这条判据的支点就在这里）。`applied` 恒为 `true`：服务把"没换成"当 `Err` 交回，
+ * 能拿到响应就等于成功（见 `RestoreResult` 的契约注释），所以替身**不造** `applied: false`
+ * 那条不存在的路径。
  */
 
 import { mockIPC } from "@tauri-apps/api/mocks";
@@ -31,9 +39,11 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import {
   MEASURES,
   type AttentionOverview,
+  type BackupResult,
   type CommandOutcome,
   type DailyPlanChange,
   type ErrorResponse,
+  type ExportResult,
   type HistoryDetail,
   type HistoryView,
   type IntervalRow,
@@ -42,6 +52,7 @@ import {
   type PendingIntervalItem,
   type ProjectChange,
   type ProjectRow,
+  type RestoreResult,
   type SessionAttentionItem,
   type SessionRow,
   type StatsClass,
@@ -57,6 +68,20 @@ export const EPOCH = "epoch-a";
 export const RUN = "run-1";
 export const SESSION = "session-1";
 export const AT = 1_700_000_000_000;
+
+/** 恢复之后那份库的身份（默认与 `EPOCH` 不同：恢复通常是装上另一份库）。 */
+export const RESTORE_EPOCH = "epoch-b";
+
+/**
+ * 导出 / 备份产物的默认路径（Windows 形状的绝对路径）。
+ *
+ * 替身**不碰文件系统**（模块头）：路径只是一个夹具值，页面要做的是把它显示出来、复制出去、
+ * 交给 `revealItemInDir`——三件事都只关心"这条字符串原样走通"。
+ */
+export const EXPORT_PATH =
+  "C:\\Users\\lenovo\\AppData\\Roaming\\worktrace\\exports\\worktrace-export-json-1700000000000.json";
+export const BACKUP_PATH =
+  "C:\\Users\\lenovo\\AppData\\Roaming\\worktrace\\backups\\worktrace-backup-1700000000000.sqlite3";
 
 /** 今日视图的默认口径：上海的一天（`2026-10-03`，整 24 小时的半开区间）。 */
 export const TODAY_DATE = "2026-10-03";
@@ -346,6 +371,14 @@ export interface Backend {
   commands: string[];
   /** 每条命令的入参（`{ request }` 里那个）。 */
   requests: Array<{ command: string; request: unknown }>;
+  /**
+   * 库身份：**各条响应统一报它**（默认 `EPOCH`）。
+   *
+   * 恢复用例把它换成另一份库的身份（见 `restoreEpoch`）——"恢复之后必须据新 `data_epoch`
+   * 重新握手"这条判据要求替身的身份是**可换的**，而且换过之后**每条**响应都跟着换
+   * （只换一半会让页面把新响应当旧库的迟到响应丢掉，测出来的就不是页面的行为了）。
+   */
+  epoch: string;
   /** `list_tasks` 交回的任务（**不筛条件**，只按窗口切片，见模块头）。 */
   tasks: TaskRow[];
   /** `list_projects` / `list_selectable_projects` 交回的项目。 */
@@ -364,8 +397,31 @@ export interface Backend {
   history: HistoryView;
   /** `accept_detected_clock_correction` 交回的 `accepted`（默认 `false` = 没有待接受的校正）。 */
   clockAccepted: boolean;
-  /** 命令名 ⇒ 要抛出的失败响应（模拟服务拒绝）。 */
-  fail: Record<string, ErrorResponse>;
+  /** `export_data` 交回的产物路径（替身不落盘，只给形状）。 */
+  exportPath: string;
+  /** `export_data` 交回的字节数。 */
+  exportBytes: number;
+  /** `backup` 交回的产物路径。 */
+  backupPath: string;
+  /** `backup` 交回的字节数。 */
+  backupBytes: number;
+  /** `restore` 成功之后的库身份（默认与 `epoch` 不同：恢复通常是装上另一份库）。 */
+  restoreEpoch: string;
+  /**
+   * `plugin:opener|reveal_item_in_dir` 收到的路径，按调用顺序。
+   *
+   * 单独记一份是因为 `@tauri-apps/plugin-opener` **不走** `{ request }` 信封
+   * （它直接发 `{ paths }`，见 `dist-js/index.js`）：`requests` 里那条的 `request` 是
+   * `undefined`，用例要断"参数就是那条真实路径"就得看这里。
+   */
+  revealed: string[];
+  /**
+   * 命令名 ⇒ 要抛出的失败（模拟服务拒绝）。
+   *
+   * 值是 `unknown` 而不是 `ErrorResponse`：插件那条通道的失败是**字符串**（Tauri 的 ACL
+   * 拒绝原文，不是六码信封），页面同样要按"不静默"处理它。
+   */
+  fail: Record<string, unknown>;
   /** 命令名 ⇒ 响应要挂着的 promise（模拟"这条命令还在飞"）。 */
   hold: Record<string, Promise<unknown>>;
   /** 某个命令被调用了几次。 */
@@ -393,6 +449,7 @@ export function createBackend(): Backend {
   const backend: Backend = {
     commands: [],
     requests: [],
+    epoch: EPOCH,
     tasks: [],
     projects: [],
     tags: [],
@@ -402,6 +459,12 @@ export function createBackend(): Backend {
     attention: attentionOverview(),
     history: historyView(),
     clockAccepted: false,
+    exportPath: EXPORT_PATH,
+    exportBytes: 2_048,
+    backupPath: BACKUP_PATH,
+    backupBytes: 40_960,
+    restoreEpoch: RESTORE_EPOCH,
+    revealed: [],
     fail: {},
     hold: {},
     count: (command) => backend.commands.filter((name) => name === command).length,
@@ -428,6 +491,19 @@ export function createBackend(): Backend {
     if (queued !== undefined && queued.length > 0) return queued.shift()!.promise;
     if (command in backend.hold) return backend.hold[command];
 
+    /**
+     * 快照的库身份跟着 `backend.epoch`。
+     *
+     * `idleSnapshot` / `runningSnapshot` 这两个夹具的 `data_epoch` 是**常量** `EPOCH`，
+     * 而镜像会把交回来的快照 `applyStamp` 进水位的：换库（恢复）之后若还回旧 epoch 的快照，
+     * 水位就被**拉回旧库**——现象是"恢复之后 epoch 又变回去了"，那是替身自己不一致，
+     * 不是页面的行为。所以凡是回快照的分支都从这里过一道。
+     */
+    const stampSnapshot = (snapshot: TimerSnapshot): TimerSnapshot => ({
+      ...snapshot,
+      data_epoch: backend.epoch,
+    });
+
     /** 项目写命令的版本守卫（真实服务在 `project_repo` 里判，用例可以据此驱动冲突）。 */
     const requireVersion = (projectId: string, expected: number): ProjectRow => {
       const row = backend.projects.find((item) => item.id === projectId);
@@ -442,16 +518,16 @@ export function createBackend(): Backend {
 
     switch (command) {
       case "get_revision":
-        return { data_epoch: EPOCH, revision: backend.revision };
+        return { data_epoch: backend.epoch, revision: backend.revision };
       case "timer_snapshot":
-        return backend.snapshot;
+        return stampSnapshot(backend.snapshot);
       case "list_tasks": {
         const { limit, offset } = request as { limit: number; offset: number };
         return {
           // 只按窗口切片：条件的交集在服务端算，替身不重实现（见模块头）。
           tasks: backend.tasks.slice(offset, offset + limit),
           total: backend.tasks.length,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
           revision: backend.revision,
         };
       }
@@ -459,7 +535,7 @@ export function createBackend(): Backend {
         return {
           // 与 `catalog::list_selectable_projects` 同义：**只回 active**。
           items: backend.projects.filter((row) => row.status === "active"),
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
           revision: backend.revision,
         };
       case "list_projects": {
@@ -469,14 +545,14 @@ export function createBackend(): Backend {
             status === null
               ? backend.projects
               : backend.projects.filter((row) => row.status === status),
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
           revision: backend.revision,
         };
       }
       case "list_tags": {
         const kind = (request as { kind?: string | null }).kind ?? null;
         const items = kind === null ? backend.tags : backend.tags.filter((row) => row.kind === kind);
-        return { items, data_epoch: EPOCH, revision: backend.revision } satisfies TagList;
+        return { items, data_epoch: backend.epoch, revision: backend.revision } satisfies TagList;
       }
       case "create_project": {
         const created = project({
@@ -488,7 +564,7 @@ export function createBackend(): Backend {
         return {
           project: created,
           revision: backend.revision,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
         } satisfies ProjectChange;
       }
       case "rename_project": {
@@ -501,11 +577,11 @@ export function createBackend(): Backend {
         backend.revision += 1;
         // 与 `project_repo::rename_project` 同一条幂等规则：同名 ⇒ 零写入（版本不动）。
         if (before.name === name) {
-          return { project: before, revision: backend.revision, data_epoch: EPOCH };
+          return { project: before, revision: backend.revision, data_epoch: backend.epoch };
         }
         const renamed = project({ ...before, name, row_version: before.row_version + 1 });
         backend.projects = backend.projects.map((row) => (row.id === renamed.id ? renamed : row));
-        return { project: renamed, revision: backend.revision, data_epoch: EPOCH };
+        return { project: renamed, revision: backend.revision, data_epoch: backend.epoch };
       }
       case "archive_project": {
         const { project_id, expected_row_version } = request as {
@@ -517,7 +593,7 @@ export function createBackend(): Backend {
         const archived = project({ ...before, status: "archived", row_version: before.row_version + 1 });
         backend.projects = backend.projects.map((row) => (row.id === archived.id ? archived : row));
         backend.revision += 1;
-        return { project: archived, revision: backend.revision, data_epoch: EPOCH };
+        return { project: archived, revision: backend.revision, data_epoch: backend.epoch };
       }
       case "create_task": {
         const created = task({
@@ -526,20 +602,20 @@ export function createBackend(): Backend {
           project_id: (request as { project_id?: string | null }).project_id ?? null,
         });
         backend.tasks = [...backend.tasks, created];
-        return { task: created, revision: 6, data_epoch: EPOCH };
+        return { task: created, revision: 6, data_epoch: backend.epoch };
       }
       case "clarify_ready": {
         const before = backend.tasks.find((row) => row.id === (request as { task_id: string }).task_id);
         const changed = task({ ...before, status: "Ready", row_version: (before?.row_version ?? 0) + 1 });
         backend.tasks = backend.tasks.map((row) => (row.id === changed.id ? changed : row));
-        return { task: changed, revision: 6, data_epoch: EPOCH };
+        return { task: changed, revision: 6, data_epoch: backend.epoch };
       }
       case "stats_today":
         // 五项与 `data_epoch` / `revision` 同源：假后端统一给这两个字段，用例改
         // `backend.revision` 就能造出"更新的一版"。`date` / `timezone` / `range` 来自夹具。
-        return { ...backend.view, data_epoch: EPOCH, revision: backend.revision };
+        return { ...backend.view, data_epoch: backend.epoch, revision: backend.revision };
       case "attention_overview":
-        return { ...backend.attention, data_epoch: EPOCH, revision: backend.revision };
+        return { ...backend.attention, data_epoch: backend.epoch, revision: backend.revision };
       case "history_view": {
         const { limit, offset, session_id } = request as {
           limit: number;
@@ -551,9 +627,53 @@ export function createBackend(): Backend {
           sessions: backend.history.sessions.slice(offset, offset + limit),
           // `session_id` 省略 / `null` = 只要列表；给了就给那条详情（替身不判它存不存在）。
           selected: session_id === undefined || session_id === null ? null : backend.history.selected,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
           revision: backend.revision,
         } satisfies HistoryView;
+      }
+      case "export_data":
+        // 生成 + 落盘都在 Rust（替身不碰文件系统）：只回**形状正确**的产物路径与大小，
+        // 版本信封照旧由假后端统一给——导出**不推进** `revision`（不改业务事实）。
+        return {
+          path: backend.exportPath,
+          bytes: backend.exportBytes,
+          data_epoch: backend.epoch,
+          revision: backend.revision,
+        } satisfies ExportResult;
+      case "backup":
+        // 同一姿势：备份不改业务事实 ⇒ `revision` 原样（"版本没变"不是失败）。
+        return {
+          path: backend.backupPath,
+          bytes: backend.backupBytes,
+          data_epoch: backend.epoch,
+          revision: backend.revision,
+        } satisfies BackupResult;
+      case "restore": {
+        const { confirmed } = request as { confirmed: boolean };
+        // 命令层的二次确认**再校验一次**（`confirmed: false` ⇒ 零副作用的拒绝）。
+        if (!confirmed) {
+          throw failure({
+            code: "DOMAIN_ERROR",
+            message: "恢复会替换当前数据库，需要明确的二次确认（confirmed 必须为 true）。",
+          });
+        }
+        // `backup_path` 是替身唯一不验的字段：真实服务会去读那个文件，而替身不碰文件系统
+        // ——页面要断的是"这条路径逐字进了请求"，那由 `backend.requests` 记账。
+        // 恢复 = 换了库：身份换成 `restoreEpoch`（换库之后**每条**响应都会报新身份）。
+        backend.epoch = backend.restoreEpoch;
+        return {
+          data_epoch: backend.epoch,
+          revision: backend.revision,
+          // 恒为 `true`：服务把"没换成"当 `Err` 交回，能拿到响应就等于成功（见契约注释）。
+          applied: true,
+        } satisfies RestoreResult;
+      }
+      case "plugin:opener|reveal_item_in_dir": {
+        // `@tauri-apps/plugin-opener` 直接发 `{ paths }`（**不是** `{ request }` 信封），
+        // 所以单独记一份（见 `Backend.revealed`）。替身不开文件管理器，回 `null` 就够。
+        const paths = (payload as { paths?: string[] } | undefined)?.paths ?? [];
+        backend.revealed.push(...paths);
+        return null;
       }
       case "reconcile": {
         const { session_id } = request as { session_id: string };
@@ -564,7 +684,7 @@ export function createBackend(): Backend {
           session: session({ id: session_id, task_id: item?.task_id ?? "task-1" }),
           intervals: [interval({ session_id })],
           revision: backend.revision,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
         };
       }
       case "correct": {
@@ -577,7 +697,7 @@ export function createBackend(): Backend {
           session: session({ id: session_id }),
           interval: interval({ id: interval_id, session_id }),
           revision: backend.revision,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
         };
       }
       case "backfill": {
@@ -587,7 +707,7 @@ export function createBackend(): Backend {
           session: session({ id: "session-backfilled", task_id }),
           interval: interval({ id: "interval-backfilled", session_id: "session-backfilled" }),
           revision: backend.revision,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
         };
       }
       case "discard_session": {
@@ -598,18 +718,18 @@ export function createBackend(): Backend {
           session: session({ id: session_id, state: "discarded", needs_review: false }),
           interval: interval({ session_id, voided_at: AT + 3_600_000, duration_ms: null }),
           revision: backend.revision,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
         };
       }
       case "retry_recovery":
         // 恢复重试：返回提交后的权威快照（不保证推进 `revision`，所以版本照原样给）。
-        return backend.snapshot;
+        return stampSnapshot(backend.snapshot);
       case "accept_detected_clock_correction": {
         // `accepted: false` 是**正常路径**（没有待接受的校正、零写入、不加版本）。
         if (backend.clockAccepted) backend.revision += 1;
         return {
           accepted: backend.clockAccepted,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
           revision: backend.revision,
         };
       }
@@ -627,7 +747,7 @@ export function createBackend(): Backend {
         return {
           tasks: backend.view.tasks,
           revision: backend.revision,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
         } satisfies DailyPlanChange;
       }
       case "remove_from_plan": {
@@ -641,7 +761,7 @@ export function createBackend(): Backend {
         return {
           tasks: backend.view.tasks,
           revision: backend.revision,
-          data_epoch: EPOCH,
+          data_epoch: backend.epoch,
         } satisfies DailyPlanChange;
       }
       case "start_timer": {
@@ -651,7 +771,7 @@ export function createBackend(): Backend {
         backend.tasks = backend.tasks.map((row) => (row.id === changed.id ? changed : row));
         backend.snapshot = runningSnapshot({ session_version: 1, tick_seq: 1 });
         return {
-          snapshot: backend.snapshot,
+          snapshot: stampSnapshot(backend.snapshot),
           revision: 6,
           task_version: changed.row_version,
         } satisfies CommandOutcome;
@@ -662,17 +782,29 @@ export function createBackend(): Backend {
           state: "paused",
           session_version: (backend.snapshot.session_version ?? 1) + 1,
         };
-        return { snapshot: backend.snapshot, revision: 7, task_version: 2 } satisfies CommandOutcome;
+        return {
+          snapshot: stampSnapshot(backend.snapshot),
+          revision: 7,
+          task_version: 2,
+        } satisfies CommandOutcome;
       case "resume_timer":
         backend.snapshot = {
           ...backend.snapshot,
           state: "running",
           session_version: (backend.snapshot.session_version ?? 1) + 1,
         };
-        return { snapshot: backend.snapshot, revision: 8, task_version: 2 } satisfies CommandOutcome;
+        return {
+          snapshot: stampSnapshot(backend.snapshot),
+          revision: 8,
+          task_version: 2,
+        } satisfies CommandOutcome;
       case "finish_timer":
         backend.snapshot = idleSnapshot(9);
-        return { snapshot: backend.snapshot, revision: 9, task_version: 2 } satisfies CommandOutcome;
+        return {
+          snapshot: stampSnapshot(backend.snapshot),
+          revision: 9,
+          task_version: 2,
+        } satisfies CommandOutcome;
       default:
         throw new Error(`这条用例没有脚本化命令 ${command}`);
     }

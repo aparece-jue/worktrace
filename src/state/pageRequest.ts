@@ -13,10 +13,14 @@
  */
 
 /**
- * 七个页面的键。
+ * 八个页面的键。
  *
  * 它是**唯一出处**（外壳的 `PageKey` 直接引用它）：导航项、`PageView` 的 `switch` 与
  * 跳转请求共用同一个联合类型，少一处字面量就少一处能漂移的地方。
+ *
+ * P8 Task 3b 加第 8 项 `data`（导出 / 备份 / 恢复）：它和别的页面一样只是**一个键**
+ * ——没有任何跳转请求指向它（`requestPage` 的现有消费者只有 `RECOVERY_REQUIRED` 那一档），
+ * 用户从导航进去。
  */
 export type PageKey =
   | "inbox"
@@ -25,7 +29,8 @@ export type PageKey =
   | "timer"
   | "today"
   | "recovery"
-  | "history";
+  | "history"
+  | "data";
 
 /**
  * 一次切页请求的处置者。

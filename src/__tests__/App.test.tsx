@@ -19,6 +19,9 @@
  * P8 Task 2c 再加第 6、7 块「恢复」「历史」：导航与"切过去发自己的读查询"扩到七项；
  * 另加一条 M8 用例——`RECOVERY_REQUIRED` 要**把用户导到恢复页**（`requestPage` → 外壳的
  * `useState`），并把 Rust 的那句话一起带过去，而不是只弹一条通用提示。
+ * P8 Task 3b 加第 8 块「数据」（导出 / 备份 / 恢复）：导航扩到八项，切过去发它自己的读查询
+ * （`stats_today`，与今日页同一条）；**默认页仍是收件箱**，所以"挂载时恰好四条命令"那条
+ * 判据一个字都不用改——它正是"新页面没有被偷偷设成默认页"的哨兵。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -171,7 +174,7 @@ afterEach(async () => {
 });
 
 describe("应用外壳", () => {
-  it("挂载：渲染标题与三个区域、导航七项、收件箱页，且命令集合恰好是那四条", async () => {
+  it("挂载：渲染标题与三个区域、导航八项、收件箱页，且命令集合恰好是那四条", async () => {
     const called = scriptShell();
 
     const { container } = render(<App />);
@@ -188,6 +191,7 @@ describe("应用外壳", () => {
     expect(nav?.textContent).toContain("计时");
     expect(nav?.textContent).toContain("恢复");
     expect(nav?.textContent).toContain("历史");
+    expect(nav?.textContent).toContain("数据");
 
     await waitFor(() => expect(called).toContain("list_tasks"));
     // 不去重（M4）：这条断言同时钉住「恰好四条」与「每条恰好一次」。
@@ -205,7 +209,7 @@ describe("应用外壳", () => {
     expect(container.querySelector('[data-region="page"]')?.textContent).toContain("收件箱");
   });
 
-  it("导航里七项都在；「项目」「任务」「今日」「恢复」「历史」各自发自己的读查询", async () => {
+  it("导航里八项都在；「项目」「任务」「今日」「恢复」「历史」「数据」各自发自己的读查询", async () => {
     // 反向验证：把 `PageView` 的某个分支接错页（或忘了把新页加进 `PAGES`）⇒
     // 导航文案或挂载区里那句断言红。
     const called = scriptShell();
@@ -213,7 +217,7 @@ describe("应用外壳", () => {
     await waitFor(() => expect(called).toContain("list_tasks"));
 
     const nav = container.querySelector('[data-region="nav"]');
-    for (const label of ["收件箱", "项目", "任务", "计时", "今日", "恢复", "历史"]) {
+    for (const label of ["收件箱", "项目", "任务", "计时", "今日", "恢复", "历史", "数据"]) {
       expect(nav?.textContent, `导航里缺少「${label}」`).toContain(label);
     }
 
@@ -236,6 +240,16 @@ describe("应用外壳", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "历史" }));
     await waitFor(() => expect(called).toContain("history_view"));
     expect(screen.getByTestId("history-page")).not.toBeNull();
+
+    // 「数据」是第 8 块：切过去之后发它自己的读查询（`stats_today`，与今日页同一条
+    // ——导出范围必须与界面同源），所以这里比的是**计数**（今日页已经发过一次）。
+    const readsBefore = called.filter((name) => name === "stats_today").length;
+    fireEvent.click(screen.getByRole("menuitem", { name: "数据" }));
+    expect(await screen.findByTestId("data-page")).not.toBeNull();
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("数据");
+    await waitFor(() =>
+      expect(called.filter((name) => name === "stats_today").length).toBeGreaterThan(readsBefore),
+    );
   });
 
   it("M8：`RECOVERY_REQUIRED` 把用户导到恢复页，并把 Rust 那句话一起带过去（说明可关闭）", async () => {
