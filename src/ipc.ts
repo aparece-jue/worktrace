@@ -1,5 +1,5 @@
 /**
- * IPC 客户端（P7 Task 1b）：25 条命令的转发、错误规范化、迟到响应丢弃与事件订阅。
+ * IPC 客户端（P7 Task 1b）：**34 条命令**的转发、错误规范化、迟到响应丢弃与事件订阅。
  *
  * 这一层**不含业务规则**（00 §6）：它只做转发、形状转换与协议原语。
  * 状态判断（合法性、统计口径、恢复分流）全在 Rust；镜像与接纳策略是 Task 2 的
@@ -23,23 +23,33 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type {
   ArchiveProjectRequest,
+  AttentionOverview,
+  BackfillRequest,
   ClarifyReadyRequest,
+  ClockCorrectionAccepted,
   CommandOutcome,
+  CorrectRequest,
   CreateProjectRequest,
   CreateTagRequest,
   CreateTaskRequest,
   DailyPlanChange,
   DailyPlanQuery,
   DailyPlanView,
+  DiscardSessionRequest,
   EpochRequest,
   ErrorAuthority,
   ErrorResponse,
   EventEnvelope,
+  HistoryEditReport,
+  HistoryQuery,
+  HistoryView,
   ListProjectsRequest,
   ListTagsRequest,
   PlanMutationRequest,
   ProjectChange,
   ProjectList,
+  ReconcileReport,
+  ReconcileRequest,
   RenameProjectRequest,
   ResumeRequest,
   RevisionSnapshot,
@@ -55,9 +65,11 @@ import type {
   TaskTagRequest,
   TaskTagsRequest,
   TaskTagsChange,
+  TaskTransitionReport,
   TimerSnapshot,
   TodayQuery,
   TodayView,
+  TransitionTaskRequest,
 } from "./types/ipc";
 
 /**
@@ -154,7 +166,7 @@ export function toIpcError(cause: unknown): IpcError {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 转发（25 条，命令名与参数形状逐个对应 commands/mod.rs）
+// 转发（34 条，命令名与参数形状逐个对应 commands/mod.rs）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -269,6 +281,79 @@ export function removeFromPlan(request: PlanMutationRequest): Promise<DailyPlanC
  */
 export function statsToday(request: TodayQuery): Promise<TodayView> {
   return call<TodayView>("stats_today", request);
+}
+
+/**
+ * `reconcile`（命令 1）：一次处理该会话**全部**待确认区间。
+ *
+ * `action: "confirm"` 的 `ranges` 必须**恰好覆盖**该会话的全部待确认区间（缺一条、多一条
+ * 都整条拒绝）；`"discard_uncertain"` 必须给空数组。作废整次是 {@link discardSession}，
+ * 两条命令、两个语义，界面上也不许合并。
+ */
+export function reconcile(request: ReconcileRequest): Promise<ReconcileReport> {
+  return call<ReconcileReport>("reconcile", request);
+}
+
+/** `correct`（命令 2）：重定时 / 软删除一条可信区间。只对 `finished` 会话开放。 */
+export function correct(request: CorrectRequest): Promise<HistoryEditReport> {
+  return call<HistoryEditReport>("correct", request);
+}
+
+/**
+ * `backfill`（命令 3）：把一段**已经发生**的人工时间补录成一条 `finished` 会话。
+ *
+ * 独立入口：不启动计时、不伪造完成事件。新建 ⇒ 只带 epoch（没有可校验的行版本）。
+ */
+export function backfill(request: BackfillRequest): Promise<HistoryEditReport> {
+  return call<HistoryEditReport>("backfill", request);
+}
+
+/** `discard_session`（命令 4）：作废**整次**（全部区间软作废 + 会话 `discarded`）。 */
+export function discardSession(request: DiscardSessionRequest): Promise<HistoryEditReport> {
+  return call<HistoryEditReport>("discard_session", request);
+}
+
+/** `transition_task`（命令 5）：任务跃迁 + 同事务联动它的会话（结束 / 暂停）。 */
+export function transitionTask(request: TransitionTaskRequest): Promise<TaskTransitionReport> {
+  return call<TaskTransitionReport>("transition_task", request);
+}
+
+/**
+ * `accept_detected_clock_correction`（命令 6）：**显式**接受一次已检测的墙钟校正。
+ *
+ * 请求就是库身份（命令 6/7/8 共用 {@link EpochRequest}，服务层那个
+ * `AcceptClockCorrectionRequest` 没有 `Deserialize`）。`accepted: false` 是**正常路径**
+ * （当时没有待接受的校正、库一个字节都没改），不是失败。
+ */
+export function acceptDetectedClockCorrection(
+  request: EpochRequest,
+): Promise<ClockCorrectionAccepted> {
+  return call<ClockCorrectionAccepted>("accept_detected_clock_correction", request);
+}
+
+/**
+ * `retry_recovery`（命令 7）：**用户显式触发**的恢复重试（不做定时自动重试）。
+ *
+ * 它必要时提交恢复事务、也可能只是重载/重扫或无变化，所以**不保证**每次推进 `revision`
+ * ——页面不要在响应上比版本，重拉一次 `attention_overview` 才是权威。
+ */
+export function retryRecovery(request: EpochRequest): Promise<TimerSnapshot> {
+  return call<TimerSnapshot>("retry_recovery", request);
+}
+
+/** `attention_overview`（命令 8）：恢复页与「待确认」栏的**唯一**数据源（纯读）。 */
+export function attentionOverview(request: EpochRequest): Promise<AttentionOverview> {
+  return call<AttentionOverview>("attention_overview", request);
+}
+
+/**
+ * `history_view`（命令 13）：常规历史的一页 + 可选的一条详情（纯读）。
+ *
+ * 响应里**没有** `total`（形状由计划钉死）：翻页只能按「取满 `limit` 条 ⇒ 可能还有
+ * 下一页」。详情按 id 取、不按窗口过滤（`session_id` 省略 / `null` = 只要列表）。
+ */
+export function historyView(request: HistoryQuery): Promise<HistoryView> {
+  return call<HistoryView>("history_view", request);
 }
 
 /** `timer_snapshot`：查询命令（自己取一次采样），不是纯读。 */

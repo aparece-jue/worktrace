@@ -499,10 +499,14 @@ pub struct HistoryViewRequest {
 /// 「全部」是有意的：已作废的区间与已删除的审计都留着（软删除），历史页要能看到
 /// 「这条记录被改过什么」。`session.row_version` 就是**库里的真实行版本**，**版本**可以
 /// 直接当 `correct` / `discard_session` 的 `expected_row_version` 用（不要在界面上自己
-/// 加一）；但**这两个动作是否合法要看 `session.state`**——详情对**任何状态**的会话都返回
-/// （这条读路径不判状态），而 `correct` 只接 `finished`（[`require_finished`]），
-/// `recovering` 要走 `reconcile`、`running`/`paused` 要先结束会话。界面据 `state`
-/// 决定入口开不开，别把这句读成「拿到版本就能改」。
+/// 加一）。
+///
+/// **但「版本可用」不等于「动作合法」，两条动作的合法前提并不相同**：`correct` 只接
+/// `finished`（[`require_finished`]，详情对**任何状态**的会话都返回，这条读路径不判状态），
+/// `recovering` 要走 `reconcile`、`running`/`paused` 要先结束会话；`discard_session` 则是
+/// **无状态前置**——`running` / `paused` / `recovering` / `finished` 都能作废（唯一的库内
+/// 前置是「该会话至少一条区间」）。界面据 `state` 决定 `correct` 的入口开不开，别把这句读成
+/// 「拿到版本就能改」，也别拿 `state` 把作废一起禁掉。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HistoryDetail {
     pub session: SessionRow,

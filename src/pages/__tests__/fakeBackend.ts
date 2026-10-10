@@ -1,6 +1,6 @@
 /**
  * 页面用例的**假后端**（P7 Task 3 建立，Task 5 扩到项目/标签/筛选查询，P8 Task 1b 扩到
- * 今日页）：按 `src/types/ipc.ts` 的契约形状回应命令。
+ * 今日页，P8 Task 2c 扩到恢复页与历史页）：按 `src/types/ipc.ts` 的契约形状回应命令。
  *
  * 它不是业务实现，只是一个可脚本化的替身——**业务规则仍在 Rust**，所以默认行为尽量
  * 贴近真实服务（`create_task` 回一个新任务、`clarify_ready` 把状态改成 Ready 并 +1 版本、
@@ -13,28 +13,42 @@
  * 记账三件：`commands`（发过哪些命令，按顺序）、`requests`（每条命令的入参）、
  * `count(name)`。用例的"只发一次"就是数这里的。
  *
- * ⚠️ 两条**刻意不重实现**的服务端行为，别把它们当遗漏：
+ * ⚠️ 三条**刻意不重实现**的服务端行为，别把它们当遗漏：
  * - `list_tasks` **不按 `statuses` / `project` / `context_tag_id` 过滤**，只按窗口切片。
  *   页面级用例要断的是「条件进了同一条请求」与「显示的是响应里的东西」，重实现一遍
  *   服务端筛选只会让替身自己成为被测对象（真实的交集在 `task_repo::filter_clause`）。
  * - `list_projects` / `list_tags` 只按 `status` / `kind` 过滤，其余照原样回。
+ * - 恢复/历史的四条写命令（`reconcile` / `correct` / `backfill` / `discard_session`）
+ *   只回**形状正确**的报告并推一版 `revision`：`reconcile` 的"ranges 必须恰好覆盖"、
+ *   `discard_session` 的"全部区间软作废"这些判据都在 Rust（`services/recovery.rs` /
+ *   `history.rs`），替身重实现一遍就等于把服务端的规则抄成第二份。要断"作废掉的那条
+ *   从列表里消失了"，用 `attention` / `history` 夹具在写回之后换一份**新夹具**表达
+ *   （与今日页用 `backend.view = …` 造新版同一姿势）。
  */
 
 import { mockIPC } from "@tauri-apps/api/mocks";
 
 import {
   MEASURES,
+  type AttentionOverview,
   type CommandOutcome,
   type DailyPlanChange,
   type ErrorResponse,
+  type HistoryDetail,
+  type HistoryView,
+  type IntervalRow,
   type Measure,
   type MeasureColumn,
+  type PendingIntervalItem,
   type ProjectChange,
   type ProjectRow,
+  type SessionAttentionItem,
+  type SessionRow,
   type StatsClass,
   type TagList,
   type TagRow,
   type TaskRow,
+  type TimeEdit,
   type TimerSnapshot,
   type TodayView,
 } from "../../types/ipc";
@@ -203,6 +217,120 @@ export function todayView(overrides: Partial<TodayView> = {}): TodayView {
   };
 }
 
+/** 一条会话行（默认：一条已结束的正计时人工会话）。 */
+export function session(overrides: Partial<SessionRow> = {}): SessionRow {
+  return {
+    id: SESSION,
+    task_id: "task-1",
+    run_id: RUN,
+    mode: "FOREGROUND",
+    state: "finished",
+    timer_kind: "stopwatch",
+    target_duration_ms: null,
+    started_at: AT,
+    ended_at: AT + 3_600_000,
+    needs_review: false,
+    row_version: 1,
+    ...overrides,
+  };
+}
+
+/** 一条区间行（默认：10 分钟、已确认、未作废、无采样点）。 */
+export function interval(overrides: Partial<IntervalRow> = {}): IntervalRow {
+  return {
+    id: "interval-1",
+    session_id: SESSION,
+    started_at: AT,
+    ended_at: AT + 600_000,
+    voided_at: null,
+    duration_ms: 600_000,
+    sampled_end_wall_at: null,
+    needs_review: false,
+    ...overrides,
+  };
+}
+
+/** 一条审计行（默认：一次 `reconcile` 确认）。 */
+export function timeEdit(overrides: Partial<TimeEdit> = {}): TimeEdit {
+  return {
+    id: "edit-1",
+    session_id: SESSION,
+    before_json: '{"change":"reconcile_confirm","session":{}}',
+    after_json: '{"change":"reconcile_confirm","session":{}}',
+    reason: "reconcile:confirm",
+    created_at: AT,
+    ...overrides,
+  };
+}
+
+/**
+ * 一条待确认候选区间（默认：**候选终点已知但时长未确认**，`duration_ms: null`）。
+ *
+ * 这正是"已知单调时长只作候选"的形状：候选端点是材料，不是事实。
+ */
+export function pendingInterval(overrides: Partial<PendingIntervalItem> = {}): PendingIntervalItem {
+  return {
+    id: "pending-1",
+    started_at: AT,
+    ended_at: AT + 120_000,
+    duration_ms: null,
+    sampled_end_wall_at: null,
+    needs_review: true,
+    ...overrides,
+  };
+}
+
+/** 一条需要处理的会话（默认：`recovering` + 一条待确认候选）。 */
+export function attentionItem(overrides: Partial<SessionAttentionItem> = {}): SessionAttentionItem {
+  return {
+    session_id: SESSION,
+    task_id: "task-1",
+    state: "recovering",
+    run_id: RUN,
+    is_current_run: false,
+    attention: "needs_review",
+    intervals: [pendingInterval()],
+    fault_reason: null,
+    session_row_version: 1,
+    session_needs_review: true,
+    ...overrides,
+  };
+}
+
+/** 一份待确认概览（`attention_overview` 的响应；默认：一张空表）。 */
+export function attentionOverview(overrides: Partial<AttentionOverview> = {}): AttentionOverview {
+  return {
+    items: [],
+    pending_intervals: 0,
+    pending_sessions: 0,
+    fault_sessions: 0,
+    data_epoch: EPOCH,
+    revision: 5,
+    ...overrides,
+  };
+}
+
+/** 一个会话的详情（`history_view.selected`；默认：一条已结束会话 + 一条区间 + 一条审计）。 */
+export function historyDetail(overrides: Partial<HistoryDetail> = {}): HistoryDetail {
+  return {
+    session: session(),
+    intervals: [interval()],
+    edits: [timeEdit()],
+    ...overrides,
+  };
+}
+
+/** 一页历史（`history_view` 的响应；默认：一页空表、没有详情）。 */
+export function historyView(overrides: Partial<HistoryView> = {}): HistoryView {
+  return {
+    sessions: [],
+    selected: null,
+    data_epoch: EPOCH,
+    revision: 5,
+    ...overrides,
+  };
+}
+
 /** 一个可手工放行的响应（`holdNext` 交回它）。 */
 export interface Deferred<T = unknown> {
   promise: Promise<T>;
@@ -230,6 +358,12 @@ export interface Backend {
   snapshot: TimerSnapshot;
   /** `stats_today` 交回的今日视图（五项）；`data_epoch` / `revision` 由假后端统一给。 */
   view: TodayView;
+  /** `attention_overview` 交回的待确认概览；`data_epoch` / `revision` 由假后端统一给。 */
+  attention: AttentionOverview;
+  /** `history_view` 交回的那一页（`sessions` 按窗口切片，`selected` 只在指名时给）。 */
+  history: HistoryView;
+  /** `accept_detected_clock_correction` 交回的 `accepted`（默认 `false` = 没有待接受的校正）。 */
+  clockAccepted: boolean;
   /** 命令名 ⇒ 要抛出的失败响应（模拟服务拒绝）。 */
   fail: Record<string, ErrorResponse>;
   /** 命令名 ⇒ 响应要挂着的 promise（模拟"这条命令还在飞"）。 */
@@ -265,6 +399,9 @@ export function createBackend(): Backend {
     revision: 5,
     snapshot: idleSnapshot(),
     view: todayView(),
+    attention: attentionOverview(),
+    history: historyView(),
+    clockAccepted: false,
     fail: {},
     hold: {},
     count: (command) => backend.commands.filter((name) => name === command).length,
@@ -401,6 +538,81 @@ export function createBackend(): Backend {
         // 五项与 `data_epoch` / `revision` 同源：假后端统一给这两个字段，用例改
         // `backend.revision` 就能造出"更新的一版"。`date` / `timezone` / `range` 来自夹具。
         return { ...backend.view, data_epoch: EPOCH, revision: backend.revision };
+      case "attention_overview":
+        return { ...backend.attention, data_epoch: EPOCH, revision: backend.revision };
+      case "history_view": {
+        const { limit, offset, session_id } = request as {
+          limit: number;
+          offset: number;
+          session_id?: string | null;
+        };
+        return {
+          // 与 `session_repo::history_sessions` 同形：只按分页窗口切片（筛选在服务端）。
+          sessions: backend.history.sessions.slice(offset, offset + limit),
+          // `session_id` 省略 / `null` = 只要列表；给了就给那条详情（替身不判它存不存在）。
+          selected: session_id === undefined || session_id === null ? null : backend.history.selected,
+          data_epoch: EPOCH,
+          revision: backend.revision,
+        } satisfies HistoryView;
+      }
+      case "reconcile": {
+        const { session_id } = request as { session_id: string };
+        const item = backend.attention.items.find((row) => row.session_id === session_id);
+        backend.revision += 1;
+        // 写响应只保证**形状**（业务判据在 Rust，见模块头）：会话推成 finished、区间照给。
+        return {
+          session: session({ id: session_id, task_id: item?.task_id ?? "task-1" }),
+          intervals: [interval({ session_id })],
+          revision: backend.revision,
+          data_epoch: EPOCH,
+        };
+      }
+      case "correct": {
+        const { interval_id, session_id } = request as {
+          interval_id: string;
+          session_id: string;
+        };
+        backend.revision += 1;
+        return {
+          session: session({ id: session_id }),
+          interval: interval({ id: interval_id, session_id }),
+          revision: backend.revision,
+          data_epoch: EPOCH,
+        };
+      }
+      case "backfill": {
+        const { task_id } = request as { task_id: string };
+        backend.revision += 1;
+        return {
+          session: session({ id: "session-backfilled", task_id }),
+          interval: interval({ id: "interval-backfilled", session_id: "session-backfilled" }),
+          revision: backend.revision,
+          data_epoch: EPOCH,
+        };
+      }
+      case "discard_session": {
+        const { session_id } = request as { session_id: string };
+        backend.revision += 1;
+        // 作废整次：会话 `discarded`、区间 `voided_at` 非空（报告形状见 `HistoryEditReport`）。
+        return {
+          session: session({ id: session_id, state: "discarded", needs_review: false }),
+          interval: interval({ session_id, voided_at: AT + 3_600_000, duration_ms: null }),
+          revision: backend.revision,
+          data_epoch: EPOCH,
+        };
+      }
+      case "retry_recovery":
+        // 恢复重试：返回提交后的权威快照（不保证推进 `revision`，所以版本照原样给）。
+        return backend.snapshot;
+      case "accept_detected_clock_correction": {
+        // `accepted: false` 是**正常路径**（没有待接受的校正、零写入、不加版本）。
+        if (backend.clockAccepted) backend.revision += 1;
+        return {
+          accepted: backend.clockAccepted,
+          data_epoch: EPOCH,
+          revision: backend.revision,
+        };
+      }
       case "add_to_plan": {
         const taskId = (request as { task_id: string }).task_id;
         const added = backend.tasks.find((row) => row.id === taskId);
