@@ -150,6 +150,8 @@ pub fn run() {
             commands::plan_for,
             commands::add_to_plan,
             commands::remove_from_plan,
+            // 统计（F-010 的「今日工时」半边）
+            commands::stats_today,
             // 计时（P2）
             commands::timer_snapshot,
             commands::timer_tick,

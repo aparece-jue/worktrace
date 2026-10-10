@@ -1,0 +1,203 @@
+{
+  "as_of": 1700000000000,
+  "confirmed": [
+    {
+      "as_of": 1700000000000,
+      "class": "confirmed",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 3,
+      "measure": "human",
+      "ms": 3600000,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "as_of": 1700000000000,
+      "class": "confirmed",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 2,
+      "measure": "machine_background",
+      "ms": 1200000,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "as_of": 1700000000000,
+      "class": "confirmed",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 1,
+      "measure": "machine_passive",
+      "ms": 300000,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "as_of": 1700000000000,
+      "class": "confirmed",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 1,
+      "measure": "waiting",
+      "ms": 600000,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    }
+  ],
+  "current": {
+    "session_id": "44444444-4444-4444-8444-444444444444",
+    "state": "running",
+    "task_id": "11111111-1111-4111-8111-111111111111",
+    "task_title": "写 P7 Task 1 的报告"
+  },
+  "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+  "date": "2023-11-15",
+  "live": [
+    {
+      "as_of": 1700000000000,
+      "class": "live",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 1,
+      "measure": "human",
+      "ms": 900000,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "as_of": 1700000000000,
+      "class": "live",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 0,
+      "measure": "machine_background",
+      "ms": 0,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "as_of": 1700000000000,
+      "class": "live",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 0,
+      "measure": "machine_passive",
+      "ms": 0,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "as_of": 1700000000000,
+      "class": "live",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 0,
+      "measure": "waiting",
+      "ms": 0,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    }
+  ],
+  "pending": [
+    {
+      "as_of": 1700000000000,
+      "class": "pending",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 1,
+      "measure": "human",
+      "ms": 0,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "as_of": 1700000000000,
+      "class": "pending",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 1,
+      "measure": "machine_background",
+      "ms": null,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "as_of": 1700000000000,
+      "class": "pending",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 1,
+      "measure": "machine_passive",
+      "ms": 120000,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    },
+    {
+      "as_of": 1700000000000,
+      "class": "pending",
+      "data_epoch": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "intervals": 0,
+      "measure": "waiting",
+      "ms": null,
+      "range": {
+        "from": 1699977600000,
+        "to": 1700064000000
+      },
+      "revision": 14,
+      "timezone": "Asia/Shanghai"
+    }
+  ],
+  "range": {
+    "from": 1699977600000,
+    "to": 1700064000000
+  },
+  "revision": 14,
+  "tasks": [
+    {
+      "created_at": 1700000000000,
+      "id": "11111111-1111-4111-8111-111111111111",
+      "project_id": "22222222-2222-4222-8222-222222222222",
+      "quality": null,
+      "row_version": 3,
+      "status": "Ready",
+      "title": "写 P7 Task 1 的报告",
+      "updated_at": 1700000120000
+    }
+  ],
+  "timezone": "Asia/Shanghai"
+}

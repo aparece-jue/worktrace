@@ -31,7 +31,7 @@
 //! 调服务 → 返回响应）。包装只有一行转发。
 //!
 //! 为什么分开：`#[tauri::command]` 生成的包装要 Tauri 运行时才能调，而命令体只需要一个
-//! `&mut AppState`——分开之后 `tests/ipc_commands.rs` 能**逐条**覆盖 24 条命令
+//! `&mut AppState`——分开之后 `tests/ipc_commands.rs` 能**逐条**覆盖 25 条命令
 //! （不需要 `tauri::test`，因此也不需要动 `Cargo.toml`）。一个 `finish_timer` 里误调
 //! `app.pause` 的复制粘贴错误，现在会当场断言失败。
 //!
@@ -114,7 +114,7 @@ use crate::services::timer::coordinator::{
     StartRequest,
 };
 use crate::services::timer::snapshot::TimerSnapshot;
-use crate::services::{catalog, daily_plan, handshake};
+use crate::services::{catalog, daily_plan, handshake, stats};
 
 /// 实验器材（P7 Task 6a）：四条 dev 命令，**只在 debug 构建编译**。
 #[cfg(debug_assertions)]
@@ -1046,6 +1046,43 @@ pub fn remove_from_plan_impl(
         now,
         change,
     ))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 统计（F-010 的「今日工时」半边）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Today 聚合（F-010 的五项）：今日选择列表、当前任务、已确认 / 运行暂计 / 待确认三组。
+///
+/// 收的是服务层的 IPC 请求 DTO（[`stats::TodayQuery`]，**不另造请求形状**）：
+/// 它**不带日期**——「今天」由服务从**同一次样本的归属终点**算，所以 `date` / `range` /
+/// `as_of` 三者天然同源；想看别的日子用范围报表。`timezone` 是原始输入，归一在
+/// [`stats::today`] 那一条唯一入口上（与日界、存储键同一套），命令层只转发。
+///
+/// **纯读**（命令表第 12 条）：不 `bump_revision`、不广播 `domain.changed`、不补采时钟、
+/// 不重算数字。异常采样可能先提交 P2 的恢复事务——那是服务层的事，这里不「顺手」刷新。
+#[tauri::command]
+pub async fn stats_today(
+    window: tauri::WebviewWindow,
+    state: State<'_, RunningApp>,
+    request: stats::TodayQuery,
+) -> Result<stats::TodayView, ErrorResponse> {
+    run_command(
+        "stats_today",
+        window.label(),
+        &state,
+        Vec::new(),
+        move |app| stats_today_impl(app, request),
+    )
+    .await
+}
+
+/// [`stats_today`] 的命令体（IPC 包装只做转发）。
+pub fn stats_today_impl(
+    app: &mut AppState,
+    request: stats::TodayQuery,
+) -> Result<stats::TodayView, AppError> {
+    app.stats_today(&request)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -79,6 +79,30 @@ export const SESSION_MODES = [
 ] as const;
 export type SessionMode = (typeof SESSION_MODES)[number];
 
+/**
+ * 统计口径里的**三类分列**（`src-tauri/src/services/stats.rs` 的 `StatsClass`）。**小写**。
+ *
+ * 02 §6：已确认 / 实时暂计 / 待确认是三件**不同的事实**，**不得合并**，也没有
+ * 「三类相加」这个入口。
+ */
+export const STATS_CLASSES = ["confirmed", "live", "pending"] as const;
+export type StatsClass = (typeof STATS_CLASSES)[number];
+
+/**
+ * 统计口径里的 **measure 维度**（`src-tauri/src/services/stats.rs` 的 `Measure`）。**小写**。
+ *
+ * 固定四项、顺序与 Rust 侧 `Measure::ALL` 一致（消费方按 `class` + `measure` 取列，
+ * 不按下标）。人工**只有** `human`（`FOREGROUND` 会话）：机器时长无论与人工并行多久
+ * 都不并入人工；`waiting` 单列，谁也不并进谁（F-103）。
+ */
+export const MEASURES = [
+  "human",
+  "machine_background",
+  "machine_passive",
+  "waiting",
+] as const;
+export type Measure = (typeof MEASURES)[number];
+
 /** 错误上下文里的受控实体种类（`src-tauri/src/error.rs` 的白名单，**小写**）。 */
 export const AUTHORITY_KINDS = ["task", "session", "project", "tag"] as const;
 export type AuthorityKind = (typeof AUTHORITY_KINDS)[number];
@@ -192,6 +216,106 @@ export interface TaskQueryResult {
 export interface DailyPlanView {
   tasks: TaskRow[];
   data_epoch: string;
+  revision: number;
+}
+
+/** 统计范围（半开 `[from, to)`，Unix 毫秒）。 */
+export interface StatsRange {
+  from: number;
+  to: number;
+}
+
+/**
+ * 一列统计结果（02 §6 的「每个结果 DTO」，五个口径字段齐全）。
+ *
+ * 取列按 `class` + `measure` 找（每一类固定四项），**不按下标**，也没有任何
+ * 「相加」的入口。
+ */
+export interface MeasureColumn {
+  /** 属于三类中的哪一类。 */
+  class: StatsClass;
+  /** 这一列报的是哪个 measure。 */
+  measure: Measure;
+  /** 这一列按哪个时区算（已归一）。 */
+  timezone: string;
+  /** 这一列覆盖的范围（半开）；日桶里是「该日真实日界 ∩ 报表范围」。 */
+  range: StatsRange;
+  /** 这一列的数字截至哪一刻（本次采样的归属挂钟 `A(M)`）。 */
+  as_of: number;
+  /** 事实来自哪个库身份。 */
+  data_epoch: string;
+  /** 事实来自哪个业务版本（与列里的数字同一次读事务）。 */
+  revision: number;
+  /**
+   * 该列的毫秒数。
+   *
+   * **待确认列**：只有**已知端点**候选的跨度之和（零点长度的候选贡献 0）；这一 measure
+   * 一条已知端点的候选都没有时才是 `null`——「终点未知不推算」，不是「整栏不给数」。
+   * 零长度候选有已知端点但跨度 0，所以它计数、给 0。
+   */
+  ms: number | null;
+  /**
+   * 该列覆盖的区间条数。
+   *
+   * **待确认列**：与范围相交（**含零长度候选**与终点未知但已开始的候选）的未作废条数
+   * ⇒ 判「有没有待确认」看它，**不要**看 `ms === null`（Ruling P5-12）。
+   */
+  intervals: number;
+}
+
+/**
+ * 当前任务与运行状态（`TodayView.current`）。
+ *
+ * ⚠️ **有 `current` ≠ 正在计时**：它是协调器镜像里**最后装载**的那条会话，那条会话
+ * **可能已经结束**（`state` 为 `finished` / `discarded`）。判「是否正在计时」必须看
+ * `state === "running"` 与 `TodayView.live` 那一列的 `intervals`。
+ */
+export interface CurrentTask {
+  /** 当前会话。暂停中的会话**也是**当前会话，只是没有开放区间。 */
+  session_id: string;
+  task_id: string;
+  /**
+   * 任务标题。
+   *
+   * 只有 id 的话界面渲染不出「当前任务」：没有「按 id 取任务」的读路径
+   * （`list_tasks` 只按 status / project / context 筛），而当前任务未必在今天的列表里。
+   */
+  task_title: string;
+  state: SessionState;
+}
+
+/**
+ * `stats_today`（F-010）：一次返回五项，**分别显示、不预先相加**。
+ *
+ * 五项 = {@link TodayView.tasks}（今日选择列表）、{@link TodayView.current}
+ * （当前任务与运行状态），以及三组里的 `human` 列（确认人工工时 / 运行暂计 /
+ * 待确认时间）。**没有**合计字段：三段时间分属三类事实，加起来既不是工时也不是待办。
+ *
+ * 三组工时都固定四项（与 `Measure::ALL` 同序）；三组的 `as_of` / `revision` /
+ * `data_epoch` 与视图本身**同源**（同一个读事务、同一次采样）——页面的本视图水位
+ * （`viewWatermark`）就用后两个判旧，机器与等待因此不会跟人工出现两个水位。
+ */
+export interface TodayView {
+  /** ① 今日选择列表（P4 的顺序）；**完成的任务保留在列表里**并带自己的状态。 */
+  tasks: TaskRow[];
+  /** ② 当前任务与运行状态；**没有装载过任何会话时为 `null`**。 */
+  current: CurrentTask | null;
+  /** ③ 已确认，固定四项。`human` 那一列就是 F-010 的「确认人工工时」。 */
+  confirmed: MeasureColumn[];
+  /** ④ 运行暂计：当前开放区间裁剪到今日，固定四项。 */
+  live: MeasureColumn[];
+  /** ⑤ 待确认，固定四项。有没有待确认看 `intervals`。 */
+  pending: MeasureColumn[];
+  /** 这个视图算的是哪一天：**查询时区**的本地日期（`YYYY-MM-DD`）。 */
+  date: string;
+  /** 已归一的查询时区。 */
+  timezone: string;
+  /** 今日的**真实**半开日界（夏令时切换日是 23 / 25 小时）。 */
+  range: StatsRange;
+  /** 这些数字截至哪一刻（同一次样本的归属终点 `A(M)`）。 */
+  as_of: number;
+  data_epoch: string;
+  /** 这些事实来自哪个业务版本（与五项出自**同一个读事务**）。 */
   revision: number;
 }
 
@@ -418,6 +542,18 @@ export interface PlanMutationRequest {
 /** `plan_for`。 */
 export interface DailyPlanQuery {
   date: string;
+  timezone: string;
+  expected_data_epoch: string;
+}
+
+/**
+ * `stats_today`。
+ *
+ * **不带日期**：「今天」由服务从**同一次样本的归属终点** `A(M)` 算，所以
+ * `date` / `range` / `as_of` 三者天然同源——另传一个日期只会得到一份「数字是这一天的、
+ * 口径字段是那一天」的视图。`timezone` 是原始输入，归一在服务入口。
+ */
+export interface TodayQuery {
   timezone: string;
   expected_data_epoch: string;
 }

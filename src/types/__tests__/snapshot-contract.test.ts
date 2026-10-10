@@ -33,23 +33,28 @@ import { describe, expect, it } from "vitest";
 import {
   AUTHORITY_KINDS,
   ERROR_CODES,
+  MEASURES,
   PROJECT_STATUSES,
   SESSION_STATES,
+  STATS_CLASSES,
   TAG_KINDS,
   TASK_STATUSES,
   TIMER_KINDS,
 } from "../ipc";
 import type {
   CommandOutcome,
+  CurrentTask,
   DailyPlanChange,
   DailyPlanView,
   ErrorAuthority,
   ErrorResponse,
+  MeasureColumn,
   ProjectChange,
   ProjectList,
   ProjectRow,
   RecordVersion,
   RevisionSnapshot,
+  StatsRange,
   TagChange,
   TagList,
   TagRow,
@@ -59,6 +64,7 @@ import type {
   TaskRow,
   TaskTagsChange,
   TimerSnapshot,
+  TodayView,
 } from "../ipc";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -120,6 +126,19 @@ const TOP_LEVEL = {
   tag_list: ["data_epoch", "items", "revision"],
   task_query_result: ["data_epoch", "revision", "tasks", "total"],
   daily_plan_view: ["data_epoch", "revision", "tasks"],
+  today_view: [
+    "as_of",
+    "confirmed",
+    "current",
+    "data_epoch",
+    "date",
+    "live",
+    "pending",
+    "range",
+    "revision",
+    "tasks",
+    "timezone",
+  ],
   timer_snapshot: [
     "active_ms",
     "as_of",
@@ -196,6 +215,20 @@ const TASK_ROW_KEYS = [
 ] as const;
 const ERROR_AUTHORITY_KEYS = ["data_epoch", "records", "revision"] as const;
 const RECORD_VERSION_KEYS = ["id", "kind", "row_version"] as const;
+/** Today 的三组工时列（`MeasureColumn`）：口径字段必须与视图本身同源。 */
+const MEASURE_COLUMN_KEYS = [
+  "as_of",
+  "class",
+  "data_epoch",
+  "intervals",
+  "measure",
+  "ms",
+  "range",
+  "revision",
+  "timezone",
+] as const;
+const STATS_RANGE_KEYS = ["from", "to"] as const;
+const CURRENT_TASK_KEYS = ["session_id", "state", "task_id", "task_title"] as const;
 
 /**
  * 编译期：声明的键集合**恰好**是 TS 接口的键集合（多一个、少一个、改个名都不行）。
@@ -208,6 +241,7 @@ export type TopLevelKeyChecks = [
   Expect<Equal<(typeof TOP_LEVEL)["tag_list"][number], keyof TagList>>,
   Expect<Equal<(typeof TOP_LEVEL)["task_query_result"][number], keyof TaskQueryResult>>,
   Expect<Equal<(typeof TOP_LEVEL)["daily_plan_view"][number], keyof DailyPlanView>>,
+  Expect<Equal<(typeof TOP_LEVEL)["today_view"][number], keyof TodayView>>,
   Expect<Equal<(typeof TOP_LEVEL)["timer_snapshot"][number], keyof TimerSnapshot>>,
   Expect<Equal<(typeof TOP_LEVEL)["timer_snapshot_idle"][number], keyof TimerSnapshot>>,
   Expect<Equal<(typeof TOP_LEVEL)["command_outcome"][number], keyof CommandOutcome>>,
@@ -227,6 +261,9 @@ export type NestedKeyChecks = [
   Expect<Equal<(typeof TASK_ROW_KEYS)[number], keyof TaskRow>>,
   Expect<Equal<(typeof ERROR_AUTHORITY_KEYS)[number], keyof ErrorAuthority>>,
   Expect<Equal<(typeof RECORD_VERSION_KEYS)[number], keyof RecordVersion>>,
+  Expect<Equal<(typeof MEASURE_COLUMN_KEYS)[number], keyof MeasureColumn>>,
+  Expect<Equal<(typeof STATS_RANGE_KEYS)[number], keyof StatsRange>>,
+  Expect<Equal<(typeof CURRENT_TASK_KEYS)[number], keyof CurrentTask>>,
 ];
 
 /** 嵌套对象的运行期比对表：`where` 是点分路径，`[]` 表示取数组第一项。 */
@@ -235,6 +272,12 @@ const NESTED: ReadonlyArray<{ where: string; keys: readonly string[] }> = [
   { where: "tag_list.items[]", keys: TAG_ROW_KEYS },
   { where: "task_query_result.tasks[]", keys: TASK_ROW_KEYS },
   { where: "daily_plan_view.tasks[]", keys: TASK_ROW_KEYS },
+  { where: "today_view.tasks[]", keys: TASK_ROW_KEYS },
+  { where: "today_view.current", keys: CURRENT_TASK_KEYS },
+  { where: "today_view.confirmed[]", keys: MEASURE_COLUMN_KEYS },
+  { where: "today_view.live[]", keys: MEASURE_COLUMN_KEYS },
+  { where: "today_view.pending[]", keys: MEASURE_COLUMN_KEYS },
+  { where: "today_view.range", keys: STATS_RANGE_KEYS },
   { where: "command_outcome.snapshot", keys: TOP_LEVEL.timer_snapshot },
   { where: "project_change.project", keys: PROJECT_ROW_KEYS },
   { where: "task_project_change.task", keys: TASK_ROW_KEYS },
@@ -287,6 +330,8 @@ describe("快照契约", () => {
       { field: "status", domain: [...TASK_STATUSES, ...PROJECT_STATUSES], label: "TaskStatus | ProjectStatus" },
       { field: "kind", domain: [...TAG_KINDS, ...AUTHORITY_KINDS], label: "TagKind | AuthorityKind" },
       { field: "state", domain: SESSION_STATES, label: "SessionState" },
+      { field: "class", domain: STATS_CLASSES, label: "StatsClass" },
+      { field: "measure", domain: MEASURES, label: "Measure" },
       { field: "timer_kind", domain: TIMER_KINDS, label: "TimerKind" },
       { field: "code", domain: ERROR_CODES, label: "ErrorCode" },
     ];

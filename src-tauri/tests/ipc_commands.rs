@@ -1,4 +1,4 @@
-//! P7 Task 1 fix round 1（评审 I6）：**24 条命令体逐条覆盖**。
+//! P7 Task 1 fix round 1（评审 I6）：**25 条命令体逐条覆盖**。
 //!
 //! `#[tauri::command]` 生成的包装（`spawn_blocking` + `State`）要 Tauri 运行时才能调，
 //! 所以本文件调的是 `commands::*_impl`——命令体本身：解析请求 → 调服务 → 返回响应。
@@ -45,6 +45,9 @@ use worktrace_lib::services::bootstrap::{
 use worktrace_lib::services::catalog::{ProjectSelector, TaskQueryRequest};
 use worktrace_lib::services::daily_plan::DailyPlanQuery;
 use worktrace_lib::services::events::{EventEnvelope, EventSink};
+use worktrace_lib::services::stats::{
+    Measure, MeasureColumn, StatsClass, StatsRange, TodayQuery, TodayView,
+};
 use worktrace_lib::services::timer::coordinator::{ResumeRequest, SessionRequest};
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
@@ -893,6 +896,151 @@ fn remove_from_plan_impl_is_idempotent_when_the_task_was_never_added() {
     .unwrap();
     assert!(removed.tasks.is_empty());
     assert_eq!(removed.revision, before, "本来就不在集合里 ⇒ 零写入");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 统计（F-010 的「今日工时」半边）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `FakeClock` 冻结在 [`WALL`]（2023-11-14T22:13:20Z）⇒ 两个时区里的「今天」是常量。
+/// 日期与日界**写死在这里**，不用服务自己的函数算期望值（那是同义反复）。
+const UTC_DATE: &str = "2023-11-14";
+const UTC_MID: i64 = 1_699_920_000_000;
+const SH_DATE: &str = "2023-11-15";
+const SH_MID: i64 = 1_699_977_600_000;
+const DAY_MS: i64 = 86_400_000;
+
+/// 三组工时各自固定四项、顺序与 [`Measure::ALL`] 一致，且**与视图同源**
+/// （同一 `timezone`/`range`/`as_of`/`data_epoch`/`revision`）。
+/// 把 `live` 组接到 `confirmed` 上、或让某组自带另一个水位，都会在这里红。
+fn assert_four_measures(view: &TodayView, class: StatsClass, columns: &[MeasureColumn]) {
+    let measures: Vec<Measure> = columns.iter().map(|column| column.measure).collect();
+    assert_eq!(
+        measures,
+        Measure::ALL.to_vec(),
+        "{class:?} 必须固定四项、顺序固定"
+    );
+    for column in columns {
+        assert_eq!(column.class, class, "{class:?} 组里混进了别类的列");
+        assert_eq!(column.timezone, view.timezone);
+        assert_eq!(column.range, view.range);
+        assert_eq!(column.as_of, view.as_of, "五项必须出自同一次查询");
+        assert_eq!(column.data_epoch, view.data_epoch);
+        assert_eq!(column.revision, view.revision);
+    }
+}
+
+#[test]
+fn stats_today_impl_returns_the_five_items_from_one_authoritative_read() {
+    let shell = launch();
+    let mut state = shell.state();
+
+    // 先在「上海 2023-11-15」这一天放一个任务：① 列表不是空的，② revision 真的前进过，
+    // 下面的权威版本断言就不会落在「0 == 0」这种空断言上。
+    commands::add_to_plan_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        PlanMutationRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            task_id: "t1".to_string(),
+            date: SH_DATE.to_string(),
+            timezone: TZ.to_string(),
+        },
+    )
+    .unwrap();
+
+    let view = commands::stats_today_impl(
+        &mut state,
+        TodayQuery {
+            timezone: TZ.to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+        },
+    )
+    .unwrap();
+
+    // ① 今日选择列表：就是刚放进去的那条（与 `plan_for` 同一个读事务）。
+    assert_eq!(view.tasks.len(), 1);
+    assert_eq!(view.tasks[0].id, "t1");
+    assert_eq!(view.tasks[0].title, "任务一");
+    // ② 当前任务：本夹具没有任何会话被装载进协调器镜像。
+    assert!(view.current.is_none(), "没有装载过任何会话");
+    // ③④⑤ 三组各四项，且与视图同源。
+    assert_four_measures(&view, StatsClass::Confirmed, &view.confirmed);
+    assert_four_measures(&view, StatsClass::Live, &view.live);
+    assert_four_measures(&view, StatsClass::Pending, &view.pending);
+
+    // 库是空的（没有区间）：已确认与实时暂计是 0（不是缺失），待确认一条候选都没有
+    // ⇒ 按条数判有无，毫秒按「不推算」给 `None`。
+    assert_eq!(
+        view.column(StatsClass::Confirmed, Measure::Human).ms,
+        Some(0)
+    );
+    assert_eq!(view.column(StatsClass::Live, Measure::Human).ms, Some(0));
+    assert_eq!(
+        view.column(StatsClass::Pending, Measure::Human).intervals,
+        0
+    );
+    assert_eq!(view.column(StatsClass::Pending, Measure::Human).ms, None);
+
+    // 口径字段：`date`/`range`/`as_of` 同源（服务从同一次样本的归属终点算），
+    // `revision`/`data_epoch` 与库的权威值一致 ⇒ 页面的本视图水位能用来判旧。
+    assert_eq!(view.date, SH_DATE);
+    assert_eq!(view.timezone, TZ);
+    assert_eq!(
+        view.range,
+        StatsRange {
+            from: SH_MID,
+            to: SH_MID + DAY_MS
+        },
+        "日界是次日零点的换算结果，不是 start + 24h"
+    );
+    assert!(view.range.from < view.range.to);
+    assert_eq!(view.as_of, WALL, "as_of 就是那一次样本的归属终点");
+    assert_eq!(view.data_epoch, shell.epoch);
+    assert_eq!(view.revision, revision_of(&state));
+
+    // 时区归一：小写 `utc` 回显成 IANA 名字 `UTC`（原样回显就会在这里红）；「今天」
+    // 也跟着时区走到 UTC 的那一天——计划是按 (日期, 时区) 存的，上海那天的不该在这里。
+    let utc = commands::stats_today_impl(
+        &mut state,
+        TodayQuery {
+            timezone: "utc".to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(utc.timezone, "UTC");
+    assert_eq!(utc.date, UTC_DATE);
+    assert_eq!(
+        utc.range,
+        StatsRange {
+            from: UTC_MID,
+            to: UTC_MID + DAY_MS
+        }
+    );
+    assert!(utc.tasks.is_empty(), "计划是按 (日期, 时区) 存的");
+
+    // 读路径同样过 epoch 守卫：期望值不对 ⇒ `DATA_EPOCH_MISMATCH`。
+    let stale = commands::stats_today_impl(
+        &mut state,
+        TodayQuery {
+            timezone: TZ.to_string(),
+            expected_data_epoch: "66666666-6666-4666-8666-666666666666".to_string(),
+        },
+    )
+    .expect_err("陈旧 epoch 必须被拒");
+    assert_code(&stale, "DATA_EPOCH_MISMATCH");
+
+    // 坏时区在服务入口（归一那唯一一条）就被拒，不是回显一个坏名字。
+    let bad_zone = commands::stats_today_impl(
+        &mut state,
+        TodayQuery {
+            timezone: "Etc/Unknown".to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+        },
+    )
+    .expect_err("拿不到 IANA 名称的时区必须被拒");
+    assert_code(&bad_zone, "DOMAIN_ERROR");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

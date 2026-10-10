@@ -1,5 +1,5 @@
 /**
- * IPC 客户端（P7 Task 1b）：24 条命令的转发、错误规范化、迟到响应丢弃与事件订阅。
+ * IPC 客户端（P7 Task 1b）：25 条命令的转发、错误规范化、迟到响应丢弃与事件订阅。
  *
  * 这一层**不含业务规则**（00 §6）：它只做转发、形状转换与协议原语。
  * 状态判断（合法性、统计口径、恢复分流）全在 Rust；镜像与接纳策略是 Task 2 的
@@ -56,6 +56,8 @@ import type {
   TaskTagsRequest,
   TaskTagsChange,
   TimerSnapshot,
+  TodayQuery,
+  TodayView,
 } from "./types/ipc";
 
 /**
@@ -152,7 +154,7 @@ export function toIpcError(cause: unknown): IpcError {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 转发（24 条，命令名与参数形状逐个对应 commands/mod.rs）
+// 转发（25 条，命令名与参数形状逐个对应 commands/mod.rs）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -258,6 +260,15 @@ export function addToPlan(request: PlanMutationRequest): Promise<DailyPlanChange
 /** `remove_from_plan`。 */
 export function removeFromPlan(request: PlanMutationRequest): Promise<DailyPlanChange> {
   return call<DailyPlanChange>("remove_from_plan", request);
+}
+
+/**
+ * `stats_today`（F-010）：一次读回今日五项，五项与 `as_of` / `date` / `range` 同源。
+ *
+ * 它是**读**命令（与 `plan_for` 同类）：不改水位、不广播，也不重算任何数字。
+ */
+export function statsToday(request: TodayQuery): Promise<TodayView> {
+  return call<TodayView>("stats_today", request);
 }
 
 /** `timer_snapshot`：查询命令（自己取一次采样），不是纯读。 */

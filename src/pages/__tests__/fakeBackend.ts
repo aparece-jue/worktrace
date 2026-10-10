@@ -1,11 +1,12 @@
 /**
- * 页面用例的**假后端**（P7 Task 3 建立，Task 5 扩到项目/标签/筛选查询）：按
- * `src/types/ipc.ts` 的契约形状回应命令。
+ * 页面用例的**假后端**（P7 Task 3 建立，Task 5 扩到项目/标签/筛选查询，P8 Task 1b 扩到
+ * 今日页）：按 `src/types/ipc.ts` 的契约形状回应命令。
  *
  * 它不是业务实现，只是一个可脚本化的替身——**业务规则仍在 Rust**，所以默认行为尽量
  * 贴近真实服务（`create_task` 回一个新任务、`clarify_ready` 把状态改成 Ready 并 +1 版本、
  * `start_timer` 把状态改到 Doing 并给出**提交后**的任务版本、项目改名/归档校验
- * `expected_row_version`、`list_selectable_projects` 只回 active），个别用例再用
+ * `expected_row_version`、`list_selectable_projects` 只回 active、`add_to_plan` /
+ * `remove_from_plan` 改 `view.tasks` 并对重复动作保持幂等），个别用例再用
  * `fail`（模拟服务拒绝）、`hold`（某条命令整体挂起）与 `holdNext`（只挂起**下一次**调用，
  * 用于"旧响应晚到"这类竞态）覆盖。
  *
@@ -21,21 +22,33 @@
 
 import { mockIPC } from "@tauri-apps/api/mocks";
 
-import type {
-  CommandOutcome,
-  ErrorResponse,
-  ProjectChange,
-  ProjectRow,
-  TagList,
-  TagRow,
-  TaskRow,
-  TimerSnapshot,
+import {
+  MEASURES,
+  type CommandOutcome,
+  type DailyPlanChange,
+  type ErrorResponse,
+  type Measure,
+  type MeasureColumn,
+  type ProjectChange,
+  type ProjectRow,
+  type StatsClass,
+  type TagList,
+  type TagRow,
+  type TaskRow,
+  type TimerSnapshot,
+  type TodayView,
 } from "../../types/ipc";
 
 export const EPOCH = "epoch-a";
 export const RUN = "run-1";
 export const SESSION = "session-1";
 export const AT = 1_700_000_000_000;
+
+/** 今日视图的默认口径：上海的一天（`2026-10-03`，整 24 小时的半开区间）。 */
+export const TODAY_DATE = "2026-10-03";
+export const TODAY_ZONE = "Asia/Shanghai";
+const TODAY_FROM = Date.UTC(2026, 9, 2, 16, 0, 0);
+const TODAY_TO = TODAY_FROM + 86_400_000;
 
 /** 一条任务行（默认是一条刚捕获进来的 Inbox 任务）。 */
 export function task(overrides: Partial<TaskRow> = {}): TaskRow {
@@ -124,6 +137,72 @@ export function runningSnapshot(overrides: Partial<TimerSnapshot> = {}): TimerSn
   };
 }
 
+/**
+ * 一列统计结果（默认：已确认的人工、0 毫秒、当天口径）。
+ *
+ * `class` / `measure` 是这一列的**身份**，所以默认值只是"最常用的一格"；要别的格子就
+ * 显式给（`measureGroup` 就是这么拼的）。
+ */
+export function column(overrides: Partial<MeasureColumn> = {}): MeasureColumn {
+  return {
+    class: "confirmed",
+    measure: "human",
+    timezone: TODAY_ZONE,
+    range: { from: TODAY_FROM, to: TODAY_TO },
+    as_of: AT,
+    data_epoch: EPOCH,
+    revision: 5,
+    ms: 0,
+    intervals: 0,
+    ...overrides,
+  };
+}
+
+/**
+ * 一组固定四项的列（次序与 `MEASURES` 一致，也就是 Rust 侧 `Measure::ALL` 的次序）。
+ *
+ * `values` 里没给的 measure 用 `0`——真实服务对"库里就是没有区间"正是这么答的；
+ * 要表达"未给数"（待确认列一条已知端点的候选都没有）就显式传 `null`（**不是**省略）。
+ */
+export function measureGroup(
+  cls: StatsClass,
+  values: Partial<Record<Measure, number | null>> = {},
+  intervals: Partial<Record<Measure, number>> = {},
+): MeasureColumn[] {
+  return MEASURES.map((measure) => {
+    const given = values[measure];
+    return column({
+      class: cls,
+      measure,
+      ms: given === undefined ? 0 : given,
+      intervals: intervals[measure] ?? 0,
+    });
+  });
+}
+
+/**
+ * 一份今日视图（`stats_today` 的响应，五项齐全）。
+ *
+ * 默认是"这一天库里什么都没有"：三组列各四项、数字 0，待确认一条候选都没有
+ * （`ms: null` + `intervals: 0`，与 `MeasureColumn.ms` 的口径注释一致）。
+ */
+export function todayView(overrides: Partial<TodayView> = {}): TodayView {
+  return {
+    tasks: [],
+    current: null,
+    confirmed: measureGroup("confirmed"),
+    live: measureGroup("live"),
+    pending: measureGroup("pending", { human: null }),
+    date: TODAY_DATE,
+    timezone: TODAY_ZONE,
+    range: { from: TODAY_FROM, to: TODAY_TO },
+    as_of: AT,
+    data_epoch: EPOCH,
+    revision: 5,
+    ...overrides,
+  };
+}
+
 /** 一个可手工放行的响应（`holdNext` 交回它）。 */
 export interface Deferred<T = unknown> {
   promise: Promise<T>;
@@ -149,6 +228,8 @@ export interface Backend {
   revision: number;
   /** `timer_snapshot` 交回的快照（命令会在它上面推状态）。 */
   snapshot: TimerSnapshot;
+  /** `stats_today` 交回的今日视图（五项）；`data_epoch` / `revision` 由假后端统一给。 */
+  view: TodayView;
   /** 命令名 ⇒ 要抛出的失败响应（模拟服务拒绝）。 */
   fail: Record<string, ErrorResponse>;
   /** 命令名 ⇒ 响应要挂着的 promise（模拟"这条命令还在飞"）。 */
@@ -183,6 +264,7 @@ export function createBackend(): Backend {
     tags: [],
     revision: 5,
     snapshot: idleSnapshot(),
+    view: todayView(),
     fail: {},
     hold: {},
     count: (command) => backend.commands.filter((name) => name === command).length,
@@ -314,6 +396,41 @@ export function createBackend(): Backend {
         const changed = task({ ...before, status: "Ready", row_version: (before?.row_version ?? 0) + 1 });
         backend.tasks = backend.tasks.map((row) => (row.id === changed.id ? changed : row));
         return { task: changed, revision: 6, data_epoch: EPOCH };
+      }
+      case "stats_today":
+        // 五项与 `data_epoch` / `revision` 同源：假后端统一给这两个字段，用例改
+        // `backend.revision` 就能造出"更新的一版"。`date` / `timezone` / `range` 来自夹具。
+        return { ...backend.view, data_epoch: EPOCH, revision: backend.revision };
+      case "add_to_plan": {
+        const taskId = (request as { task_id: string }).task_id;
+        const added = backend.tasks.find((row) => row.id === taskId);
+        if (added === undefined) {
+          throw failure({ code: "DOMAIN_ERROR", message: "任务不存在。" });
+        }
+        // 重复加入 ⇒ 幂等（`daily_plan::add_to_plan` 同一条规则）：版本不动。
+        if (!backend.view.tasks.some((row) => row.id === taskId)) {
+          backend.view = { ...backend.view, tasks: [...backend.view.tasks, added] };
+          backend.revision += 1;
+        }
+        return {
+          tasks: backend.view.tasks,
+          revision: backend.revision,
+          data_epoch: EPOCH,
+        } satisfies DailyPlanChange;
+      }
+      case "remove_from_plan": {
+        const taskId = (request as { task_id: string }).task_id;
+        const kept = backend.view.tasks.filter((row) => row.id !== taskId);
+        // 本来就不在今日列表里 ⇒ 幂等：版本不动。
+        if (kept.length !== backend.view.tasks.length) {
+          backend.view = { ...backend.view, tasks: kept };
+          backend.revision += 1;
+        }
+        return {
+          tasks: backend.view.tasks,
+          revision: backend.revision,
+          data_epoch: EPOCH,
+        } satisfies DailyPlanChange;
       }
       case "start_timer": {
         const before = backend.tasks.find((row) => row.id === (request as { task_id: string }).task_id);

@@ -41,6 +41,9 @@ use worktrace_lib::services::catalog::{
 use worktrace_lib::services::daily_plan::{DailyPlanChange, DailyPlanView};
 use worktrace_lib::services::events::timer_tick_payload;
 use worktrace_lib::services::handshake::RevisionSnapshot;
+use worktrace_lib::services::stats::{
+    CurrentTask, Measure, MeasureColumn, StatsClass, StatsRange, TodayView,
+};
 use worktrace_lib::services::timer::coordinator::CommandOutcome;
 use worktrace_lib::services::timer::snapshot::TimerSnapshot;
 use worktrace_lib::storage::project_repo::ProjectRow;
@@ -54,6 +57,11 @@ const TAG_ID: &str = "33333333-3333-4333-8333-333333333333";
 const SESSION_ID: &str = "44444444-4444-4444-8444-444444444444";
 const RUN_ID: &str = "55555555-5555-4555-8555-555555555555";
 const AT: i64 = 1_700_000_000_000;
+/// Today 样例的查询时区，以及 `AT` 在它里面的**真实**半开日界
+/// （上海 2023-11-15 00:00 +08:00 → 次日零点）：`date` / `range` / `as_of` 三者自洽。
+const TODAY_TZ: &str = "Asia/Shanghai";
+const TODAY_FROM: i64 = 1_699_977_600_000;
+const TODAY_TO: i64 = 1_700_064_000_000;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 固定的样例值：全部是常量，没有 UUID/时钟/随机数，同一次编译的产出逐字节稳定
@@ -128,6 +136,79 @@ fn timer_snapshot_idle() -> TimerSnapshot {
     TimerSnapshot::idle(EPOCH.to_string(), 7, RUN_ID.to_string(), 43, AT + 301_000)
 }
 
+/// 一列统计结果的固定四项（顺序与 [`Measure::ALL`] 一致）。
+///
+/// `cells` 是 `(ms, intervals)`：待确认栏允许 `ms: None`（该 measure 一条已知端点的
+/// 候选都没有）——`null` 分支也要钉住，前端必须把它当 `number | null` 处理。
+fn measure_columns(class: StatsClass, cells: [(Option<i64>, usize); 4]) -> Vec<MeasureColumn> {
+    Measure::ALL
+        .iter()
+        .copied()
+        .zip(cells)
+        .map(|(measure, (ms, intervals))| MeasureColumn {
+            class,
+            measure,
+            timezone: TODAY_TZ.to_string(),
+            range: StatsRange {
+                from: TODAY_FROM,
+                to: TODAY_TO,
+            },
+            as_of: AT,
+            data_epoch: EPOCH.to_string(),
+            revision: 14,
+            ms,
+            intervals,
+        })
+        .collect()
+}
+
+/// Today 的五项 + 口径字段，全部是常量：（① `tasks` 与 ② `current` 都非空，
+/// 三组工时各四项且 `class` 与所在组一致）。
+fn today_view() -> TodayView {
+    TodayView {
+        tasks: vec![task_row()],
+        current: Some(CurrentTask {
+            session_id: SESSION_ID.to_string(),
+            task_id: TASK_ID.to_string(),
+            task_title: "写 P7 Task 1 的报告".to_string(),
+            state: SessionState::Running,
+        }),
+        confirmed: measure_columns(
+            StatsClass::Confirmed,
+            [
+                (Some(3_600_000), 3),
+                (Some(1_200_000), 2),
+                (Some(300_000), 1),
+                (Some(600_000), 1),
+            ],
+        ),
+        live: measure_columns(
+            StatsClass::Live,
+            [(Some(900_000), 1), (Some(0), 0), (Some(0), 0), (Some(0), 0)],
+        ),
+        pending: measure_columns(
+            StatsClass::Pending,
+            [
+                // 零长度候选：有已知端点、跨度 0 ⇒ 计数但给 0。
+                (Some(0), 1),
+                // 终点未知的候选：不推算 ⇒ 这一 measure 整列不给毫秒。
+                (None, 1),
+                (Some(120_000), 1),
+                (None, 0),
+            ],
+        ),
+        date: "2023-11-15".to_string(),
+        timezone: TODAY_TZ.to_string(),
+        range: StatsRange {
+            from: TODAY_FROM,
+            to: TODAY_TO,
+        },
+        as_of: AT,
+        data_epoch: EPOCH.to_string(),
+        revision: 14,
+    }
+}
+
 fn cases() -> Vec<(&'static str, serde_json::Value)> {
     vec![
         (
@@ -172,6 +253,7 @@ fn cases() -> Vec<(&'static str, serde_json::Value)> {
         ),
         ("timer_snapshot", json(&timer_snapshot_active())),
         ("timer_snapshot_idle", json(&timer_snapshot_idle())),
+        ("today_view", json(&today_view())),
         (
             "command_outcome",
             json(&CommandOutcome {

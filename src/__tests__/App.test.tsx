@@ -14,6 +14,8 @@
  *
  * Task 5 把项目页与任务页接进同一个挂载区：导航四项与「切过去就发它自己的读查询」
  * 由一条用例钉住（默认页仍是收件箱，所以上面那条"恰好四条命令"的断言不受影响）。
+ * P8 Task 1b 加第 5 块页面「今日」：同一条用例扩到五项，并为 `stats_today` 补一条假响应
+ * ——**默认页仍是收件箱**，所以"挂载时恰好四条命令"那条判据照旧（多一条就说明默认页被改了）。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -108,6 +110,21 @@ function scriptShell(session: Record<string, unknown> | null = null): string[] {
         return { items: [], data_epoch: EPOCH, revision: 5 };
       case "list_tags":
         return { items: [], data_epoch: EPOCH, revision: 5 };
+      case "stats_today":
+        // 今日页的五项（本用例只钉「切过去会发这条读命令」，数字不是它的事）。
+        return {
+          tasks: [],
+          current: null,
+          confirmed: [],
+          live: [],
+          pending: [],
+          date: "2026-10-03",
+          timezone: "Asia/Shanghai",
+          range: { from: AT, to: AT + 86_400_000 },
+          as_of: AT,
+          data_epoch: EPOCH,
+          revision: 5,
+        };
       default:
         throw new Error(`外壳不该调用 ${command}`);
     }
@@ -123,7 +140,7 @@ afterEach(async () => {
 });
 
 describe("应用外壳", () => {
-  it("挂载：渲染标题与三个区域、导航四项、收件箱页，且命令集合恰好是那四条", async () => {
+  it("挂载：渲染标题与三个区域、导航五项、收件箱页，且命令集合恰好是那四条", async () => {
     const called = scriptShell();
 
     const { container } = render(<App />);
@@ -154,7 +171,7 @@ describe("应用外壳", () => {
     expect(container.querySelector('[data-region="page"]')?.textContent).toContain("收件箱");
   });
 
-  it("导航里四项都在；「项目」「任务」接进挂载区，各自发自己的读查询", async () => {
+  it("导航里五项都在；「项目」「任务」「今日」接进挂载区，各自发自己的读查询", async () => {
     // 反向验证：把 `PageView` 的某个分支接错页（或忘了把新页加进 `PAGES`）⇒
     // 导航文案或挂载区里那句断言红。
     const called = scriptShell();
@@ -162,7 +179,7 @@ describe("应用外壳", () => {
     await waitFor(() => expect(called).toContain("list_tasks"));
 
     const nav = container.querySelector('[data-region="nav"]');
-    for (const label of ["收件箱", "项目", "任务", "计时"]) {
+    for (const label of ["收件箱", "项目", "任务", "计时", "今日"]) {
       expect(nav?.textContent, `导航里缺少「${label}」`).toContain(label);
     }
 
@@ -173,6 +190,10 @@ describe("应用外壳", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "任务" }));
     await waitFor(() => expect(called).toContain("list_tags"));
     expect(container.querySelector('[data-region="page"]')?.textContent).toContain("任务");
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "今日" }));
+    await waitFor(() => expect(called).toContain("stats_today"));
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("今日");
   });
 
   it("导航切到计时页；卸载时把事件会话撤掉（不留监听）", async () => {
