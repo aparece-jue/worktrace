@@ -22,6 +22,9 @@
  * P8 Task 3b 加第 8 块「数据」（导出 / 备份 / 恢复）：导航扩到八项，切过去发它自己的读查询
  * （`stats_today`，与今日页同一条）；**默认页仍是收件箱**，所以"挂载时恰好四条命令"那条
  * 判据一个字都不用改——它正是"新页面没有被偷偷设成默认页"的哨兵。
+ * P8 Task 7 起外壳还有**第二条订阅**：托盘视图跳转的定向事件（`worktrace:tray-view`，
+ * 见 `src/trayViewRequests.ts`），所以"挂载后开着几条订阅"从 1 变成 2；它**不发任何命令**，
+ * 上面那条命令集合判据因此不受影响。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -29,18 +32,22 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 
 const events = vi.hoisted(() => {
-  const listeners = new Map<number, () => void>();
+  const listeners = new Map<number, (event: { payload: unknown }) => void>();
   let next = 1;
   return {
     get open() {
       return listeners.size;
     },
-    async listen() {
+    async listen(_channel: string, handler: (event: { payload: unknown }) => void) {
       const id = next++;
-      listeners.set(id, () => undefined);
+      listeners.set(id, handler);
       return async () => {
         listeners.delete(id);
       };
+    },
+    /** 把一条事件投给所有在听的订阅（P8 Task 7 的托盘跳转用它）。 */
+    emit(payload: unknown) {
+      for (const handler of [...listeners.values()]) handler({ payload });
     },
     reset() {
       listeners.clear();
@@ -343,10 +350,105 @@ describe("应用外壳", () => {
     );
   });
 
+  it("托盘跳转：收到托盘事件就切到计时视图（P8 Task 7）", async () => {
+    // 反向验证：把 `App.tsx` 里那第二个 useEffect（`installTrayViewRequests`）删掉 ⇒ 本用例红
+    // （事件没人接）；把 `trayViewRequest` 的页名收窄去掉（任何 `page` 都切）⇒
+    // `src/__tests__/trayViewRequests.test.ts` 的"认不出的页名"那条红。
+    const called = scriptShell();
+    const { container } = render(<App />);
+    // 两条订阅：业务广播（`worktrace:event`）+ 托盘跳转（`worktrace:tray-view`）。
+    await waitFor(() => expect(events.open).toBe(2));
+    expect(called).toContain("list_tasks");
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("收件箱");
+
+    await act(async () => {
+      events.emit({ page: "timer", focus: false });
+    });
+
+    expect(await screen.findByText(/当前没有正在计时的会话/)).not.toBeNull();
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("计时");
+    expect(screen.queryByTestId("inbox-list")).toBeNull();
+  });
+
+  it("托盘「快速捕获」：切到收件箱**并把光标放进捕获输入框**（P8 Task 7 的判据）", async () => {
+    // 反向验证：把收件箱里那个聚焦 effect 删掉 ⇒ ③ 红；把 `focus` 意图丢掉
+    // （`intent?.focus === "capture"` 那一行删掉）⇒ ③ 红；把 `ref={captureRef}` 拿掉 ⇒ ③ 红；
+    // 把"输入框禁用时不消费意图"那一步删掉 ⇒ ③ 也红（挂载头一拍的 `focus()` 会被丢掉）。
+    scriptShell();
+    const { container } = render(<App />);
+    await waitFor(() => expect(events.open).toBe(2));
+
+    // 先离开收件箱（否则"切过去了"没有判别力：默认页就是收件箱）。
+    const input = await screen.findByPlaceholderText(/输入一句话，回车创建/);
+    expect(document.activeElement).not.toBe(input);
+    fireEvent.click(screen.getByRole("menuitem", { name: "今日" }));
+    await waitFor(() =>
+      expect(container.querySelector('[data-region="page"]')?.textContent).toContain("今日"),
+    );
+    expect(screen.queryByPlaceholderText(/输入一句话，回车创建/)).toBeNull();
+
+    await act(async () => {
+      events.emit({ page: "inbox", focus: true });
+    });
+
+    // ① 切回收件箱；② 输入框在屏上；③ **它就是当前焦点**（托盘那一下的落点）。
+    // 比的是"现在屏上那个输入框"而不是卸载前那个 DOM 节点：切页 = 收件箱重新挂载，
+    // 节点换了新的（拿旧节点比会红，而那不是判据本身）。
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("收件箱");
+    const focused = document.activeElement as HTMLInputElement | null;
+    expect(focused?.tagName).toBe("INPUT");
+    expect(focused?.placeholder).toBe("输入一句话，回车创建（项目可留空）");
+    expect(screen.getByPlaceholderText(/输入一句话，回车创建/)).toBe(focused);
+  });
+
+  it("托盘「快速捕获」但**人就在收件箱**：同样要把光标放进输入框（fix round 1 / Critical-1）", async () => {
+    // 反向验证：把收件箱聚焦 effect 的依赖从 `[captureFocusTick, disabled]` 改回
+    // `[disabled, tasks]` ⇒ 本用例红（这一拍 `disabled`/`tasks` 都没变，effect 不重跑，
+    // `document.activeElement` 停在 body 上）。这正是评审实测到的"点了托盘什么都不发生"。
+    scriptShell();
+    const { container } = render(<App />);
+    await waitFor(() => expect(events.open).toBe(2));
+
+    // 前置：默认页就是收件箱（**不切页**），输入框在屏上但没有焦点。
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("收件箱");
+    const input = await screen.findByPlaceholderText(/输入一句话，回车创建/);
+    input.blur();
+    expect(document.activeElement).not.toBe(input);
+
+    await act(async () => {
+      events.emit({ page: "inbox", focus: true });
+    });
+
+    // 页没换（还是收件箱、还是同一个输入框），但光标进去了。
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("收件箱");
+    expect(screen.getByPlaceholderText(/输入一句话，回车创建/)).toBe(input);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("托盘跳转的坏载荷：不切页、不崩（托盘的失败姿势是「什么都不做 + 诊断」）", async () => {
+    const called = scriptShell();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { container } = render(<App />);
+    await waitFor(() => expect(events.open).toBe(2));
+
+    await act(async () => {
+      // ① 页名不在托盘能要求的那两页里；② 一条**别的名字**的事件（业务层不认识它）——
+      // 两条都走同一条总线，两个订阅各自按自己的判据忽略，互不干扰。
+      events.emit({ page: "recovery", focus: true });
+      events.emit({ data_epoch: EPOCH, event: "something.else", revision: 6, at: AT, payload: {} });
+    });
+
+    // 默认页仍是收件箱：一条坏载荷都没把用户带走，也没有第二条业务查询被触发。
+    expect(container.querySelector('[data-region="page"]')?.textContent).toContain("收件箱");
+    expect(called).not.toContain("attention_overview");
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it("导航切到计时页；卸载时把事件会话撤掉（不留监听）", async () => {
     scriptShell();
     const { container, unmount } = render(<App />);
-    await waitFor(() => expect(events.open).toBe(1));
+    await waitFor(() => expect(events.open).toBe(2));
 
     fireEvent.click(screen.getByRole("menuitem", { name: "计时" }));
 

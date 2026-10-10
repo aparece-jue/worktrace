@@ -29,6 +29,12 @@
  * 用户处理完之后得有个消失路径；但**不做"到达即清"**——M8 要的正是"看得见原因"。
  * 用户自己点导航时它同样作废（新的一页有自己的上下文）。
  *
+ * P8 Task 7 起它多了第二个消费者：**托盘的视图跳转**（「快速捕获」⇒ 收件箱 + 聚焦捕获
+ * 输入框、「当前任务」⇒ 计时视图）。Rust 把托盘动作变成一条窗口作用域的定向事件
+ * （`worktrace:tray-view`），`src/trayViewRequests.ts` 收到后走的**就是**上面那个入口
+ * （`requestPage`），只是多带一个 `intent`：外壳把它转交给有输入框的那一页
+ * （`requestCaptureFocus`），自己不碰 DOM、也不持有焦点状态。
+ *
  * 「当前任务」不在外壳里存：计时页与状态栏的标题都读**快照自己的** `task_title`
  * （契约随 `task_id` / `task_row_version` 一起下发，见 `src/components/timerRequests.ts`
  * 的模块头）。外壳因此不持有任何跨页面的业务状态——`pageRequest` 带过来的那一句是
@@ -40,13 +46,14 @@
 
 import { useEffect, useState } from "react";
 import { Layout, Menu, Typography } from "antd";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 
 import "./App.css";
 import { ErrorNotice } from "./components/ErrorNotice";
 import { formatDuration } from "./components/duration";
 import { Data } from "./pages/Data";
 import { History } from "./pages/History";
-import { Inbox } from "./pages/Inbox";
+import { Inbox, requestCaptureFocus } from "./pages/Inbox";
 import { Projects } from "./pages/Projects";
 import { Recovery } from "./pages/Recovery";
 import { Tasks } from "./pages/Tasks";
@@ -55,6 +62,7 @@ import { Today } from "./pages/Today";
 import { domainState } from "./state/domainState";
 import { useHandshakePhase, useTimerSnapshot } from "./state/hooks";
 import { onPageRequest, type PageKey } from "./state/pageRequest";
+import { installTrayViewRequests } from "./trayViewRequests";
 
 const { Header, Sider, Content, Footer } = Layout;
 
@@ -144,10 +152,44 @@ export default function App() {
   useEffect(() => {
     // 「切到某页」的外部触发口（M8）：订阅 -> 返回退订函数。退订与订阅同源，
     // 所以 StrictMode 的双挂载也不会留下第二个处置者。
-    return onPageRequest((next, message) => {
+    //
+    // `intent` 是这次跳转的附加意图（P8 Task 7）：托盘的「快速捕获」要求到了收件箱
+    // **把光标放进捕获输入框**。外壳只把它转交给**有那个输入框的那一页**
+    // （`requestCaptureFocus`），自己不碰 DOM、也不持有焦点状态。
+    return onPageRequest((next, message, intent) => {
       setPage(next);
       setNotice(message ?? null);
+      if (intent?.focus === "capture") requestCaptureFocus();
     });
+  }, []);
+
+  useEffect(() => {
+    // 托盘视图跳转的接收侧（P8 Task 7）：Rust 的 `emit_to(主窗, "worktrace:tray-view", …)`
+    // 到了就翻成一次 `requestPage`（与上面同一个入口，不新造第二套切页机制）。
+    //
+    // `listen` 是异步的，所以卸载时要防"订阅回来得比卸载晚"：那时 aliveness 已过期，
+    // 立刻退订，绝不把 handler 留在事件总线上（StrictMode 的 mount→cleanup→mount
+    // 会真的走这条路径）。
+    //
+    // 失败**不改本地状态、也不弹提示**（跳转是体验项，订阅不上就当作没有它；托盘的抬窗与
+    // 其余动作都还在，见 `src/trayViewRequests.ts` 的模块头）——但**要留一行诊断**：
+    // 与本功能"失败只记诊断"的姿势一致（托盘那条路径也是 `eprintln` 诊断），
+    // 否则实机上"点了托盘不跳转"就查不出是"订阅没建起来"还是"事件没到"
+    // （fix round 1，评审 Minor-3）。
+    let alive = true;
+    let unlisten: UnlistenFn | null = null;
+    void installTrayViewRequests()
+      .then((off) => {
+        if (alive) unlisten = off;
+        else void off();
+      })
+      .catch((cause: unknown) => {
+        console.warn("[worktrace] 托盘跳转订阅失败，视图跳转本次不可用", cause);
+      });
+    return () => {
+      alive = false;
+      if (unlisten !== null) void unlisten();
+    };
   }, []);
 
   return (

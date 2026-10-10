@@ -341,7 +341,7 @@ fn finish_startup(
     started
 }
 
-/// 托盘动作去往哪一类入口（Task 4）。
+/// 托盘动作去往哪一类入口（Task 4；P8 Task 7 起「窗口动作」还要带视图）。
 ///
 /// 与 [`tray_dispatch`] 一起构成「动作 → 入口」的**唯一**一张表：`on_tray_action`
 /// 只 match 它，用例断言它。为什么单列一张表（fix round 1，评审 I2）：这段路由原先
@@ -349,8 +349,9 @@ fn finish_startup(
 /// 而「托盘动作与界面动作走同一批命令」这条要求，接缝正是这几行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayDispatch {
-    /// 窗口动作：抬起主窗（已关则按配置重建）。**不是**命令。
-    Window,
+    /// 窗口动作：**视图跳转**（`Some`）+ 抬起主窗（已关则按配置重建），或只抬窗（`None`）。
+    /// **不是**命令。
+    View(Option<tray::TrayView>),
     /// 复用 `commands::tray_pause_impl`（内部就是 `pause_timer_impl`）。
     Pause,
     /// 复用 `commands::tray_finish_impl`（内部就是 `transition_task_impl`，P8 Task 2d）。
@@ -362,10 +363,13 @@ pub enum TrayDispatch {
 /// 动作 → 去向。**只有这一处**决定托盘动作往哪走。
 ///
 /// 注意它只分类、不执行：真正落到命令体上的映射在 `commands::`（`tray_pause_impl` /
-/// `tray_finish_impl` / `tray_quit_impl`），所以托盘与 IPC 走的是同一批入口。
+/// `tray_finish_impl` / `tray_quit_impl`），所以托盘与 IPC 走的是同一批入口；
+/// 「去哪个视图」由 [`tray::tray_view_for`] 一处给出（P8 Task 7）。
 pub fn tray_dispatch(action: TrayAction) -> TrayDispatch {
     match action {
-        TrayAction::CurrentTask | TrayAction::QuickCapture => TrayDispatch::Window,
+        TrayAction::CurrentTask | TrayAction::QuickCapture => {
+            TrayDispatch::View(tray::tray_view_for(action))
+        }
         TrayAction::Pause => TrayDispatch::Pause,
         TrayAction::Finish => TrayDispatch::Finish,
         TrayAction::Quit => TrayDispatch::Quit,
@@ -374,17 +378,53 @@ pub fn tray_dispatch(action: TrayAction) -> TrayDispatch {
 
 /// 托盘动作 → 入口（Task 4 的接线点）：按 [`tray_dispatch`] 分派。
 ///
-/// - **窗口动作**（当前任务 / 快速捕获）：抬起主窗（已关则重建）；
+/// - **窗口动作**（当前任务 / 快速捕获）：**先**把视图跳转请求发给主窗，**再**抬起主窗
+///   （已关则重建）——抬窗不能丢（P7 的落点）。发在前面的理由：`show`/`set_focus` 之后
+///   事件循环可能立刻调度窗口消息，先发事件就不会出现"窗口已经在前台、跳转还没到"的
+///   空窗期（顺序本身不是判据，`tests/shell_lifecycle.rs` 钉的是两者都在）。
 /// - **服务动作**（暂停 / 完成 / 退出）：交给 `commands::` 那一侧——与 IPC 同一批入口，
 ///   托盘不另写业务逻辑。
+///
+/// **失败姿势**（托盘没有回执通道）：抬窗/重建失败 ⇒ 什么都不做 + 一行诊断，**不 panic**；
+/// 跳转事件发不出去 ⇒ 同样只记诊断，抬窗照旧。事件是"请前端切页"，前端没收到就是一次
+/// 点不动的跳转——按 `pageRequest` 的既有口径丢弃，不留待办队列。
+///
+/// # 一条**已知限制**：主窗被关掉后重建的那一次跳转丢失（fix round 1，评审 Critical-2）
+///
+/// 主窗**已经被关掉**时点「当前任务」/「快速捕获」：`emit_to` 是发给**尚不存在的窗口**
+/// （`emit_to(label, …)` 对不存在的 label 零接收者，通常也不返回 `Err` —— 所以下面那条
+/// 诊断**不一定**会出现），随后 [`window::raise_or_rebuild_main`] 才按 `tauri.conf.json`
+/// 重建它。新窗口是**全新 JS 上下文**，按默认页（收件箱）挂载 ⇒ **这一次跳转不会发生**。
+///
+/// 为什么**不补发**：补发要引入"待办视图队列 + 页面加载后重放"（或 `on_page_load` 钩子、
+/// 或新增一条 IPC），那是**第二套投递机制**，而本节前面刚写明"前端没收到就丢弃、不留待办
+/// 队列"这条口径；计划 §6.4-11 的判据也只要求"点到了要切视图"，没有要求跨进程生命周期补发。
+/// **代价**：关窗后从托盘回来只能落到默认页，用户要自己点一下导航。
+/// 如实登记在 `tests/manual-v01.md` §10.5 与 `docs/validation/p8-acceptance.md` §3。
 fn on_tray_action(app: &AppHandle, action: TrayAction) {
     match tray_dispatch(action) {
-        // P7 的落点是「把主窗抬起来」：视图跳转（定位到当前任务 / 聚焦捕获输入框）
-        // 依赖前端的视图与路由，而 P7 是固定布局、没有路由——登记为 P8。
-        TrayDispatch::Window => match window::raise_or_rebuild_main(app) {
-            Ok(plan) => println!("[worktrace] tray: {} -> {plan:?}", action.menu_id()),
-            Err(error) => eprintln!("[worktrace] tray: {} failed: {error}", action.menu_id()),
-        },
+        TrayDispatch::View(view) => {
+            // 跳转先发。`emit_to` 失败只记诊断：它不是业务写，也不该拦住抬窗。
+            // ⚠️ 主窗不存在时**通常不会**走到这里（零接收者，不算 `Err`）⇒ 这一行
+            // 有没有，不足以判断"跳转到底有没有送到"；见上面那条已知限制。
+            if let Some(view) = view {
+                if let Err(error) =
+                    app.emit_to(window::MAIN_WINDOW_LABEL, tray::TRAY_VIEW_EVENT, view)
+                {
+                    eprintln!(
+                        "[worktrace] tray: {} view request failed: {error}",
+                        action.menu_id()
+                    );
+                }
+            }
+            match window::raise_or_rebuild_main(app) {
+                Ok(plan) => println!(
+                    "[worktrace] tray: {} -> {plan:?} {view:?}",
+                    action.menu_id()
+                ),
+                Err(error) => eprintln!("[worktrace] tray: {} failed: {error}", action.menu_id()),
+            }
+        }
         TrayDispatch::Pause => commands::spawn_tray_pause(app),
         TrayDispatch::Finish => commands::spawn_tray_finish(app),
         TrayDispatch::Quit => commands::spawn_tray_quit(app),
@@ -439,6 +479,32 @@ mod tests {
         assert!(
             !path.exists() || std::fs::read_to_string(&path).unwrap().is_empty(),
             "成功路径不该写 startup.failed"
+        );
+    }
+
+    /// 发给前端的跳转载荷就是前端读的那两个键（P8 Task 7）。
+    ///
+    /// 前端的消费方（`src/trayViewRequests.ts`）按 `page` / `focus` 取值，
+    /// 所以**序列化形状**是契约的一部分：在这里钉住 JSON 逐字（字段名、字符串取值、
+    /// 布尔）。前端侧的对称判据在 `src/types/__tests__/event-constants.test.ts`
+    /// （事件名与两个页名读本仓源码）与 `src/__tests__/trayViewRequests.test.ts`（消费）。
+    ///
+    /// 反向验证：把 `TrayView` 的字段改名（或把 `page` 换成枚举）⇒ 这一条立刻红。
+    #[test]
+    fn the_tray_view_payload_serializes_to_the_two_keys_the_frontend_reads() {
+        // 「快速捕获」⇒ 收件箱 + 聚焦捕获输入框（F-001 的视图跳转）。
+        let quick = tray::tray_view_for(TrayAction::QuickCapture).expect("快速捕获要有视图跳转");
+        assert_eq!(
+            serde_json::to_value(quick).unwrap(),
+            serde_json::json!({ "page": "inbox", "focus": true }),
+            "载荷字段名与取值都是契约"
+        );
+
+        // 「当前任务」⇒ 计时视图，不要求聚焦。
+        let current = tray::tray_view_for(TrayAction::CurrentTask).expect("当前任务要有视图跳转");
+        assert_eq!(
+            serde_json::to_value(current).unwrap(),
+            serde_json::json!({ "page": "timer", "focus": false })
         );
     }
 }

@@ -37,7 +37,7 @@ const events = vi.hoisted(() => {
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 
-import { Inbox } from "../Inbox";
+import { Inbox, requestCaptureFocus, takeCaptureFocus } from "../Inbox";
 import { domainState } from "../../state/domainState";
 import { EVENT_DOMAIN_CHANGED, type TaskQueryResult } from "../../types/ipc";
 import {
@@ -103,6 +103,10 @@ afterEach(async () => {
   await domainState.stop();
   events.reset();
   clearMocks();
+  // 聚焦意图是**模块级**的一次性意图（P8 Task 7）：用例之间不互相带
+  // （否则后一条用例会因为前一条留下的意图而"自己"聚焦）。**清理在 `cleanup()` 之后**：
+  // 先清后卸的话，卸载那一拍如果又有人请求聚焦，意图就会留到下一个用例里。
+  takeCaptureFocus();
 });
 
 describe("收件箱：F-001 快速捕获", () => {
@@ -569,5 +573,104 @@ describe("收件箱：旧响应与水位（fix round 2）", () => {
 
     expect(domainState.getView().invalidated).toBe(invalidated + 1);
     await waitFor(() => expect(backend.count("list_tasks")).toBe(before + 1));
+  });
+});
+
+describe("收件箱：托盘的「快速捕获」落点（P8 Task 7）", () => {
+  /** 捕获输入框（页面上唯一那个 placeholder 是它的）。 */
+  function captureInput(): HTMLElement {
+    return screen.getByPlaceholderText(/输入一句话，回车创建/);
+  }
+
+  afterEach(() => {
+    // 意图是模块级的：用例之间不互相带（否则后一条用例会因为前一条留下的意图而"自己"聚焦）。
+    expect(takeCaptureFocus()).toBe(false);
+  });
+
+  it("被要求聚焦时，捕获输入框拿到焦点（托盘点「快速捕获」的落点）", async () => {
+    // 反向验证：把页里那个聚焦 effect 删掉 ⇒ `document.activeElement` 不再是输入框，下面红；
+    // 把 `hasPendingCaptureFocus()` 那一步换成 `takeCaptureFocus()`（先取走再找落点）⇒
+    // 第二次挂载那条用例红——意图被一次早跑的 effect 吃掉了。
+    backend = createBackend();
+    backend.tasks = [];
+    requestCaptureFocus();
+    await mountInbox();
+
+    expect(document.activeElement).toBe(captureInput());
+    // ① 消费一次就没了：再挂一次页不会再抢焦点。
+    expect(takeCaptureFocus()).toBe(false);
+  });
+
+  it("没被要求时不抢焦点（默认挂载后焦点不在输入框上）", async () => {
+    backend = createBackend();
+    backend.tasks = [];
+    takeCaptureFocus(); // 清掉可能残留的意图（正常路径上它本来就是 false）
+    await mountInbox();
+
+    expect(document.activeElement).not.toBe(captureInput());
+    expect(takeCaptureFocus()).toBe(false);
+  });
+
+  it("意图是**一次性**的：消费之后不再抢焦点（用户随后可以自由点别处）", async () => {
+    backend = createBackend();
+    backend.tasks = [];
+    requestCaptureFocus();
+    await mountInbox();
+    expect(document.activeElement).toBe(captureInput());
+
+    // 用户把光标移走：页面重渲染（失效 → 重拉）不得把焦点抢回输入框。
+    captureInput().blur();
+    expect(document.activeElement).not.toBe(captureInput());
+    await changed(6);
+    expect(document.activeElement).not.toBe(captureInput());
+    expect(takeCaptureFocus()).toBe(false);
+  });
+
+  it("页面**已经挂着**时再被要求聚焦：当场聚焦，且只消费一次（fix round 1 / Critical-1）", async () => {
+    // 反向验证（这一条正是为它写的）：把聚焦 effect 的依赖从 `[focusVersion, disabled]`
+    // 改回 `[disabled, tasks]`、或把 `useSyncExternalStore` 那一步删掉（只改模块级变量）
+    // ⇒ 下面第一句红——**模块级变量不是 React 状态**，改它不调度重渲染，effect 不重跑，
+    // 光标停在上一次的地方（旧实现的实测现象：点了托盘什么都不发生）。
+    // 再把"消费即清"换成不清（或把 `hasPendingCaptureFocus` 恒真）⇒ 最后那句红。
+    backend = createBackend();
+    backend.tasks = [];
+    await mountInbox();
+    takeCaptureFocus(); // 挂载这一拍没有待办意图（正控：下面那次才是被要求的那次）
+    captureInput().blur();
+    expect(document.activeElement).not.toBe(captureInput());
+
+    // 页面不重挂、`disabled`/`busy` 都不变——只有"被要求聚焦"这一件事发生。
+    // （`await act` 只是让 React 把这次外部 store 变更冲刷干净；判据是紧随其后的同步断言。）
+    await act(async () => {
+      requestCaptureFocus();
+    });
+
+    expect(document.activeElement).toBe(captureInput());
+    // 消费一次就没了：把光标移走之后，再没有任何东西会把它抢回来。
+    expect(takeCaptureFocus()).toBe(false);
+    captureInput().blur();
+    await changed(6);
+    expect(document.activeElement).not.toBe(captureInput());
+  });
+
+  it("连续两次被要求：两次都聚焦（第二次不是「被第一次吃掉」）", async () => {
+    // 判据是"每一次请求都在它的那一拍落到实处"：计数器只增不减，所以第二次也会重跑。
+    backend = createBackend();
+    backend.tasks = [];
+    await mountInbox();
+    takeCaptureFocus();
+
+    captureInput().blur();
+    await act(async () => {
+      requestCaptureFocus();
+    });
+    expect(document.activeElement).toBe(captureInput());
+
+    captureInput().blur();
+    await act(async () => {
+      requestCaptureFocus();
+    });
+    expect(document.activeElement).toBe(captureInput());
+    expect(takeCaptureFocus()).toBe(false);
   });
 });

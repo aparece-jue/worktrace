@@ -21,6 +21,11 @@
  * P8 Task 3b 加第 8 项 `data`（导出 / 备份 / 恢复）：它和别的页面一样只是**一个键**
  * ——没有任何跳转请求指向它（`requestPage` 的现有消费者只有 `RECOVERY_REQUIRED` 那一档），
  * 用户从导航进去。
+ *
+ * P8 Task 7 起托盘视图跳转也走这个口（第二处消费者）：它按页名发**同一个联合类型**的
+ * 字符串（Rust 侧的 `platform::tray::TRAY_VIEW_PAGE_*`，两侧由
+ * `src/types/__tests__/event-constants.test.ts` 与 `src-tauri/tests/shell_lifecycle.rs`
+ * 各读一次源码核对）。
  */
 export type PageKey =
   | "inbox"
@@ -38,15 +43,37 @@ export type PageKey =
  * `notice` 是可选的一句说明，**原样来自 Rust 的 `ErrorResponse.message`**（R8：用户文案
  * 只有那一个来源）。带上它是为了别把门禁的原因丢掉：跳转之后发起那一条命令的页面已经
  * 卸载，它自己的提示条也就没了，外壳据此把它显示在页面区上方。
+ *
+ * `intent` 是这次跳转的**附加意图**（可选；P8 Task 7 加的一个参数，不是第二个入口）：
+ * 今天只有一种——`{ focus: "capture" }`，托盘点「快速捕获」时要求到了收件箱**把光标放进
+ * 捕获输入框**。它不改变"切到哪一页"这件事，所以处置者忽略它也不会切错页。
  */
-export type PageRequestHandler = (page: PageKey, notice?: string) => void;
+export type PageRequestHandler = (
+  page: PageKey,
+  notice?: string,
+  intent?: PageRequestIntent,
+) => void;
+
+/**
+ * 跳转的附加意图（见 {@link PageRequestHandler}）。
+ *
+ * `focus: "capture"` = 到了目标页把捕获输入框聚焦一次。**它不是焦点命令**：只由收件箱
+ * （有捕获输入框的那一页）消费，别的页面读到也不做任何事。
+ */
+export interface PageRequestIntent {
+  focus?: "capture";
+}
 
 const handlers = new Set<PageRequestHandler>();
 
-/** 请求切到某页（可带一句说明）。同步分发：调用方在失败处理的 `catch` 里直接调它。 */
-export function requestPage(page: PageKey, notice?: string): void {
+/**
+ * 请求切到某页（可带一句说明与一个附加意图）。同步分发：调用方在失败处理的 `catch` 里
+ * 直接调它；托盘的视图跳转由 `src/trayViewRequests.ts` 在收到 Rust 的定向事件后调它
+ * （**不新造第二套切页机制**）。
+ */
+export function requestPage(page: PageKey, notice?: string, intent?: PageRequestIntent): void {
   // 复制一份再遍历：处置者可能在回调里退订（React 的卸载路径）。
-  for (const handler of [...handlers]) handler(page, notice);
+  for (const handler of [...handlers]) handler(page, notice, intent);
 }
 
 /** 订阅切页请求；返回退订函数（外壳在 `useEffect` 里用）。 */

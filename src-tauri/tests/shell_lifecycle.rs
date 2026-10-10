@@ -12,11 +12,17 @@
 //!   （只改 label）、且登记进权限名单；
 //! - 托盘的「暂停」「退出」落在**与 IPC 相同的**命令体/服务入口上（用效果相等与
 //!   显式退出的库内证据断言），「完成」同样（P8 Task 2d：与 IPC 的 `transition_task_impl`
-//!   效果逐项相等；没有正在计时的任务时**零写入**）。
+//!   效果逐项相等；没有正在计时的任务时**零写入**）；
+//! - **视图跳转的目标页**（P8 Task 7：「快速捕获」⇒ 收件箱 + 聚焦、「当前任务」⇒ 计时视图）
+//!   与"页名与前端 `PageKey` 逐字相同"这条跨语言契约（读前端源码核对，见
+//!   `the_tray_view_pages_are_the_frontend_page_keys_and_nothing_else`）。
 //!
 //! **真实托盘图标/菜单交互、关掉全部窗口后仍然计时**在集成测试里不可能成立：
 //! 测试进程里没有事件循环，也就没有窗口与托盘（`tauri::test` 的 mock 运行时本轮
-//! 没有启用）。步骤与记录表见 `tests/manual-shell.md`。
+//! 没有启用）⇒ "点一下托盘，那一页真的切过来了"由**前端**用例钉住
+//! （前端 `src/__tests__/trayViewRequests.test.ts` 与 `src/__tests__/App.test.tsx`），
+//! 这里钉的是它上游那张表。步骤与记录表见 `tests/manual-v01.md`（§托盘视图跳转）
+//! 与 `tests/manual-shell.md`。
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -163,17 +169,28 @@ fn a_menu_id_maps_back_to_its_own_action() {
 /// **动作 → 入口的路由表**（fix round 1，评审 I2）：`on_tray_action` 只 match
 /// `tray_dispatch`，所以这张表就是「托盘动作与界面动作走同一批命令」那条要求的接缝。
 /// 把 `Pause` 接到 `Quit` 上（一次粘贴错误）必须在这里红——原先它谁都不会吵醒。
+///
+/// P8 Task 7 起两个窗口动作**带上视图**（`TrayDispatch::View(Some(..))`）：只抬窗不再够，
+/// 所以这里比的是 `tray_view_for` 那**一处**给出的目标页，不再是笼统的 `Window`。
 #[test]
 fn each_tray_action_is_dispatched_to_its_own_entry() {
+    let view = |action: TrayAction| match tray_dispatch(action) {
+        TrayDispatch::View(Some(view)) => view,
+        other => panic!(
+            "{} 必须是带视图的窗口动作，实际 {other:?}",
+            action.menu_id()
+        ),
+    };
+
     assert_eq!(
-        tray_dispatch(TrayAction::CurrentTask),
-        TrayDispatch::Window,
-        "当前任务：抬起主窗（P7 的落点），不是命令"
+        view(TrayAction::CurrentTask),
+        view_of(tray::TRAY_VIEW_PAGE_TIMER, false),
+        "当前任务：切到计时视图 + 抬起主窗（P7 的抬窗仍在），不是命令"
     );
     assert_eq!(
-        tray_dispatch(TrayAction::QuickCapture),
-        TrayDispatch::Window,
-        "快速捕获：同样只抬窗（跳转输入框归 P8）"
+        view(TrayAction::QuickCapture),
+        view_of(tray::TRAY_VIEW_PAGE_INBOX, true),
+        "快速捕获：切到收件箱**并聚焦捕获输入框** + 抬起主窗（P8 Task 7 的判据）"
     );
     assert_eq!(
         tray_dispatch(TrayAction::Pause),
@@ -195,7 +212,7 @@ fn each_tray_action_is_dispatched_to_its_own_entry() {
     let service: Vec<TrayDispatch> = TrayAction::ALL
         .iter()
         .map(|action| tray_dispatch(*action))
-        .filter(|dispatch| *dispatch != TrayDispatch::Window)
+        .filter(|dispatch| !matches!(dispatch, TrayDispatch::View(_)))
         .collect();
     assert_eq!(
         service,
@@ -204,7 +221,121 @@ fn each_tray_action_is_dispatched_to_its_own_entry() {
             TrayDispatch::Finish,
             TrayDispatch::Quit
         ],
-        "只有暂停、完成与退出是服务动作（其余只碰窗口）"
+        "只有暂停、完成与退出是服务动作（其余是带视图的窗口动作）"
+    );
+
+    // 窗口动作恰好两个，而且**两个都要有视图**（P8 Task 7 把 P7 那句"只抬窗"收掉了）。
+    let views: Vec<&'static str> = TrayAction::ALL
+        .iter()
+        .filter_map(|action| match tray_dispatch(*action) {
+            TrayDispatch::View(Some(view)) => Some(view.page),
+            TrayDispatch::View(None) => {
+                panic!(
+                    "{} 是窗口动作却没有视图：P8 Task 7 要求它跳转",
+                    action.menu_id()
+                )
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        views,
+        vec![tray::TRAY_VIEW_PAGE_TIMER, tray::TRAY_VIEW_PAGE_INBOX],
+        "窗口动作恰好两个（当前任务、快速捕获），各自带一个目标页"
+    );
+}
+
+/// 造一个期望的 [`tray::TrayView`]（用例里不手抄字段名）。
+fn view_of(page: &'static str, focus: bool) -> tray::TrayView {
+    tray::TrayView { page, focus }
+}
+
+/// **视图跳转表本身**（P8 Task 7）：动作 → (页, 是否聚焦)。
+///
+/// 为什么单列一条：`tray_view_for` 是"点到什么 → 去哪个视图"的唯一一处，
+/// 把两个动作对调（快速捕获跳去计时视图）不会让别的用例变红——而计划 §6.4-11 的判据
+/// 正是这一对。非窗口动作返回 `None`（它们不该跳转）。
+#[test]
+fn only_the_two_window_actions_request_a_view_and_the_targets_are_fixed() {
+    assert_eq!(
+        tray::tray_view_for(TrayAction::QuickCapture),
+        Some(view_of(tray::TRAY_VIEW_PAGE_INBOX, true)),
+        "「快速捕获」⇒ 收件箱 + 聚焦捕获输入框（F-001）"
+    );
+    assert_eq!(
+        tray::tray_view_for(TrayAction::CurrentTask),
+        Some(view_of(tray::TRAY_VIEW_PAGE_TIMER, false)),
+        "「当前任务」⇒ 计时视图（不要求聚焦）"
+    );
+
+    for action in [TrayAction::Pause, TrayAction::Finish, TrayAction::Quit] {
+        assert_eq!(
+            tray::tray_view_for(action),
+            None,
+            "{} 是服务动作，不该顺带切页",
+            action.menu_id()
+        );
+    }
+    // 聚焦只挂在「快速捕获」上：另外那一条明确**不**要求聚焦（否则每次点「当前任务」
+    // 都会去动收件箱输入框的焦点，而那条路径根本不该碰它）。
+    assert!(
+        tray::tray_view_for(TrayAction::QuickCapture).unwrap().focus,
+        "「快速捕获」要求聚焦输入框"
+    );
+    assert!(
+        !tray::tray_view_for(TrayAction::CurrentTask).unwrap().focus,
+        "「当前任务」不该去动输入框的焦点"
+    );
+}
+
+/// **页名与前端 `PageKey` 逐字相同**（P8 Task 7 的跨语言契约）。
+///
+/// 跳转载荷里的 `page` 是前端 `src/state/pageRequest.ts` 那个联合类型的字符串——
+/// 前端拿它直接调 `requestPage`，两侧对不上就是"点了托盘什么都不发生"（而且没有任何
+/// 编译期报错）。所以这里**读两份前端源码**核对：
+///
+/// - `src/state/pageRequest.ts`：两个页名必须出现在 `PageKey` 联合类型**内部**；
+/// - `src/trayViewRequests.ts`：`TRAY_VIEW_EVENT` 的**值**必须与 Rust 这边逐字相同
+///   （前端按这个名字 `listen`；常量住在它那里，所以不在 `pageRequest.ts` 里找）。
+///
+/// 与前端 `src/types/__tests__/event-constants.test.ts` 是**同一份契约的两个方向**
+/// （那边读本仓源码核对常量）。反向验证：把 `TRAY_VIEW_PAGE_INBOX` 改成 `"inbox2"`，
+/// 或者改 `TRAY_VIEW_EVENT` 的名字只改一侧 ⇒ 这一条红。
+///
+/// 路径：前端在**仓库根**（`frontendDist: "../dist"`，即 `src-tauri/` 的上一级），
+/// 所以是 `<manifest>/../src/...`（不是镜像里的 `worktrace-web/`）。
+/// WSL 镜像的布局（前端独立目录 + 没有仓库根那一级）跑不了这一条 ⇒ **只在仓库侧跑**
+/// （`p7t6b-web-gate.ps1` / 仓库里的 `cargo test`），这是 Ruling P8-3 同一条边界。
+#[test]
+fn the_tray_view_pages_are_the_frontend_page_keys_and_nothing_else() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read_frontend = |relative: &str| -> String {
+        let path = manifest.join("..").join(relative);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("读不到前端 {}：{error}", path.display()))
+            .replace("\r\n", "\n")
+    };
+    let page_request = read_frontend("src/state/pageRequest.ts");
+    let tray_requests = read_frontend("src/trayViewRequests.ts");
+
+    // 负控：那两个页名不是随便什么字符串——它们就是 `PageKey` 联合类型里的成员。
+    let union = page_request
+        .split("export type PageKey =")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("pageRequest.ts 里应当有 `export type PageKey = …;`");
+    for page in [tray::TRAY_VIEW_PAGE_INBOX, tray::TRAY_VIEW_PAGE_TIMER] {
+        assert!(
+            union.contains(&format!("\"{page}\"")),
+            "`{page}` 必须在 `PageKey` 联合类型**内部**（不在类型外面的某句话里）"
+        );
+    }
+
+    // 事件名：前端必须按同一个名字订阅（两个方向各写一份，靠这一条对齐）。
+    assert!(
+        tray_requests.contains(&format!("\"{}\"", tray::TRAY_VIEW_EVENT)),
+        "前端（src/trayViewRequests.ts）必须按同一个事件名订阅托盘跳转：{}",
+        tray::TRAY_VIEW_EVENT
     );
 }
 

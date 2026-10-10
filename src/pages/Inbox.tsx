@@ -41,8 +41,9 @@
  * 让这里的 `useEffect` 重拉一次数据。
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, Button, Empty, Flex, Input, Select, Space, Tag, Typography } from "antd";
+import type { InputRef } from "antd";
 
 import {
   clarifyReady,
@@ -90,6 +91,87 @@ const PAGE_SIZE = 50;
 
 /** 「无项目」在下拉里的哨兵值（antd 的 Select 不适合拿 `null` 当取值）。 */
 const NO_PROJECT = "";
+
+/**
+ * 「把光标放进捕获输入框」的**一次性意图**（P8 Task 7）。
+ *
+ * 托盘的「快速捕获」要求"切到收件箱 + 聚焦捕获输入框"（计划 §6.4-11）。前半个由
+ * `src/trayViewRequests.ts` 经 `requestPage` 交给外壳；后半个落在**有输入框的这一页**：
+ * 意图记在这里、由收件箱**消费一次**（[`takeCaptureFocus`]），消费即清。
+ *
+ * 为什么不是 prop：外壳不持有业务状态，而"聚焦"是**一次事件**不是一份状态——用 prop 传
+ * 下去还得在聚焦后清掉它（否则每次重渲染都会把光标抢回输入框，正在列表上点按钮的用户会
+ * 突然失去焦点）。这里与 `pageRequest` 同一姿势：一次请求、没有队列。
+ *
+ * ⚠️ **只置一个模块级布尔是不够的**（fix round 1，评审 Critical-1；实测确认）：
+ * 收件箱**已经挂着**时（最小化后回来、被别的窗口遮挡、用户本来就在这一页）
+ * `requestCaptureFocus()` 不会让 React 重渲染——**模块级变量不是 React 状态**，
+ * 改它不等于调度一次更新 ⇒ 聚焦 effect 不重跑 ⇒ ① 点托盘什么都不发生，而意图还留着
+ * ⇒ ② 等下一次 `busy` 翻转或任意 `domain.changed` 重拉时，把光标**抢**进捕获框。
+ *
+ * 所以本模块对外是一个用 [`useSyncExternalStore`] 读的**外部存储**
+ * （[`subscribeCaptureFocus`] + [`captureFocusVersion`]）：请求时既置意图、也通知订阅者，
+ * 于是**已挂载**的那条路径会重渲染并让"三段式"判据重跑一次；而挂载路径本来就会跑一次
+ * effect。两条路走的是**同一段**判据（`hasPending` → 输入框真的可聚焦 → `take`），
+ * 语义不会分叉。
+ *
+ * 本页没挂载时意图留在原地：外壳收到跳转 ⇒ 收件箱挂载 ⇒ 立刻消费（同一拍内）。
+ */
+let captureFocusPending = false;
+
+/**
+ * 第几次聚焦请求（**单调递增**，`useSyncExternalStore` 的快照值）。
+ *
+ * 它只用来回答"有没有变过"：订阅者拿它当快照比较（变了 ⇒ 重渲染 ⇒ effect 重跑）。
+ * 不需要回绕处理：JS 的 `number` 要加到 `2^53` 才丢精度，而这个计数每次点托盘才 +1。
+ * 它**不导出**：外部只表达"请聚焦一次"，不需要知道是第几次。
+ */
+let captureFocusVersion = 0;
+
+/** 订阅者（`useSyncExternalStore` 注册；同一时刻最多一个——只有收件箱会订阅）。 */
+const captureFocusSubscribers = new Set<() => void>();
+
+/** `useSyncExternalStore` 的订阅端：返回退订函数（与 `pageRequest` 同形）。 */
+function subscribeCaptureFocus(onChange: () => void): () => void {
+  captureFocusSubscribers.add(onChange);
+  return () => {
+    captureFocusSubscribers.delete(onChange);
+  };
+}
+
+/** `useSyncExternalStore` 的快照端：读那个只增不减的版本号。 */
+function captureFocusSnapshot(): number {
+  return captureFocusVersion;
+}
+
+/** 请求"到了收件箱就把捕获输入框聚焦一次"（`App.tsx` 转发跳转意图时调）。 */
+export function requestCaptureFocus(): void {
+  captureFocusPending = true;
+  captureFocusVersion += 1;
+  // 复制一份再遍历：订阅者可能在回调里退订（React 的卸载路径）。
+  for (const notify of [...captureFocusSubscribers]) notify();
+}
+
+/** 还欠着一次聚焦吗？（**只读**，见 [`takeCaptureFocus`] 的说明。） */
+export function hasPendingCaptureFocus(): boolean {
+  return captureFocusPending;
+}
+
+/**
+ * 取走那个一次性意图（取走即清）。**收件箱是唯一消费者**：别的页面读到也不会做任何事。
+ *
+ * 与 [`hasPendingCaptureFocus`] 分开两步（读→聚焦→再取走）：先取走再找落点的话，
+ * 落点还没挂上（`captureRef.current === null`）的那一次就把意图吃掉了——托盘点一下
+ * 什么都没发生，而"重试"也无从谈起。
+ *
+ * 为什么放在这里而不是 `src/state/pageRequest.ts`：那是"切页"的口，不认识任何页面的
+ * 内部结构（见它的模块头）；而"捕获输入框在哪"只有本页知道。
+ */
+export function takeCaptureFocus(): boolean {
+  const pending = captureFocusPending;
+  captureFocusPending = false;
+  return pending;
+}
 
 /** 02 §5：`Inbox → Ready`、`Clarifying → Ready` 合法，服务端也只接受这两个。 */
 function canClarify(status: TaskStatus): boolean {
@@ -192,6 +274,14 @@ export function Inbox() {
    */
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  /**
+   * 捕获输入框的落点（P8 Task 7）：托盘「快速捕获」要求把光标放在这里。
+   *
+   * 用 `Input` 的 ref（antd 的 `InputRef.focus()`）而不是查 DOM：这一页里没有别的
+   * 输入框、也不该靠 `data-testid` 之类的选择器去找自己的控件。
+   */
+  const captureRef = useRef<InputRef>(null);
 
   /**
    * **本页这一次读**的视图水位（fix round 2）：收件箱列表是一份视图（两条查询在
@@ -373,6 +463,37 @@ export function Inbox() {
 
   const disabled = epoch === null || busy;
 
+  /**
+   * 托盘的「快速捕获」留下的一次性意图（P8 Task 7）：**消费一次**就不再有。
+   *
+   * 判据三段（`hasPending` → 输入框真的可聚焦 → `take`）：意图是**一次事件**，不是一份
+   * 状态——落不到实处（还没挂载 / 还是禁用态 / 落点还没挂上）时**不能**取走它，否则托盘点
+   * 一下就被这一次早跑的 effect 吃掉了；而落到了实处就必须立刻取走，否则每次重渲染都会把
+   * 用户的光标抢回输入框。
+   *
+   * 依赖里的两项各有分工（fix round 1，评审 Critical-1）：
+   *
+   * - `focusVersion`（[`useSyncExternalStore`] 读到的版本号）：**页面已经挂着**时的那条
+   *   路径——点托盘不改变 `disabled`/`busy`，只有这个版本号会变 ⇒ 重渲染 ⇒ 本 effect 重跑
+   *   （旧实现只改模块级布尔，**根本不会重渲染**：点托盘什么都不发生，意图还留着，
+   *   等下一次重拉把光标抢进来）；
+   * - `disabled`：挂载头一拍 `epoch` 还是 `null`，输入框是禁用态，此刻 `focus()` 落空
+   *   ⇒ 这次**不消费**，等禁用解除后重跑。
+   */
+  const focusVersion = useSyncExternalStore(subscribeCaptureFocus, captureFocusSnapshot);
+
+  useEffect(() => {
+    if (!hasPendingCaptureFocus()) return;
+    const input = captureRef.current;
+    // ⚠️ 光看 `disabled` 不够：挂载头一拍 `epoch` 还是 `null`，**输入框本身是禁用态**，
+    // 此刻 `focus()` 会被浏览器丢掉（实测：`document.activeElement` 仍是 `body`）。
+    // 所以这一拍**不消费**意图——禁用一解除（`disabled` 变化）这个 effect 会重跑。
+    if (input === null || input.input?.disabled !== false) return;
+    input.focus();
+    // 到这一步聚焦是真的发生过了，这一次意图就此用掉（它是一次事件，不是一份状态）。
+    takeCaptureFocus();
+  }, [focusVersion, disabled]);
+
   return (
     <Flex vertical gap={16}>
       <Typography.Title level={5} style={{ margin: 0 }}>
@@ -381,6 +502,7 @@ export function Inbox() {
 
       <Space.Compact style={{ width: "100%" }}>
         <Input
+          ref={captureRef}
           placeholder="输入一句话，回车创建（项目可留空）"
           value={draft}
           disabled={disabled}

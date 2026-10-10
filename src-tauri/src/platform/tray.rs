@@ -25,6 +25,34 @@
 //! 今天没有第二个预留项）。
 //! 显示 HUD 的托盘项属 V0.1b，本计划不加。
 //!
+//! ## 视图跳转：跳到哪一页由**这张表**给（P8 Task 7）
+//!
+//! [`TrayAction::CurrentTask`] / [`TrayAction::QuickCapture`] 不只是"抬窗"：
+//!
+//! - 「当前任务」要切到计时视图；
+//! - 「快速捕获」要切到收件箱并**聚焦捕获输入框**（计划 §6.4-11）。
+//!
+//! 本模块只回答"点到了什么、该去哪个视图"（[`tray_view_for`]），**怎么跳**是前端的事
+//! （`src/state/pageRequest.ts` 的 `requestPage` + `src/App.tsx` 的订阅，M8 建立的那一套）；
+//! 组合根 `lib.rs` 把 [`TrayView`] 变成一条窗口作用域的定向事件后**照旧抬窗**（抬窗不能丢）。
+//!
+//! **通道为什么是一条新窗口事件而不是广播**：`services/events.rs` 那对名字
+//! （`domain.changed` / `timer.tick`）是**业务广播**的封闭词表——它们的两个字段
+//! （`data_epoch` / `revision`）说的都是"这次业务写把库推到了哪一版"，四个消费方按那套
+//! 去重规则接纳。而"用户点了托盘的哪一项"两样都不是：它不改库、没有版本、也不该被卷进
+//! 去重规则。所以它走**窗口作用域**的定向事件：[`TRAY_VIEW_EVENT`] + `emit_to(主窗 label, …)`，
+//! 只发给主窗，不新建窗口、不动信封。
+//! （注：理由**不是**"混进 `worktrace:event` 会让每个窗口白重拉一遍"——`domainState.onEvent`
+//! 对不认识的事件名是**直接忽略**的；理由就是上面那条：信封是业务事实的词表。）
+//! 签名的第二处（前端）在同名常量里，由 `src/types/__tests__/event-constants.test.ts`
+//! 读本文件核对（前端在**仓库根**，所以路径不带 `src-tauri/` 前缀；另一侧的反向判据在
+//! `tests/shell_lifecycle.rs`）。
+//!
+//! **一条已知限制**（fix round 1，评审 Critical-2）：主窗**已经被关掉**时点这两个动作，
+//! 跳转请求发给的是尚不存在的窗口（零接收者），随后才重建 ⇒ 新窗口是全新 JS 上下文、
+//! 按默认页（收件箱）挂载，**这一次跳转丢失**。要不要补发由组合根决定，理由与代价写在
+//! `lib.rs::on_tray_action` 的同名小节；实机判据见 `tests/manual-v01.md` §10.5。
+//!
 //! ## 图标
 //!
 //! 用 [`tauri::AppHandle::default_window_icon`]（`tauri.conf.json` 的 `bundle.icon`，
@@ -129,6 +157,57 @@ pub const MENU_ITEMS: [MenuItemSpec; 5] = [
         action: Some(TrayAction::Quit),
     },
 ];
+
+/// 托盘动作要求的**视图跳转**（P8 Task 7）。
+///
+/// `page` 是**前端 `PageKey` 的字符串**（前端 `src/state/pageRequest.ts` 的联合类型）
+/// ——两侧同名，前端 `requestPage` 直接吃它，不需要第二张"名字 → 页面"的对照表。
+/// `focus` 说"到了那一页还要把光标放进捕获输入框"：只有「快速捕获」为真。
+///
+/// 为什么用 `&'static str` 而不是 Rust 侧再枚举一遍八个页面：本模块只发**两个**目标，
+/// 再造一个八变体的枚举就是第二份 `PageKey`（而它一个消费者都没有）。
+///
+/// `Serialize` 按全路径派生（本模块不 `use serde`）：它的形状就是发给前端的那两个键
+/// （`{page, focus}`），由 `src/lib.rs` 的用例与前端两侧各钉一次。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct TrayView {
+    pub page: &'static str,
+    pub focus: bool,
+}
+
+/// 视图跳转事件名（**窗口作用域**，不是 `worktrace:event` 那条广播）。
+///
+/// 见模块头「视图跳转」：`lib.rs` 用 `emit_to(主窗 label, …)` 只发给主窗。
+pub const TRAY_VIEW_EVENT: &str = "worktrace:tray-view";
+
+/// 视图跳转的目标页（与前端 `PageKey` 逐字相同）。
+pub const TRAY_VIEW_PAGE_INBOX: &str = "inbox";
+/// 视图跳转的目标页（与前端 `PageKey` 逐字相同）。
+pub const TRAY_VIEW_PAGE_TIMER: &str = "timer";
+
+/// 这条托盘动作要求跳到哪个视图；不是视图动作就返回 `None`。
+///
+/// **只有这一处**决定"点到什么 → 去哪个视图"（与 [`action_for`] 同一条纪律：
+/// 路由集中在一张表上，用例断言它）。今天两个视图动作：
+///
+/// - 「快速捕获」（F-001）⇒ 收件箱 + **聚焦捕获输入框**；
+/// - 「当前任务」⇒ 计时视图。
+///
+/// 这里**不看库里的状态**（有没有正在计时的任务）：那是服务层的事，托盘没有回执通道，
+/// 空态由页面自己照实显示（"没有在计时"不是错误，也不该编一个假会话出来）。
+pub fn tray_view_for(action: TrayAction) -> Option<TrayView> {
+    match action {
+        TrayAction::QuickCapture => Some(TrayView {
+            page: TRAY_VIEW_PAGE_INBOX,
+            focus: true,
+        }),
+        TrayAction::CurrentTask => Some(TrayView {
+            page: TRAY_VIEW_PAGE_TIMER,
+            focus: false,
+        }),
+        TrayAction::Pause | TrayAction::Finish | TrayAction::Quit => None,
+    }
+}
 
 /// 菜单项 id → 动作。未知 id 返回 `None`（点了什么也不做）。
 pub fn action_for(menu_id: &str) -> Option<TrayAction> {
