@@ -1,4 +1,5 @@
-//! P7 Task 1 fix round 1（评审 I6）：**34 条命令体逐条覆盖**。
+//! P7 Task 1 fix round 1（评审 I6）：**37 条命令体逐条覆盖**（P8 Task 3a 补上命令 9/10/11：
+//! `export_data_impl` / `backup_impl` / `restore_impl`——覆盖账本与 `lib.rs` 的注册表同步）。
 //!
 //! `#[tauri::command]` 生成的包装（`spawn_blocking` + `State`）要 Tauri 运行时才能调，
 //! 所以本文件调的是 `commands::*_impl`——命令体本身：解析请求 → 调服务 → 返回响应。
@@ -31,30 +32,34 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use worktrace_lib::commands::{
-    self, ArchiveProjectRequest, BackfillRequest, ClarifyReadyRequest, ConfirmedRangeRequest,
-    CorrectRequest, CreateProjectRequest, CreateTagRequest, CreateTaskRequest,
-    DiscardSessionRequest, EpochRequest, HistoryQuery, ListProjectsRequest, ListTagsRequest,
-    PlanMutationRequest, ReconcileRequest, RenameProjectRequest, SetTaskProjectRequest,
-    StartTimerRequest, TaskTagRequest, TaskTagsRequest, TransitionTaskRequest,
+    self, ArchiveProjectRequest, BackfillRequest, BackupRequest, ClarifyReadyRequest,
+    ConfirmedRangeRequest, CorrectRequest, CreateProjectRequest, CreateTagRequest,
+    CreateTaskRequest, DiscardSessionRequest, EpochRequest, ExportRequest, HistoryQuery,
+    ListProjectsRequest, ListTagsRequest, PlanMutationRequest, ReconcileRequest,
+    RenameProjectRequest, RestoreRequest, SetTaskProjectRequest, StartTimerRequest, TaskTagRequest,
+    TaskTagsRequest, TransitionTaskRequest,
 };
 use worktrace_lib::domain::session::{SessionAttention, SessionMode, SessionState, TimerKind};
 use worktrace_lib::domain::task::TaskStatus;
 use worktrace_lib::error::AppError;
-use worktrace_lib::platform::clock::{Clock, ClockSample, FakeClock, SampleError};
-use worktrace_lib::services::backup::begin_restore;
+use worktrace_lib::platform::clock::{Clock, ClockSample, FakeClock, SampleError, SystemClock};
+use worktrace_lib::platform::diagnostics::Diagnostics;
+use worktrace_lib::services::backup::{backup_consistent, begin_restore};
 use worktrace_lib::services::bootstrap::{
-    lock_app, startup, AppGuard, AppState, NoProbe, RunningApp, Startup, StartupConfig,
+    lock_app, startup, AppGuard, AppState, MaintenancePhase, NoProbe, RunningApp, Startup,
+    StartupConfig,
 };
 use worktrace_lib::services::catalog::{ProjectSelector, TaskQueryRequest};
 use worktrace_lib::services::daily_plan::DailyPlanQuery;
 use worktrace_lib::services::events::{EventEnvelope, EventSink};
+use worktrace_lib::services::export::WeeklyQuery;
 use worktrace_lib::services::stats::{
-    Measure, MeasureColumn, StatsClass, StatsRange, TodayQuery, TodayView,
+    Measure, MeasureColumn, StatsClass, StatsRange, StatsRangeQuery, TodayQuery, TodayView,
 };
 use worktrace_lib::services::timer::coordinator::{ResumeRequest, SessionRequest};
 use worktrace_lib::storage::db::Db;
 use worktrace_lib::storage::meta::init_meta;
-use worktrace_lib::storage::migrations::migrate;
+use worktrace_lib::storage::migrations::{current_version, migrate};
 
 const WALL: i64 = 1_700_000_000_000;
 const TODAY: &str = "2026-10-04";
@@ -3046,6 +3051,624 @@ fn finish_timer_impl_finishes_the_session_instead_of_pausing_it() {
     )
     .expect_err("旧会话版本必须被拒");
     assert_code(&stale, "VERSION_CONFLICT");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 导出与备份 / 恢复（P8 Task 3a：命令 9/10/11）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 三条命令都**真的碰文件系统**，所以每条都注入一个临时目录（`dir_override` 参数，
+// 与 `services::backup::backup_consistent` 的同名参数同一姿势）：**绝不写真实的
+// `%APPDATA%`**（这个文件里没有环境变量那套开关：`paths::app_data_dir()` 读进程级
+// 环境变量，而 cargo 的测试是并行线程——改它会把别的用例一起带偏）。
+
+/// 现做一份**当前库**的一致备份（走生产原语 `VACUUM INTO`），返回产物路径。
+fn take_backup(state: &mut AppState, dir: &std::path::Path) -> PathBuf {
+    let db = state.db().unwrap();
+    let version = current_version(db.connection()).unwrap();
+    backup_consistent(
+        Some(dir),
+        db.connection(),
+        version,
+        &FakeClock::new(WALL, 0),
+        "test backup",
+        &Diagnostics::disabled(),
+    )
+    .expect("备份应当成功")
+}
+
+/// 导出目录里被写出来的文件（按名字排序，便于"恰好一份"这类断言）。
+fn entries(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// JSON 导出（命令 9）：真落盘（路径存在、内容与生成函数的输出**逐字节一致**、
+/// `bytes` 与文件大小相符）、信封取自**本次生成结果**、**不推进 `revision`、不广播**。
+#[test]
+fn export_data_impl_writes_the_json_export_with_the_version_envelope_of_that_generation() {
+    let shell = launch();
+    let mut state = shell.state();
+    // 有内容的导出：一条**有真实时长**的 finished 会话（否则"逐字节一致"就只是两份空文档）。
+    // 时长取 1 分钟：超过采样节拍就会被挂起判定挡下（那条路径要的是恢复，不是导出）。
+    const DURATION: i64 = 60_000;
+    let (session_id, _, _) = finished_session_spanning(&mut state, &shell, "t1", DURATION);
+    let exports = tempfile::tempdir().unwrap();
+    let revision_before = revision_of(&state);
+    let events_before = shell.events().len();
+
+    // 期望值走**同一个服务入口**（同一份数据、同一台冻结的钟 ⇒ 逐字节可比）。
+    let expected = state
+        .export_json(&StatsRangeQuery {
+            from: WALL - 3_600_000,
+            to: WALL + DURATION + 3_600_000,
+            timezone: TZ.to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+        })
+        .unwrap();
+
+    let result = commands::export_data_impl(
+        &mut state,
+        ExportRequest {
+            format: "json".to_string(),
+            timezone: TZ.to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+            from: Some(WALL - 3_600_000),
+            to: Some(WALL + DURATION + 3_600_000),
+            anchor: None,
+        },
+        Some(exports.path()),
+    )
+    .unwrap();
+
+    let path = std::path::Path::new(&result.path);
+    assert!(path.is_absolute(), "响应要给绝对路径：{}", result.path);
+    assert!(path.exists(), "返回的路径必须真实存在：{}", result.path);
+    let text = std::fs::read_to_string(path).unwrap();
+    assert_eq!(
+        text, expected.text,
+        "文件内容必须与生成函数的输出逐字节一致"
+    );
+    // 落盘的确实是一份**可解析的导出文档**（不是"两份都为空"式的恒真）。
+    let document: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["data_epoch"], serde_json::json!(shell.epoch));
+    assert!(
+        document["intervals"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "这条用例至少要导出一条真实区间，否则'逐字节一致'只是两份空文档"
+    );
+    assert_eq!(
+        result.bytes,
+        std::fs::metadata(path).unwrap().len(),
+        "bytes 必须与文件大小相符"
+    );
+    assert_eq!(result.data_epoch, expected.data_epoch);
+    assert_eq!(
+        result.revision, expected.revision,
+        "信封取自本次生成结果，不是写文件之后另读一次"
+    );
+    assert_eq!(
+        entries(exports.path()),
+        vec![format!("worktrace-export-json-{}.json", WALL + DURATION)],
+        "文件名带时间戳（冻结的钟 + 推进过的时长 ⇒ 精确可断言）"
+    );
+    assert!(
+        document["intervals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["session_id"] == serde_json::json!(session_id)),
+        "导出的明细里就是刚才那条 finished 会话"
+    );
+
+    assert_eq!(revision_of(&state), revision_before, "落盘不推进业务版本");
+    assert_eq!(
+        shell.events().len(),
+        events_before,
+        "落盘不广播：{:?}",
+        shell.events()
+    );
+}
+
+/// Markdown 导出（命令 9）转发到**自然周**那一条服务入口：
+/// `anchor` 只是"哪一周"的输入，周界由服务算（不能用任意范围冒充自然周）。
+///
+/// 判别力来自**锚点跨周**：锚点取下一周（`WALL` 是周三，+8 天是下周四）。那条 1 分钟的
+/// 会话在本周，所以"下一周"的回顾里人工投入是 0、周界也是下周的那两天——
+/// 一旦实现把 `anchor` 丢掉（或拿 `from`/`to` 冒充周界、把锚点当范围起点），
+/// 内容立刻与 `export_weekly_markdown(&WeeklyQuery { anchor: Some(下周四) })` 不一致。
+/// （**同周内的另一个锚点判不出来**：省略 `anchor` 时服务取同一次样本的归属终点，
+/// 它落在同一周 ⇒ 两份内容逐字节相同。这一点是踩过的坑，别再改回去。）
+#[test]
+fn export_data_impl_forwards_markdown_to_the_service_week_boundary() {
+    let shell = launch();
+    let mut state = shell.state();
+    const DURATION: i64 = 60_000;
+    finished_session_spanning(&mut state, &shell, "t1", DURATION);
+    let exports = tempfile::tempdir().unwrap();
+    let revision_before = revision_of(&state);
+
+    // 锚点取**下一周**的同一时刻：这一周里那条会话不落在它的周界内。
+    let next_week = WALL + 8 * 86_400_000;
+    let expected = state
+        .export_weekly_markdown(&WeeklyQuery {
+            timezone: TZ.to_string(),
+            anchor: Some(next_week),
+            expected_data_epoch: shell.epoch.clone(),
+        })
+        .unwrap();
+    let result = commands::export_data_impl(
+        &mut state,
+        ExportRequest {
+            format: "markdown".to_string(),
+            timezone: TZ.to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+            from: None,
+            to: None,
+            anchor: Some(next_week),
+        },
+        Some(exports.path()),
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&result.path).unwrap();
+    assert_eq!(
+        text, expected.text,
+        "周回顾的内容必须与服务的自然周口径逐字节一致"
+    );
+    // 周界那一行与服务的半开区间逐字对上：范围不是命令层拼的，是服务按锚点算的。
+    assert!(
+        text.contains(&format!(
+            "- 周界（Unix 毫秒）：[{}, {})",
+            expected.range.from, expected.range.to
+        )),
+        "周界必须来自服务的自然周口径：{text}"
+    );
+    assert!(
+        text.contains("本周合计：0（0 毫秒）"),
+        "下一周没有那条会话 ⇒ 人工投入为 0（锚点真的被转发了）：{text}"
+    );
+    assert_eq!(result.revision, expected.revision);
+    assert_eq!(
+        entries(exports.path()),
+        vec![format!("worktrace-export-weekly-{}.md", WALL + DURATION)],
+    );
+    assert_eq!(revision_of(&state), revision_before, "落盘不推进业务版本");
+
+    // 省略 `anchor`（"本周"）走的还是同一个入口：周界由**同一次样本的归属终点**算，
+    // 这一周里确实有那 1 分钟人工投入（否则上一条的 0 只是"两边都空"）。
+    //
+    // 推进 1 毫秒再导出：同形状 + 同一毫秒 = 同一个名字，而那已经被
+    // [`export_data_impl_refuses_to_overwrite_an_artifact_of_the_same_millisecond`]
+    // 钉成"拒绝覆盖"——这里要的是**第二次导出成功**的那条路径。
+    shell.advance(1);
+    let this_week = commands::export_data_impl(
+        &mut state,
+        ExportRequest {
+            format: "markdown".to_string(),
+            timezone: TZ.to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+            from: None,
+            to: None,
+            anchor: None,
+        },
+        Some(exports.path()),
+    )
+    .unwrap();
+    let expected_now = state
+        .export_weekly_markdown(&WeeklyQuery {
+            timezone: TZ.to_string(),
+            anchor: None,
+            expected_data_epoch: shell.epoch.clone(),
+        })
+        .unwrap();
+    let this_week_text = std::fs::read_to_string(&this_week.path).unwrap();
+    assert_eq!(this_week_text, expected_now.text);
+    assert!(
+        this_week_text.contains("本周合计：1 分钟（60000 毫秒）"),
+        "本周确实有那 1 分钟人工投入（上一段的 0 不是'两边都空'）：{this_week_text}"
+    );
+}
+
+/// 导出请求的**判别式**：含糊请求与非法取值都拒（`DOMAIN_ERROR`），
+/// 且**一个文件都不写**；旧 epoch 走 `DATA_EPOCH_MISMATCH`。
+#[test]
+fn export_data_impl_rejects_ambiguous_requests_and_a_stale_epoch_without_writing() {
+    let shell = launch();
+    let mut state = shell.state();
+    let exports = tempfile::tempdir().unwrap();
+    let base = |format: &str| ExportRequest {
+        format: format.to_string(),
+        timezone: TZ.to_string(),
+        expected_data_epoch: shell.epoch.clone(),
+        from: None,
+        to: None,
+        anchor: None,
+    };
+
+    let cases: Vec<(&str, ExportRequest)> = vec![
+        (
+            "json 没有范围",
+            ExportRequest {
+                from: None,
+                to: Some(WALL),
+                ..base("json")
+            },
+        ),
+        (
+            "json 带 anchor",
+            ExportRequest {
+                from: Some(WALL - 1_000),
+                to: Some(WALL),
+                anchor: Some(WALL),
+                ..base("json")
+            },
+        ),
+        (
+            "markdown 带 from/to",
+            ExportRequest {
+                from: Some(WALL - 1_000),
+                to: Some(WALL),
+                ..base("markdown")
+            },
+        ),
+        ("未知格式", base("csv")),
+        ("空格式", base("  ")),
+    ];
+    for (label, request) in cases {
+        let error = commands::export_data_impl(&mut state, request, Some(exports.path()))
+            .expect_err(&format!("{label} 必须被拒"));
+        assert_code(&error, "DOMAIN_ERROR");
+    }
+
+    let stale = commands::export_data_impl(
+        &mut state,
+        ExportRequest {
+            from: Some(WALL - 1_000),
+            to: Some(WALL),
+            expected_data_epoch: "another-database".to_string(),
+            ..base("json")
+        },
+        Some(exports.path()),
+    )
+    .expect_err("旧 epoch 必须被拒");
+    assert_code(&stale, "DATA_EPOCH_MISMATCH");
+
+    assert!(
+        entries(exports.path()).is_empty(),
+        "被拒的请求一个文件都不许写：{:?}",
+        entries(exports.path())
+    );
+}
+
+/// 目标目录写不出来 ⇒ 走 **Rust 的错误契约**（`STORAGE_ERROR` + 合同里那句固定文案），
+/// 不是在 `invoke` 的 `catch` 里自己编的文案。
+///
+/// 制造"不可写"用**便携**的办法：把导出目录指到一个**普通文件**下面
+/// （`<临时文件>/exports`）⇒ `create_dir_all` 必然失败，且与平台权限无关。
+#[test]
+fn export_data_impl_reports_an_unusable_target_directory_through_the_error_contract() {
+    let shell = launch();
+    let mut state = shell.state();
+    let blocker = tempfile::tempdir().unwrap();
+    let blocker_file = blocker.path().join("not-a-directory");
+    std::fs::write(&blocker_file, b"x").unwrap();
+
+    let error = commands::export_data_impl(
+        &mut state,
+        ExportRequest {
+            format: "json".to_string(),
+            timezone: TZ.to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+            from: Some(WALL - 1_000),
+            to: Some(WALL),
+            anchor: None,
+        },
+        Some(&blocker_file),
+    )
+    .expect_err("目录建不出来必须报错");
+
+    assert_code(&error, "STORAGE_ERROR");
+    assert_eq!(
+        error.message(),
+        AppError::Storage {
+            detail: String::new()
+        }
+        .message(),
+        "用户文案来自错误契约，不是命令层自己编的"
+    );
+    assert!(
+        error
+            .detail()
+            .is_some_and(|detail| detail.contains("export")),
+        "内部诊断要能定位到导出这一步：{error:?}"
+    );
+}
+
+/// **写入本身失败 ⇒ 不留半份产物**（fix round 1，评审 Minor-3）。
+///
+/// 制造"写失败"用**便携**的办法：把这次导出的**临时名**（`<正式名>.partial`）先占成
+/// 一个**目录** ⇒ `fs::write` 必然失败（`create_dir_all` 已经成功，所以这一条只考"写"
+/// 那一步）。断言两件事：**正式名的文件不存在**（不是"名字正常、内容截断"），
+/// 且目录里除那个占位目录外没有别的残留。
+///
+/// 判别力：把 [`write_export`] 改回"直接写正式名"的实现 ⇒ 这里那次写入**会成功**、
+/// `expect_err` 当场红（正式名与占位目录不同名）。这条用例钉的正是"先写临时名再改名"
+/// 这个不变量，不是"目录不可写"那条（那条由
+/// [`export_data_impl_reports_an_unusable_target_directory_through_the_error_contract`] 钉）。
+#[test]
+fn export_data_impl_leaves_no_truncated_artifact_when_the_write_fails() {
+    let shell = launch();
+    let mut state = shell.state();
+    let exports = tempfile::tempdir().unwrap();
+    let final_name = format!("worktrace-export-json-{WALL}.json");
+    std::fs::create_dir(exports.path().join(format!("{final_name}.partial"))).unwrap();
+
+    let error = commands::export_data_impl(
+        &mut state,
+        ExportRequest {
+            format: "json".to_string(),
+            timezone: TZ.to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+            from: Some(WALL - 1_000),
+            to: Some(WALL),
+            anchor: None,
+        },
+        Some(exports.path()),
+    )
+    .expect_err("写入失败必须报错");
+
+    assert_code(&error, "STORAGE_ERROR");
+    assert!(
+        !exports.path().join(&final_name).exists(),
+        "写失败不得留下名字正常的产物：{}",
+        exports.path().join(&final_name).display()
+    );
+    assert_eq!(
+        entries(exports.path()),
+        vec![format!("{final_name}.partial")],
+        "只剩那个占位目录（best-effort 清理删不掉目录，但也没有半份产物）"
+    );
+}
+
+/// **同名产物不覆盖**（fix round 1，评审 Minor-4）：同一毫秒内的同形状导出撞成同一个
+/// 名字，第二次**拒绝**而不是把内容换掉（两次 JSON 导出可以问**不同范围**）。
+///
+/// 口径与 `services::backup::backup_consistent` 的"同名即拒绝"一致。
+/// 判别力：把 [`write_export`] 的"已存在即拒绝"拿掉（退回 `fs::write` 覆盖）⇒
+/// 第二次导出会成功，本用例红。
+#[test]
+fn export_data_impl_refuses_to_overwrite_an_artifact_of_the_same_millisecond() {
+    let shell = launch();
+    let mut state = shell.state();
+    let exports = tempfile::tempdir().unwrap();
+    let request = |from: i64| ExportRequest {
+        format: "json".to_string(),
+        timezone: TZ.to_string(),
+        expected_data_epoch: shell.epoch.clone(),
+        from: Some(from),
+        to: Some(WALL),
+        anchor: None,
+    };
+
+    // 第一次：正常产出（冻结的钟 ⇒ 名字就是 `…-{WALL}.json`）。
+    let first = commands::export_data_impl(&mut state, request(WALL - 1_000), Some(exports.path()))
+        .expect("第一次导出应当成功");
+    let first_text = std::fs::read_to_string(&first.path).unwrap();
+
+    // 第二次：**不同范围**、同一毫秒 ⇒ 撞名 ⇒ 拒绝，且第一份内容原样不动。
+    let error = commands::export_data_impl(&mut state, request(WALL - 2_000), Some(exports.path()))
+        .expect_err("同名产物必须拒绝覆盖");
+    assert_code(&error, "STORAGE_ERROR");
+    assert!(
+        error
+            .detail()
+            .is_some_and(|detail| detail.contains("already exists")),
+        "拒绝原因要能定位到「同名产物」：{error:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&first.path).unwrap(),
+        first_text,
+        "被拒的那一次不得动过已有的产物"
+    );
+    assert_eq!(
+        entries(exports.path()),
+        vec![format!("worktrace-export-json-{WALL}.json")]
+    );
+}
+
+/// 备份（命令 10）：产出**真实文件**、`bytes` 与文件大小相符、**不加 `revision`、
+/// 不广播**；信封来自产物落地之后的权威读。
+#[test]
+fn backup_impl_writes_a_real_artifact_without_bumping_the_revision_or_broadcasting() {
+    let shell = launch();
+    let mut state = shell.state();
+    let backups = tempfile::tempdir().unwrap();
+    let revision_before = revision_of(&state);
+    let events_before = shell.events().len();
+
+    let result = commands::backup_impl(
+        &mut state,
+        &FakeClock::new(WALL, 0),
+        BackupRequest {
+            expected_data_epoch: shell.epoch.clone(),
+        },
+        Some(backups.path()),
+    )
+    .unwrap();
+
+    let path = std::path::Path::new(&result.path);
+    assert!(path.is_absolute() && path.exists(), "{}", result.path);
+    assert_eq!(result.bytes, std::fs::metadata(path).unwrap().len());
+    assert_eq!(result.data_epoch, shell.epoch);
+    assert_eq!(
+        result.revision, revision_before,
+        "备份不改业务事实 ⇒ 版本原样"
+    );
+    assert_eq!(
+        entries(backups.path()),
+        vec![format!(
+            "worktrace-f1-s1-v{}-{WALL}.db",
+            env!("CARGO_PKG_VERSION")
+        )],
+        "产物名由生产原语给出（格式版号-库版号-应用版本-毫秒）"
+    );
+    assert_eq!(revision_of(&state), revision_before);
+    assert_eq!(
+        shell.events().len(),
+        events_before,
+        "备份不广播：{:?}",
+        shell.events()
+    );
+    // 产物本身是一份能独立打开的库（"一份库副本"这句是可核的）。
+    let artifact = Db::open(path).unwrap();
+    assert_eq!(current_version(artifact.connection()).unwrap(), 1);
+
+    // 旧 epoch ⇒ 拒，且**不产出**第二份产物。
+    let stale = commands::backup_impl(
+        &mut state,
+        &FakeClock::new(WALL, 0),
+        BackupRequest {
+            expected_data_epoch: "another-database".to_string(),
+        },
+        Some(backups.path()),
+    )
+    .expect_err("旧 epoch 必须被拒");
+    assert_code(&stale, "DATA_EPOCH_MISMATCH");
+    assert_eq!(entries(backups.path()).len(), 1, "被拒的备份不产出产物");
+}
+
+/// 维护态 ⇒ 备份被拒（`DATA_RESTORE_IN_PROGRESS`），且**不产出**任何东西。
+///
+/// 这里用 `begin_maintenance`（而不是 `begin_restore`）：运行态留在手，这样"被拒"
+/// 只可能是门禁那一句，不会与"取不到库"混起来。
+#[test]
+fn backup_impl_refuses_while_the_database_is_in_maintenance() {
+    let shell = launch();
+    let mut state = shell.state();
+    let backups = tempfile::tempdir().unwrap();
+    state
+        .begin_maintenance(MaintenancePhase::Restore, WALL)
+        .expect("进维护态");
+
+    let refused = commands::backup_impl(
+        &mut state,
+        &FakeClock::new(WALL, 0),
+        BackupRequest {
+            expected_data_epoch: shell.epoch.clone(),
+        },
+        Some(backups.path()),
+    )
+    .expect_err("维护态必须拒绝备份");
+    assert_code(&refused, "DATA_RESTORE_IN_PROGRESS");
+    assert_eq!(refused.detail(), None, "维护态拒绝不带内部 detail");
+    assert!(entries(backups.path()).is_empty(), "被拒时零产物");
+    state.end_maintenance();
+}
+
+/// 恢复（命令 11）的成功路径：新 `data_epoch` + **锁内冻结**的 `revision`，
+/// 且旧 epoch 的请求在恢复之后被拒（"旧展示必须丢"的服务侧那一半）。
+///
+/// `revision` 的判别力在**取值来源**：先在版本 R 上取一份备份，再把库推到 R+1，
+/// 然后恢复那份备份 ⇒ 返回的必须是**被恢复那份库**的 R（不是恢复前那个更大的值，
+/// 也不是从 `RunningApp` 的启动快照里抄来的老值）。
+#[test]
+fn restore_impl_returns_the_new_epoch_with_the_revision_frozen_inside_the_lock() {
+    let mut shell = launch();
+    // 组合根的同源时钟（生产接线就是这一句）：`restore_impl` 收的 `ClockSource` 必须
+    // 来自这里——各建一只 `SystemClock` 会让恢复之后的 OS 边界全部被拒（R-02 落空）。
+    shell.running.attach_clock(SystemClock::new());
+    let clock = shell.running.clock_source().expect("组合根已挂同源时钟");
+    let backups = tempfile::tempdir().unwrap();
+
+    // ① 当前版本 R 上取一份备份。
+    let artifact = {
+        let mut state = shell.state();
+        take_backup(&mut state, backups.path())
+    };
+    let revision_when_backed_up = {
+        let state = shell.state();
+        revision_of(&state)
+    };
+    // ② 把库推到 R+1（备份之后的一次真实业务写）。
+    {
+        let mut state = shell.state();
+        commands::create_task_impl(
+            &mut state,
+            shell.running.broadcaster(),
+            CreateTaskRequest {
+                expected_data_epoch: shell.epoch.clone(),
+                title: "备份之后才有的任务".to_string(),
+                project_id: None,
+            },
+        )
+        .unwrap();
+    }
+    let revision_before_restore = {
+        let state = shell.state();
+        revision_of(&state)
+    };
+    assert!(
+        revision_before_restore > revision_when_backed_up,
+        "备份之后确实又写过（否则这条用例区分不出 revision 的来源）"
+    );
+
+    // ③ 恢复。
+    let result = commands::restore_impl(
+        shell.running.app(),
+        shell.running.broadcaster(),
+        &clock,
+        RestoreRequest {
+            backup_path: artifact.display().to_string(),
+            expected_data_epoch: shell.epoch.clone(),
+            confirmed: true,
+        },
+    )
+    .expect("恢复应当成功");
+
+    assert!(result.applied, "成功路径上 applied 恒为 true");
+    assert_ne!(result.data_epoch, shell.epoch, "换库 ⇒ 新 epoch");
+    {
+        let state = shell.state();
+        assert_eq!(
+            result.revision,
+            revision_of(&state),
+            "revision 与库里的权威值一致"
+        );
+    }
+    assert_eq!(
+        result.revision, revision_when_backed_up,
+        "revision 取自**被恢复那份库**，不是恢复前那个更大的值"
+    );
+
+    // ④ 旧展示必须丢：旧 epoch 的请求在新库上被拒；新库上确实没有"备份之后"那条任务。
+    let mut state = shell.state();
+    let stale = commands::create_task_impl(
+        &mut state,
+        shell.running.broadcaster(),
+        CreateTaskRequest {
+            expected_data_epoch: shell.epoch.clone(),
+            title: "旧 epoch 的写入".to_string(),
+            project_id: None,
+        },
+    )
+    .expect_err("旧 epoch 必须被拒");
+    assert_code(&stale, "DATA_EPOCH_MISMATCH");
+    assert_eq!(
+        scalar(
+            &state,
+            "SELECT COUNT(*) FROM task WHERE title = '备份之后才有的任务'"
+        ),
+        0,
+        "恢复换掉的是整个库"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -617,6 +617,41 @@ fn cases() -> Vec<(&'static str, serde_json::Value)> {
         ),
         ("attention_overview", json(&attention_overview())),
         ("history_view", json(&history_view())),
+        // ── P8 Task 3a：导出 / 备份 / 恢复（命令 9/10/11） ──────────────────────
+        //
+        // 三份新快照各钉一个**新**响应类型。三条命令都是"落盘 + 版本信封"，键集合相同
+        // 但语义不同：导出与备份**不改业务事实**（信封就是当时的权威值），恢复的
+        // `revision` 是**锁内冻结**的那一个（可以低于恢复前那个值——换库了）。
+        // 样例里的路径是固定字符串（没有真实路径、没有时钟），所以逐字节稳定。
+        (
+            "export_result",
+            json(&worktrace_lib::commands::ExportResult {
+                path: "C:/Users/worktrace/AppData/Roaming/com.worktrace.desktop/exports/worktrace-export-json-1700000000000.json".to_string(),
+                bytes: 4096,
+                data_epoch: EPOCH.to_string(),
+                revision: 23,
+            }),
+        ),
+        (
+            "backup_result",
+            json(&worktrace_lib::commands::BackupResult {
+                path: "C:/Users/worktrace/AppData/Roaming/com.worktrace.desktop/backups/worktrace-f1-s1-v0.1.0-1700000000000.db".to_string(),
+                bytes: 262_144,
+                data_epoch: EPOCH.to_string(),
+                revision: 23,
+            }),
+        ),
+        (
+            "restore_result",
+            json(&worktrace_lib::commands::RestoreResult {
+                // 恢复之后是**另一个世界**：全新 epoch，版本只在新 epoch 内比较
+                // （00 §5 明说它可以低于原库）。
+                data_epoch: "9f1c0e2a-6f4b-4c1a-9c0e-2a6f4b4c1a9c".to_string(),
+                revision: 1,
+                // 成功路径恒为 true（服务把"没换成"当 Err 交回）。
+                applied: true,
+            }),
+        ),
     ]
 }
 
@@ -704,8 +739,8 @@ fn every_response_dto_matches_its_committed_snapshot() {
     }
 
     assert!(
-        names.len() >= 24,
-        "快照用例至少要覆盖 24 个响应 DTO，实际 {}：{names:?}",
+        names.len() >= 27,
+        "快照用例至少要覆盖 27 个响应 DTO，实际 {}：{names:?}",
         names.len()
     );
     assert!(

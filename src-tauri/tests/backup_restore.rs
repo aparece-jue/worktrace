@@ -1786,9 +1786,13 @@ fn restore_refuses_to_start_on_the_thread_that_holds_the_serial_boundary() {
         .expect_err("持锁线程上开始恢复必须被拒绝")
     };
     assert_eq!(error.code(), "STORAGE_ERROR");
+    // **文案要能归因到层**（P8 Task 3a 的 fix round 1，评审 Minor-2）：命令体
+    // （`commands::restore_impl`）也有一条同源的早拒，两句文案刻意不同——这里点的是
+    // **服务入口自己那句**（"它自己按三段取锁"）。只写 `contains("锁外")` 的话，
+    // 两条拒绝长得一样，"红在哪一层"就分不出来。
     assert!(
-        format!("{error:?}").contains("锁外"),
-        "拒绝文案要说清正确姿势（在锁外调用）：{error:?}"
+        format!("{error:?}").contains("它自己按三段取锁"),
+        "这句必须来自服务入口自己那条判据（在锁外调用）：{error:?}"
     );
 
     {
@@ -2017,4 +2021,240 @@ fn a_restore_keeps_the_os_boundary_trusted_because_the_clock_is_shared() {
         "recovering",
         "另建一只 SystemClock ⇒ 边界被拒（这正是 I-1 的生产故障形态）"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 命令层的恢复（P8 Task 3a：命令 11 的四条硬约束）
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// 上面那些用例驱动的是**服务原语**；这一节驱动的是**命令体** `commands::restore_impl`
+// ——它才是"接线错在哪"会被看见的地方。四条硬约束：
+//
+// 1. 它是**唯一不进 `run_command`** 的命令：三段必须在一次调用体内，而
+//    `restore_from_backup` 自己按段取锁 ⇒ 放进持锁的闭包里必须**红**而不是死锁；
+// 2. `confirmed` 必须为 `true`（命令层再校验一次，不靠界面）；
+// 3. `RestoreResult.revision` 在**锁内冻结**（取自 `RestoreOutcome`，不在放锁后重读）；
+// 4. 失败**不得伪造成成功信封**：原错误原样交回，回滚也失败时**不换成**维护态码。
+
+/// 一次恢复请求（命令层）：`confirmed: true`、epoch 取当前库的权威值。
+fn restore_request(rig: &Rig, artifact: &Path) -> commands::RestoreRequest {
+    commands::RestoreRequest {
+        backup_path: artifact.display().to_string(),
+        expected_data_epoch: rig.epoch(),
+        confirmed: true,
+    }
+}
+
+/// **硬约束 1**：把恢复放进"正持锁"的形状里必须**红**，而不是死锁。
+///
+/// 这正是"接线错误"的机器判据：`run_command` 的闭包正持着那把非重入 `Mutex`，谁把
+/// `restore_impl` 塞回那种形状，这里就是 `STORAGE_ERROR`（服务入口第一句的硬判据），
+/// 不是一条挂住的用例。断言同时也钉住"拒绝时不碰任何东西"。
+#[test]
+fn the_restore_command_refuses_inside_the_serial_boundary_instead_of_deadlocking() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+    let artifact = take_backup(&rig);
+    let app = rig.app();
+    let epoch_before = rig.epoch();
+    let revision_before = rig.revision();
+
+    let error = {
+        // 本线程**正持着**串行边界：恢复内部要再取一次锁，走进去就是自死锁。
+        let _guard = lock_app(&app);
+        commands::restore_impl(
+            &app,
+            rig.broadcaster(),
+            &rig.clock_source(),
+            restore_request(&rig, &artifact),
+        )
+        .expect_err("持锁线程上调用恢复命令体必须被拒绝")
+    };
+    assert_eq!(error.code(), "STORAGE_ERROR");
+    // **红在哪一层是可归因的**（P8 Task 3a 的 fix round 1，评审 Minor-2）：这句文案
+    // 只可能来自命令体的早拒（服务入口那句是"它自己按三段取锁"，由
+    // [`restore_refuses_to_start_on_the_thread_that_holds_the_serial_boundary`] 点名）。
+    // 把它改成笼统的 `contains("锁外")`，两条拒绝就又混在一起了。
+    assert!(
+        format!("{error:?}").contains("命令体自己按段取锁"),
+        "这句必须来自命令体自己的早拒（在锁外开始）：{error:?}"
+    );
+
+    {
+        let state = lock_app(&app);
+        assert!(state.maintenance().is_none(), "拒绝时不进维护态");
+        assert!(state.runtime_present(), "运行态没有被取走");
+    }
+    assert_eq!(rig.epoch(), epoch_before, "库身份没被动过");
+    assert_eq!(rig.revision(), revision_before, "一次被拒的调用不得改版本");
+}
+
+/// **硬约束 2**：`confirmed: false` ⇒ 拒绝，且**不产生任何副作用**。
+///
+/// 拒绝发生在进维护态**之前**：不进维护态、不取走运行态、不碰文件、库身份与版本不动。
+/// 界面上的二次确认是硬前置，但命令层必须自己再判一次（"不要只靠界面"）。
+#[test]
+fn the_restore_command_refuses_without_the_second_confirmation() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+    let artifact = take_backup(&rig);
+    let app = rig.app();
+    let epoch_before = rig.epoch();
+    let revision_before = rig.revision();
+    let facts_before = rig.facts();
+
+    let mut request = restore_request(&rig, &artifact);
+    request.confirmed = false;
+    let error = commands::restore_impl(&app, rig.broadcaster(), &rig.clock_source(), request)
+        .expect_err("没有二次确认必须被拒");
+    assert_eq!(error.code(), "DOMAIN_ERROR");
+    assert!(
+        error
+            .detail()
+            .is_some_and(|detail| detail.contains("二次确认")),
+        "拒绝原因要可读且点明缺的是什么：{error:?}"
+    );
+
+    {
+        let state = lock_app(&app);
+        assert!(state.maintenance().is_none(), "拒绝时不进维护态");
+        assert!(state.runtime_present(), "运行态没有被取走");
+    }
+    assert_eq!(rig.epoch(), epoch_before);
+    assert_eq!(rig.facts(), facts_before, "被拒的恢复不改任何事实");
+    assert_eq!(rig.revision(), revision_before);
+}
+
+/// **硬约束 2 的另一半**：旧 epoch ⇒ `DATA_EPOCH_MISMATCH`，同样**在进维护态之前**
+/// 被拒（拿旧展示来点恢复，进程状态与磁盘一个字节都没变）。
+#[test]
+fn the_restore_command_refuses_a_stale_epoch_before_entering_maintenance() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+    let artifact = take_backup(&rig);
+    let app = rig.app();
+    let revision_before = rig.revision();
+    let epoch_before = rig.epoch();
+
+    let request = commands::RestoreRequest {
+        backup_path: artifact.display().to_string(),
+        expected_data_epoch: "epoch-of-another-database".to_string(),
+        confirmed: true,
+    };
+    let error = commands::restore_impl(&app, rig.broadcaster(), &rig.clock_source(), request)
+        .expect_err("旧 epoch 必须被拒");
+    assert_eq!(error.code(), "DATA_EPOCH_MISMATCH");
+
+    {
+        let state = lock_app(&app);
+        assert!(state.maintenance().is_none(), "拒绝时不进维护态");
+        assert!(state.runtime_present());
+    }
+    assert_eq!(rig.epoch(), epoch_before, "库没有被换过");
+    assert_eq!(rig.revision(), revision_before);
+}
+
+/// **硬约束 3 + 4**：成功 ⇒ 新 epoch + **锁内冻结**的 revision；失败 ⇒ 原错误、
+/// **绝不**伪造成功信封。
+///
+/// revision 的判别力在**取值来源**：备份在版本 R 上取，之后库被推到 R+1，再恢复 ⇒
+/// 返回值必须是**被恢复那份库**的 R。抄"恢复前那个值"或抄"启动快照"的实现都会红。
+#[test]
+fn the_restore_command_returns_the_new_epoch_and_the_frozen_revision_but_never_a_fake_success() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+    let artifact = take_backup(&rig);
+    let revision_when_backed_up = rig.revision();
+    let epoch_before = rig.epoch();
+    // 备份之后再写一笔：把库推到 R+1，好让"抄恢复前那个值"的实现当场露馅。
+    create_task(&rig, "备份之后才有的任务").unwrap();
+    let revision_before_restore = rig.revision();
+    assert!(
+        revision_before_restore > revision_when_backed_up,
+        "备份之后确实又写过（否则这条用例区分不出 revision 的来源）"
+    );
+
+    let result = commands::restore_impl(
+        &rig.app(),
+        rig.broadcaster(),
+        &rig.clock_source(),
+        restore_request(&rig, &artifact),
+    )
+    .expect("恢复应当成功");
+    assert!(result.applied, "成功路径上 applied 恒为 true");
+    assert_ne!(result.data_epoch, epoch_before, "换库 ⇒ 新 epoch");
+    assert_eq!(result.data_epoch, rig.epoch(), "响应里的 epoch 就是新库的");
+    assert_eq!(
+        result.revision, revision_when_backed_up,
+        "revision 取自**被恢复那份库**（锁内冻结），不是恢复前那个更大的值"
+    );
+    assert_eq!(result.revision, rig.revision(), "与库里的权威值一致");
+    assert_eq!(
+        rig.scalar("SELECT COUNT(*) FROM task WHERE title = '备份之后才有的任务'"),
+        0,
+        "恢复换掉的是整个库"
+    );
+
+    // 失败不伪造成功信封：候选库结构合法但没有库身份 ⇒ ③ 段失败、回滚成功 ⇒ 原错误。
+    let candidate = candidate_without_identity(rig._dir.path(), "candidate-command.db");
+    let epoch_before_failure = rig.epoch();
+    let revision_before_failure = rig.revision();
+    let failure = commands::restore_impl(
+        &rig.app(),
+        rig.broadcaster(),
+        &rig.clock_source(),
+        restore_request(&rig, &candidate),
+    )
+    .expect_err("提交失败必须交回错误，不得返回 applied=false 的成功信封");
+    assert_eq!(failure.code(), "STORAGE_ERROR");
+    assert!(
+        !matches!(&failure, AppError::DataRestoreInProgress),
+        "回滚成功之后交回的是**原始原因**，不是维护态码：{failure:?}"
+    );
+    assert_eq!(rig.epoch(), epoch_before_failure, "回滚之后还是原库");
+    assert_eq!(rig.revision(), revision_before_failure);
+    {
+        let app = rig.app();
+        let state = lock_app(&app);
+        assert!(state.maintenance().is_none(), "回滚成功 ⇒ 维护态已结束");
+        assert!(state.runtime_present(), "运行态装回来了");
+    }
+}
+
+/// **硬约束 4 的错误映射**：换库窗口里（运行态不在手）**原错误原样交出去**，
+/// 不换成 `DATA_RESTORE_IN_PROGRESS`、不编权威版本；读得到库时才补 `authority`。
+///
+/// 为什么这是判据而不是细节：「恢复失败**且回滚也失败**」的现象是进程留在维护态、
+/// 托盘拒绝退出；若把错误统一换成维护态码，界面就再也分不出"正在恢复"与"恢复失败
+/// 卡住"（P6 终审 I-2 立的就是这条规矩），而 `restore.failed` 诊断是唯一线索。
+#[test]
+fn the_error_envelope_outside_the_boundary_keeps_the_original_code() {
+    let rig = launch();
+    create_task(&rig, "原库的事实").unwrap();
+    let app = rig.app();
+    let cause = AppError::Storage {
+        detail: "restore: commit_restore: injected".to_string(),
+    };
+
+    // 运行态在手：形状与 `capture_error_response` 一致（有权威上下文）。
+    let response = commands::error_response_without_lock(&app, &cause);
+    assert_eq!(response.code, "STORAGE_ERROR");
+    let authority = response.authority.expect("运行态在手 ⇒ 有权威上下文");
+    assert_eq!(authority.data_epoch, rig.epoch());
+    assert_eq!(authority.revision, rig.revision());
+    assert!(!response.requires_handshake);
+
+    // **换库窗口**：进维护态并取走运行态（回滚失败时进程就停在这里）。
+    let runtime = begin_restore(&app).expect("进入维护态并取走运行态");
+    let response = commands::error_response_without_lock(&app, &cause);
+    assert_eq!(
+        response.code, "STORAGE_ERROR",
+        "原错误必须原样交出去——换成 DATA_RESTORE_IN_PROGRESS 就把'失败卡住'伪装成了'正在恢复'"
+    );
+    assert!(
+        response.authority.is_none(),
+        "拿不到权威版本就不编一个（也不去强读缺失的 Db）"
+    );
+    assert!(response.requires_handshake, "没有权威版本 ⇒ 按重新握手处理");
+    drop(runtime);
 }

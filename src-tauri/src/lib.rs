@@ -163,6 +163,14 @@ pub fn run() {
             commands::retry_recovery,
             commands::attention_overview,
             commands::history_view,
+            // 导出与备份/恢复（P8 Task 3a；命令 9/10/11）。
+            //
+            // `restore` 与其余命令**同一张注册表**：差别在它的包装自己按段取锁
+            // （`commands::run_maintenance_command`），不在注册方式。它**不属于**
+            // `run_command` 那条单临界区形状——理由写在 `commands/mod.rs` 该节。
+            commands::export_data,
+            commands::backup,
+            commands::restore,
             // 计时（P2）
             commands::timer_snapshot,
             commands::timer_tick,

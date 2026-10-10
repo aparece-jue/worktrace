@@ -282,7 +282,7 @@ export interface TimeEdit {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 响应 DTO（24 份快照逐一对上）
+// 响应 DTO（27 份快照逐一对上）
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** `get_revision`：只给库身份与版本，不含业务数据。 */
@@ -663,6 +663,54 @@ export interface HistoryView {
   revision: number;
 }
 
+/**
+ * `export_data`（P8 Task 3a，命令 9）：**真实存在的绝对路径** + 与内容同源的版本信封。
+ *
+ * `data_epoch` / `revision` **直接取自这一次生成结果**（不是写文件之后另读一次）——
+ * 所以它们与文件里的数字是同一份数据。落盘**不推进业务 `revision`**、不广播
+ * `domain.changed`：导出是文件系统副作用，不是业务事实。
+ *
+ * `path` 是绝对路径（可直接复制，也可交给 `revealItemInDir` 打开所在位置）。
+ */
+export interface ExportResult {
+  path: string;
+  /** 写进文件的字节数（与文件大小逐字节相符）。 */
+  bytes: number;
+  data_epoch: string;
+  revision: number;
+}
+
+/**
+ * `backup`（P8 Task 3a，命令 10）：备份产物的路径 + 当时的权威版本信封。
+ *
+ * 备份产生一份库副本、**不修改业务事实** ⇒ 不加 `revision`、不广播；响应里的
+ * `data_epoch` / `revision` 就是这次备份时刻库里的权威值。
+ */
+export interface BackupResult {
+  /** 备份产物的**绝对**路径（`VACUUM INTO` 出来的单文件快照）。 */
+  path: string;
+  bytes: number;
+  data_epoch: string;
+  revision: number;
+}
+
+/**
+ * `restore`（P8 Task 3a，命令 11）：恢复之后的**新身份**与**锁内冻结**的版本。
+ *
+ * `data_epoch` 变了 ⇒ 前端据此**重新握手**，旧展示必须丢（同进程内旧 epoch 的请求
+ * 会被服务拒成 `DATA_EPOCH_MISMATCH`）。`revision` 与它是同一个时刻读出来的
+ * （恢复的锁内、两步重扫之后）：**可以低于恢复前那个值**——那是另一个库的版本，
+ * 只在新 epoch 内比较。
+ *
+ * `applied` 在成功时恒为 `true`：服务把"没换成"当 `Err` 交回（回滚成功也报原始原因），
+ * 所以拿不到响应就等于失败——**不存在** `applied: false` 的正常返回。
+ */
+export interface RestoreResult {
+  data_epoch: string;
+  revision: number;
+  applied: boolean;
+}
+
 /** 一个被请求目标的版本。 */
 export interface RecordVersion {
   kind: AuthorityKind;
@@ -990,4 +1038,53 @@ export interface HistoryQuery {
   /** 跳过条数，>= 0。 */
   offset: number;
   session_id?: string | null;
+}
+
+/**
+ * `export_data`（P8 Task 3a，命令 9）：按 `format` 判别该带哪些标量。
+ *
+ * **判别式，不是"都能传"**：`"json"` 要 `from` + `to`（半开范围）；`"markdown"` 只要
+ * 可选的 `anchor`（这一周里的**任一刻**，周界由服务算）。不适用却传了 ⇒ 命令层
+ * **拒绝**（`DOMAIN_ERROR`），不是忽略——忽略会让调用方以为自己指定了范围，
+ * 而服务用的是另一套口径（Rust 侧 `parse_export_request` 是权威）。
+ *
+ * `from` / `to` / `anchor` 在 TS 里都可选，而"`json` 必须给 `from`/`to`"这条规则
+ * **只有 Rust 侧**有（serde 表达不了"当 format=json 时必填"）：页面按 `format`
+ * 自己保证带上，缺了会拿到 `DOMAIN_ERROR` 而不是一次静默的空导出。
+ */
+export interface ExportRequest {
+  format: "json" | "markdown";
+  timezone: string;
+  expected_data_epoch: string;
+  /** `json` 必填：范围起点（含），Unix 毫秒。 */
+  from?: number | null;
+  /** `json` 必填：范围终点（**不含**），Unix 毫秒。 */
+  to?: number | null;
+  /** `markdown` 可选：这一周里的任一刻；省略 / `null` = 本周（同一次样本的归属终点）。 */
+  anchor?: number | null;
+}
+
+/**
+ * `backup`（P8 Task 3a，命令 10）：只带库身份。
+ *
+ * 备份**不修改业务事实**（它只产出一份库副本）⇒ 没有可校验的实体版本，
+ * 也就没有 `expected_row_version` 这一位。
+ */
+export interface BackupRequest {
+  expected_data_epoch: string;
+}
+
+/**
+ * `restore`（P8 Task 3a，命令 11）：全项目唯一的危险操作。
+ *
+ * `confirmed` 是**命令层再校验一次**的二次确认位（界面上的二次确认是硬前置，
+ * 但不能只靠界面）：`false` ⇒ `DOMAIN_ERROR`，且**不产生任何副作用**。
+ * `expected_data_epoch` 是进维护态之前的身份守卫：拿旧展示来点恢复 ⇒
+ * `DATA_EPOCH_MISMATCH`，此时进程状态与磁盘一个字节都没变。
+ */
+export interface RestoreRequest {
+  /** 待恢复的备份产物路径（用户从备份目录里挑的那一份）。 */
+  backup_path: string;
+  expected_data_epoch: string;
+  confirmed: boolean;
 }

@@ -80,8 +80,16 @@ use crate::services::events::{Broadcaster, EventEnvelope};
 use crate::services::timer::coordinator::Coordinator;
 use crate::storage::db::{map_sqlite, Db};
 use crate::storage::meta;
-use crate::storage::migrations::{current_version, migrate, SCHEMA_VERSION};
+use crate::storage::migrations::{migrate, SCHEMA_VERSION};
 use crate::storage::run_repo;
+
+/// 当前库的 schema 版本（`PRAGMA user_version`）的**公开转发**（P8 Task 3a）。
+///
+/// 为什么要有这一行：命令层的备份入口要给 [`backup_consistent`] 凑 `db_version`，而
+/// **`commands/` 不得引用 `storage::`**（`scripts/check-layers.ps1` 第 1 条：命令层不直连
+/// 存储）。转发的就是 `storage::migrations::current_version` 本身——没有第二份实现，
+/// 也不是新语义；`services` 与 `storage` 之间那条边本来就是允许的。
+pub use crate::storage::migrations::current_version;
 
 /// 备份产物的**格式版号**：与库 schema 版号、应用版本并列的第三个版号。
 ///
@@ -404,6 +412,18 @@ pub struct RestoreOutcome {
     pub data_epoch: String,
     /// 恢复之后**当前 run** 的 id（两条路径都是**新的**）。
     pub run_id: String,
+    /// 恢复之后库里的**权威 `revision`**（P8 Task 3a 扩展）。
+    ///
+    /// **为什么必须在锁内冻结**（勘察 §1-B6 / 决策 3）：它与 [`RestoreOutcome::data_epoch`]
+    /// 是"同一个时刻的两个字段"，而这个时刻只在 ③ 段的临界区里存在——两步重扫
+    /// （P3 的归一可能推进一次 `revision`）之后、`install_runtime` 之前，[`Identity`]
+    /// 从 `meta` 上把两个值**一起**读出来。换库完成、放锁之后再独立读一次拼上去，
+    /// 报的就是"读的那一刻"的版本：响应里的 `data_epoch` 与 `revision` 从此不再同源，
+    /// 而客户端拿它当本视图水位（`viewWatermark`）判旧。
+    ///
+    /// 提交路径上是**新库**的版本（可以低于恢复前那个值——00 §5：只在新 epoch 内比较）；
+    /// 回滚路径上是**原库**的版本（原 epoch，`rotation` 没有发生）。
+    pub revision: i64,
     /// 恢复之后的重扫门禁快照（`requires_recovery()` 就是"要不要先确认历史"）。
     pub recovery: RecoveryScan,
     /// 候选库 schema 偏旧时、迁移前那份一致备份的产物路径（`None` = 没走到那条分支）。
@@ -963,6 +983,7 @@ pub fn commit_restore(
     Ok(RestoreOutcome {
         committed: true,
         data_epoch: identity.data_epoch,
+        revision: identity.revision,
         run_id,
         recovery: identity.recovery,
         migration_backup: swap.migration_backup.clone(),
@@ -1038,6 +1059,7 @@ pub fn abort_restore(
     Ok(RestoreOutcome {
         committed: false,
         data_epoch: identity.data_epoch,
+        revision: identity.revision,
         run_id,
         recovery: identity.recovery,
         migration_backup: swap.migration_backup.clone(),
@@ -1127,13 +1149,19 @@ fn rebuild_and_install(
 
     Ok(Identity {
         data_epoch: meta.data_epoch,
+        revision: meta.revision,
         recovery,
     })
 }
 
 /// [`rebuild_and_install`] 装完之后库里的**权威身份**（广播用的就是这一份）。
+///
+/// `data_epoch` 与 `revision` 出自**同一次** `require_meta`（同一把锁、同一个读事务），
+/// 所以它们天然同源——恢复结果里的版本信封就是这两个字段（P8 Task 3a：命令响应直接
+/// 取它们，不在放锁之后再读一次）。
 struct Identity {
     data_epoch: String,
+    revision: i64,
     recovery: RecoveryScan,
 }
 

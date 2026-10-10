@@ -137,10 +137,11 @@ fn the_dev_commands_are_registered_only_under_the_debug_guard() {
     );
     // 业务命令的条数：**改注册表就要改这个数**。它挡的是「注册项被删/被改写法」——
     // 只写 `>= 1` 之类的下限，从 `lib.rs` 删掉一条业务命令就不会红（P8 Task 2a 起：
-    // 25 → 30，含恢复与历史的五条写命令；P8 Task 2b：30 → 34，含恢复读取/重试与历史读取）。
+    // 25 → 30，含恢复与历史的五条写命令；P8 Task 2b：30 → 34，含恢复读取/重试与历史读取；
+    // P8 Task 3a：34 → 37，含导出、备份与恢复）。
     assert!(
-        ungated.len() >= 34,
-        "34 条业务命令不带守卫（发布构建里也在）：只有 {} 条被解析出来，注册表是不是被改了写法？",
+        ungated.len() >= 37,
+        "37 条业务命令不带守卫（发布构建里也在）：只有 {} 条被解析出来，注册表是不是被改了写法？",
         ungated.len()
     );
 }
@@ -205,9 +206,15 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// 延迟开关按 **(调用方窗口, 命令名)** 匹配，所以命令包装交给 `run_command` 的两个键
 /// 都得对：命令名与 `lib.rs` 注册表逐字一致（写错一个字，装开关的命令永远不触发），
 /// 而且必须把调用方窗口一起交上去（少一个，装在 B 上的开关会被 A 的重拉先吃掉）。
+///
+/// **两个骨架一起数**（P8 Task 3a）：`restore` 走的是 [`run_maintenance_command`]
+/// （它**不进** `run_command` 的单临界区形状，理由见 `commands/mod.rs` 那一节），
+/// 但两个键一样要交对。哪条命令走哪个骨架由下一条用例逐条钉住。
 #[test]
 fn every_command_passes_its_own_name_and_the_calling_window_to_run_command() {
-    let calls = run_command_calls(&source("src/commands/mod.rs"));
+    let commands_source = source("src/commands/mod.rs");
+    let mut calls = run_command_calls(&commands_source);
+    calls.extend(named_calls(&commands_source, MAINTENANCE_HEAD));
 
     let names: Vec<String> = calls
         .iter()
@@ -230,7 +237,7 @@ fn every_command_passes_its_own_name_and_the_calling_window_to_run_command() {
     for name in &registered {
         assert!(
             names.contains(name),
-            "`{name}` 的包装没有把命令名交给 run_command（dev 延迟开关按名字匹配）：{names:?}"
+            "`{name}` 的包装没有把命令名交给命令骨架（dev 延迟开关按名字匹配）：{names:?}"
         );
     }
     assert!(
@@ -249,18 +256,61 @@ fn every_command_passes_its_own_name_and_the_calling_window_to_run_command() {
     for call in &calls {
         assert!(
             call.contains("window.label()"),
-            "每条命令都要把**调用方窗口**交给 run_command（dev 延迟开关的另一个键）：{call}"
+            "每条命令都要把**调用方窗口**交给命令骨架（dev 延迟开关的另一个键）：{call}"
         );
     }
 }
 
+/// **`restore` 是唯一不进 `run_command` 的命令**（P8 Task 3a 的计划要求：
+/// 「这是唯一不进 `run_command` 单临界区形状的命令」）。
+///
+/// 这条断言就是它的机器判据，两侧都钉：
+/// - 唯一性：走 [`run_maintenance_command`] 的命令名**恰好**是 `{"restore"}`——
+///   把别的命令也搬过去（`run_command` 的维护态快速失败会失效）当场红；
+/// - 不能改回去：谁把 `restore` 接回 `run_command` 的闭包，它就出现在前者里、
+///   从这个集合里消失 ⇒ 红。**改回去的真实后果是静默死锁**（`run_command` 正持锁，
+///   而 `restore_from_backup` 要自己按段取锁），所以这条判据必须存在——它挡的是
+///   一条"门禁全绿、真机上卡死"的改动。
+#[test]
+fn restore_is_the_only_command_that_does_not_go_through_run_command() {
+    let commands_source = source("src/commands/mod.rs");
+    let plain: Vec<String> = run_command_calls(&commands_source)
+        .iter()
+        .filter_map(|call| first_string_literal(call))
+        .collect();
+    let maintenance: Vec<String> = named_calls(&commands_source, MAINTENANCE_HEAD)
+        .iter()
+        .filter_map(|call| first_string_literal(call))
+        .collect();
+
+    assert_eq!(
+        maintenance,
+        vec!["restore".to_string()],
+        "走 `run_maintenance_command` 的命令必须恰好是 restore"
+    );
+    assert!(
+        !plain.iter().any(|name| name == "restore"),
+        "restore 不得回到 run_command 的单临界区形状：{plain:?}"
+    );
+}
+
 /// `run_command(…)` 的调用表达式（括号配平，跟 rustfmt 怎么折行无关）。
 fn run_command_calls(source: &str) -> Vec<String> {
-    const HEAD: &str = "run_command(";
+    let calls = named_calls(source, "run_command(");
+    assert!(!calls.is_empty(), "一条 run_command 调用都没解析出来？");
+    calls
+}
+
+/// `restore` 专用骨架的调用头（P8 Task 3a）。它与 `run_command(` **不互为子串**
+/// （`...nance_command(` 里没有 `run_command(`），所以两个解析器各数各的。
+const MAINTENANCE_HEAD: &str = "run_maintenance_command(";
+
+/// 某个调用头（例如 `run_command(`）的调用表达式（括号配平，跟 rustfmt 怎么折行无关）。
+fn named_calls(source: &str, head: &str) -> Vec<String> {
     let mut calls = Vec::new();
     let mut rest = source;
-    while let Some(at) = rest.find(HEAD) {
-        let open = at + HEAD.len() - 1;
+    while let Some(at) = rest.find(head) {
+        let open = at + head.len() - 1;
         let bytes = rest.as_bytes();
         let mut depth = 0usize;
         let mut end = open;
@@ -281,7 +331,6 @@ fn run_command_calls(source: &str) -> Vec<String> {
         calls.push(rest[open..end].to_string());
         rest = &rest[end..];
     }
-    assert!(!calls.is_empty(), "一条 run_command 调用都没解析出来？");
     calls
 }
 

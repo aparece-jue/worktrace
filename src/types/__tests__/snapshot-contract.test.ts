@@ -3,7 +3,7 @@
  *
  * ## 为什么需要这一条
  *
- * `src-tauri/tests/ipc_snapshots.rs` 只钉住 **Rust ↔ JSON**：24 份快照与 Rust 类型
+ * `src-tauri/tests/ipc_snapshots.rs` 只钉住 **Rust ↔ JSON**：27 份快照与 Rust 类型
  * 逐字节一致。手写的 `src/types/ipc.ts` 与那些快照之间**没有**机械联系——没有这条
  * 用例，「改了 Rust 类型忘了改前端类型」仍然只能靠人记得（D1 放弃 DTO 生成器之后的
  * 替代承诺就是这两条用例）。
@@ -49,6 +49,7 @@ import {
 } from "../ipc";
 import type {
   AttentionOverview,
+  BackupResult,
   ClockCorrectionAccepted,
   CommandOutcome,
   CurrentTask,
@@ -56,6 +57,7 @@ import type {
   DailyPlanView,
   ErrorAuthority,
   ErrorResponse,
+  ExportResult,
   HistoryDetail,
   HistoryEditReport,
   HistoryView,
@@ -67,6 +69,7 @@ import type {
   ProjectRow,
   ReconcileReport,
   RecordVersion,
+  RestoreResult,
   RevisionSnapshot,
   SessionAttentionItem,
   SessionRow,
@@ -137,7 +140,7 @@ type Equal<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 type Expect<T extends true> = T;
 
-/** 24 个响应 DTO 的顶层键集合（照抄快照；顺序按字典序，便于与 `Object.keys().sort()` 对读）。 */
+/** 27 个响应 DTO 的顶层键集合（照抄快照；顺序按字典序，便于与 `Object.keys().sort()` 对读）。 */
 const TOP_LEVEL = {
   revision_snapshot: ["data_epoch", "revision"],
   project_list: ["data_epoch", "items", "revision"],
@@ -227,6 +230,12 @@ const TOP_LEVEL = {
     "revision",
   ],
   history_view: ["data_epoch", "revision", "selected", "sessions"],
+  // P8 Task 3a：导出 / 备份 / 恢复（命令 9/10/11）。三个形状的键集合相同、语义不同：
+  // 导出与备份**不改业务事实**（信封就是当时的权威值），恢复的 `revision` 是**锁内
+  // 冻结**的那一个（可以低于恢复前那个值——换库了），`applied` 成功时恒为 true。
+  export_result: ["bytes", "data_epoch", "path", "revision"],
+  backup_result: ["bytes", "data_epoch", "path", "revision"],
+  restore_result: ["applied", "data_epoch", "revision"],
 } as const;
 
 /** 嵌套对象（行类型与错误上下文）的键集合。 */
@@ -366,6 +375,10 @@ export type TopLevelKeyChecks = [
   >,
   Expect<Equal<(typeof TOP_LEVEL)["attention_overview"][number], keyof AttentionOverview>>,
   Expect<Equal<(typeof TOP_LEVEL)["history_view"][number], keyof HistoryView>>,
+  // P8 Task 3a：三个新响应类型（导出 / 备份 / 恢复）。
+  Expect<Equal<(typeof TOP_LEVEL)["export_result"][number], keyof ExportResult>>,
+  Expect<Equal<(typeof TOP_LEVEL)["backup_result"][number], keyof BackupResult>>,
+  Expect<Equal<(typeof TOP_LEVEL)["restore_result"][number], keyof RestoreResult>>,
 ];
 
 /** 编译期：嵌套对象的键集合断言（与上面同一形状）。 */
