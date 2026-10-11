@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 630" width="1000" height="630" role="img"
+         aria-labelledby="fig-04-today-metrics-title fig-04-today-metrics-desc"
+         font-family="'Geist','Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif">
+      <title id="fig-04-today-metrics-title">今日页的五项与三类工时的分列口径</title>
+      <desc id="fig-04-today-metrics-desc">今日页显示五件事，都来自同一次读取，所以说的必然是同一个今天：今日选择列表、当前任务、确认人工工时、运行暂计、待确认时间。后三项是三张结构相同的工时卡片，每张卡片上面一格是人工，下面分列机器（后台）、机器（被动）与等待，标题写着机器与等待分列、不并入人工，页面上没有总计。V0.1 只能开前台会话，所以机器与等待那几格通常是 0。</desc>
+      <defs><style>@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;family=Instrument+Serif:ital@0;1&amp;display=swap');</style>
+        <marker id="fig-04-today-metrics-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+          <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+        </marker>
+      </defs>
+
+      <rect x="0" y="0" width="1000" height="630" fill="#FBF9F6"/>
+
+      <!-- 箭头先画 -->
+      <path d="M124,156 V204" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-04-today-metrics-arrow)"/>
+      <path d="M312,156 V204" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-04-today-metrics-arrow)"/>
+      <path d="M500,156 V204" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-04-today-metrics-arrow)"/>
+      <path d="M688,156 V204" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-04-today-metrics-arrow)"/>
+      <path d="M876,156 V204" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-04-today-metrics-arrow)"/>
+
+      <!-- 一次读取 -->
+      <rect x="40" y="80" width="920" height="76" rx="6" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+      <text x="500" y="112" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">一次读取</text>
+      <text x="500" y="136" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">五项来自同一次读取：同一天、同一时区、同一段半开区间</text>
+
+      <!-- ① 今日选择列表 -->
+      <rect x="40" y="210" width="168" height="76" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+      <text x="124" y="240" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">今日选择列表</text>
+      <text x="124" y="264" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">今天打算做的任务</text>
+
+      <!-- ② 当前任务 -->
+      <rect x="228" y="210" width="168" height="76" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+      <text x="312" y="240" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">当前任务</text>
+      <text x="312" y="264" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">正在计时 / 未在计时</text>
+
+      <!-- ③ 确认人工工时 -->
+      <rect x="416" y="210" width="168" height="200" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+      <text x="500" y="240" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">确认人工工时</text>
+      <text x="500" y="262" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">已经算数的人工时间</text>
+      <line x1="428" y1="274" x2="572" y2="274" stroke="#6B9BC7" stroke-opacity="0.30" stroke-width="0.8"/>
+      <rect x="428" y="282" width="144" height="26" rx="4" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+      <text x="500" y="300" font-size="12" font-weight="500" fill="#2A2320" text-anchor="middle">人工</text>
+      <text x="500" y="330" font-size="12" fill="#6F6357" text-anchor="middle">机器与等待（分列）</text>
+      <rect x="428" y="338" width="144" height="24" rx="4" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="500" y="355" font-size="12" fill="#6F6357" text-anchor="middle">机器（后台）</text>
+      <rect x="428" y="366" width="144" height="24" rx="4" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="500" y="383" font-size="12" fill="#6F6357" text-anchor="middle">机器（被动）</text>
+      <rect x="428" y="394" width="144" height="24" rx="4" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="500" y="411" font-size="12" fill="#6F6357" text-anchor="middle">等待</text>
+
+      <!-- ④ 运行暂计 -->
+      <rect x="604" y="210" width="168" height="200" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+      <text x="688" y="240" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">运行暂计</text>
+      <text x="688" y="262" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">还在跑、还没结束</text>
+      <line x1="616" y1="274" x2="760" y2="274" stroke="#6B9BC7" stroke-opacity="0.30" stroke-width="0.8"/>
+      <rect x="616" y="282" width="144" height="26" rx="4" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+      <text x="688" y="300" font-size="12" font-weight="500" fill="#2A2320" text-anchor="middle">人工</text>
+      <text x="688" y="330" font-size="12" fill="#6F6357" text-anchor="middle">机器与等待（分列）</text>
+      <rect x="616" y="338" width="144" height="24" rx="4" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="688" y="355" font-size="12" fill="#6F6357" text-anchor="middle">机器（后台）</text>
+      <rect x="616" y="366" width="144" height="24" rx="4" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="688" y="383" font-size="12" fill="#6F6357" text-anchor="middle">机器（被动）</text>
+      <rect x="616" y="394" width="144" height="24" rx="4" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="688" y="411" font-size="12" fill="#6F6357" text-anchor="middle">等待</text>
+
+      <!-- ⑤ 待确认时间 -->
+      <rect x="792" y="210" width="168" height="200" rx="6" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+      <text x="876" y="240" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">待确认时间</text>
+      <text x="876" y="262" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">候选区间 N 条</text>
+      <line x1="804" y1="274" x2="948" y2="274" stroke="#6B9BC7" stroke-opacity="0.30" stroke-width="0.8"/>
+      <rect x="804" y="282" width="144" height="26" rx="4" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+      <text x="876" y="300" font-size="12" font-weight="500" fill="#2A2320" text-anchor="middle">人工</text>
+      <text x="876" y="330" font-size="12" fill="#6F6357" text-anchor="middle">机器与等待（分列）</text>
+      <rect x="804" y="338" width="144" height="24" rx="4" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="876" y="355" font-size="12" fill="#6F6357" text-anchor="middle">机器（后台）</text>
+      <rect x="804" y="366" width="144" height="24" rx="4" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="876" y="383" font-size="12" fill="#6F6357" text-anchor="middle">机器（被动）</text>
+      <rect x="804" y="394" width="144" height="24" rx="4" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="876" y="411" font-size="12" fill="#6F6357" text-anchor="middle">等待</text>
+
+      <!-- 注记：三列不相加（本图焦点口径） -->
+      <rect x="40" y="330" width="3" height="122" rx="1" fill="#D9603A"/>
+      <text x="56" y="348" font-size="12" font-weight="600" fill="#D9603A">三列分开，不相加</text>
+      <text x="56" y="376" font-size="12" fill="#6F6357">人工只算前台会话</text>
+      <text x="56" y="402" font-size="12" fill="#6F6357">机器（后台 / 被动）与等待各自一列</text>
+      <text x="56" y="428" font-size="12" fill="#6F6357">页面上没有「总计」</text>
+
+      <text x="40" y="466" font-size="12" fill="#6F6357">三张工时卡片的读法完全一样：人工一格在上，机器与等待分列在下，互不并入。</text>
+
+      <!-- 图例：底部横条 -->
+      <line x1="28" y1="500" x2="972" y2="500" stroke="#2A2320" stroke-opacity="0.10" stroke-width="0.8"/>
+      <text x="28" y="522" font-size="12" font-weight="600" fill="#6F6357">图例</text>
+      <rect x="68" y="512" width="18" height="12" rx="2" fill="#E4F1EF" stroke="#6FAFA8" stroke-width="1"/>
+      <text x="94" y="522" font-size="12" fill="#6F6357">计入人工的那一格 / 同一次读取</text>
+      <rect x="330" y="512" width="18" height="12" rx="2" fill="#E3EDF7" stroke="#6B9BC7" stroke-width="1"/>
+      <text x="356" y="522" font-size="12" fill="#6F6357">今日页的五项</text>
+      <rect x="500" y="512" width="18" height="12" rx="2" fill="#F2F2F3" stroke="#BABEC6" stroke-width="0.8"/>
+      <text x="526" y="522" font-size="12" fill="#6F6357">机器与等待（分列，不并入人工）</text>
+      <text x="28" y="552" font-size="12" fill="#6F6357">五项的读法：① 今天打算做的任务 ② 正在计时的那条 ③ 已经算数的人工 ④ 还在跑的暂计 ⑤ 还不能算数的候选。</text>
+      <text x="28" y="576" font-size="12" fill="#6F6357">同一次读取＝同一天、同一时区、同一段半开区间 [起, 止)：含起点、不含终点；V0.1 只能开前台会话，所以机器与等待那几格通常是 0。</text>
+    </svg>
