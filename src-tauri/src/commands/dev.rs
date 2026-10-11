@@ -258,13 +258,12 @@ impl CommandProbe {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        println!(
-            "[worktrace] probe: {}",
-            serde_json::json!({
-                "id": self.id, "window": self.window, "command": self.command,
-                "phase": phase, "wall_ms": wall_ms,
-                "elapsed_ms": self.started.elapsed().as_millis(), "success": success,
-            })
-        );
+        let observation = serde_json::json!({
+            "id": self.id, "window": self.window, "command": self.command,
+            "phase": phase, "wall_ms": wall_ms,
+            "elapsed_ms": self.started.elapsed().as_millis(), "success": success,
+        });
+        println!("[worktrace] probe: {observation}");
+        crate::platform::debug_probe::record(&observation);
     }
 }

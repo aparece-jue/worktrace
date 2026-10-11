@@ -13,6 +13,8 @@
 //! 的监听器（一个从不显示的顶层消息窗），只翻成事件与边界样本，怎么处理由上层决定。
 
 pub mod clock;
+#[cfg(debug_assertions)]
+pub mod debug_probe;
 // P6 Task 2a：一条一行地记诊断（append）。2b 的故障态进入/清除复用同一落点。
 pub mod diagnostics;
 pub mod paths;

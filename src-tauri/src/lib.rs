@@ -233,6 +233,14 @@ fn setup(app: &mut tauri::App, alive: &Arc<AtomicBool>) -> Result<(), Box<dyn st
     // 库与锁的路径**只解析一次**：唤醒请求写在锁文件旁边，两次解析万一不一致，
     // 第二次启动的通知就会石沉大海。
     let config = StartupConfig::from_app_paths()?;
+    #[cfg(debug_assertions)]
+    if let Some(directory) = config
+        .diagnostic_log
+        .as_deref()
+        .and_then(std::path::Path::parent)
+    {
+        platform::debug_probe::initialize(directory);
+    }
     let lock_path = config.lock_path.clone();
 
     // ⑥ 开窗口：抬起主窗（若已经被关掉则按 `tauri.conf.json` 重建）。失败即启动失败

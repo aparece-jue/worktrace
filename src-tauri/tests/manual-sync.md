@@ -50,6 +50,8 @@ DevTools 控制台里读不到「水位 / 失效计数」。本文档的判据�
 
 ### 本轮 debug 命令观测日志（2026-10-05）
 
+2026-10-11 补充：debug 构建启动时在应用数据目录生成独立的 `worktrace-probe-<pid>-<启动毫秒>.jsonl`，记录 CommandProbe 的 start/body_complete/return 和 event_dropped；从资源管理器正常启动也可留档。每个文件最多 8 MiB，达到上限后不再追加，后续验收必须检查文件未满；I/O 失败关闭该日志，不影响业务。release 构建不包含此落点。旧版本仅有控制台输出，不能从新版日志反向证明此前实机时序。文件只含命令名、窗口、请求编号和时序/结果，不含业务载荷。
+
 `commands::dev::CommandProbe` 由真实 `run_command` 包装消费，debug 控制台输出 `[worktrace] probe:` JSON：`id/window/command/phase/wall_ms/elapsed_ms/success`。每个请求依次记录 `start`（IPC 到达包装）、`body_complete`（业务读取完成并释放锁）、`return`（注入延迟结束，将返回响应）。据窗口筛选 `get_revision` 可计算校验请求数；据相同 id 的 body_complete/return 可证明延迟发生在取数之后。广播丢弃时另记 `event_dropped/event/revision`，证明开关真正消费。
 
 这些日志不写数据库、不记录请求载荷，不新增产品命令；CommandProbe 所在模块及包装调用均带 debug 编译守卫。日志记录后端接收/返回时刻，不等于前端实际绘制时刻，仍须配合窗口观察。也不能用它单独证明隐藏期间 visibilityState；该状态需要从对应 WebView 控制台核对。临时替换 __TAURI_INTERNALS__.invoke 的脚本在本机未捕获真实调用，不作为时序证据。
@@ -134,7 +136,7 @@ await __TAURI_INTERNALS__.invoke("__p7_replay_event", { revision: R - 1 })
      本实验要的是**两个各自独立的 WebView**（各有自己的模块实例、自己的水位、自己的事件
      订阅）。同窗分栏共享同一个 `domainState`；浏览器标签页连 Tauri 后端都没有
      （`invoke` 直接失败）。拿它们做出来的"一致"不说明任何问题。
-3. 两个窗口都切到「任务」页。
+3. 两个窗口都切到「收件箱」页（该列表包含 Inbox；「任务」页默认 Ready，不能观察新捕获任务）。
    - [ ] 两个窗口都有数据（不是加载态/错误态）；两边看到的列表**内容相同**
    - [ ] 两个窗口的 `document.visibilityState` 都是 `visible`（各自 DevTools 控制台）
    - 现象：
@@ -147,7 +149,7 @@ await __TAURI_INTERNALS__.invoke("__p7_replay_event", { revision: R - 1 })
 > 验的是 00 §5 规则 4：**末次通知丢了仍要能收敛**，靠可见窗口至多每 30 秒一次
 > `get_revision` 校验（隐藏窗口在显示前校验）。
 
-1. **前置**：B（`sync-lab`）能看到任务列表；记下 B 列表里有几条、最后一条是什么。
+1. **前置**：B（`sync-lab`）停在「收件箱」页，能看到包含 Inbox 的任务列表；记下 B 列表里有几条、最后一条是什么。
 2. **注入**：在 B 的 DevTools 控制台执行 `__p7_drop_next_event("domain.changed")`。
 3. **触发**：切到 A（`main`），在收件箱里捕获一条新任务，例如标题 `实机-a-<时刻>`。
    - [ ] A 的列表里立刻出现这条任务（A 自己的命令响应）
@@ -176,7 +178,7 @@ await __TAURI_INTERNALS__.invoke("__p7_replay_event", { revision: R - 1 })
 > 于是这一步**悄悄失去判别力、却仍然会记「通过」**。下面第 3 步的第一条勾选就是用来
 > 当场确认「注入此刻还有效」的。
 
-1. **前置**：两个窗口都在「任务」页，**筛选条件保持一致、全程不改**；记下两边列表的最后一条。
+1. **前置**：两个窗口都在「收件箱」页，**筛选条件保持一致、全程不改**；记下两边列表的最后一条。
 2. **注入**：在 **B** 的控制台执行 `__p7_delay_next_query_ms("list_tasks", 10000)`
    （**8–10 秒**；写 5000 会让操作时间逼近窗口宽度，见上面的第二条 ⚠️）。
 3. **触发 A 连写两条**：切到 A，在延迟窗口内（8–10 秒）**连续**捕获两条任务：
