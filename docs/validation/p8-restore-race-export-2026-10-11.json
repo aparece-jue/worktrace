@@ -1,0 +1,321 @@
+{
+  "schema_version": 1,
+  "generated_at": 1791706711544,
+  "units": {
+    "durations": "milliseconds",
+    "instants": "unix_epoch_milliseconds",
+    "dates": "YYYY-MM-DD",
+    "minutes": "not used: no field is reported in minutes"
+  },
+  "criteria": {
+    "classification": "current_assignments",
+    "range_basis": "半开范围 [from, to)：每段区间与范围的交集是它的 clipped_ms（max(0, min(end,to) - max(start,from))）；日桶按 timezone 的真实日界切分（夏令时切换日是 23 / 25 小时），逐日之和等于不分组的总和。",
+    "exclusions": "needs_review=1、voided_at 非空、discarded 会话的区间都不进任何「已确认」数字；其中 voided_at 非空与 discarded 会话的区间也不进明细；第 1 类（不变量损坏）会话的已确认区间不进明细——被排除的会话计入 fault_sessions_excluded；本次采样认可的开放区间由 live 分支处理，不由故障集合再次排除；非待确认的零长度行也不进明细（取数时就被「空区间不占时间」挡掉）；未作废的待确认候选会出现在明细里（needs_review=true、class=pending，含上述损坏会话的候选），它的 clipped_ms 计入 pending 列（含零长度候选：计数但不贡献跨度）；该列 ms 为 null 时按 0 求和，明细之和因此等于列合计。",
+    "measures": "人工只有 FOREGROUND；机器分 BACKGROUND 与 PASSIVE 两项；WAITING 单列。四类分列、谁也不并进谁（1h 前台 + 1h 后台 = 人工 1h），三类之间不预先相加。",
+    "pending": "待确认栏的 ms 只累加「已知端点」候选的跨度（裁剪到范围）；终点未知不推算——该 measure 一条已知端点的候选都没有时 ms 为 null（不是 0）。条数看 intervals。",
+    "labels": "标签与项目按每条明细的 task_id 取当前归属（导出这一刻的当前分类，见 tasks 段），只做连接、不重算任何时长，也不做任何按 weight 的分配；按标签归并时多个标签之和可大于人工总量，不可相加。",
+    "watermarks": "数字截至 as_of（同一次采样的归属终点，全部数字都来自它）；generated_at只说明本文件何时生成，不代表数据更新到那一刻——两者可以不等。"
+  },
+  "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+  "revision": 42,
+  "as_of": 1791706711542,
+  "timezone": "Asia/Shanghai",
+  "range": {
+    "from": 1791648000000,
+    "to": 1791734400000
+  },
+  "confirmed": [
+    {
+      "class": "confirmed",
+      "measure": "human",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": 363151,
+      "intervals": 2
+    },
+    {
+      "class": "confirmed",
+      "measure": "machine_background",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": 0,
+      "intervals": 0
+    },
+    {
+      "class": "confirmed",
+      "measure": "machine_passive",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": 0,
+      "intervals": 0
+    },
+    {
+      "class": "confirmed",
+      "measure": "waiting",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": 0,
+      "intervals": 0
+    }
+  ],
+  "live": [
+    {
+      "class": "live",
+      "measure": "human",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": 0,
+      "intervals": 0
+    },
+    {
+      "class": "live",
+      "measure": "machine_background",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": 0,
+      "intervals": 0
+    },
+    {
+      "class": "live",
+      "measure": "machine_passive",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": 0,
+      "intervals": 0
+    },
+    {
+      "class": "live",
+      "measure": "waiting",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": 0,
+      "intervals": 0
+    }
+  ],
+  "pending": [
+    {
+      "class": "pending",
+      "measure": "human",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": null,
+      "intervals": 0
+    },
+    {
+      "class": "pending",
+      "measure": "machine_background",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": null,
+      "intervals": 0
+    },
+    {
+      "class": "pending",
+      "measure": "machine_passive",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": null,
+      "intervals": 0
+    },
+    {
+      "class": "pending",
+      "measure": "waiting",
+      "timezone": "Asia/Shanghai",
+      "range": {
+        "from": 1791648000000,
+        "to": 1791734400000
+      },
+      "as_of": 1791706711542,
+      "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+      "revision": 42,
+      "ms": null,
+      "intervals": 0
+    }
+  ],
+  "days": [
+    {
+      "date": "2026-10-11",
+      "confirmed": [
+        {
+          "class": "confirmed",
+          "measure": "human",
+          "timezone": "Asia/Shanghai",
+          "range": {
+            "from": 1791648000000,
+            "to": 1791734400000
+          },
+          "as_of": 1791706711542,
+          "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+          "revision": 42,
+          "ms": 363151,
+          "intervals": 2
+        },
+        {
+          "class": "confirmed",
+          "measure": "machine_background",
+          "timezone": "Asia/Shanghai",
+          "range": {
+            "from": 1791648000000,
+            "to": 1791734400000
+          },
+          "as_of": 1791706711542,
+          "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+          "revision": 42,
+          "ms": 0,
+          "intervals": 0
+        },
+        {
+          "class": "confirmed",
+          "measure": "machine_passive",
+          "timezone": "Asia/Shanghai",
+          "range": {
+            "from": 1791648000000,
+            "to": 1791734400000
+          },
+          "as_of": 1791706711542,
+          "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+          "revision": 42,
+          "ms": 0,
+          "intervals": 0
+        },
+        {
+          "class": "confirmed",
+          "measure": "waiting",
+          "timezone": "Asia/Shanghai",
+          "range": {
+            "from": 1791648000000,
+            "to": 1791734400000
+          },
+          "as_of": 1791706711542,
+          "data_epoch": "16838f06-82c3-4c43-bcfa-5109d0513126",
+          "revision": 42,
+          "ms": 0,
+          "intervals": 0
+        }
+      ]
+    }
+  ],
+  "intervals": [
+    {
+      "id": "c6dffed7-164f-417b-8437-a495b8db85f0",
+      "session_id": "921cd86a-0f4f-4c49-913c-df36cf213228",
+      "task_id": "09195ba4-d2ce-49f1-b5ac-784c5ecc7e36",
+      "class": "confirmed",
+      "measure": "human",
+      "started_at": 1791694120862,
+      "ended_at": 1791694453052,
+      "duration_ms": 332190,
+      "needs_review": false,
+      "clipped_ms": 332190
+    },
+    {
+      "id": "309d58dc-770c-44f0-a630-fe1ef80166f4",
+      "session_id": "305e88ae-584a-48d9-a185-fc9b757c0f72",
+      "task_id": "ca1ec488-e0a5-4b80-846e-92c87c7f5788",
+      "class": "confirmed",
+      "measure": "human",
+      "started_at": 1791701162649,
+      "ended_at": 1791701193610,
+      "duration_ms": 30961,
+      "needs_review": false,
+      "clipped_ms": 30961
+    }
+  ],
+  "fault_sessions_excluded": 0,
+  "tasks": [
+    {
+      "task": {
+        "id": "09195ba4-d2ce-49f1-b5ac-784c5ecc7e36",
+        "project_id": null,
+        "title": "[验收20261011] 发布版异常恢复j1",
+        "status": "Doing",
+        "quality": null,
+        "row_version": 3,
+        "created_at": 1791694044274,
+        "updated_at": 1791694120862
+      },
+      "project": null,
+      "tags": []
+    },
+    {
+      "task": {
+        "id": "ca1ec488-e0a5-4b80-846e-92c87c7f5788",
+        "project_id": null,
+        "title": "[验收20261011] 恢复确认k1",
+        "status": "Doing",
+        "quality": null,
+        "row_version": 3,
+        "created_at": 1791701131940,
+        "updated_at": 1791701162649
+      },
+      "project": null,
+      "tags": []
+    }
+  ]
+}
