@@ -19,6 +19,7 @@ Apply dependency cleanup and decide production dockview after review; preserve c
 | V0.3 | AI/history/feedback/selected-input confirmation | F-201…F-210 |
 | V0.4 | Brief facts/decisions, minimal outcomes, references, Agent imports and record search | F-301…F-305 plus F-110 extension |
 | V0.5 | Extended review/KPA/knowledge facts/experimental capability model | F-401…F-405 |
+| V0.6 | **Distribution & auto-update**: signed update feed, check/download/install, channels, rollback | New capability, F-ID TBD |
 | V1.0 | Automated backup/hardened migration/recovery/long-run verification | F-501…F-510 |
 
 V0.1 Today is a daily selection, not a calendar; Goal/Milestone/WBS are not required. Scheduled begins in V0.2. Precise skill scores are experimental and never mandatory under sparse evidence.
@@ -41,6 +42,23 @@ Each step delivers commands/persistence/UI/tests/demo. Specify only the next sli
 - V0.3: M09 selected-input/preview/confirmation before M10 history/feedback. Use existing entities; advanced analyze_context/review_week interfaces follow later capabilities, not all eight at once.
 - V0.4: brief ContextFact/Decision, references and reviewed Agent import under 07; M13 searches records/reference titles, never source-file bodies.
 - V0.5: usage facts/sample counts before optional experimental ability scores; KPA/review use confirmed facts, acceptance rate does not establish saved time.
+- V0.6: **auto-update**. Six decisions must be settled before implementation:
+  1. **Update feed & hosting**: GitHub Releases / self-hosted static site / internal mirror.
+  2. **Signing-key ownership**: the public key is embedded and the private key stays offline — losing it means
+     no already-installed build can ever auto-update again, so backup and rotation must be written down first.
+  3. **Check timing & user visibility**: silent startup check plus a user-confirmed install (recommended) versus
+     silent download and restart-to-install; a manual "check for updates" entry point is required, and being
+     offline must never block normal use.
+  4. **Channels**: whether stable/beta fork, and how beta rolls back to stable.
+  5. **Failure & rollback**: interrupted downloads, signature mismatch and failed installs must leave the old
+     build runnable; after data has been written by a newer version the older one must refuse to write
+     (existing "future-version write refusal" rule), so a pre-upgrade backup should be the default.
+  6. **Relationship to the current install shape**: NSIS, `INSTALLMODE=currentUser`, installed under
+     `%LOCALAPPDATA%\Worktrace`, with data in `%APPDATA%\com.worktrace.desktop\` (must survive the upgrade);
+     a portable form would need separate treatment.
+  Note (observed): downloads have already failed under a restricted network here (NSIS tool download hit socket
+  permission 10013, proxy unreachable), so feed reachability, timeouts and "check failed" messaging must assume
+  the feed can be unavailable for long stretches.
 - V1.0: automate/harden existing protection and conduct fault/long-run tests; data protection is not first implemented here.
 
 ## 4. Risks and gates
