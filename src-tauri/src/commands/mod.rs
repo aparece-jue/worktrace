@@ -28,9 +28,10 @@
 //!
 //! 每条命令都是**一对**：`#[tauri::command] pub async fn x(…)`（IPC 包装：取锁、
 //! 跑阻塞段、把错误映射成 [`ErrorResponse`]）与 `pub fn x_impl(…)`（命令体：解析请求 →
-//! 调服务 → 返回响应）。包装只有一行转发——例外只有两处，都在「导出与备份 / 恢复」
-//! 一节里写清：`backup` 的包装多凑一只**组合根的同源时钟**，`restore` 的包装走
-//! [`run_maintenance_command`]（**不进 `run_command`**）。
+//! 调服务 → 返回响应）。包装只有一行转发——例外只有三处：`backup` 的包装多凑一只
+//! 组合根的同源时钟、`restore` 的包装走 [`run_maintenance_command`]（**不进
+//! `run_command`**），以及 `get_revision` 的包装在握手成功之后多投一次重建路径留下的
+//! 视图意图（[`replay_deferred_view`]，P8 Task 9b）。三处的理由都写在各节里。
 //!
 //! 为什么分开：`#[tauri::command]` 生成的包装要 Tauri 运行时才能调，而命令体只需要一个
 //! `&mut AppState`（`restore` 那一对收 [`SharedApp`]：它自己按段取锁，见该节）——分开之后
@@ -113,11 +114,12 @@
 
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::domain::error::DomainError;
 use crate::domain::task::TaskStatus;
 use crate::error::{AppError, AuthorityKind, AuthorityTarget, ErrorResponse};
+use crate::platform::{tray, window};
 use crate::services::bootstrap::{
     is_maintenance_refusal, lock_app, AppState, ExitReport, RunningApp, SharedApp,
 };
@@ -365,19 +367,64 @@ pub struct EpochRequest {
 ///
 /// 纯读、不要求任何已知 epoch；返回的 `data_epoch` 是随后所有业务请求的入参。
 /// 它**不代替**业务快照：窗口拿到 epoch 之后仍要逐条拉自己需要的一致视图。
+///
+/// ⚠️ **本包装不是一行转发**（第三处例外，理由见 [`replay_deferred_view`]）：握手
+/// **成功**之后补投一次重建路径留下的托盘视图意图。失败路径不投——一次没握上手的
+/// 窗口还没有能收这条事件的上下文。
 #[tauri::command]
 pub async fn get_revision(
     window: tauri::WebviewWindow,
     state: State<'_, RunningApp>,
 ) -> Result<crate::services::handshake::RevisionSnapshot, ErrorResponse> {
-    run_command(
+    let result = run_command(
         "get_revision",
         window.label(),
         &state,
         Vec::new(),
         get_revision_impl,
     )
-    .await
+    .await;
+    if result.is_ok() {
+        replay_deferred_view(window.label(), |view| {
+            window.emit(tray::TRAY_VIEW_EVENT, view)
+        });
+    }
+    result
+}
+
+/// 主窗握手之后的**补投**（P8 Task 9b）：重建路径留下的视图意图在这里投递一次。
+///
+/// 重建出来的窗口是**全新 JS 上下文**，组合根那次 `emit_to` 落在尚不存在的 label 上；
+/// 而它挂载后的第一条命令就是 `get_revision`（`domainState.start()` 的握手），所以
+/// 走到这里时那只窗口一定已经在听——前端把托盘订阅排在握手**之前**
+/// （`src/App.tsx` 的那一个 effect，顺序由 `src/__tests__/App.test.tsx` 的调用序列钉住）。
+///
+/// **为什么让包装破例**（本仓"包装只有一行转发"那条纪律的第三处例外）：补投必须挂在
+/// **这一次握手成功之后**这一个时刻上。早于窗口加载完（事件丢了）、挂在别的命令上
+/// （用户已经看见停在默认页）、或者另开一条 IPC（本波次明令不新增业务命令：命令数
+/// 必须仍是 37）都不行。这里没有新增命令、没有新增状态机，只多一次 `take` + `emit`；
+/// "要不要投"那一半在 [`tray::take_deferred_view`] 里，是可单测的纯状态。
+///
+/// 只认**主窗** label：实验窗口（`sync-lab`）也会周期握手，让它把待办取走就等于把这次
+/// 跳转投进一个不显示主界面的窗口，主窗那边反而永远等不到。
+///
+/// 返回"这一次投没投"（用例据此断言"恰好一次"）。`emit` 的失败**不改结论**：托盘那条
+/// 通道没有回执，意图已经取走（take 即清），同一次跳转不重试——否则它会在下一次开窗时
+/// 变成一次误跳（与 `lib.rs::on_tray_action` 的失败口径一致：只记诊断）。
+pub fn replay_deferred_view(
+    label: &str,
+    emit: impl FnOnce(tray::TrayView) -> Result<(), tauri::Error>,
+) -> bool {
+    if label != window::MAIN_WINDOW_LABEL {
+        return false;
+    }
+    let Some(view) = tray::take_deferred_view() else {
+        return false;
+    };
+    if let Err(error) = emit(view) {
+        eprintln!("[worktrace] tray: deferred view request to `{label}` failed: {error}");
+    }
+    true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

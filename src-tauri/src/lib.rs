@@ -395,26 +395,33 @@ pub fn tray_dispatch(action: TrayAction) -> TrayDispatch {
 ///
 /// **失败姿势**（托盘没有回执通道）：抬窗/重建失败 ⇒ 什么都不做 + 一行诊断，**不 panic**；
 /// 跳转事件发不出去 ⇒ 同样只记诊断，抬窗照旧。事件是"请前端切页"，前端没收到就是一次
-/// 点不动的跳转——按 `pageRequest` 的既有口径丢弃，不留待办队列。
+/// 点不动的跳转——**这一条只对已经存在的窗口成立**；窗口不在时那次投递本来就是空放，
+/// 走下面的补投。
 ///
-/// # 一条**已知限制**：主窗被关掉后重建的那一次跳转丢失（fix round 1，评审 Critical-2）
+/// # 重建路径的**补投**（P8 Task 9b；此前 fix round 1 把它登记为"已知限制"）
 ///
-/// 主窗**已经被关掉**时点「当前任务」/「快速捕获」：`emit_to` 是发给**尚不存在的窗口**
-/// （`emit_to(label, …)` 对不存在的 label 零接收者，通常也不返回 `Err` —— 所以下面那条
-/// 诊断**不一定**会出现），随后 [`window::raise_or_rebuild_main`] 才按 `tauri.conf.json`
-/// 重建它。新窗口是**全新 JS 上下文**，按默认页（收件箱）挂载 ⇒ **这一次跳转不会发生**。
+/// 主窗**已经被关掉**时点「当前任务」/「快速捕获」：上面那次 `emit_to` 是发给
+/// **尚不存在的窗口**（`emit_to(label, …)` 对不存在的 label 零接收者，通常也不返回
+/// `Err` —— 所以那条诊断**不一定**会出现），随后 [`window::raise_or_rebuild_main`] 才按
+/// `tauri.conf.json` 重建它。新窗口是**全新 JS 上下文**，按默认页（收件箱）挂载。
 ///
-/// 为什么**不补发**：补发要引入"待办视图队列 + 页面加载后重放"（或 `on_page_load` 钩子、
-/// 或新增一条 IPC），那是**第二套投递机制**，而本节前面刚写明"前端没收到就丢弃、不留待办
-/// 队列"这条口径；计划 §6.4-11 的判据也只要求"点到了要切视图"，没有要求跨进程生命周期补发。
-/// **代价**：关窗后从托盘回来只能落到默认页，用户要自己点一下导航。
-/// 如实登记在 `tests/manual-v01.md` §10.5 与 `docs/validation/p8-acceptance.md` §3。
+/// 所以重建**成功**之后把这次意图留成待办（[`tray::defer_view`]），由新窗口的首次握手
+/// 投递一次：`commands::get_revision` 的包装在握手成功后调
+/// `commands::replay_deferred_view`，**只认主窗 label、取走即清**。
+///
+/// - **为什么挂在握手而不是别处**：重建出来的前端要等 `listen()` 回来才收得到这条事件，
+///   而 `get_revision` 正是它挂载后的第一条命令；前端因此把托盘订阅排在握手**之前**
+///   （`src/App.tsx` 的那一个 effect，顺序由 `src/__tests__/App.test.tsx` 的调用序列钉住）。
+///   不用定时器轮询、也不新增 IPC 命令（业务命令仍是 37 条）。
+/// - **窗口还在时不留待办**（[`window::needs_view_replay`] 恒为假）：那次 `emit_to` 已经
+///   把意图送到，再留一份就是投递两次——已存在窗口那条路径的行为**一字未改**。
+/// - **重建失败不留残渣**：留待办在 `Ok(plan)` 分支里，失败分支什么都不写。
 fn on_tray_action(app: &AppHandle, action: TrayAction) {
     match tray_dispatch(action) {
         TrayDispatch::View(view) => {
             // 跳转先发。`emit_to` 失败只记诊断：它不是业务写，也不该拦住抬窗。
             // ⚠️ 主窗不存在时**通常不会**走到这里（零接收者，不算 `Err`）⇒ 这一行
-            // 有没有，不足以判断"跳转到底有没有送到"；见上面那条已知限制。
+            // 有没有，不足以判断"跳转到底有没有送到"；那一条由下面的补投兜住。
             if let Some(view) = view {
                 if let Err(error) =
                     app.emit_to(window::MAIN_WINDOW_LABEL, tray::TRAY_VIEW_EVENT, view)
@@ -426,10 +433,18 @@ fn on_tray_action(app: &AppHandle, action: TrayAction) {
                 }
             }
             match window::raise_or_rebuild_main(app) {
-                Ok(plan) => println!(
-                    "[worktrace] tray: {} -> {plan:?} {view:?}",
-                    action.menu_id()
-                ),
+                Ok(plan) => {
+                    // 只有重建这条路要补投（窗口还在时意图已经送到了）。
+                    if window::needs_view_replay(plan) {
+                        if let Some(view) = view {
+                            tray::defer_view(view);
+                        }
+                    }
+                    println!(
+                        "[worktrace] tray: {} -> {plan:?} {view:?}",
+                        action.menu_id()
+                    )
+                }
                 Err(error) => eprintln!("[worktrace] tray: {} failed: {error}", action.menu_id()),
             }
         }

@@ -13,7 +13,9 @@ import { installNativeVisibility } from "./nativeVisibility";
  * 4. **本上下文唯一那个订阅入口的启动接线**：挂载时 `domainState.start()`
  *    （Task 2 的 `startEventSession` 语义：先订阅并暂存 → 握手 → 取计时快照 → 按序交付），
  *    卸载时 `domainState.stop()`。**页面自己不开会话、也不各自订阅事件**——
- *    它们只通过 `src/state/hooks.ts` 读同一个入口。
+ *    它们只通过 `src/state/hooks.ts` 读同一个入口。⚠️ 它挂在**托盘订阅之后**
+ *    （P8 Task 9b）：主窗被托盘重建时那一次跳转是**补投**的（Rust 在首次 `get_revision`
+ *    成功之后才 emit），订阅必须先可用——顺序由 `src/__tests__/App.test.tsx` 的调用序列钉住。
  *
  * ## 「切到某页」是外壳的事，触发口在外面（P8 Task 2c，M8）
  *
@@ -141,16 +143,6 @@ export default function App() {
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    // 启动：失败不改本地状态（镜像自己会置 `phase: "failed"`，状态栏照实显示）。
-    domainState.start().catch(() => undefined);
-    return () => {
-      // StrictMode 的 mount→cleanup→mount 与真实卸载都走这里：`stop()` 幂等，
-      // 之后再来一次 `start()` 会重新起一代（Task 2 fix round 2）。
-      void domainState.stop();
-    };
-  }, []);
-
-  useEffect(() => {
     // 「切到某页」的外部触发口（M8）：订阅 -> 返回退订函数。退订与订阅同源，
     // 所以 StrictMode 的双挂载也不会留下第二个处置者。
     //
@@ -177,6 +169,12 @@ export default function App() {
     // 与本功能"失败只记诊断"的姿势一致（托盘那条路径也是 `eprintln` 诊断），
     // 否则实机上"点了托盘不跳转"就查不出是"订阅没建起来"还是"事件没到"
     // （fix round 1，评审 Minor-3）。
+    //
+    // ⚠️ **顺序是判据，不是巧合**（P8 Task 9b）：镜像会话要等这条订阅**可用之后**才开。
+    // 主窗被托盘重建时那一次跳转是**补投**的——Rust 在首次 `get_revision` **成功之后**
+    // emit 一次 `worktrace:tray-view`（`commands::replay_deferred_view`），
+    // 所以"订阅先可用"必须早于"握手发出"；两者并发就等于把补投再丢一次
+    // （`App.test.tsx` 的调用序列用例钉住这一条，不靠"两条 IPC 谁先回来"）。
     let alive = true;
     let unlisten: UnlistenFn | null = null;
     void installTrayViewRequests()
@@ -186,10 +184,18 @@ export default function App() {
       })
       .catch((cause: unknown) => {
         console.warn("[worktrace] 托盘跳转订阅失败，视图跳转本次不可用", cause);
+      })
+      .then(() => {
+        // 启动：失败不改本地状态（镜像自己会置 `phase: "failed"`，状态栏照实显示）。
+        // 订阅**失败**也照常开（跳转是体验项，业务状态不能跟着一起没有）。
+        if (alive) domainState.start().catch(() => undefined);
       });
     return () => {
       alive = false;
       if (unlisten !== null) void unlisten();
+      // StrictMode 的 mount→cleanup→mount 与真实卸载都走这里：`stop()` 幂等，
+      // 之后再来一次 `start()` 会重新起一代（Task 2 fix round 2）。
+      void domainState.stop();
     };
   }, []);
 

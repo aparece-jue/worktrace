@@ -385,6 +385,119 @@ fn an_activation_request_raises_or_rebuilds_and_nothing_else() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 重建路径的视图**补投**（P8 Task 9b）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 托盘重建主窗之后的那一次跳转：**只在重建路径留待办、只投一次、投后即清**。
+///
+/// 为什么要补：主窗已被关掉时，`on_tray_action` 先发的那次 `emit_to` 落在尚不存在的
+/// label 上（零接收者），重建出来的又是全新 JS 上下文 ⇒ 那一次跳转本来会丢。
+/// 现在它被留成待办，由新窗口的首次握手取走并投一次。
+///
+/// 这几条断言动的是**同一个进程级待办**，所以放在同一条用例里：`cargo test` 在同一个
+/// 进程里并行跑各条用例，拆开会互相把对方的待办取走（那正是"全局状态"的代价，
+/// 而它在生产里只有一个主窗、一条托盘，不会撞）。
+///
+/// 反向验证（逐条都能被打红）：
+/// - `window::needs_view_replay` 恒真 ⇒ ② 红（窗口还在也留待办 ⇒ 已存在窗口被投两次）；
+///   恒假 ⇒ ① 红（重建后跳转永远补不上）；
+/// - `tray::take_deferred_view` 用 `peek()` 代替 `take()` ⇒ ③ 红（待办残留 ⇒ 下一次开窗误跳）；
+/// - 去掉 `replay_deferred_view` 的 label 判据 ⇒ ④ 红（实验窗口的握手把主窗的跳转吃掉）；
+/// - 把"投过"改成"投成功才算投过"（失败时把意图放回去）⇒ ⑤ 红（失败会重试 ⇒ 下一次开窗误跳）。
+#[test]
+fn a_rebuilt_main_window_replays_the_view_exactly_once_and_clears_it() {
+    let timer = || view_of(tray::TRAY_VIEW_PAGE_TIMER, false);
+    let inbox = || view_of(tray::TRAY_VIEW_PAGE_INBOX, true);
+
+    // ① 重建 ⇒ 留待办；主窗握手把它**投递一次**，载荷逐字不变。
+    assert!(
+        window::needs_view_replay(ActivationPlan::Rebuild),
+        "重建路径必须留待办：新窗口是全新 JS 上下文，那次 emit_to 已经空放"
+    );
+    tray::defer_view(timer());
+    let mut delivered = Vec::new();
+    assert!(
+        commands::replay_deferred_view(window::MAIN_WINDOW_LABEL, |view| {
+            delivered.push(view);
+            Ok(())
+        }),
+        "主窗握手时应当补投一次"
+    );
+    assert_eq!(
+        delivered,
+        vec![timer()],
+        "补投的就是那一次意图（页与聚焦都不许改）"
+    );
+
+    // ② 投完即清：紧接着的第二次握手什么都不投。
+    //    （不清的话，之后每一次 30 秒周期校验都会把用户从当前页拽走。）
+    assert!(
+        !commands::replay_deferred_view(window::MAIN_WINDOW_LABEL, |_| {
+            panic!("待办已经取走，第二次握手不该再投")
+        }),
+        "待办投递后必须清除：第二次握手不得再投"
+    );
+
+    // ③ 窗口还在（`Raise` / `Ignore`）**不留**待办——那次 emit_to 已经把意图送到，
+    //    再留一份就是投递两次（已存在窗口那条路径的回归闸门）。
+    assert!(
+        !window::needs_view_replay(ActivationPlan::Raise),
+        "窗口还在时不补投：意图已经由 emit_to 送到，再投一次就是两次"
+    );
+    assert!(
+        !window::needs_view_replay(ActivationPlan::Ignore),
+        "`Ignore` 连窗口动作都不是，更不该留待办"
+    );
+
+    // ④ 别的窗口的握手**不吃掉**主窗的待办：实验窗口 `sync-lab` 也会周期握手，
+    //    让它取走就等于把这次跳转投进一个不显示主界面的窗口。
+    tray::defer_view(inbox());
+    assert!(
+        !commands::replay_deferred_view("sync-lab", |_| {
+            panic!("非主窗的握手不得补投托盘视图意图")
+        }),
+        "只有主窗的握手才补投"
+    );
+    let mut second = Vec::new();
+    assert!(
+        commands::replay_deferred_view(window::MAIN_WINDOW_LABEL, |view| {
+            second.push(view);
+            Ok(())
+        }),
+        "上一个窗口没吃掉它 ⇒ 主窗仍然拿得到"
+    );
+    assert_eq!(
+        second,
+        vec![inbox()],
+        "待办被别的窗口看过之后仍原样交回主窗"
+    );
+
+    // ⑤ 投递失败**也算投过**：托盘那条通道没有回执，意图已经取走、不重试——
+    //    否则它会在下一次开窗时变成一次误跳（与 `lib.rs::on_tray_action` 同一条口径）。
+    tray::defer_view(timer());
+    assert!(
+        commands::replay_deferred_view(window::MAIN_WINDOW_LABEL, |_| {
+            Err(tauri::Error::Io(std::io::Error::other("no listener")))
+        }),
+        "emit 失败仍然算投过一次（只记诊断）"
+    );
+    assert!(
+        !commands::replay_deferred_view(window::MAIN_WINDOW_LABEL, |_| {
+            panic!("失败的投递不得留下待办：留下就是下一次开窗误跳")
+        }),
+        "投递失败不留残渣"
+    );
+
+    // ⑥ 没有待办时不投：重建路径之外不会有东西凭空投出来。
+    assert!(
+        !commands::replay_deferred_view(window::MAIN_WINDOW_LABEL, |_| {
+            panic!("没有待办时不该 emit")
+        }),
+        "没有待办 ⇒ 什么都不做"
+    );
+}
+
 #[test]
 fn the_main_window_label_matches_the_config_and_the_capability() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

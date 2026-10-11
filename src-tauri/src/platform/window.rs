@@ -11,6 +11,8 @@
 //!    `tauri.conf.json` 那份窗口配置重建，于是新窗口是一次**全新页面加载**，
 //!    前端挂载时按 Task 2 的顺序「先监听、再拉一致快照」。抬起一个还活着的窗口
 //!    则是 `show` + 还原 + 聚焦（隐藏窗口重新显示前的校验是前端规则 4 的事）。
+//!    重建这条路还多一件事：托盘的视图意图要**留成待办**等新窗口握手时补投
+//!    （[`needs_view_replay`]，P8 Task 9b）——`Raise` 那条路一个字都不改。
 //! 3. **单实例唤醒的接收侧**：Task 0 交付了发送侧与接收原语
 //!    （`single_instance::{request_activation, take_activation_request}`），
 //!    [`spawn_activation_watcher`] 把「请求 → 抬起/重建主窗」接上，这一半闭环。
@@ -60,6 +62,20 @@ pub fn plan_activation(requested: bool, main_window_exists: bool) -> ActivationP
         (true, true) => ActivationPlan::Raise,
         (true, false) => ActivationPlan::Rebuild,
     }
+}
+
+/// 这一次抬窗走的是哪条路 ⇒ 托盘的视图意图要不要**留成待办**（P8 Task 9b）？
+///
+/// 只有 [`ActivationPlan::Rebuild`] 要：窗口是新键的，组合根先发的那次 `emit_to` 落在
+/// 一个尚不存在的 label 上（零接收者，通常也不返回 `Err`），所以得在新窗口的首次握手时
+/// 补投一次（`commands::replay_deferred_view`）。
+///
+/// `Raise` 时那次 `emit_to` **已经送到**，再留一份就是投递两次——已存在窗口那条路径
+/// 必须一字不差，这个判断就是它的闸门；[`ActivationPlan::Ignore`] 更是连窗口动作都算不上。
+///
+/// 决策只在这一处（与 [`plan_activation`] 同一条纪律）：组合根不自己拼条件。
+pub fn needs_view_replay(plan: ActivationPlan) -> bool {
+    plan == ActivationPlan::Rebuild
 }
 
 /// 「全部窗口关闭」这件事要不要阻止进程退出（F-009）。

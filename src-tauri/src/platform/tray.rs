@@ -48,16 +48,21 @@
 //! 读本文件核对（前端在**仓库根**，所以路径不带 `src-tauri/` 前缀；另一侧的反向判据在
 //! `tests/shell_lifecycle.rs`）。
 //!
-//! **一条已知限制**（fix round 1，评审 Critical-2）：主窗**已经被关掉**时点这两个动作，
-//! 跳转请求发给的是尚不存在的窗口（零接收者），随后才重建 ⇒ 新窗口是全新 JS 上下文、
-//! 按默认页（收件箱）挂载，**这一次跳转丢失**。要不要补发由组合根决定，理由与代价写在
-//! `lib.rs::on_tray_action` 的同名小节；实机判据见 `tests/manual-v01.md` §10.5。
+//! **重建路径要补投**（P8 Task 9b；此前 fix round 1 登记为已知限制）：主窗**已经被关掉**
+//! 时点这两个动作，跳转请求发给的是尚不存在的窗口（零接收者，通常也不返回 `Err`），
+//! 随后才重建 ⇒ 新窗口是全新 JS 上下文、按默认页（收件箱）挂载。所以**重建路径**要把这次
+//! 意图留成待办（[`defer_view`]），等新窗口的首次握手把它投递一次
+//! （`commands::replay_deferred_view`）。窗口还在时**不留**：那次 `emit_to` 已经送到，
+//! 再留一份就是投递两次——判断在 [`crate::platform::window::needs_view_replay`] 一处。
+//! 组合根那一侧的理由写在 `lib.rs::on_tray_action`；实机判据见 `tests/manual-v01.md` §10.5。
 //!
 //! ## 图标
 //!
 //! 用 [`tauri::AppHandle::default_window_icon`]（`tauri.conf.json` 的 `bundle.icon`，
 //! 构建期就嵌好了）。**不启用 `image-png` / `image-ico`**：那要 `image` crate，
 //! 本机离线缓存里没有（`Cargo.lock` 里也没有），一开就构建不出来。
+
+use std::sync::Mutex;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -184,6 +189,42 @@ pub const TRAY_VIEW_EVENT: &str = "worktrace:tray-view";
 pub const TRAY_VIEW_PAGE_INBOX: &str = "inbox";
 /// 视图跳转的目标页（与前端 `PageKey` 逐字相同）。
 pub const TRAY_VIEW_PAGE_TIMER: &str = "timer";
+
+/// 重建路径上**待补投**的视图意图（P8 Task 9b）。
+///
+/// 主窗被关掉之后由托盘重新建出来的那个窗口是**全新 JS 上下文**：点托盘那一下发出的
+/// `emit_to` 是发给一个尚不存在的 label（零接收者，而且通常连 `Err` 都不返回），
+/// 所以这一次跳转必须留成待办、等新窗口挂载完再投一次。
+///
+/// **只有重建路径会写它**（组合根按 [`crate::platform::window::needs_view_replay`]
+/// 判断）：窗口还在时那一次 `emit_to` 已经把意图送到了，再留一份就是投递两次。
+///
+/// 取走即清（[`take_deferred_view`] 用 `take()`）：不清的话，**下一次**开窗的首次握手
+/// 会被一条陈旧的意图误跳一次——那正是"补投"最容易退化成"乱跳"的地方。
+///
+/// 为什么是一个进程级静态量而不是命令状态：它描述的是一次**窗口生命周期事件**
+/// （关掉 → 重建）之间要活下来的意图，而这个窗口的握手入口（`commands::get_revision`）
+/// 与写下它的组合根（`lib.rs::on_tray_action`）之间没有共享的状态对象可挂
+/// （`RunningApp` 是业务运行态，往里面塞一条视图意图会把业务状态与窗口状态搅在一起）。
+static DEFERRED_VIEW: Mutex<Option<TrayView>> = Mutex::new(None);
+
+/// 把一次视图跳转留成待办（**只该在重建路径上调用**，见 [`DEFERRED_VIEW`]）。
+///
+/// 后写覆盖先写：同一时刻只可能有一次待补投的跳转（用户又点了一下托盘，意图就是最后
+/// 那一下），留成队列只会把旧的意图在新窗口上再放一次。
+pub fn defer_view(view: TrayView) {
+    *DEFERRED_VIEW
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(view);
+}
+
+/// 取走待办的视图意图；**取走即清**（没有待办时返回 `None`）。
+pub fn take_deferred_view() -> Option<TrayView> {
+    DEFERRED_VIEW
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take()
+}
 
 /// 这条托盘动作要求跳到哪个视图；不是视图动作就返回 `None`。
 ///

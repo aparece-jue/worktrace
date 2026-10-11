@@ -604,3 +604,94 @@ fn the_replay_switch_emits_the_old_revision_without_writing() {
         "旧版本的通知**照常投递**（丢掉它才是错的：客户端按闸门②/③自己判）"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. 探针：`event_dropped` 的 `wall_ms` 就是信封的 `at`（P8 Task 9b）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// 读探针 jsonl 里 `data_epoch` 命中的那一行。
+///
+/// 文件名由 `debug_probe::initialize` 给出（`worktrace-probe-<pid>-<stamp>.jsonl`）。
+/// **按 `data_epoch` 过滤是必须的**：探针是**进程级** sink，同一个测试二进制里并行跑的
+/// 别的用例只要触发一次丢弃，也会往同一个文件里写一行 `event_dropped`。
+fn probe_record(dir: &Path, data_epoch: &str) -> serde_json::Value {
+    let file = std::fs::read_dir(dir)
+        .expect("探针目录应当可读")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("worktrace-probe-") && name.ends_with(".jsonl")
+                })
+        })
+        .unwrap_or_else(|| panic!("initialize 应当在 {} 下写一个探针文件", dir.display()));
+    let text = std::fs::read_to_string(&file).expect("探针文件应当可读");
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|value| value["phase"] == "event_dropped" && value["data_epoch"] == data_epoch)
+        .unwrap_or_else(|| {
+            panic!("探针里应当有 data_epoch={data_epoch} 的 event_dropped 行：{text}")
+        })
+}
+
+/// **丢弃探针的 `wall_ms` 是信封的 `at`**（P8 Task 9b）。
+///
+/// 这条语义此前**没有任何测试碰过**（`grep -rn debug_probe src tests` 只命中实现文件，
+/// 也没有任何用例读 `worktrace-probe-*.jsonl`）：把 `services/events.rs` 里那句
+/// `"wall_ms": envelope.at` 抄成 `envelope.revision`（或 `data_epoch`、或再取一次
+/// `SystemTime::now()`）整个套件**全绿**。这条判据就是为它补的。
+///
+/// 夹具刻意让 `at != revision`：两者相等时，抄错字段是看不出来的。
+///
+/// 反向验证（改坏什么会让它红）：
+/// - `"wall_ms": envelope.at` ⇒ `envelope.revision` ⇒ ①②红；
+/// - ⇒ `envelope.data_epoch` ⇒ ①红（连类型都不对，`as_i64()` 是 `None`）；
+/// - ⇒ 重新取 `SystemTime::now()`（Task 8 之前的写法）⇒ ①红（不再等于夹具的 `at`）。
+#[test]
+fn the_dropped_event_probe_records_the_envelope_wall_clock_not_its_revision() {
+    const AT: i64 = 1_700_000_123_456;
+    const REVISION: i64 = 7;
+    const EPOCH: &str = "epoch-probe-9b";
+    assert_ne!(AT, REVISION, "夹具的前提：`at` 与 `revision` 必须不同");
+
+    let dir = tempfile::tempdir().unwrap();
+    worktrace_lib::platform::debug_probe::initialize(dir.path());
+
+    let sink = Arc::new(RecordingSink::default());
+    let broadcaster = Broadcaster::new(Arc::clone(&sink) as Arc<dyn EventSink>);
+    broadcaster.arm_drop_next(EVENT_DOMAIN_CHANGED);
+    assert_eq!(
+        broadcaster.emit(EventEnvelope::new(
+            EPOCH,
+            EVENT_DOMAIN_CHANGED,
+            REVISION,
+            AT,
+            serde_json::json!({})
+        )),
+        EmitOutcome::Dropped,
+        "装好的开关必须吃掉这条通知（没吃掉就读不到下面那一行）"
+    );
+
+    let line = probe_record(dir.path(), EPOCH);
+    // ① `wall_ms` 就是信封的 `at`。
+    assert_eq!(
+        line["wall_ms"].as_i64(),
+        Some(AT),
+        "探针里的 wall_ms 必须是信封的 `at`：{line}"
+    );
+    // ② 而且**不是**别的字段：抄错字段时这一条必然红（哪怕两个值恰好接近）。
+    assert_ne!(
+        line["wall_ms"].as_i64(),
+        Some(REVISION),
+        "wall_ms 不是 revision：{line}"
+    );
+    // 同一条记录里 revision 照旧单独记一份（探针不缺字段，缺的是"没钉住"）。
+    assert_eq!(
+        line["revision"].as_i64(),
+        Some(REVISION),
+        "revision 照旧单独记一份：{line}"
+    );
+    assert_eq!(line["event"], serde_json::json!(EVENT_DOMAIN_CHANGED));
+}

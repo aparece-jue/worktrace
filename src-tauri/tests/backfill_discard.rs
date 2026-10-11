@@ -782,9 +782,25 @@ fn backfilling_an_overlapping_range_is_rejected_without_any_write() {
     assert_code(&error, "DOMAIN_ERROR");
     let detail = error.detail().unwrap_or_default().to_string();
     assert!(detail.contains("重叠"), "命中重叠规则的文案：{detail}");
+    // P8 Task 9b：这两个端点不再以**裸毫秒**出现（`1699999940000` 对用户没有意义），
+    // 改成 **UTC RFC3339**——写入路径的请求里没有 timezone，所以口径只能是 UTC。
+    // 判据本身没变：文案仍要能指出与**哪一段**重叠，只是它现在以日历形状出现。
+    // （渲染的固定形状由 `tests/error_contract.rs` 用字面量钉住；这里跟着常量走，
+    //  改 `WALL` 不会留下两份对不上的期望值。）
+    let utc = |at_ms: i64| {
+        jiff::Timestamp::from_millisecond(at_ms)
+            .expect("夹具的时刻都在 jiff 的表示范围内")
+            .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string()
+    };
     assert!(
-        detail.contains(&S1_START.to_string()) && detail.contains(&S1_END.to_string()),
+        detail.contains(&utc(S1_START)) && detail.contains(&utc(S1_END)),
         "文案要能指出与哪一段重叠：{detail}"
+    );
+    // 另一半是**新增**的：裸毫秒一个都不许剩（换一组取值、换一条路径同样红）。
+    assert!(
+        !detail.contains(&S1_START.to_string()) && !detail.contains(&S1_END.to_string()),
+        "13 位裸毫秒不该再进用户文案：{detail}"
     );
     assert_eq!(
         world(state.db().unwrap()),

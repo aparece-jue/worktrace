@@ -236,9 +236,12 @@ fn representative_cases() -> Vec<DomainError> {
             ended_at: 5,
         },
         DomainError::IntervalSpanOverflow,
+        // P8 Task 9b：这两个取值是**验收现场读到的**那两个毫秒
+        // （`docs/validation/p8-fix-and-acceptance-2026-10-10.md` §29），文案现在把它们
+        // 渲染成 UTC RFC3339 ⇒ 取值本身要真实，否则渲染出来的 1970 年没有意义。
         DomainError::OverlappingInterval {
-            existing_start: 1,
-            existing_end: 9,
+            existing_start: 1_791_694_120_862,
+            existing_end: 1_791_694_453_052,
         },
         DomainError::TrustedIntervalWithoutDuration,
         DomainError::PendingAndVoided,
@@ -343,6 +346,12 @@ fn domain_error_messages_are_user_facing_chinese() {
     for e in cases {
         // ④ 的豁免在 `into()` 之前判：`UnknownEnumValue` 需要回显非法取值与列名。
         let echoes_the_bad_value = matches!(e, DomainError::UnknownEnumValue { .. });
+        // P8 Task 9b 的第二处豁免，但**不是"整条跳过"**：`OverlappingInterval` 用
+        // UTC RFC3339 印两个毫秒时刻（`2026-10-11T04:48:40.862Z`），于是文案里出现
+        // `T`（ISO 8601 的日期/时间分隔符）与 `Z`（UTC 指示符）。它们是**格式字符**，
+        // 不是内部标识，所以④只放行这两个字母**本身**——别的 ASCII 字母
+        // （枚举名、列名、`pomodoro` 这种取值）照旧红，判据的力度一点没减。
+        let prints_rfc3339_times = matches!(e, DomainError::OverlappingInterval { .. });
         let shown: AppError = e.into();
         let message = shown.message();
 
@@ -440,12 +449,99 @@ fn domain_error_messages_are_user_facing_chinese() {
         // 的回显。所以「新增 Domain 用途时 `field` 必须写中文」这条规矩**唯一的记录
         // 就是本注释**——新增第四处时记得回来补这一行，并确认它写的是中文。
         if !echoes_the_bad_value {
+            // 与 `UnknownEnumValue` 的"整条跳过"不同：这里**逐字符**过滤，
+            // 只有 RFC3339 的 `T`/`Z` 被放行（见上面 `prints_rfc3339_times` 处）。
+            let leaked: Vec<char> = user_text
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .filter(|c| !(prints_rfc3339_times && matches!(c, 'T' | 'Z')))
+                .collect();
             assert!(
-                !user_text.chars().any(|c| c.is_ascii_alphabetic()),
-                "除 UnknownEnumValue 外的用户文案不得含 ASCII 字母：{user_text}"
+                leaked.is_empty(),
+                "除 UnknownEnumValue 外的用户文案不得含 ASCII 字母\
+                 （OverlappingInterval 只放行 RFC3339 的 `T`/`Z`）：{user_text}；漏出 {leaked:?}"
             );
         }
     }
+}
+
+/// **重叠拒绝的文案是可读的 UTC 时刻，不是 13 位裸毫秒**（P8 Task 9b）。
+///
+/// 验收两次标注的原文是
+/// `操作不被允许：与已有区间 [1791694120862, 1791694453052) 重叠。`——那两个 13 位数字
+/// 对用户没有任何意义（`docs/validation/p8-fix-and-acceptance-2026-10-10.md` §29）。
+/// 现在渲染成 **UTC RFC3339**（写入路径的请求里没有 timezone，见
+/// `domain::error::utc_rfc3339`，所以口径只能是 UTC）。
+///
+/// 反向验证（改坏什么会让它红）：
+/// - 把 `Display` 换回 `{existing_start}` 裸数字 ⇒ ①②红（出现 13 位毫秒、没有日期）；
+/// - 换成 jiff 默认的"最短表示"（`stamp.to_string()`）⇒ ③红（整毫秒会写成
+///   `T00:00:00Z`，少掉 `.000`）；
+/// - 把 UTC 换成某个固定本地时区（例如硬编 `+08:00`）⇒ ①③红（后缀不再是 `Z`）；
+/// - 让包装在错误路径上改 `code`/`requires_handshake` ⇒ ④红
+///   （本用例顺带钉住"只改文案、不动错误契约"）。
+#[test]
+fn an_overlapping_rejection_shows_readable_utc_times_instead_of_bare_milliseconds() {
+    // 取值就是验收现场那两个毫秒（用户当时读到的原文见 §29）。
+    let shown: AppError = DomainError::OverlappingInterval {
+        existing_start: 1_791_694_120_862,
+        existing_end: 1_791_694_453_052,
+    }
+    .into();
+
+    // ① 逐字：两条时刻都是 `YYYY-MM-DDTHH:MM:SS.mmmZ`（UTC）。
+    assert_eq!(
+        shown.message(),
+        "操作不被允许：与已有区间 [2026-10-11T04:48:40.862Z, 2026-10-11T04:54:13.052Z) 重叠。"
+    );
+
+    // ② 判据写成"扫描 13 位及以上的数字串"，不是"这两个数不在文案里"——
+    //    换一组取值、换一条路径同样要红。
+    let message = shown.message();
+    let long_digit_runs: Vec<&str> = message
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|run| run.len() >= 13)
+        .collect();
+    assert!(
+        long_digit_runs.is_empty(),
+        "用户文案里不该再有裸毫秒：{long_digit_runs:?}（{message}）"
+    );
+
+    // ③ 固定三位小数 + `Z` 后缀：整毫秒也必须写成 `.000`（jiff 默认省略它）。
+    let whole_second = DomainError::OverlappingInterval {
+        existing_start: 0,
+        existing_end: 1_000,
+    }
+    .to_string();
+    assert_eq!(
+        whole_second,
+        "与已有区间 [1970-01-01T00:00:00.000Z, 1970-01-01T00:00:01.000Z) 重叠。"
+    );
+
+    // ④ 错误契约没动：`DOMAIN_ERROR` + 同一份 detail 拼进同一条模版，
+    //    而且这是**一次普通的领域拒绝**（权威上下文照旧可读 ⇒ 不要求重新握手）。
+    assert_eq!(shown.code(), "DOMAIN_ERROR");
+    assert_eq!(
+        format!(
+            "操作不被允许：{}",
+            shown.detail().expect("Domain 变体必须带 detail")
+        ),
+        shown.message(),
+        "用户文案仍是那条模版 + detail（`AppError` 的形状没动）"
+    );
+    let f = bootstrap();
+    let response = capture_error_response(&f.db, &shown, &[]);
+    assert_eq!(response.code, "DOMAIN_ERROR");
+    assert_eq!(response.message, shown.message());
+    assert!(
+        !response.requires_handshake,
+        "重叠拒绝不带新版本，客户端不需要重新握手"
+    );
+    assert_eq!(
+        response.authority.map(|authority| authority.data_epoch),
+        Some(f.epoch.clone()),
+        "库身份照旧可读 ⇒ authority 仍是这一版的 epoch（文案改动没有碰错误响应）"
+    );
 }
 
 /// `zh_status` **十个取值一个不漏**：任务状态名会出现在 `IllegalTransition`、

@@ -25,6 +25,10 @@
  * P8 Task 7 起外壳还有**第二条订阅**：托盘视图跳转的定向事件（`worktrace:tray-view`，
  * 见 `src/trayViewRequests.ts`），所以"挂载后开着几条订阅"从 1 变成 2；它**不发任何命令**，
  * 上面那条命令集合判据因此不受影响。
+ * P8 Task 9b 起这条订阅还要**先于**镜像的握手落地（重建路径的补投挂在首次
+ * `get_revision` 的成功之后），所以监听夹具把托盘那条 `listen` 故意推迟一个宏任务，
+ * 并用 `events.calls` 那条**订阅与命令混排的时间线**钉住先后——本文件里唯一一条
+ * 只比顺序、不比结果的用例。
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -33,14 +37,28 @@ import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 
 const events = vi.hoisted(() => {
   const listeners = new Map<number, (event: { payload: unknown }) => void>();
+  /**
+   * 订阅与命令的**同一条时间线**（P8 Task 9b 的调用序列判据）：
+   * `listen:<事件名>` 记在订阅**真的可用**的那一刻，`invoke:<命令名>` 由
+   * `scriptShell` 记。两条必须在同一条线上才比得出先后。
+   */
+  const calls: string[] = [];
   let next = 1;
   return {
+    calls,
     get open() {
       return listeners.size;
     },
-    async listen(_channel: string, handler: (event: { payload: unknown }) => void) {
+    async listen(channel: string, handler: (event: { payload: unknown }) => void) {
+      // ⚠️ 托盘那条订阅**故意慢一个宏任务**：真实环境里它是一次异步 IPC 注册
+      // （`listen()` 的 promise 要等 Rust 应答才落地），而镜像会话的握手同样在飞。
+      // 这一拍就是「订阅与握手谁先落地」那条判据要钉的东西——不许靠"应该来得及"。
+      if (channel === "worktrace:tray-view") {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
       const id = next++;
       listeners.set(id, handler);
+      calls.push(`listen:${channel}`);
       return async () => {
         listeners.delete(id);
       };
@@ -51,6 +69,7 @@ const events = vi.hoisted(() => {
     },
     reset() {
       listeners.clear();
+      calls.length = 0;
     },
   };
 });
@@ -59,6 +78,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: events.listen }));
 
 import App from "../App";
 import { domainState } from "../state/domainState";
+import { TRAY_VIEW_EVENT } from "../trayViewRequests";
 
 const EPOCH = "epoch-a";
 const AT = 1_700_000_000_000;
@@ -116,6 +136,8 @@ function scriptShell(
   const called: string[] = [];
   mockIPC((command: string) => {
     called.push(command);
+    // 与订阅记在**同一条时间线**上（P8 Task 9b 的调用序列判据要用）。
+    events.calls.push(`invoke:${command}`);
     const refused = options.fail?.[command];
     if (refused !== undefined) throw refused;
     switch (command) {
@@ -423,6 +445,29 @@ describe("应用外壳", () => {
     expect(container.querySelector('[data-region="page"]')?.textContent).toContain("收件箱");
     expect(screen.getByPlaceholderText(/输入一句话，回车创建/)).toBe(input);
     expect(document.activeElement).toBe(input);
+  });
+
+  it("重建补投的时机：托盘订阅**先可用**，镜像握手（`get_revision`）在它之后（P8 Task 9b）", async () => {
+    // 判据：主窗被托盘重建后那一次跳转是**补投**的——Rust 在首次 `get_revision`
+    // **成功之后**才 emit 一次 `worktrace:tray-view`（`commands::replay_deferred_view`）。
+    // 所以前端必须**先把托盘订阅建好、再开镜像会话**；两者并发就等于把补投再丢一次。
+    //
+    // 反向验证：把 `domainState.start()` 挪回一个独立的 `useEffect`（或挪到托盘订阅
+    // 之前）⇒ 下面是 `invoke:get_revision` 在前 ⇒ 红。夹具把托盘那条 `listen` 故意
+    // 推迟一个宏任务，就是为了让这个先后**由代码保证**，而不是靠"两条 IPC 谁先回来"。
+    const called = scriptShell();
+    render(<App />);
+    await waitFor(() => expect(called).toContain("get_revision"));
+
+    const timeline = events.calls.join(" -> ");
+    const trayAt = events.calls.indexOf(`listen:${TRAY_VIEW_EVENT}`);
+    const handshakeAt = events.calls.indexOf("invoke:get_revision");
+    expect(trayAt, `托盘订阅没建起来：${timeline}`).toBeGreaterThanOrEqual(0);
+    expect(handshakeAt, `镜像没有握手：${timeline}`).toBeGreaterThanOrEqual(0);
+    expect(
+      trayAt,
+      `托盘订阅必须**先可用**再握手，否则重建后的补投又丢一次：${timeline}`,
+    ).toBeLessThan(handshakeAt);
   });
 
   it("托盘跳转的坏载荷：不切页、不崩（托盘的失败姿势是「什么都不做 + 诊断」）", async () => {

@@ -43,6 +43,10 @@ pub enum DomainError {
     /// 文案故意**不带**参数：这里没有能讲给用户听的具体值，只有"太长了"这一个事实。
     IntervalSpanOverflow,
     /// 区间与另一段有效人工区间（**可跨会话**）重叠（半开区间，端点相接不算重叠）。
+    ///
+    /// 两个字段是**毫秒时间戳**；面向用户的 [`std::fmt::Display`] 把它们渲染成
+    /// **UTC RFC3339**（[`utc_rfc3339`]），不是裸毫秒——写入路径拿不到 timezone，
+    /// 所以口径是 UTC 且带 `Z`。
     OverlappingInterval {
         existing_start: i64,
         existing_end: i64,
@@ -189,6 +193,24 @@ fn zh_session_state(raw: &str) -> &str {
     }
 }
 
+/// 毫秒时间戳 → **UTC RFC3339**（`2026-10-11T06:48:40.862Z`）。
+///
+/// 固定三位小数（`%.3f`）而不是 jiff 默认的"最短表示"：毫秒本来就是这两条载荷的精度，
+/// 而判据要能钉住**一个**形状（同一毫秒值在两次运行、两个平台上渲染成同一串字符）。
+///
+/// **为什么是 UTC**：写入路径（确认 / 修正 / 补录）的请求里**没有** timezone
+/// ——全仓只有 `commands/export.rs` 与 `commands/daily_plan.rs` 两条**只读**命令带它，
+/// 这一层是领域层，连那条请求都看不到，更不该猜一个本地时区（猜错就是把用户带到
+/// 一个错误的时刻上）。UTC 是唯一不必猜的口径，`Z` 后缀让口径本身写在文案里。
+///
+/// 超出 jiff 能表示的范围（约 ±9999 年）时退回裸毫秒：那种取值没有可读形式可言，
+/// 但 `Display` **不能 panic**——它会把一条业务拒绝变成一次崩溃。
+fn utc_rfc3339(at_ms: i64) -> String {
+    jiff::Timestamp::from_millisecond(at_ms)
+        .map(|stamp| stamp.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+        .unwrap_or_else(|_| at_ms.to_string())
+}
+
 /// **这里的文案是面向用户的**，不是给日志看的。
 ///
 /// 原因：`AppError::Domain { detail }` 的 `message()` 是
@@ -236,7 +258,16 @@ impl std::fmt::Display for DomainError {
                 existing_start,
                 existing_end,
             } => {
-                write!(f, "与已有区间 [{existing_start}, {existing_end}) 重叠。")
+                // 两个 `i64` 是**毫秒时间戳**，直接印出来用户读到的是
+                // `与已有区间 [1791694120862, 1791694453052) 重叠。`（验收两次标注）。
+                // 渲染成 UTC RFC3339（理由见 [`utc_rfc3339`]）；载荷类型、错误码与
+                // `AppError` 的形状都不动。
+                write!(
+                    f,
+                    "与已有区间 [{}, {}) 重叠。",
+                    utc_rfc3339(*existing_start),
+                    utc_rfc3339(*existing_end)
+                )
             }
             Self::TrustedIntervalWithoutDuration => write!(f, "已确认的计时区间必须有时长。"),
             Self::PendingAndVoided => write!(f, "同一段区间不能既待确认又已作废。"),
