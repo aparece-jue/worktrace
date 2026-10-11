@@ -3,54 +3,51 @@
          aria-labelledby="fig-02-task-flow-title fig-02-task-flow-desc"
          font-family="'Geist','Noto Sans SC','PingFang SC','Microsoft YaHei',sans-serif">
       <title id="fig-02-task-flow-title">任务状态流转：主干与四个出口</title>
-      <desc id="fig-02-task-flow-desc">任务状态的主干是 Inbox 到 Clarifying 到 Ready 到 Doing：从收件箱点「置为 Ready」理清，点「开始」进入 Doing，也可以在 Inbox 上直接点「开始」，理清与开工在同一步完成。Ready 或 Doing 可以走到 Blocked（阻塞）、Waiting（等待中）、Done（完成）、Cancelled（已取消）；Blocked 与 Waiting 用「恢复为可执行」回到 Ready；Done 与 Cancelled 只能用「重开」回到 Ready，且不会恢复旧会话。完成与取消会结束这条任务正在跑的会话，阻塞与等待中会暂停它。</desc>
+      <desc id="fig-02-task-flow-desc">任务状态的主干是 Inbox 到 Clarifying 到 Ready 到 Doing：Inbox 可以直接置为 Ready，也可以在收件箱上点开始，理清与开工在同一步完成；从 Ready 点开始进入 Doing。Ready 或 Doing 可以走到 Waiting（等待中）、Blocked（阻塞）、Done（完成）、Cancelled（已取消）；Waiting 与 Blocked 用恢复为可执行回到 Ready；Done 与 Cancelled 只能用重开回到 Ready，且不会恢复旧会话。完成与取消会结束这条任务正在跑的会话，阻塞与等待中会暂停它。Clarifying 与 Review 在 V0.1 界面上没有单独的按钮，Scheduled 属后续版本、现在写入会被拒绝。</desc>
       <defs><style>@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;family=Instrument+Serif:ital@0;1&amp;display=swap');</style>
         <marker id="fig-02-task-flow-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
-          <polygon points="0 0, 8 3, 0 6" fill="#6F6357"/>
+          <polygon points="0 0 8 3 0 6" fill="#6F6357"/>
         </marker>
       </defs>
 
       <rect x="0" y="0" width="1000" height="820" fill="#FBF9F6"/>
 
       <!-- 箭头先画 -->
-      <path d="M208,178 H296" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M128,140 V96 Q128,88 136,88 H600 Q608,88 608,96 V140" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M456,178 H544" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M704,178 H792" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M608,216 V340" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M640,340 V216" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M856,216 V340" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M888,340 V268 Q888,260 880,260 H680 Q672,260 672,252 V216" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M544,202 H508 Q500,202 500,210 V530 Q500,538 508,538 H544" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M952,202 H968 Q976,202 976,210 V530 Q976,538 968,538 H952" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M824,576 V612 Q824,620 816,620 H488 Q480,620 480,612 V128 Q480,120 488,120 H552 Q560,120 560,128 V140" fill="none" stroke="#6F6357" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#fig-02-task-flow-arrow)"/>
-      <path d="M672,576 V636 Q672,644 664,644 H448 Q440,644 440,636 V112 Q440,104 448,104 H664 Q672,104 672,112 V140" fill="none" stroke="#6F6357" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M208,178 H290" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M456,178 H538" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M704,178 H786" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M552,216 V334" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M584,340 V222" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M856,216 V334" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M792,378 H752 Q744,378 744,370 V308 Q744,300 736,300 H696 Q688,300 688,292 V222" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M544,202 H496 Q488,202 488,210 V530 Q488,538 496,538 H538" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M952,190 H968 Q976,190 976,198 V530 Q976,538 968,538 H952" fill="none" stroke="#6F6357" stroke-width="1.2" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M672,576 V596 Q672,604 664,604 H48 Q40,604 40,596 V112 Q40,104 48,104 H552 Q560,104 560,112 V140" fill="none" stroke="#6F6357" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#fig-02-task-flow-arrow)"/>
+      <path d="M920,576 V628 Q920,636 912,636 H32 Q24,636 24,628 V88 Q24,80 32,80 H616 Q624,80 624,88 V140" fill="none" stroke="#6F6357" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#fig-02-task-flow-arrow)"/>
 
       <!-- 箭头标签：蒙版 + 文字，与线留 6–10px 空隙 -->
       <rect x="228" y="150" width="48" height="20" rx="2" fill="#FBF9F6"/>
       <text x="252" y="165" font-size="12" fill="#6F6357" text-anchor="middle">理清</text>
-      <rect x="306" y="94" width="132" height="20" rx="2" fill="#FBF9F6"/>
-      <text x="372" y="109" font-size="12" fill="#6F6357" text-anchor="middle">「开始」＝理清并开工</text>
       <rect x="464" y="150" width="72" height="20" rx="2" fill="#FBF9F6"/>
       <text x="500" y="165" font-size="12" fill="#6F6357" text-anchor="middle">置为 Ready</text>
       <rect x="732" y="150" width="32" height="20" rx="2" fill="#FBF9F6"/>
       <text x="748" y="165" font-size="12" fill="#6F6357" text-anchor="middle">开始</text>
-      <rect x="568" y="250" width="32" height="20" rx="2" fill="#FBF9F6"/>
-      <text x="584" y="265" font-size="12" fill="#6F6357" text-anchor="middle">阻塞</text>
-      <rect x="648" y="250" width="76" height="20" rx="2" fill="#FBF9F6"/>
-      <text x="686" y="265" font-size="12" fill="#6F6357" text-anchor="middle">恢复为可执行</text>
-      <rect x="864" y="230" width="44" height="20" rx="2" fill="#FBF9F6"/>
-      <text x="886" y="245" font-size="12" fill="#6F6357" text-anchor="middle">等待中</text>
-      <rect x="707" y="266" width="76" height="20" rx="2" fill="#FBF9F6"/>
-      <text x="745" y="281" font-size="12" fill="#6F6357" text-anchor="middle">恢复为可执行</text>
-      <rect x="460" y="390" width="32" height="20" rx="2" fill="#FBF9F6"/>
-      <text x="476" y="405" font-size="12" fill="#6F6357" text-anchor="middle">完成</text>
+      <rect x="500" y="250" width="44" height="20" rx="2" fill="#FBF9F6"/>
+      <text x="522" y="265" font-size="12" fill="#6F6357" text-anchor="middle">等待中</text>
+      <rect x="592" y="250" width="76" height="20" rx="2" fill="#FBF9F6"/>
+      <text x="630" y="265" font-size="12" fill="#6F6357" text-anchor="middle">恢复为可执行</text>
+      <rect x="864" y="250" width="32" height="20" rx="2" fill="#FBF9F6"/>
+      <text x="880" y="265" font-size="12" fill="#6F6357" text-anchor="middle">阻塞</text>
+      <rect x="620" y="308" width="76" height="20" rx="2" fill="#FBF9F6"/>
+      <text x="658" y="323" font-size="12" fill="#6F6357" text-anchor="middle">恢复为可执行</text>
+      <rect x="448" y="390" width="32" height="20" rx="2" fill="#FBF9F6"/>
+      <text x="464" y="405" font-size="12" fill="#6F6357" text-anchor="middle">完成</text>
       <rect x="936" y="250" width="32" height="20" rx="2" fill="#FBF9F6"/>
       <text x="952" y="265" font-size="12" fill="#6F6357" text-anchor="middle">取消</text>
-      <rect x="724" y="596" width="32" height="20" rx="2" fill="#FBF9F6"/>
-      <text x="740" y="611" font-size="12" fill="#6F6357" text-anchor="middle">重开</text>
-      <rect x="544" y="650" width="32" height="20" rx="2" fill="#FBF9F6"/>
-      <text x="560" y="665" font-size="12" fill="#6F6357" text-anchor="middle">重开</text>
+      <rect x="860" y="642" width="32" height="20" rx="2" fill="#FBF9F6"/>
+      <text x="876" y="657" font-size="12" fill="#6F6357" text-anchor="middle">重开</text>
+      <rect x="384" y="610" width="32" height="20" rx="2" fill="#FBF9F6"/>
+      <text x="400" y="625" font-size="12" fill="#6F6357" text-anchor="middle">重开</text>
 
       <!-- 主干四个状态 -->
       <rect x="48" y="140" width="160" height="76" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
@@ -69,14 +66,16 @@
       <text x="872" y="172" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">Doing</text>
       <text x="872" y="196" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">正在做</text>
 
-      <!-- 出口：阻塞 / 等待中 -->
+      <text x="48" y="244" font-size="12" fill="#6F6357">这一条也能直接「置为 Ready」，不必先经过 Clarifying。</text>
+
+      <!-- 出口：等待中 / 阻塞 -->
       <rect x="544" y="340" width="160" height="76" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
-      <text x="624" y="372" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">Blocked</text>
-      <text x="624" y="396" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">我做不了</text>
+      <text x="624" y="372" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">Waiting</text>
+      <text x="624" y="396" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">等外部</text>
 
       <rect x="792" y="340" width="160" height="76" rx="6" fill="#FBE0D5" stroke="#D9603A" stroke-width="1"/>
-      <text x="872" y="372" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">Waiting</text>
-      <text x="872" y="396" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">等外部</text>
+      <text x="872" y="372" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">Blocked</text>
+      <text x="872" y="396" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">我做不了</text>
 
       <!-- 终态：完成（本图唯一“强”档焦点）/ 已取消 -->
       <rect x="544" y="500" width="160" height="76" rx="6" fill="#F6CCBC" stroke="#D9603A" stroke-width="1.8"/>
@@ -87,18 +86,18 @@
       <text x="872" y="532" font-size="14" font-weight="600" fill="#2A2320" text-anchor="middle">Cancelled</text>
       <text x="872" y="556" font-size="12" font-weight="500" fill="#6F6357" text-anchor="middle">已取消</text>
 
-      <!-- 注记：跃迁与会话的联动（本图的焦点口径） -->
-      <rect x="48" y="300" width="3" height="150" rx="1" fill="#8A94A3"/>
-      <text x="64" y="318" font-size="12" font-weight="600" fill="#6F6357">跃迁会同时动到会话</text>
-      <text x="64" y="348" font-size="12" fill="#6F6357">完成 / 取消：结束这条任务正在跑的会话</text>
-      <text x="64" y="376" font-size="12" fill="#6F6357">阻塞 / 等待中：暂停它</text>
-      <text x="64" y="404" font-size="12" fill="#6F6357">重开：只放回 Ready，不恢复旧会话</text>
+      <!-- 注记：跃迁与会话的联动 -->
+      <rect x="64" y="300" width="3" height="120" rx="1" fill="#8A94A3"/>
+      <text x="80" y="318" font-size="12" font-weight="600" fill="#6F6357">跃迁会同时动到会话</text>
+      <text x="80" y="348" font-size="12" fill="#6F6357">完成 / 取消：结束这条任务正在跑的会话</text>
+      <text x="80" y="376" font-size="12" fill="#6F6357">阻塞 / 等待中：暂停它</text>
+      <text x="80" y="404" font-size="12" fill="#6F6357">重开：只放回 Ready，不恢复旧会话</text>
 
-      <rect x="48" y="460" width="3" height="106" rx="1" fill="#8A94A3"/>
-      <text x="64" y="478" font-size="12" font-weight="600" fill="#6F6357">界面上没有单独按钮的两个状态</text>
-      <text x="64" y="506" font-size="12" fill="#6F6357">Clarifying（理清中）：只有「置为 Ready」</text>
-      <text x="64" y="530" font-size="12" fill="#6F6357">Review（待检查）：跃迁表允许，界面没有入口</text>
-      <text x="64" y="554" font-size="12" fill="#6F6357">Scheduled（已排期）：V0.2 开放，现在写入被拒</text>
+      <rect x="64" y="440" width="3" height="106" rx="1" fill="#8A94A3"/>
+      <text x="80" y="458" font-size="12" font-weight="600" fill="#6F6357">界面上没有单独按钮的两个状态</text>
+      <text x="80" y="486" font-size="12" fill="#6F6357">Clarifying（理清中）：只有「置为 Ready」</text>
+      <text x="80" y="510" font-size="12" fill="#6F6357">Review（待检查）：跃迁表允许，界面没有入口</text>
+      <text x="80" y="534" font-size="12" fill="#6F6357">Scheduled（已排期）：V0.2 开放，现在写入被拒</text>
 
       <!-- 图例：底部横条 -->
       <line x1="28" y1="700" x2="972" y2="700" stroke="#2A2320" stroke-opacity="0.10" stroke-width="0.8"/>
@@ -110,6 +109,6 @@
       <line x1="356" y1="718" x2="392" y2="718" stroke="#6F6357" stroke-width="1.2" stroke-dasharray="5,4"/>
       <text x="400" y="722" font-size="12" fill="#6F6357">重开：终态唯一的出边</text>
       <text x="28" y="750" font-size="12" fill="#6F6357">注：本图画的是常见动线；同一张跃迁表里还允许——Inbox / Clarifying 可直接置为 Ready 或直接取消，Clarifying 可退回收件箱；</text>
-      <text x="28" y="774" font-size="12" fill="#6F6357">Ready 另可直接到 Blocked / Waiting / Done / Cancelled；Doing 另可直接退回 Ready 或直接取消；</text>
-      <text x="28" y="798" font-size="12" fill="#6F6357">Blocked / Waiting 的出口只有 Ready 与 Cancelled；Done / Cancelled 只能靠显式「重开」回 Ready。</text>
+      <text x="28" y="774" font-size="12" fill="#6F6357">Ready 另可直接到 Blocked / Done / Cancelled，以及 Review（待检查）；Doing 另可直接退回 Ready 或直接取消；</text>
+      <text x="28" y="798" font-size="12" fill="#6F6357">Waiting / Blocked 的出口只有 Ready 与 Cancelled；Done / Cancelled 只能靠显式「重开」回 Ready。</text>
     </svg>

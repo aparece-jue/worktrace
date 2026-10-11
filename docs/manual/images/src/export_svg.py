@@ -18,7 +18,9 @@ run aborts on the first failure. Gates:
                    slug-prefixed ids (no bare title/desc)
   3. connectors -- orthogonal only: <line> axis-aligned, <path> M/H/V/Q with
                    quarter-arc corners (r=8); no diagonal slants
-  4. budget     -- node boxes <= 9, connectors <= 12 (diagram-design budget)
+  4. geometry   -- label masks must not overlap a node box; no connector may run
+                   through the interior of a box that is not its own endpoint
+  5. budget     -- node boxes <= 9, connectors <= 12 (diagram-design budget)
 """
 
 from __future__ import annotations
@@ -154,17 +156,173 @@ def gate_connectors(root: ET.Element) -> tuple[list[str], int]:
 
 
 def count_nodes(root: ET.Element) -> int:
-    """Node boxes = rounded rects (rx=6) at node size; chips use rx<=4."""
-    nodes = 0
+    """Node boxes = rounded rects (rx 6 or 8) at node size, without a zone wash.
+
+    Chips are rx=4 and small; zone backgrounds carry fill-opacity; the status /
+    legend strips are too flat (h < 60) to be nodes.
+    """
+    return len(node_rects(root))
+
+
+def node_rects(root: ET.Element) -> list[tuple[float, float, float, float]]:
+    boxes: list[tuple[float, float, float, float]] = []
     for el in root.iter():
-        if local(el.tag) != "rect":
+        if local(el.tag) != "rect" or el.get("fill-opacity"):
             continue
         rx = float(el.get("rx", 0))
-        w = float(el.get("width", 0))
-        h = float(el.get("height", 0))
-        if rx == 6 and w >= 140 and h >= 60:
-            nodes += 1
-    return nodes
+        x, y = float(el.get("x", 0)), float(el.get("y", 0))
+        w, h = float(el.get("width", 0)), float(el.get("height", 0))
+        if rx in (6, 8) and 140 <= w <= 960 and 60 <= h <= 260:
+            boxes.append((x, y, x + w, y + h))
+    return boxes
+
+
+def label_masks(root: ET.Element) -> list[tuple[float, float, float, float]]:
+    """Arrow-label masks are paper-filled rects that are not node boxes."""
+    masks: list[tuple[float, float, float, float]] = []
+    for el in root.iter():
+        if local(el.tag) != "rect" or el.get("fill") != "#FBF9F6":
+            continue
+        x, y = float(el.get("x", 0)), float(el.get("y", 0))
+        w, h = float(el.get("width", 0)), float(el.get("height", 0))
+        if w <= 400 and h <= 24:
+            masks.append((x, y, x + w, y + h))
+    return masks
+
+
+def overlap(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float], inset: float = 0.0
+) -> float:
+    x0 = max(a[0], b[0] + inset)
+    y0 = max(a[1], b[1] + inset)
+    x1 = min(a[2], b[2] - inset)
+    y1 = min(a[3], b[3] - inset)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    return (x1 - x0) * (y1 - y0)
+
+
+def path_polyline(d: str) -> list[tuple[float, float]]:
+    """Orthogonal path -> polyline; a Q corner contributes its corner point."""
+    points: list[tuple[float, float]] = []
+    pos: tuple[float, float] | None = None
+    for cmd, raw in re.findall(r"([MHQVZ])([^MHQVZ]*)", d):
+        nums = [float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", raw)]
+        if cmd == "M":
+            pos = (nums[0], nums[1])
+            points.append(pos)
+        elif cmd == "H":
+            pos = (nums[0], pos[1])  # type: ignore[index]
+            points.append(pos)
+        elif cmd == "V":
+            pos = (pos[0], nums[0])  # type: ignore[index]
+            points.append(pos)
+        elif cmd == "Q":
+            pos = (nums[2], nums[3])
+            points.append(pos)
+    return points
+
+
+def on_border(point: tuple[float, float], box: tuple[float, float, float, float], tol: float = 3.0) -> bool:
+    x, y = point
+    inside_x = box[0] - tol <= x <= box[2] + tol
+    inside_y = box[1] - tol <= y <= box[3] + tol
+    if not (inside_x and inside_y):
+        return False
+    near_v = abs(x - box[0]) <= tol or abs(x - box[2]) <= tol
+    near_h = abs(y - box[1]) <= tol or abs(y - box[3]) <= tol
+    return near_v or near_h
+
+
+def gate_geometry(root: ET.Element) -> list[str]:
+    boxes = node_rects(root)
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1 :]:
+            if overlap(a, b, inset=1.0) > 0:
+                raise GateError(f"two node boxes overlap: {a} / {b}")
+
+    for mask in label_masks(root):
+        for box in boxes:
+            if overlap(mask, box, inset=1.0) > 0:
+                raise GateError(f"label mask {mask} overlaps node box {box}")
+
+    for el in root.iter():
+        if local(el.tag) != "path" or not el.get("marker-end"):
+            continue
+        points = path_polyline(el.get("d", ""))
+        if len(points) < 2:
+            continue
+        start, end = points[0], points[-1]
+        for box in boxes:
+            if on_border(start, box) or on_border(end, box):
+                continue
+            for p, q in zip(points, points[1:]):
+                seg = (
+                    min(p[0], q[0]),
+                    min(p[1], q[1]),
+                    max(p[0], q[0]) or min(p[0], q[0]) + 0.001,
+                    max(p[1], q[1]) or min(p[1], q[1]) + 0.001,
+                )
+                if overlap(seg, box, inset=2.0) > 4.0:
+                    raise GateError(
+                        f"connector {el.get('d')} runs through a non-endpoint node {box}"
+                    )
+    return [f"geometry ok ({len(boxes)} node boxes, {len(label_masks(root))} label masks)"]
+
+
+def segments(points: list[tuple[float, float]]) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    return list(zip(points, points[1:]))
+
+
+def gate_no_overlap(root: ET.Element) -> list[str]:
+    """No two connectors may share a stroke path or cross without a hop."""
+    paths: list[str] = []
+    for el in root.iter():
+        if local(el.tag) == "path" and el.get("marker-end"):
+            paths.append(el.get("d", ""))
+    drawn = [(d, segments(path_polyline(d))) for d in paths]
+    for i, (da, sa) in enumerate(drawn):
+        for db, sb in drawn[i + 1 :]:
+            for p1, p2 in sa:
+                for q1, q2 in sb:
+                    a_h = abs(p1[1] - p2[1]) < 0.5
+                    b_h = abs(q1[1] - q2[1]) < 0.5
+                    if a_h and b_h and abs(p1[1] - q1[1]) < 0.5:
+                        lo = max(min(p1[0], p2[0]), min(q1[0], q2[0]))
+                        hi = min(max(p1[0], p2[0]), max(q1[0], q2[0]))
+                        if hi - lo > 4:
+                            raise GateError(f"connectors overlap on a horizontal segment: {da} / {db}")
+                    elif (not a_h) and (not b_h) and abs(p1[0] - q1[0]) < 0.5:
+                        lo = max(min(p1[1], p2[1]), min(q1[1], q2[1]))
+                        hi = min(max(p1[1], p2[1]), max(q1[1], q2[1]))
+                        if hi - lo > 4:
+                            raise GateError(f"connectors overlap on a vertical segment: {da} / {db}")
+    return [f"no shared connector strokes ({len(paths)} paths)"]
+
+
+def gate_no_crossings(root: ET.Element) -> list[str]:
+    """Two connectors may not cross: a crossing would need a hop/bridge."""
+    drawn: list[tuple[str, list[tuple[tuple[float, float], tuple[float, float]]]]] = []
+    for el in root.iter():
+        if local(el.tag) == "path" and el.get("marker-end"):
+            d = el.get("d", "")
+            drawn.append((d, segments(path_polyline(d))))
+    for i, (da, sa) in enumerate(drawn):
+        for db, sb in drawn[i + 1 :]:
+            for p1, p2 in sa:
+                for q1, q2 in sb:
+                    a_h = abs(p1[1] - p2[1]) < 0.5
+                    b_h = abs(q1[1] - q2[1]) < 0.5
+                    if a_h == b_h:
+                        continue
+                    h = (p1, p2) if a_h else (q1, q2)
+                    vt = (q1, q2) if a_h else (p1, p2)
+                    hx0, hx1 = sorted((h[0][0], h[1][0]))
+                    vy0, vy1 = sorted((vt[0][1], vt[1][1]))
+                    x, y = vt[0][0], h[0][1]
+                    if hx0 + 4 < x < hx1 - 4 and vy0 + 4 < y < vy1 - 4:
+                        raise GateError(f"connectors cross at ({x:.0f},{y:.0f}): {da} / {db}")
+    return [f"no connector crossings ({len(drawn)} paths)"]
 
 
 def export_one(src: Path, out: Path) -> list[str]:
@@ -187,6 +345,9 @@ def export_one(src: Path, out: Path) -> list[str]:
     notes += gate_a11y(root, slug)
     conn_notes, arrows = gate_connectors(root)
     notes += conn_notes
+    notes += gate_geometry(root)
+    notes += gate_no_overlap(root)
+    notes += gate_no_crossings(root)
     nodes = count_nodes(root)
     if nodes > 9:
         raise GateError(f"{out.name}: {nodes} node boxes > budget 9")
